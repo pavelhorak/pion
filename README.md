@@ -316,7 +316,8 @@ redis-cli -p 1974 PING           # +PONG
 Roughly 2 MB: the binary, the three Mojo runtime dylibs it actually links
 against, and the Metal shader library that `--metal-attention` needs. No
 toolchain, no Python, no model download. Verify the download against the
-release's `SHA256SUMS` if you care to (`shasum -a 256 -c SHA256SUMS`).
+release's `SHA256SUMS` if you care to (`shasum -a 256 -c SHA256SUMS --ignore-missing`;
+without the flag it reports every tarball you did not download as FAILED).
 
 Launch through `pion-server.sh`, not `bin/pion-server` directly — the binary's
 rpath points at the build machine's toolchain, and the wrapper is what points it
