@@ -53,6 +53,11 @@ crash reporting: crash breadcrumbs (`pion-<port>.crash.log`, `.status`) are
 written to local files and go nowhere. `PION.STATS` is computed and served
 locally.
 
+The website is different, and only the website: pion.pavelhorak.com counts
+page views with Cloudflare Web Analytics, which sets no cookies and collects
+no personal data. Nothing in the server, the Python packages or the release
+tarballs reports anywhere.
+
 The server opens an outbound connection only in these cases, each of which
 you enable or configure:
 
