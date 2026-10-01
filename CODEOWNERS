@@ -1,0 +1,33 @@
+# CODEOWNERS — review routing.
+#
+# Single-owner project: everything routes to the maintainer. The per-path
+# entries below are not redundant — they exist so that the reason a file needs
+# careful review is visible at review time.
+
+*                               @pavelhorak
+
+# Wire-protocol surface. A change here can desync a client, which is unbounded:
+# every later reply pairs with the wrong request. Dispatch arms must consume
+# their own frame (tests/test_dispatch_sweep.py, 5 argument shapes).
+/src/network/                   @pavelhorak
+/src/commands/                  @pavelhorak
+
+# Durability. A missing WAL effect record loses data silently on restart, and
+# replay must reproduce runtime behaviour exactly.
+/src/io/                        @pavelhorak
+/src/memory/                    @pavelhorak
+
+# Performance-gated. Changes here need the perf gates, not just correctness:
+# these files back published QPS/recall numbers.
+/src/vector/                    @pavelhorak
+/src/network/fast_path.mojo     @pavelhorak
+
+# NOTE: /publication/ used to be listed here as "reference implementations".
+# It is stripped from the export (it holds the strip list, the forbidden-token
+# list and the substitutes), so the entry routed reviews for a path no
+# contributor can see. Removed 2026-09-19. The reference-implementation split
+# it described was also retired when the held kernels were published.
+
+# Gate baselines are a release contract. They move only deliberately, in both
+# the JSON and the documented table, never to make a run pass.
+/benchmarks/gate_baselines.json @pavelhorak

@@ -1,0 +1,59 @@
+name: Performance report
+description: A benchmark number looks wrong
+labels: [performance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please read this part.** Pion's benchmarks are unusually sensitive to
+        machine state, and most surprising numbers turn out to be the box rather
+        than the build. These questions are not bureaucracy — each one comes
+        from a real incident that cost hours:
+
+        - A leaked `pion-server` from an earlier run cost **~30% on every write
+          row** while leaving reads nearly untouched, on shipped code.
+        - `pgrep -x redis-server` **never matches**, because Redis rewrites its
+          process title. A leaked oracle sat on a port for two days while the
+          documented check reported clean.
+        - The MSET row swings **38%** purely on its position in the sequence,
+          and the warm-up ramp takes about six runs to reach steady state.
+        - A full disk makes the build exit 0 with a fresh timestamp and stale
+          machine code.
+  - type: input
+    id: version
+    attributes: { label: Version, description: "`./pion-server --version`" }
+    validations: { required: true }
+  - type: input
+    id: invocation
+    attributes:
+      label: Server command line
+      description: "Include `-w`. Note that `-w N` is N independent keyspaces."
+    validations: { required: true }
+  - type: input
+    id: bench
+    attributes: { label: Benchmark command, description: "Verbatim, including -c / -n / -P." }
+    validations: { required: true }
+  - type: textarea
+    id: preflight
+    attributes:
+      label: Machine state at the time
+      description: |
+        Paste the output of:
+        ```
+        pgrep -x pion-server; pgrep -x pion-server-dev
+        pgrep -f 'redis-serve[r]'
+        uptime
+        df -h /
+        ```
+      render: shell
+    validations: { required: true }
+  - type: input
+    id: runs
+    attributes:
+      label: How many runs, and were they warm?
+      description: A single cold run is not a measurement. Say how many you did and the spread.
+    validations: { required: true }
+  - type: textarea
+    id: numbers
+    attributes: { label: Numbers, description: "What you measured, and what you expected." }
+    validations: { required: true }

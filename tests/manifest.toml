@@ -1,0 +1,1330 @@
+# Every test file, classified. tests/run_all.py FAILS on a file that is
+# neither here nor in [not_tests]. Fields:
+#   server  "self" (the test starts its own) | "none" (no server) | pion-server flags
+#   tier    "gate" (every push) | "full" (release / provisioned box)
+#   requires  ["py:mod", "bin:x", "ollama:model", "hf:repo", "macos", "linux", "cuda", "env:VAR", "file:path"]
+#   xfail   "gh #N" — a known bug; passing is XPASS and fails the run
+# Generated 2026-09-26 from a trial run of every file, then hand-triaged.
+
+[[test]]
+file = "pion-exo/tests/test_exo_hook.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+timeout = 600
+requires = ["macos"]
+
+[[test]]
+file = "pion-exo/tests/test_multi_host_routing.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-exo/tests/test_prefix_router.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-lmcache/tests/test_pion_lmcache.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-serve/tests/test_intent_router.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-serve/tests/test_max_backend.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-serve/tests/test_thread_safety.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_boundary_protect.py"
+server = "--kvcache -w 1"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_cold_rehydrate.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_gemma4_12b_layer_routing.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_hybrid_per_layer_agreement.py"
+server = "none"
+tier = "full"
+timeout = 600
+requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_hybrid_retrieval.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_hybrid_retrieval_v2.py"
+server = "--kvcache -w 1"
+tier = "full"
+timeout = 600
+requires = ["py:mlx_lm", "hf:mlx-community/Qwen2.5-0.5B-Instruct-4bit"]
+note = "needs a plain-RoPE model"
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_hybrid_wire_path.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_mlx_lm_seam.py"
+server = "none"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_prefix_store.py"
+server = "--kvcache -w 1"
+tier = "full"
+timeout = 600
+requires = ["py:pion_vllm_mlx"]
+
+[[test]]
+file = "pion-vllm-mlx/tests/test_prompt_cache_workload.py"
+server = "--kvcache -w 1"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "tests/g1_criteria.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/run_substrate_gate.py"
+server = "self"
+tier = "gate"
+timeout = 600
+
+[[test]]
+file = "tests/smoke_gh199_build_pool.mojo"
+server = "none"
+cmd = "pixi run build-ffi >/dev/null && pixi run mojo build -I . tests/smoke_gh199_build_pool.mojo -Xlinker src/ffi/build_pool_wrap.o -Xlinker -export_dynamic -o build/smoke_gh199 && build/smoke_gh199"
+tier = "full"
+timeout = 900
+
+[[test]]
+file = "tests/test_ai_gateway.py"
+server = "--kvcache -w 1 --flare --inference"
+tier = "gate"
+timeout = 180
+requires = ["ollama:nomic-embed-text"]
+
+[[test]]
+file = "tests/test_ai_knn_lm.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_attend_128k.py"
+# --kvcache: without it ATTEND is disabled, every call failed, and the
+# test "passed" having exercised nothing.
+server = "--kvcache -w 1"
+tier = "gate"
+timeout = 600
+
+[[test]]
+file = "tests/test_attend_asymmetric.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_attend_d512.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_fused_binary_parity.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_fused_client.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_fused_parity.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_per_call_window.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_prefix.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_prefix_batched.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_prefix_lookup.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_prefix_lse.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_attend_prefix_merge.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_attend_prefix_realistic.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_quality.py"
+# --kvcache: without it ATTEND is disabled, every call failed, and the
+# test "passed" having exercised nothing.
+server = "--kvcache -w 1"
+tier = "gate"
+timeout = 600
+
+[[test]]
+file = "tests/test_attend_scale.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_attend_sparse_auto.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_sparse_auto_fused.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_attend_sparse_kernel.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_audit_tail_alloca.py"
+server = "none"
+tier = "gate"
+timeout = 600
+
+[[test]]
+file = "tests/test_auto_embed.py"
+server = "-w 1 --auto-embed"
+tier = "full"
+timeout = 240
+requires = ["py:sentence_transformers"]
+
+[[test]]
+file = "tests/test_cag_legal_demo.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_chunked_prefill_correctness.py"
+server = "-w 1"
+tier = "full"
+requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
+
+[[test]]
+file = "tests/test_cloud_profile_int4.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_cluster_full.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_cluster_migration.py"
+server = "--cluster --cluster-host 127.0.0.1 -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_cluster_stats.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_command_table_drift.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_dispatch_sweep.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_docs_site.py"
+server = "none"
+tier = "full"
+requires = ["py:mkdocs"]
+
+[[test]]
+file = "tests/test_dropindex_grace.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_export_imports_resolve.py"
+server = "none"
+cmd = "bash scripts/export_public.sh --keep-going >/dev/null 2>&1; python3 tests/test_export_imports_resolve.py build/export"
+tier = "full"
+timeout = 600
+
+[[test]]
+file = "tests/test_failover.py"
+server = "--cluster --cluster-host 127.0.0.1 -w 1"
+tier = "full"
+timeout = 180
+
+[[test]]
+file = "tests/test_float_arg_validator.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_framework_integrations.py"
+server = "--kvcache -w 1"
+tier = "gate"
+requires = ["py:pion_autogen", "py:pion_llamaindex", "py:pion_langgraph"]
+
+[[test]]
+file = "tests/test_ft_create_redimension.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_ft_hybrid_rerank.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_ft_roundtrip.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_ft_search_pipeline_desync.py"
+server = "-w 1"
+args = "--port 1974"
+tier = "full"
+
+[[test]]
+file = "tests/test_gate_baselines.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_generic_value.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_gh115_workspace.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh138_robustness.py"
+server = "-w 1"
+tier = "full"
+note = "failed in the 2026-09-26 trial on a default server \u2014 triage"
+
+[[test]]
+file = "tests/test_gh139_bm25.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh140_dense_leg.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh145_index_scope.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh147_pipeline_flush.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh148_mlx4g32_tier.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh149_gh163_blob_durability.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_gh14_epoch_rcu.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh153_token_overflow.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh156_vset_reply_pairing.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh162_geo_dispatch_desync.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh166_high_dim_values.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_gh170.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh172.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh174.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh177.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh179_180_181.py"
+server = "-w 1"
+tier = "full"
+note = "failed in the 2026-09-26 trial on a default server \u2014 triage"
+
+[[test]]
+file = "tests/test_gh187.py"
+server = "-w 1"
+tier = "full"
+note = "failed in the 2026-09-26 trial on a default server \u2014 triage"
+
+[[test]]
+file = "tests/test_gh193.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh202_gh203.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh210.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh211_warm_restart.py"
+server = "self"
+tier = "gate"
+
+# The quant formats: the build-marker assertion ([TurboQuant] Block-INT3, …)
+# only runs with --quant. Without these entries the gate never exercised any
+# quant path — the gap that let turbo/nano silently build INT8 (gh #350).
+[[test]]
+file = "tests/test_gh211_warm_restart.py"
+server = "self"
+args = "--quant polarquant"
+tier = "gate"
+
+# The quant formats: the build-marker assertion ([TurboQuant] Block-INT3, …)
+# only runs with --quant. Without these entries the gate never exercised any
+# quant path — the gap that let turbo/nano silently build INT8 (gh #350).
+[[test]]
+file = "tests/test_gh211_warm_restart.py"
+server = "self"
+args = "--quant turboquant"
+tier = "gate"
+
+# The quant formats: the build-marker assertion ([TurboQuant] Block-INT3, …)
+# only runs with --quant. Without these entries the gate never exercised any
+# quant path — the gap that let turbo/nano silently build INT8 (gh #350).
+[[test]]
+file = "tests/test_gh211_warm_restart.py"
+server = "self"
+args = "--quant nanoquant"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh214.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh216.py"
+server = "-w 1"
+tier = "full"
+note = "failed in the 2026-09-26 trial on a default server \u2014 triage"
+
+[[test]]
+file = "tests/test_gh219.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh221_zrev.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh225_replica_writes.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh230_mset.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh232_bitmap.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh232_bitmap_string_union.py"
+server = "-w 1"
+cmd = "redis-server --port 6399 --save '' --appendonly no --daemonize yes >/dev/null && sleep 0.5; python3 tests/test_gh232_bitmap_string_union.py --port 1974 --redis-port 6399; rc=$?; redis-cli -p 6399 shutdown nosave >/dev/null 2>&1; exit $rc"
+tier = "full"
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_gh232_wrongtype.py"
+server = "-w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_gh241_quicklist.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh250_wal_rotation.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh253_multiworker_fence.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh254_readme_quickstart.py"
+server = "-w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_gh256_doc_truth.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh257_config.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh258_bind_and_secrets.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh259_graceful_shutdown.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh260_wal_full_refuses.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh261_maxmemory.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh262_prefill_ms_e2e.py"
+server = "self"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_gh262_value_receipt.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh265_lmove_quicklist.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh271_distance_metric.py"
+server = "-w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_gh282_listen_before_sidecar.py"
+server = "self"
+tier = "full"
+requires = ["py:torch"]
+note = "needs a real inference sidecar"
+
+[[test]]
+file = "tests/test_gh305_preflight.py"
+server = "none"
+tier = "gate"
+requires = ["bin:cc"]
+
+[[test]]
+file = "tests/test_gh334_non_ascii.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh346_quant_multiworker.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh346_quant_multiworker.py"
+server = "-w 1"
+args = "--quant turboquant"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh346_quant_multiworker.py"
+server = "-w 1"
+args = "--quant polarquant"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh347_bench_kill.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh365_scores.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_gh378_vset_persist.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh369_container_free.py"
+server = "self"
+tier = "gate"
+timeout = 600
+
+[[test]]
+file = "tests/test_gh372_unknown_flags.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gh373_threshold.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_gpu_rerank_parity.py"
+server = "none"
+tier = "full"
+requires = ["env:PION_GPU_SERVER_6398", "macos"]
+note = "expects a --gpu server started by hand on 6398"
+
+[[test]]
+file = "tests/test_hnsw_save_multiworker.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_hybrid_split_durability.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_int3_int2_dot_kernels.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_int8_sabd_udot.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_intent_router.py"
+server = "-w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_kv_cache.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_kv_cache_gh80.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_kv_prefix_admission.py"
+server = "--kvcache -w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_kv_prefix_bleu.py"
+server = "--kvcache -w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_kv_prefix_blocks.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_kv_prefix_cold_tier.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_kv_prefix_commit.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_kv_prefix_cross_instance.py"
+server = "--kvcache -w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_kv_prefix_lru.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_kv_prefix_mlx.py"
+server = "--kvcache -w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_kv_prefix_persistence.py"
+server = "self"
+tier = "full"
+note = "restarts its own --kvcache server"
+
+[[test]]
+file = "tests/test_kv_prefix_prototype.py"
+server = "--kvcache -w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_kv_prefix_workload.py"
+server = "--kvcache -w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_kv_roundtrip_evidence.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_kvprefix_autoredirect.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_kvprefix_xworker.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_layer_fetch_gh91.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_layer_store.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_layer_store_gh80.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_lmcache_compat.py"
+server = "-w 1 --requirepass password123"
+tier = "full"
+
+[[test]]
+file = "tests/test_lmcache_resp_connector.py"
+server = "self"
+tier = "full"
+requires = ["cuda"]
+
+[[test]]
+file = "tests/test_long_context_niah.py"
+server = "-w 1"
+tier = "full"
+requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
+
+[[test]]
+file = "tests/test_long_context_niah_multi.py"
+server = "-w 1"
+tier = "full"
+requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
+
+[[test]]
+file = "tests/test_lua_rename_payload.py"
+server = "self"
+tier = "gate"
+requires = ["py:redis"]
+
+[[test]]
+file = "tests/test_gh410_lua_numkeys.py"
+server = "self"
+tier = "gate"
+requires = ["py:redis"]
+
+[[test]]
+file = "tests/test_m14_real_model.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_mcp_search.py"
+server = "self"
+tier = "gate"
+requires = ["py:mcp.server.fastmcp", "py:redis"]
+
+[[test]]
+file = "tests/test_metal_attention_window.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_mlx_lm_patch.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["py:mlx_lm", "hf:mlx-community/Llama-3.2-1B-Instruct-4bit"]
+
+[[test]]
+file = "tests/test_moe_expert_load_dedup.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_moe_expert_wire.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_moe_hist_namespaces.py"
+server = "self"
+tier = "full"
+
+[[test]]
+file = "tests/test_moe_ns_prune_selection.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_moe_wire_tensor_parity.py"
+server = "self"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_mset_wal_record.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_multitenant.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_multiworker_recall.py"
+server = "self"
+args = "--start --port 6396"
+tier = "gate"
+
+[[test]]
+file = "tests/test_neuron_pkm.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_numeric_validation.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_parity.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_phase5.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_pion_serve_sie_embed.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_ppl_eval_methodology.py"
+server = "-w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_quest_selector.py"
+server = "-w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_quest_wire.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["macos"]
+
+[[test]]
+file = "tests/test_quicklist_pops.py"
+server = "self"
+tier = "gate"
+timeout = 600
+requires = ["py:redis"]
+
+[[test]]
+file = "tests/test_raw.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_redis_differential.py"
+server = "-w 1"
+args = "--start-redis --pion-port 1974 --redis-port 6399"
+tier = "gate"
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_replication.py"
+server = "--cluster --cluster-host 127.0.0.1 -w 1"
+tier = "full"
+timeout = 180
+
+[[test]]
+file = "tests/test_resp_malformed.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_response_buffer_overflow.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_ruler_subset.py"
+server = "-w 1"
+tier = "full"
+requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
+
+[[test]]
+file = "tests/test_sdot_int8_exact.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_serve_prefix_budget.py"
+server = "self"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_size_boundaries.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_slab_allocator.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_slab_list.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_ssm_prefix_durability.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_ssm_prefix_large_blob.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_ssm_prefix_roundtrip.py"
+server = "-w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+[[test]]
+file = "tests/test_state_store.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_tenant_isolation.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_tx_probe.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_type_confusion.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_v_store.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_v_store_fp8.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_v_store_rollback.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_v_store_schema.py"
+server = "--kvcache -w 1"
+tier = "full"
+
+[[test]]
+file = "tests/test_vector_build_equivalence.py"
+server = "none"
+tier = "full"
+requires = ["env:PION_BINARIES"]
+note = "compares two binaries; needs --binaries"
+
+[[test]]
+file = "tests/test_vector_differential.mojo"
+server = "none"
+cmd = "pixi run test-vector-differential"
+tier = "gate"
+timeout = 900
+requires = ["file:vendor/pion-vector/macos-arm64/libpion_vector.a", "macos"]
+
+[[test]]
+file = "tests/test_vector_recall_smoke.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_vset_differential.py"
+server = "self"
+tier = "gate"
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_vstore_wal.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_vstore_wal_f16.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_wal_recovery.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_wire_sparse_consumer.py"
+server = "--kvcache --metal-attention -w 1"
+tier = "full"
+requires = ["py:mlx_lm"]
+
+# ── added by the test audit (2026-09-29) ─────────────────────────────────────
+[[test]]
+file = "tests/test_boundary_differential.py"
+server = "-w 1"
+args = "--start-redis --redis-port 6412"
+tier = "gate"
+timeout = 300
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_binary_safety_differential.py"
+server = "-w 1"
+args = "--start-redis --redis-port 6413"
+tier = "gate"
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_member_aliasing.py"
+server = "-w 1"
+args = "--start-redis --redis-port 6416"
+tier = "gate"
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_numeric_args_differential.py"
+server = "-w 1"
+args = "--start-redis --redis-port 6418"
+tier = "gate"
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_pipeline_option_bleed.py"
+server = "-w 1"
+args = "--start-redis --redis-port 6421"
+tier = "gate"
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_replication_all_types.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_replication_initial_sync.py"
+server = "self"
+tier = "gate"
+
+[[test]]
+file = "tests/test_replication_resync.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_gh390_wait_parks.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_every_write_survives_restart.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_attend_args.py"
+server = "--kvcache -w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_soak_rss_bounded.py"
+server = "self"
+tier = "full"
+timeout = 1800
+
+# ── added for gh #394 (2026-09-29) ───────────────────────────────────────────
+[[test]]
+file = "tests/test_audit_borrowed_keys.py"
+server = "none"
+tier = "gate"
+timeout = 120
+
+[[test]]
+file = "tests/test_split_frames.py"
+server = "self"
+tier = "gate"
+timeout = 900
+
+[[test]]
+file = "tests/test_resp_strict_faults.py"
+server = "self"
+tier = "gate"
+timeout = 120
+
+[[test]]
+file = "tests/test_hash_field_ttl.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_long_key_leaks.py"
+server = "self"
+tier = "full"
+timeout = 1800
+
+# ── added for gh #403-#407 (2026-09-30) ──────────────────────────────────────
+[[test]]
+file = "tests/test_gh403_ft_info_name.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_gh404_attend_query_k.py"
+server = "self"
+tier = "gate"
+timeout = 120
+
+[[test]]
+file = "tests/test_gh405_hnsw_reachability.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_gh407_xworker_index_config.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[not_tests]
+# benchmarks, profilers, one-off repros and helpers — run by hand, never gated
+files = [
+  "pion-vllm-mlx/tests/bench_nemotron_h_ttft.py",
+  "tests/_gemma4_text_filter_load.py",
+  "tests/bench_amx_distance.mojo",
+  "tests/bench_attend_cpu_only.mojo",
+  "tests/bench_attend_fused.py",
+  "tests/bench_bleu_3b_stage2.py",
+  "tests/bench_g2_strict.py",
+  "tests/bench_knn_lm_hnsw.py",
+  "tests/bench_metal_attention.mojo",
+  "tests/bench_metal_flash_attention.mojo",
+  "tests/bench_mlx_vs_mojo.py",
+  "tests/bench_moe_fetch_iouring.py",
+  "tests/bench_pion_metal_attention.py",
+  "tests/bench_pion_metal_attention_dsweep.py",
+  "tests/bench_pion_metal_batched.py",
+  "tests/bench_pion_metal_multiworker.py",
+  "tests/bench_sparse_selector.py",
+  "tests/bench_store_precompute.py",
+  "tests/bench_ttft.py",
+  "tests/bench_w1_2_sweep.py",
+  "tests/bench_w1_stage2.py",
+  "tests/bench_w5_spike.py",
+  "tests/bench_w6_spike.py",
+  "tests/benchmark_bq_hnsw.mojo",
+  "tests/benchmark_fp32_hnsw.mojo",
+  "tests/benchmark_hnsw.mojo",
+  "tests/conftest_helpers.py",
+  "tests/diag_fp16_fp32_drift.py",
+  "tests/diag_pipeline_desync_sweep.py",
+  "tests/fault_proxy.py",
+  "tests/profile_layer_wall_time.py",
+  "tests/repro_minimal_kernel.mojo",
+  "tests/repro_official_pattern.mojo",
+  "tests/resp_strict.py",
+  "tests/run_all.py",
+  "tests/simd_kernel_bench.mojo",
+]

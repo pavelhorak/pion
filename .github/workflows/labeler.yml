@@ -1,0 +1,21 @@
+name: labeler
+# Pull-request paths → area labels (rules in .github/labeler.yml).
+#
+# pull_request_target, not pull_request: a fork's PR token is read-only and
+# could not add a label. This is safe here because the job never checks out or
+# runs the PR's code — actions/labeler reads only the list of changed paths.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          sync-labels: false

@@ -1,0 +1,73 @@
+# actions/labeler (v5 schema): pull-request paths → area labels.
+# Used by .github/workflows/labeler.yml. Labels are defined in labels.yml.
+
+"area: wire":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/network/fast_path.mojo
+          - src/network/slow_path.mojo
+          - src/network/resp3*.mojo
+          - src/network/response_writer.mojo
+          - src/network/dispatcher.mojo
+          - src/commands/*.mojo
+          - src/common/**
+          - tools/gen_command_table.py
+
+"area: kv-cache":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/commands/kv_cache.mojo
+          - src/commands/attend*.mojo
+          - src/commands/v_store.mojo
+          - src/network/kv_cache_store.mojo
+          - src/network/v_store.mojo
+          - src/network/layer_store.mojo
+          - src/network/attention_index.mojo
+          - src/network/*attention_engine.mojo
+          - src/ffi/metal*
+          - pion-vllm-mlx/**
+          - pion-lmcache/**
+
+"area: serve":
+  - changed-files:
+      - any-glob-to-any-file:
+          - pion-serve/**
+          - flare_gateway/**
+          - mcp/**
+
+"area: vector":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/vector/**
+          - src/commands/vector.mojo
+          - src/commands/vset.mojo
+          - src/commands/pkm.mojo
+          - src/commands/knn_lm.mojo
+          - vendor/pion-vector/**
+
+"area: persistence":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/io/**
+
+"area: build-release":
+  - changed-files:
+      - any-glob-to-any-file:
+          - pixi.toml
+          - pixi.lock
+          - Dockerfile
+          - VERSION
+          - scripts/**
+          - .github/workflows/**
+
+"area: website":
+  - changed-files:
+      - any-glob-to-any-file:
+          - website/**
+          - mkdocs.yml
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - doc/**
+          - "*.md"

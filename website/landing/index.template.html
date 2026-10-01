@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Pion — memory engine for AI inference</title>
+<meta name="description" content="Pion keeps your model's prefill: the prompt's K/V tensors live in the engine, so the next request on the same prefix starts at the first new token — from another process, another model object, or after a restart. Redis-wire-compatible, one binary, written in Mojo.">
+<link rel="canonical" href="https://pion.pavelhorak.com/">
+<link rel="icon" href="assets/pion-icon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Pion — memory engine for AI inference">
+<meta property="og:description" content="Your model re-reads the same prompt on every request. Pion keeps the prefill — across processes, across restarts, on the Redis wire.">
+<meta property="og:url" content="https://pion.pavelhorak.com/">
+<meta property="og:image" content="https://pion.pavelhorak.com/assets/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F5F8FB; --surface:#FFFFFF; --surface-2:#EDF2F7;
+  --ink:#0B2440; --ink-2:#3E5470; --muted:#6B7F96;
+  --rule:#D3DDE7; --rule-strong:#B7C6D6;
+  --accent:#0A7FB3; --accent-bright:#05A1D8; --accent-soft:#D5EDF8; --accent-ink:#06496A;
+  --code-bg:#0E1F30; --code-ink:#E4EEF6; --code-accent:#7FD4F0; --code-comment:#8AA4BD;
+  --btn-ink:#FFFFFF;
+  --font-display:"Bricolage Grotesque","Avenir Next","Segoe UI",system-ui,sans-serif;
+  --font-body:"Source Sans 3","Helvetica Neue",Arial,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  color-scheme:light dark;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0B1620; --surface:#10202E; --surface-2:#162A3B;
+    --ink:#E6EEF5; --ink-2:#B9C9D8; --muted:#8FA6BB;
+    --rule:#213547; --rule-strong:#2E4759;
+    --accent:#3DBDE8; --accent-bright:#5FD0F2; --accent-soft:#123A4E; --accent-ink:#A6E3F7;
+    --code-bg:#07111A; --code-ink:#DCE8F1; --code-accent:#7FD4F0; --code-comment:#7E97AE;
+    --btn-ink:#0B1620;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0B1620; --surface:#10202E; --surface-2:#162A3B;
+  --ink:#E6EEF5; --ink-2:#B9C9D8; --muted:#8FA6BB;
+  --rule:#213547; --rule-strong:#2E4759;
+  --accent:#3DBDE8; --accent-bright:#5FD0F2; --accent-soft:#123A4E; --accent-ink:#A6E3F7;
+  --code-bg:#07111A; --code-ink:#DCE8F1; --code-accent:#7FD4F0; --code-comment:#7E97AE;
+  --btn-ink:#0B1620;
+}
+*{box-sizing:border-box}
+.hero>*,.section-grid>*,.pair>*,.ledger>*,.tiles>*,.foot>*{min-width:0}
+html{background:var(--bg);scroll-behavior:smooth}
+html,body{overflow-x:clip}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body);font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+a:focus-visible,button:focus-visible{outline:2px solid var(--accent-bright);outline-offset:2px}
+h1,h2,h3{text-wrap:balance;margin:0}
+p{margin:0 0 1rem}
+code{font-family:var(--font-mono);font-size:.92em;background:var(--surface-2);padding:.08em .35em;border-radius:4px}
+pre code{background:transparent;padding:0;font-size:inherit}
+.eyebrow{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--accent);margin:0 0 .5rem}
+.skip{position:absolute;left:-999px;top:0;background:var(--surface);padding:.5rem 1rem;z-index:100}
+.skip:focus{left:1rem}
+
+.wrap{max-width:1120px;margin:0 auto;padding-inline:clamp(16px,4vw,40px)}
+.topnav{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding-block:.9rem;border-bottom:1px solid var(--rule)}
+.brand{display:inline-flex;align-items:center;gap:.55rem;text-decoration:none;color:var(--ink)}
+.brand svg{width:30px;height:30px}
+.brand .word{font-family:var(--font-display);font-weight:700;font-size:1.35rem;letter-spacing:-.02em}
+.brand .cat{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);letter-spacing:.04em;margin-left:.2rem}
+.topnav nav{display:flex;flex-wrap:wrap;gap:.2rem 1.2rem;font-size:15px}
+.topnav nav a{color:var(--ink-2);text-decoration:none}
+.topnav nav a:hover{color:var(--ink)}
+.hero{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:2.5rem;align-items:center;padding-block:3.2rem 2.4rem}
+.hero h1{font-family:var(--font-display);font-weight:600;font-size:clamp(2rem,4.6vw,3.5rem);line-height:1.03;letter-spacing:-.022em;margin:.4rem 0 1rem}
+.lede{font-size:1.15rem;color:var(--ink-2);max-width:58ch}
+.lede strong{color:var(--ink)}
+.cta{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1.4rem}
+.btn{display:inline-flex;align-items:center;gap:.4rem;padding:.62rem 1rem;border-radius:6px;font-weight:600;font-size:15.5px;text-decoration:none;border:1px solid transparent;cursor:pointer;font-family:var(--font-body)}
+.btn-primary{background:var(--ink);color:var(--btn-ink)}
+.btn-ghost{border-color:var(--rule-strong);color:var(--ink);background:transparent}
+.fabric{width:100%;height:auto;max-width:520px;justify-self:end;display:block}
+.fabric .link{fill:none;stroke:var(--ink);stroke-width:4.3;stroke-linecap:round;stroke-dasharray:.1 8.2;animation:flow 9s linear infinite}
+.fabric .halo{fill:url(#pion-glow)}
+.fabric .node{fill:var(--surface);stroke:var(--accent-bright);stroke-width:5}
+.fabric .drum{color:var(--ink)}
+.fabric text{font-family:var(--font-mono);font-size:12.5px;fill:var(--ink-2)}
+.fabric text.core-t{fill:var(--ink);font-weight:500;font-size:12.5px;paint-order:stroke;stroke:var(--bg);stroke-width:5px;stroke-linejoin:round}
+@keyframes flow{to{stroke-dashoffset:-83}}
+@media (prefers-reduced-motion: reduce){.fabric .link{animation:none}}
+
+.section{padding-block:3rem;border-top:1px solid var(--rule)}
+.section-grid{display:grid;grid-template-columns:190px minmax(0,1fr);gap:1.5rem 2.5rem}
+.section-grid .label{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);padding-top:.3rem}
+.section-grid .label b{display:block;color:var(--ink);font-weight:500;font-size:13px;margin-bottom:.3rem}
+.section h2{font-family:var(--font-display);font-weight:600;font-size:clamp(1.5rem,2.6vw,2rem);letter-spacing:-.018em;margin-bottom:1rem}
+.section h3{font-family:var(--font-display);font-size:1.25rem;font-weight:600;margin:1.2rem 0 .4rem;letter-spacing:-.01em}
+.prose{max-width:66ch}
+.prose p{margin-bottom:.9rem}
+.prose table{margin:1rem 0}
+.small{font-size:14.5px;color:var(--muted)}
+
+.tabs{display:flex;flex-wrap:wrap;gap:.15rem;border-bottom:1px solid var(--rule);margin-bottom:.9rem}
+.tabs button{font:600 14px var(--font-body);background:none;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;padding:.5rem .8rem;color:var(--muted);cursor:pointer}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent-bright)}
+.code{position:relative;background:var(--code-bg);color:var(--code-ink);border-radius:8px;padding:2.2rem 1.1rem 1rem;overflow-x:auto;font-family:var(--font-mono);font-size:13.5px;line-height:1.65}
+.code pre{margin:0;font:inherit;white-space:pre}
+.code .c{color:var(--code-comment)}
+.copy{position:absolute;top:.55rem;right:.6rem;font:500 11.5px var(--font-mono);letter-spacing:.04em;background:transparent;color:var(--code-comment);border:1px solid var(--code-comment);border-radius:4px;padding:.2rem .5rem;cursor:pointer}
+.copy:hover{color:var(--code-ink);border-color:var(--code-ink)}
+.install-note{font-size:14.5px;color:var(--muted);margin-top:.7rem;max-width:70ch}
+.install-note p{margin-bottom:.5rem}
+.install-note ul{padding-left:1.2rem}
+.install-note blockquote{margin:0;padding:0}
+
+.pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2rem}
+table{border-collapse:collapse;width:100%}
+th,td{padding:.65rem .6rem;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top;font-size:15.5px}
+th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.numbers{font-variant-numeric:tabular-nums;min-width:560px}
+.numbers td.num{text-align:right;font-family:var(--font-mono);white-space:nowrap}
+.numbers td.x{text-align:right;font-family:var(--font-display);font-weight:700;font-size:1.4rem;color:var(--accent-ink);white-space:nowrap}
+.numbers td.x small{display:block;font:400 12px var(--font-mono);color:var(--muted)}
+.numbers-note{font-size:14.5px;color:var(--muted);margin-top:.9rem;max-width:70ch}
+
+.ledger{display:grid;grid-template-columns:230px minmax(0,1fr);gap:2rem;align-items:start}
+.ledger .big{font-family:var(--font-display);font-size:clamp(3.4rem,8vw,5.6rem);font-weight:700;line-height:.92;letter-spacing:-.035em;color:var(--ink)}
+.ledger .big-cap{font-size:14.5px;color:var(--muted);margin-top:.6rem;max-width:26ch}
+.ledger ul{list-style:none;margin:0;padding:0}
+.ledger li{padding:.7rem 0;border-top:1px solid var(--rule);font-size:16px}
+.ledger li:last-child{border-bottom:1px solid var(--rule)}
+
+.different{max-width:none}
+.different table{font-size:14.5px;display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+.different table th:last-child,.different table td:last-child{background:var(--accent-soft)}
+.different p{max-width:70ch}
+
+.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}
+.tile{border-top:2px solid var(--ink);padding-top:.9rem}
+.tile h3{margin:.1rem 0 .45rem}
+.tile p{font-size:15.5px;margin-bottom:.5rem}
+.tile .caveat{font-size:14px;color:var(--muted);font-style:italic}
+.tile .fig{font-family:var(--font-mono);font-size:13px;color:var(--accent-ink)}
+
+.chips{display:flex;flex-wrap:wrap;gap:.5rem}
+.chip{border:1px solid var(--rule-strong);border-radius:999px;padding:.32rem .85rem;font-family:var(--font-mono);font-size:13px;color:var(--ink-2);text-decoration:none}
+.chip b{color:var(--ink);font-weight:500}
+
+.foot{border-top:1px solid var(--rule);padding-block:2rem 3rem;color:var(--muted);font-size:14px;display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:1rem 2.5rem}
+.foot a{color:var(--ink-2)}
+.foot p{margin-bottom:.5rem}
+
+@media (max-width: 820px){
+  .hero{grid-template-columns:minmax(0,1fr);padding-block:2.4rem 1.8rem}
+  .fabric{justify-self:start;max-width:100%}
+  .section-grid{grid-template-columns:minmax(0,1fr);gap:.6rem}
+  .pair{grid-template-columns:minmax(0,1fr)}
+  .tiles{grid-template-columns:minmax(0,1fr)}
+  .ledger{grid-template-columns:minmax(0,1fr)}
+  .foot{grid-template-columns:minmax(0,1fr)}
+  .topnav{flex-wrap:wrap}
+}
+@media (max-width: 600px){ body{font-size:16px} }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <!-- The Pion mark, traced (potrace) from the original logo artwork, site/assets/pion-icon-light.png — site/ is not in git. -->
+  <g id="pion-drum"><path fill="currentColor" fill-rule="evenodd" d="M78.8 141.2C78.5 141.2 77.4 141.1 76.4 141.0C75.3 140.9 73.8 140.8 73.1 140.7C72.4 140.6 70.6 140.4 69.1 140.4C65.9 140.2 64.9 140.1 62.8 139.7C62.0 139.5 60.5 139.3 59.6 139.2C58.6 139.1 57.3 138.9 56.7 138.7C56.0 138.5 55.0 138.3 54.3 138.2C53.6 138.2 52.6 137.9 52.0 137.8C51.4 137.6 50.5 137.3 50.1 137.3C49.6 137.2 48.7 136.9 48.1 136.7C47.6 136.5 46.7 136.3 46.3 136.2C45.5 136.1 43.2 135.5 41.3 134.8C40.8 134.6 40.0 134.3 39.4 134.2C33.6 132.5 24.4 127.6 18.7 123.2C14.4 119.8 9.1 113.1 7.1 108.6C6.9 108.0 6.4 107.0 6.0 106.3C5.3 104.9 3.6 100.2 3.0 98.1C2.8 97.4 2.5 96.4 2.3 95.9C2.2 95.4 2.0 94.5 1.9 93.9C1.9 93.4 1.7 92.4 1.5 91.8C1.2 90.9 1.1 90.2 1.0 88.8C0.9 86.8 0.8 86.2 0.4 83.6C-0.2 80.0 -0.1 60.8 0.5 57.2C0.8 55.5 0.8 54.9 1.0 52.0C1.1 50.3 1.2 49.4 1.4 48.4C1.6 47.7 1.8 46.6 1.9 45.9C2.0 45.3 2.3 44.2 2.5 43.5C2.7 42.8 2.9 41.7 3.0 41.2C3.1 40.7 3.3 39.8 3.5 39.2C3.7 38.6 3.9 37.8 4.0 37.3C4.3 35.7 5.9 31.6 7.5 28.9C12.7 19.7 17.1 15.6 27.0 10.6C28.3 9.9 29.6 9.3 29.9 9.2C30.7 9.1 31.7 8.7 36.4 7.0C37.2 6.7 38.2 6.4 38.6 6.2C39.1 6.1 40.1 5.8 40.9 5.5C41.8 5.2 42.8 5.0 43.2 4.9C43.6 4.9 44.4 4.7 45.1 4.5C45.7 4.3 46.6 4.1 47.2 4.0C47.7 3.9 48.7 3.7 49.4 3.5C50.1 3.3 51.1 3.1 51.9 3.0C52.7 2.9 53.6 2.7 54.4 2.5C55.3 2.2 55.9 2.1 57.4 2.0C58.6 1.9 59.8 1.8 60.6 1.6C62.2 1.2 63.9 1.0 68.1 0.9C71.2 0.9 75.3 0.6 76.8 0.3C78.8 -0.0 94.7 0.1 97.8 0.4C98.6 0.6 100.3 0.7 101.6 0.7C102.8 0.7 104.0 0.8 104.2 0.8C104.4 0.9 106.0 0.9 107.8 1.0C110.6 1.1 111.1 1.1 112.6 1.5C113.7 1.8 114.8 1.9 116.2 2.0C118.4 2.1 119.0 2.2 120.1 2.6C120.5 2.8 121.4 2.9 122.0 3.0C122.7 3.1 123.8 3.3 124.4 3.5C125.1 3.7 126.3 3.9 126.9 4.1C127.6 4.2 128.5 4.3 128.8 4.5C129.2 4.6 130.1 4.8 130.8 5.0C131.5 5.1 132.4 5.3 132.7 5.5C133.1 5.6 133.8 5.8 134.3 5.9C135.4 6.2 138.9 7.5 141.1 8.5C141.6 8.7 142.3 9.0 142.5 9.0C143.9 9.4 150.1 12.7 152.4 14.3C158.0 18.3 164.0 26.0 166.5 32.6C167.1 34.4 168.1 37.5 168.3 38.3C168.4 38.8 168.6 39.6 168.8 40.0C169.0 40.5 169.2 41.4 169.2 42.1C169.3 42.8 169.6 43.9 169.8 44.6C170.0 45.3 170.2 46.5 170.3 47.4C170.3 48.2 170.5 49.4 170.7 50.1C171.0 51.7 171.2 53.3 171.3 56.0C171.4 57.3 171.5 58.7 171.7 59.9C172.2 62.9 172.1 74.3 171.6 79.2C171.5 80.1 171.3 82.2 171.2 83.9C171.1 86.1 170.9 87.4 170.8 88.1C170.6 88.6 170.4 89.9 170.3 90.9C170.2 91.9 170.0 93.3 169.8 93.9C169.6 94.5 169.4 95.4 169.3 95.9C169.1 96.8 168.6 98.4 167.9 100.5C167.0 103.0 166.9 103.5 166.4 104.6C166.1 105.3 165.7 106.2 165.5 106.7C161.8 115.2 153.6 123.6 144.1 128.9C140.7 130.8 136.1 132.8 132.2 134.1C131.7 134.3 130.9 134.6 130.3 134.8C129.8 135.0 128.9 135.2 128.5 135.3C128.1 135.4 127.4 135.6 127.0 135.8C126.7 135.9 125.9 136.1 125.2 136.2C124.6 136.4 123.7 136.6 123.3 136.8C122.8 137.0 122.0 137.2 121.4 137.2C120.9 137.3 119.9 137.6 119.3 137.8C118.7 138.0 117.7 138.2 117.1 138.3C116.5 138.3 115.4 138.6 114.6 138.8C113.8 139.0 112.4 139.2 111.2 139.3C110.1 139.4 108.8 139.6 108.2 139.7C107.7 139.9 106.6 140.1 105.7 140.1C101.7 140.4 99.6 140.7 98.4 140.9C97.2 141.2 81.3 141.4 78.8 141.2ZM100.1 121.9C101.4 121.9 103.6 121.6 106.2 121.2C106.8 121.1 108.3 121.0 109.4 120.9C110.7 120.8 112.1 120.6 112.9 120.4C113.6 120.3 114.7 120.1 115.2 120.0C115.8 119.9 117.0 119.7 117.8 119.5C118.6 119.3 119.8 119.1 120.5 119.0C121.2 118.9 122.2 118.7 122.7 118.5C123.3 118.3 124.3 118.1 124.9 118.0C125.5 117.9 126.6 117.7 127.3 117.4C128.1 117.2 129.1 116.9 129.5 116.8C135.4 115.0 139.3 113.0 142.6 110.1C143.1 109.6 143.9 108.9 144.2 108.6C146.0 107.2 148.2 103.8 149.1 101.4C149.2 100.9 149.5 100.2 149.6 99.8C149.8 99.4 150.0 98.4 150.1 97.4C150.2 96.4 150.3 95.3 150.4 94.7C150.8 92.8 150.9 90.4 150.9 85.2C150.9 78.2 151.2 78.5 147.4 81.0C143.7 83.4 143.2 83.7 139.3 85.3C137.2 86.1 135.0 86.9 133.7 87.2C133.0 87.4 132.2 87.7 132.0 87.8C131.7 87.9 131.1 88.1 130.5 88.2C130.0 88.3 129.1 88.6 128.6 88.8C128.1 89.0 127.1 89.2 126.4 89.3C125.7 89.4 124.8 89.6 124.2 89.8C123.7 90.0 122.8 90.2 122.1 90.3C121.4 90.4 120.4 90.6 119.9 90.7C119.5 90.9 118.1 91.1 117.0 91.2C114.9 91.4 113.7 91.6 112.4 91.9C111.9 92.1 110.6 92.2 108.4 92.3C105.0 92.4 104.5 92.4 102.3 92.9C98.5 93.7 71.4 93.6 67.6 92.9C65.7 92.5 65.2 92.4 63.0 92.3C61.7 92.2 60.5 92.0 59.6 91.8C58.8 91.6 57.3 91.4 56.2 91.3C55.0 91.2 53.6 91.0 52.6 90.8C51.8 90.5 50.7 90.3 50.2 90.2C49.7 90.2 48.8 89.9 48.1 89.8C47.4 89.6 46.4 89.3 45.8 89.2C45.3 89.2 44.5 89.0 44.1 88.9C43.8 88.7 43.0 88.5 42.4 88.4C41.8 88.2 40.9 88.0 40.3 87.8C39.8 87.6 38.4 87.1 37.2 86.7C36.1 86.4 34.5 85.8 33.6 85.5C32.8 85.1 31.6 84.6 30.9 84.4C28.8 83.6 27.4 83.0 25.3 81.7C21.3 79.5 21.3 79.4 21.3 87.6C21.3 93.6 21.4 95.6 21.9 97.2C22.0 97.8 22.2 98.6 22.3 99.1C22.6 101.1 23.7 103.7 24.9 105.1C28.1 109.2 32.6 112.3 38.2 114.4C39.1 114.7 40.4 115.2 40.9 115.4C41.5 115.7 42.8 116.1 43.8 116.4C44.8 116.8 46.3 117.2 47.0 117.4C47.7 117.7 48.7 118.0 49.2 118.1C49.8 118.2 50.6 118.4 51.2 118.6C51.7 118.7 52.9 119.0 53.7 119.1C54.6 119.2 55.8 119.4 56.3 119.5C56.9 119.7 58.0 119.9 58.8 120.0C60.4 120.1 61.1 120.2 63.0 120.6C63.7 120.8 65.1 120.9 66.2 121.0C70.1 121.2 71.7 121.4 73.0 121.6C75.2 121.8 76.1 121.9 80.4 122.0C84.8 122.1 97.8 122.0 100.1 121.9ZM102.8 83.5C104.4 83.3 106.5 83.1 107.6 83.0C108.7 82.9 110.3 82.7 111.4 82.5C112.4 82.3 113.9 82.1 114.7 82.0C115.4 81.9 116.6 81.7 117.3 81.6C119.0 81.2 119.1 81.1 120.7 81.0C121.6 80.9 122.5 80.7 123.2 80.5C123.8 80.3 124.8 80.0 125.5 79.9C126.1 79.8 126.8 79.7 127.1 79.5C127.4 79.4 128.3 79.2 129.1 79.0C129.8 78.8 131.4 78.3 132.6 77.9C133.8 77.5 135.1 77.1 135.5 77.0C138.9 76.2 146.1 72.2 148.7 69.7C150.9 67.6 150.8 68.2 150.8 55.6C150.8 41.5 150.9 41.9 148.1 43.8C145.3 45.7 142.4 47.1 139.0 48.4C135.6 49.6 134.9 49.9 134.2 50.1C133.8 50.2 132.7 50.5 131.8 50.8C130.9 51.0 129.9 51.3 129.6 51.3C129.3 51.4 128.6 51.6 128.0 51.8C127.5 52.0 126.5 52.2 126.0 52.3C125.4 52.3 124.5 52.6 123.9 52.8C123.2 53.0 122.1 53.2 121.2 53.3C120.3 53.4 118.9 53.6 118.0 53.8C117.0 54.0 115.7 54.2 114.4 54.3C112.6 54.4 110.4 54.6 108.8 55.0C108.5 55.1 107.3 55.2 106.1 55.2C102.8 55.4 101.8 55.5 100.8 55.6C94.5 56.4 80.4 56.4 73.3 55.7C72.3 55.6 70.2 55.4 68.4 55.4C64.9 55.2 62.1 55.0 60.3 54.6C59.6 54.5 58.2 54.3 57.1 54.2C55.7 54.1 54.8 54.0 54.0 53.8C53.4 53.6 52.3 53.4 51.4 53.3C50.6 53.2 49.5 53.0 48.9 52.8C48.3 52.6 47.0 52.4 46.1 52.3C45.2 52.2 44.0 52.0 43.4 51.8C42.9 51.6 42.0 51.4 41.4 51.3C40.8 51.2 39.9 51.0 39.5 50.8C39.0 50.6 38.2 50.4 37.7 50.3C37.1 50.2 36.1 49.9 35.3 49.6C29.8 47.6 25.8 45.9 24.5 45.1C21.3 43.0 21.4 42.5 21.4 60.1C21.4 67.4 21.4 67.5 23.4 69.6C26.1 72.3 33.2 76.2 38.3 77.5C39.3 77.8 40.8 78.2 41.4 78.4C42.1 78.7 43.1 79.0 43.7 79.1C44.2 79.3 44.9 79.5 45.2 79.6C45.5 79.7 46.5 79.8 47.3 79.9C48.2 80.0 49.2 80.3 49.9 80.5C50.5 80.7 51.5 80.9 52.2 81.0C52.9 81.1 54.1 81.3 55.0 81.5C55.9 81.7 57.3 81.9 58.2 82.0C59.1 82.1 60.8 82.3 61.9 82.5C63.5 82.8 64.7 82.9 66.6 83.0C69.4 83.1 69.8 83.2 72.0 83.5C76.0 84.2 98.1 84.2 102.8 83.5ZM94.8 46.0C100.3 45.9 103.0 45.7 105.5 45.3C106.2 45.2 107.8 45.1 109.1 45.0C110.8 44.9 111.7 44.8 112.7 44.6C113.9 44.3 114.6 44.2 117.7 43.9C118.5 43.8 119.5 43.6 120.0 43.4C120.6 43.3 121.6 43.1 122.2 43.0C122.9 42.9 123.9 42.7 124.5 42.6C125.1 42.4 126.1 42.2 126.8 42.1C127.5 42.0 128.5 41.7 129.0 41.6C129.5 41.4 130.4 41.1 131.0 41.0C131.6 40.9 132.4 40.6 132.8 40.5C133.1 40.3 133.8 40.1 134.2 40.0C150.8 34.9 153.8 27.4 141.6 21.7C140.1 21.0 136.6 19.6 135.4 19.3C134.8 19.1 133.8 18.8 133.2 18.6C132.6 18.4 132.1 18.3 131.9 18.2C131.8 18.2 131.1 18.1 130.4 17.8C129.7 17.6 128.6 17.3 128.1 17.2C127.6 17.2 126.6 16.9 125.8 16.7C125.1 16.5 123.9 16.3 123.3 16.2C122.7 16.2 121.5 15.9 120.8 15.7C119.9 15.5 118.7 15.3 117.7 15.3C116.7 15.2 115.5 15.0 114.5 14.8C113.2 14.4 112.5 14.4 110.5 14.2C107.7 14.1 107.9 14.1 105.1 13.7C101.2 13.0 70.7 13.2 66.6 13.9C65.6 14.0 64.0 14.2 62.1 14.2C59.7 14.3 59.0 14.4 57.9 14.7C57.2 14.9 55.9 15.1 55.0 15.2C54.1 15.3 53.0 15.5 52.6 15.6C51.4 16.0 50.9 16.1 49.8 16.3C49.3 16.3 48.3 16.5 47.7 16.7C47.1 16.9 46.1 17.1 45.6 17.1C44.6 17.2 42.5 17.8 40.2 18.6C39.7 18.8 38.9 19.0 38.4 19.1C29.9 21.3 22.0 27.1 22.5 30.8C23.0 33.9 31.2 38.9 37.7 40.1C38.3 40.2 39.2 40.4 39.5 40.5C39.9 40.6 40.6 40.9 41.2 41.0C41.7 41.1 42.6 41.4 43.1 41.5C43.6 41.7 44.4 41.9 44.9 42.0C45.3 42.1 46.2 42.3 46.8 42.5C47.4 42.7 48.4 42.9 49.0 43.0C49.6 43.1 50.5 43.3 51.1 43.4C52.5 43.8 52.7 43.9 54.8 44.0C55.8 44.1 57.4 44.3 58.4 44.5C59.8 44.8 60.7 44.9 62.9 45.0C64.7 45.1 66.2 45.2 67.1 45.4C67.9 45.5 68.9 45.6 69.9 45.6C70.7 45.6 71.9 45.7 72.6 45.8C76.1 46.1 85.3 46.2 94.8 46.0Z"/><g style="fill:var(--accent-bright,#05A1D8)"><circle cx="86.1" cy="70.2" r="7"/><circle cx="110" cy="69.8" r="7"/><circle cx="86.1" cy="107.8" r="7.3"/><circle cx="110.1" cy="107.7" r="7.2"/></g></g>
+  <radialGradient id="pion-glow"><stop offset="0" stop-color="#05A1D8" stop-opacity=".7"/><stop offset="1" stop-color="#05A1D8" stop-opacity="0"/></radialGradient>
+</defs></svg>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+  <header class="topnav">
+    <a class="brand" href="/" aria-label="Pion home">
+      <svg viewBox="143.2 105.4 521.2 521.2" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="13" stroke-linecap="round" stroke-dasharray=".1 23"><path d="M345.6 310.4Q307.7 254.5 247.4 224"/><path d="M484.3 312.2Q526.2 253.2 591.9 223.3"/><path d="M315.6 366.1Q257.9 355.9 199.5 361"/><path d="M511.7 380Q560.9 375.2 608.3 389.6"/><path d="M352 435.3Q306.3 459.3 284.5 506"/><path d="M482.4 430.2Q511.5 467.9 552.7 491.6"/></g><g style="fill:var(--surface,#fff);stroke:var(--accent-bright,#05A1D8)" stroke-width="8.5"><circle cx="224.2" cy="203.6" r="17"/><circle cx="615.7" cy="203.6" r="17"/><circle cx="168.7" cy="359.6" r="17"/><circle cx="639" cy="392.6" r="17"/><circle cx="263.2" cy="528.4" r="17"/><circle cx="576" cy="511.9" r="17"/></g><use href="#pion-drum" transform="translate(331.5 302.7) scale(0.958)"/></svg>
+      <span class="word">Pion</span><span class="cat">memory engine for AI inference</span>
+    </a>
+    <nav aria-label="Primary">
+      <a href="/docs/">Docs</a><a href="/docs/guides/examples/">Examples</a><a href="#numbers">Numbers</a><a href="/docs/project/changelog/">Changelog</a><a href="https://github.com/pavelhorak/pion">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+  <section class="hero">
+    <div>
+      <p class="eyebrow">{{version}} · public preview · macOS Apple Silicon + Linux</p>
+      <h1>Your model re-reads the same prompt on every request.</h1>
+      <p class="lede">{{hero_lede}}</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="#install">Get started</a>
+        <a class="btn btn-ghost" href="/docs/">Read the docs</a>
+        <a class="btn btn-ghost" href="https://github.com/pavelhorak/pion">GitHub ↗</a>
+      </div>
+    </div>
+    <svg class="fabric" viewBox="0 0 560 385" role="img" aria-label="The Pion database at the centre, with dotted links to the processes and machines that share its cache">
+      <g><path class="link" d="M232 129.5Q195.7 78.8 139.4 52.1"/><path class="link" d="M337.3 136.4Q384.4 76.7 455.3 48.7"/><path class="link" d="M210.9 184.6Q147.8 176.2 84.6 184.5"/><path class="link" d="M365.4 188.6Q420.2 188 471 208.4"/><path class="link" d="M216.2 227.3Q170.8 260.3 154.6 314.1"/><path class="link" d="M358.6 269.4Q383.6 299.4 417.4 319.2"/></g>
+      <g><circle class="halo" cx="112.4" cy="40.5" r="23"/><circle class="halo" cx="477.8" cy="40.5" r="23"/><circle class="halo" cx="60.6" cy="186.1" r="23"/><circle class="halo" cx="499.4" cy="216.8" r="23"/><circle class="halo" cx="148.8" cy="343.5" r="23"/><circle class="halo" cx="440.6" cy="328.1" r="23"/><circle class="node" cx="112.4" cy="40.5" r="12"/><circle class="node" cx="477.8" cy="40.5" r="12"/><circle class="node" cx="60.6" cy="186.1" r="12"/><circle class="node" cx="499.4" cy="216.8" r="12"/><circle class="node" cx="148.8" cy="343.5" r="12"/><circle class="node" cx="440.6" cy="328.1" r="12"/></g>
+      <text x="112.4" y="13.5" text-anchor="middle">mlx-lm · process A</text><text x="505.8" y="13.5" text-anchor="end">process B, after restart</text><text x="60.6" y="222.1" text-anchor="middle">redis-cli</text><text x="499.4" y="252.8" text-anchor="middle">LMCache / vLLM</text><text x="148.8" y="379.5" text-anchor="middle">agent session, tomorrow</text><text x="440.6" y="364.1" text-anchor="middle">another machine</text>
+      <use href="#pion-drum" class="drum" transform="translate(231.7 148.8) scale(0.6706)"/>
+      <text class="core-t" x="289.4" y="265.5" text-anchor="middle">pion-server</text>
+    </svg>
+  </section>
+
+  <section class="section" id="install">
+    <div class="section-grid">
+      <div class="label"><b>Install</b>one binary, no toolchain</div>
+      <div>
+        <div class="tabs" role="tablist" aria-label="Install method">
+          <button type="button" role="tab" aria-selected="true" aria-controls="tab-mac" id="t-mac">macOS · Apple Silicon</button>
+          <button type="button" role="tab" aria-selected="false" aria-controls="tab-pip" id="t-pip">Python (mlx-lm)</button>
+          <button type="button" role="tab" aria-selected="false" aria-controls="tab-docker" id="t-docker">Docker</button>
+          <button type="button" role="tab" aria-selected="false" aria-controls="tab-src" id="t-src">From source</button>
+        </div>
+        <div id="tab-mac" role="tabpanel" aria-labelledby="t-mac">
+          <div class="code"><button type="button" class="copy">Copy</button><pre>{{install_mac_code}}</pre></div>
+          <div class="install-note">{{install_mac_note}}</div>
+        </div>
+        <div id="tab-pip" role="tabpanel" aria-labelledby="t-pip" hidden>
+          <div class="install-note">{{install_pip_html}}<p>The client for the prompt-cache path. It needs a running <code>pion-server --kvcache --metal-attention -w 1</code> from the macOS tab.</p></div>
+        </div>
+        <div id="tab-docker" role="tabpanel" aria-labelledby="t-docker" hidden>
+          <div class="code"><button type="button" class="copy">Copy</button><pre>{{install_docker_code}}</pre></div>
+          <div class="install-note">{{install_docker_note}}</div>
+        </div>
+        <div id="tab-src" role="tabpanel" aria-labelledby="t-src" hidden>
+          <div class="code"><button type="button" class="copy">Copy</button><pre>{{install_src_code}}</pre></div>
+          <div class="install-note">{{install_src_note}}</div>
+        </div>
+        <p class="small" style="margin-top:1rem">Loopback by default, no TLS; a password flips the bind address. Read the <a href="/docs/concepts/security-model/">security model</a> before the server sees a network.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="use">
+    <div class="section-grid">
+      <div class="label"><b>Use</b>the four Pion lines</div>
+      <div class="pair">
+        <div>
+          <h2>A drop-in for <code>make_prompt_cache</code></h2>
+          <div class="prose">
+            <p>On Apple Silicon, <code>PionPromptCache</code> sits where mlx-lm's own prompt cache does. The first run warms it; every later run — this process or another — hits.</p>
+            <div class="small">{{four_lines_explained}}</div>
+          </div>
+        </div>
+        <div class="code"><button type="button" class="copy">Copy</button><pre>{{four_lines_code}}</pre></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="numbers">
+    <div class="section-grid">
+      <div class="label"><b>Numbers</b>with their denominators</div>
+      <div>
+        <h2>Two numbers, and what each one measures</h2>
+        <div class="scroll"><table class="numbers">
+          <thead><tr><th>Time to first token</th><th style="text-align:right">vanilla mlx-lm</th><th style="text-align:right">Pion warm</th><th style="text-align:right">factor</th></tr></thead>
+          <tbody>
+{{numbers_rows}}
+          </tbody>
+        </table></div>
+        <div class="numbers-note">{{numbers_note}}</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="honesty">
+    <div class="section-grid">
+      <div class="label"><b>Where it does not help</b>read before installing</div>
+      <div class="ledger">
+        <div>
+          <div class="big">{{not_help_big}}</div>
+          <p class="big-cap">{{not_help_cap}}</p>
+        </div>
+        <ul>
+{{not_help_items}}
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="different">
+    <div class="section-grid">
+      <div class="label"><b>What is different</b>two rows are ours</div>
+      <div class="prose different">
+        {{different_html}}
+        <h3>On oMLX specifically</h3>
+        {{omlx_html}}
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="underneath">
+    <div class="section-grid">
+      <div class="label"><b>Underneath</b>the on-ramp, not the pitch</div>
+      <div class="tiles">
+        <div class="tile">
+          <h3>The Redis wire, clients unchanged</h3>
+          <p>RESP2 and RESP3. redis-py, go-redis, ioredis, Valkey GLIDE, RedisVL, LangChain and LMCache's RedisConnector talk to Pion as they are.</p>
+          <p class="fig">{{tile_kv_fig}}</p>
+          <p class="caveat">Peak numbers above one worker use <code>--independent-workers</code>: N independent keyspaces. At P=1 it is parity with Redis — the localhost TCP ceiling every engine hits.</p>
+        </div>
+        <div class="tile">
+          <h3>Vector search in the same process</h3>
+          <p>HNSW with SIMD INT8 kernels, <code>FT.CREATE</code>/<code>FT.SEARCH</code>, the Redis 8 VSET commands (one vector set per key), BM25 and hybrid retrieval, an in-process embedding model so the first request just works.</p>
+          <p class="fig">{{tile_vec_fig}}</p>
+          <p class="caveat">One index per server; L2 and COSINE, anything else refused at FT.CREATE.</p>
+        </div>
+        <div class="tile">
+          <h3>One binary, durable by default</h3>
+          <p>Zero-allocation hot path, mmap WAL with segment rotation, snapshots, blob arenas for large values, crash breadcrumbs and a 1 Hz status file that survives an OOM kill.</p>
+          <p class="fig">{{tile_dur_fig}}</p>
+          <p class="caveat">Loopback by default. No TLS, no maxmemory — read the security model first.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="ecosystem">
+    <div class="section-grid">
+      <div class="label"><b>Use it from</b>what already speaks to it</div>
+      <div>
+        <div class="chips">
+          <a class="chip" href="/docs/reference/python/pion-vllm-mlx/"><b>mlx-lm</b> · PionPromptCache</a>
+          <a class="chip" href="/docs/reference/python/pion-lmcache/"><b>LMCache</b> · resp://localhost:1974</a>
+          <a class="chip" href="/docs/client_apis/"><b>redis-py</b> · go-redis · ioredis · GLIDE</a>
+          <a class="chip" href="/docs/reference/python/pion-mcp/"><b>MCP</b> · 25 tools for agents</a>
+          <a class="chip" href="/docs/reference/python/integrations/"><b>LangGraph</b> · AutoGen · LlamaIndex</a>
+          <a class="chip" href="/docs/ai_gateway/"><b>RedisVL</b> · LangChain, unmodified</a>
+          <a class="chip" href="/docs/pion_serve/"><b>Pion Serve</b> · OpenAI-compatible proxy</a>
+          <a class="chip" href="/docs/reference/python/integrations/"><b>exo</b> · Mac cluster inference</a>
+        </div>
+        <p class="small" style="margin-top:1rem">Runnable examples ship in <a href="/docs/guides/examples/"><code>examples/</code></a>, each with its prerequisites stated — the prompt-cache demo, hybrid retrieval, 64K sparse NIAH, MoE expert paging on a 16 GB Mac, agent memory over MCP.</p>
+      </div>
+    </div>
+  </section>
+  </main>
+
+  <footer class="foot">
+    <div>{{license_html}}</div>
+    <div>
+      <p><a href="https://github.com/pavelhorak/pion/discussions">Discussions</a> · <a href="https://github.com/pavelhorak/pion/issues">Issues</a> · <a href="/docs/project/security/">Security policy</a> · <a href="/docs/project/changelog/">Changelog</a> · <a href="/docs/">Docs</a></p>
+      <p>© 2025–2026 Pavel Horak. Not the WebRTC project — that is <a href="https://pion.ly">pion.ly</a>.</p>
+    </div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  var tabs=document.querySelector('.tabs');
+  if(tabs){
+    var btns=tabs.querySelectorAll('button');
+    for(var b=0;b<btns.length;b++){
+      btns[b].addEventListener('click', function(){
+        for(var x=0;x<btns.length;x++){
+          var on=(btns[x]===this);
+          btns[x].setAttribute('aria-selected', String(on));
+          var p=document.getElementById(btns[x].getAttribute('aria-controls'));
+          if(p) p.hidden=!on;
+        }
+      });
+    }
+  }
+  var copies=document.querySelectorAll('.copy');
+  for(var c=0;c<copies.length;c++){
+    copies[c].addEventListener('click', function(){
+      var btn=this, pre=btn.parentNode.querySelector('pre'), text=pre?pre.textContent:'';
+      function done(msg){ btn.textContent=msg; setTimeout(function(){ btn.textContent='Copy'; }, 1500); }
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(function(){ done('Copied'); }, function(){ done('Select and copy'); });
+      } else { done('Select and copy'); }
+    });
+  }
+})();
+</script>
+</body>
+</html>

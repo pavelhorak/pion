@@ -1,0 +1,296 @@
+# Release artifacts (gh #295, decision D3).
+#
+# Official binaries are built HERE, not on a developer machine. That decision
+# removed five separate problems at once:
+#
+#   1. Provenance. Built locally, a binary stamps the private tree's HEAD — a
+#      commit a stranger cannot fetch, so their bug report cites code they
+#      cannot read. Built from the tag, it stamps a commit that resolves.
+#   2. Linux. There was no Linux tarball at all; runners give x86_64 and
+#      aarch64 for free.
+#   3. Metal. `pixi run build` skips the shader step without FULL Xcode and
+#      says so in one line inside a 20-minute build, leaving a previous
+#      build's metallib on disk. macos-14 runners have full Xcode, so the
+#      library is rebuilt from source every release.
+#   4. Disk. The dev machine has hit 0 bytes free mid-session; a full disk
+#      makes the build exit 0 with a fresh mtime and stale machine code.
+#   5. Tokens. The local gh token lacks write:packages; GITHUB_TOKEN has it.
+#
+# NEVER add --prerelease. GitHub excludes prereleases from /releases/latest,
+# and the README's install line is a curl at
+# releases/latest/download/pion-macos-arm64.tar.gz. Marking a release
+# prerelease silently breaks the first command a stranger runs.
+#
+# The byte-identical alias asset is load-bearing for the same reason: the
+# versioned tarball is the record, the alias is what the README points at.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build'
+        required: true
+
+permissions:
+  contents: write     # create the release, upload assets
+  packages: write     # ghcr
+  id-token: write     # PyPI Trusted Publishing
+
+jobs:
+  preflight:
+    # Runs FIRST, depends on nothing, finishes in seconds.
+    #
+    # The PyPI publish is the last step of a release and needs a Trusted
+    # Publisher registered on pypi.org — an account action nobody can do from
+    # here. Without this job, forgetting it means a full three-platform build
+    # (~60 min) succeeds and then the very last step fails, after the GitHub
+    # release has already been created. This turns that into a 20-second
+    # failure with the fix in the log.
+    name: preflight
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: The pion-vllm-mlx distribution must build
+        run: |
+          python -m pip install --quiet --upgrade build
+          python -m build --outdir /tmp/preflight pion-vllm-mlx/
+          ls -la /tmp/preflight
+      - name: Trusted Publisher must be registered on PyPI
+        run: |
+          NAME=$(python3 -c "import tomllib;print(tomllib.load(open('pion-vllm-mlx/pyproject.toml','rb'))['project']['name'])")
+          echo "distribution: $NAME"
+          code=$(curl -s -o /tmp/pypi.json -w '%{http_code}' "https://pypi.org/pypi/${NAME}/json")
+          if [ "$code" = "200" ]; then
+            echo "project exists on PyPI — publishing a new version"
+            exit 0
+          fi
+          # 404 is expected for the FIRST release. It is not proof the pending
+          # publisher is registered, so say exactly what to check rather than
+          # pretending this is a real verification.
+          cat <<'EOS'
+          ::warning::PyPI has no project by this name yet (HTTP 404). That is
+          expected for the first release — but it also means nothing here can
+          confirm the Trusted Publisher exists, and the publish step at the END
+          of this run is where you would find out.
+
+          Before tagging a first release, confirm on pypi.org:
+            Your projects -> Publishing -> Add a pending publisher
+              owner:        pavelhorak
+              repository:   pion
+              workflow:     release.yml
+              environment:  pypi
+
+          The `pypi` GitHub environment already exists.
+          EOS
+
+  build:
+    name: build ${{ matrix.name }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-14
+            build_task: build
+            binary: pion-server
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            build_task: build-portable
+            binary: pion-server-dev
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            build_task: build
+            binary: pion-server
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
+          cache-key: pixi-${{ matrix.os }}-${{ hashFiles('pixi.lock') }}
+
+      - name: Drop the tracked metallib, so the build has to make one
+        # The tracked copy targets macOS 26 (its header's OS version is 26.0),
+        # and a fresh checkout gives it the same mtime as its source. So the
+        # check after the build could not tell a rebuilt library from an
+        # inherited one; it passed whether or not the shader step ran.
+        if: matrix.os == 'macos-14'
+        run: rm src/ffi/metal_compute.metallib
+
+      - name: Build
+        run: pixi run ${{ matrix.build_task }}
+
+      - name: Metal library must be REBUILT, not inherited
+        if: matrix.os == 'macos-14'
+        # The source artifact is src/ffi/metal_compute.metallib; package_release.sh
+        # bundles it INTO the tarball at lib/. Checking the tarball path here
+        # would pass vacuously, because nothing has built a tarball yet.
+        run: |
+          test -f src/ffi/metal_compute.metallib && exit 0
+          echo "::error::no metallib: the shader step was skipped or failed"
+          # build-ffi discards the shader compiler's stderr; show it here.
+          xcrun -sdk macosx metal -c src/ffi/metal_compute.metal -o /tmp/metal_compute.air || true
+          exit 1
+
+      - name: Closed vector library matches its open reference
+        # D11: the release notes carry this result. macOS only until Linux
+        # archives are vendored (gh #348).
+        if: matrix.os == 'macos-14'
+        run: pixi run test-vector-differential
+
+      - name: Correctness before packaging
+        # A release binary that has not answered a PING is not a release.
+        run: |
+          ./${{ matrix.binary }} -p 1974 -w 1 --no-auto-detect --no-auto-embed \
+            > /tmp/pion-rel.log 2>&1 &
+          for i in $(seq 1 40); do
+            python3 -c "import socket;socket.create_connection(('127.0.0.1',1974),timeout=1)" 2>/dev/null && break
+            sleep 1
+          done
+          python3 tests/test_raw.py --port 1974
+          python3 tests/test_parity.py
+          # gh #341: a build whose vector distances are wrong answers PING and
+          # parity perfectly; this is the only step that would stop it.
+          python3 tests/test_vector_recall_smoke.py --port 1974
+
+      - name: Package
+        run: |
+          # package_release.sh ships ./pion-server as it finds it; the portable
+          # Linux build writes pion-server-dev, so normalise the name first.
+          if [ "${{ matrix.binary }}" != "pion-server" ]; then
+            mv "${{ matrix.binary }}" pion-server
+          fi
+          bash scripts/package_release.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: staged }
+
+      - name: Assemble assets + the alias every README link depends on
+        run: |
+          mkdir -p dist && find staged -name '*.tar.gz' -exec cp {} dist/ \;
+          cd dist
+          for f in pion-*-macos-arm64.tar.gz pion-*-linux-x86_64.tar.gz pion-*-linux-arm64.tar.gz; do
+            [ -e "$f" ] || continue
+            # pion-0.9.0-macos-arm64.tar.gz -> pion-macos-arm64.tar.gz,
+            # which is the exact name the README's curl fetches from
+            # releases/latest/download/. Verified against the naming in
+            # package_release.sh (NAME="pion-${VERSION}-${PLATFORM}").
+            plat="${f#pion-*-}"
+            cp "$f" "pion-${plat}"          # byte-identical alias
+          done
+          shasum -a 256 *.tar.gz > SHA256SUMS
+          ls -la; cat SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          # No --prerelease. See the header.
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+            --title "Pion ${TAG#v}" --generate-notes
+
+  # gh #417 (I-8): build each arch on its NATIVE runner and stitch the two into
+  # one multi-arch tag. The old job ran `buildx --platform amd64,arm64` on an
+  # amd64 runner, so the arm64 half did the full -O3 Mojo build under QEMU user
+  # emulation — 20-35 min native, far longer emulated, with no timeout (6 h
+  # default). Each leg here builds on hardware of its own architecture and pushes
+  # by digest; container-manifest merges them. NOTE: a package pushed to ghcr is
+  # PRIVATE by default — after the first run, set the package visibility to
+  # public in the repo settings, or `docker pull ghcr.io/pavelhorak/pion` 404s.
+  container:
+    name: ghcr ${{ matrix.platform }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push by digest
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/pion"
+          docker buildx build --platform "${{ matrix.platform }}" \
+            --output "type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file /tmp/metadata.json .
+          DIGEST="$(python3 -c "import json;print(json.load(open('/tmp/metadata.json'))['containerimage.digest'])")"
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  container-manifest:
+    name: ghcr multi-arch manifest
+    needs: container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Create and push the multi-arch manifest
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/pion"
+          REFS=""
+          for f in /tmp/digests/*; do REFS="${REFS} ${IMAGE}@sha256:$(basename "$f")"; done
+          docker buildx imagetools create \
+            -t "${IMAGE}:${TAG#v}" -t "${IMAGE}:latest" ${REFS}
+
+  pypi:
+    name: pion-vllm-mlx to PyPI
+    needs: [preflight, build]
+    runs-on: ubuntu-24.04
+    environment: pypi          # Trusted Publishing — no API token stored
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build pion-vllm-mlx/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pion-vllm-mlx/dist/

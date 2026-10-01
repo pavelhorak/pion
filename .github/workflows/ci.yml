@@ -1,0 +1,208 @@
+# Correctness CI (gh #296).
+#
+# WHAT THIS DOES NOT DO: performance.
+#
+# Pion's perf gates are position-dependent, warm-up-dependent and
+# contention-sensitive. The MSET row swings 38% purely on its index in the test
+# sequence; the warm-up ramp takes ~6 runs to reach steady state; a leaked
+# server on the same box costs ~30% on write rows while leaving reads alone. A
+# shared hosted runner can satisfy none of those preconditions, so a perf job
+# here would produce a number nobody should act on — and a green badge over a
+# meaningless measurement is worse than no badge at all. Perf gates stay local,
+# on a quiet machine.
+#
+# So this job answers exactly one question: does the wire surface still behave?
+#
+# Note for anyone reading a red run: `pixi run build` depends on
+# `stamp-version`, which regenerates src/common/version.mojo (VERSION is set by
+# hand and no longer rewritten). That leaves the CI checkout dirty by design;
+# nothing commits it.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  source-checks:
+    # Pure source analysis — no build, no server. Fast enough to fail a PR
+    # before the 20-minute jobs have finished starting.
+    name: source checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Command table is not drifting from the dispatch chains
+        # The table is GENERATED from the dispatch arms and is what MULTI uses
+        # to reject unknown commands at queue time. A command missing from it
+        # works normally and is rejected inside a transaction, which is the
+        # kind of bug that reaches a user before it reaches a test.
+        run: python3 tools/gen_command_table.py --check
+
+      - name: Every dispatch arm pins its whole command name
+        # Must stay at 0. Prefix matching once made PINX execute as PING and
+        # DBFOO! as DBSIZE; FLUSHALL's arm matched on two bytes and a length.
+        run: |
+          out=$(python3 tools/audit_loose_command_matchers.py)
+          echo "$out"
+          echo "$out" | head -1 | grep -qE '^0 dispatch arms' || {
+            echo "::error::loose command matchers found — see doc rule gh #225"
+            exit 1
+          }
+
+      - name: Documentation links resolve
+        run: python3 scripts/check_doc_links.py .
+
+      - name: The website builds strictly from the tree
+        # Landing + docs are derived from README regions, doc/*.md, the --help
+        # printer and the command table (website/README.md). Strict mode turns
+        # a dead link, an orphan page or a missing README region into a red PR.
+        env:
+          DISABLE_MKDOCS_2_WARNING: "true"
+        run: |
+          python3 -m pip install -q -r website/requirements.txt
+          python3 -m mkdocs build --strict
+          python3 website/landing/build_landing.py --out _site
+          python3 tests/test_docs_site.py --built _site
+
+  correctness:
+    name: ${{ matrix.leg }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS minutes count 10x against the private dev repo's free monthly
+        # allotment, which Pages draws on too. So on a private repo the macOS
+        # leg runs only when started by hand (`gh workflow run CI --ref
+        # <branch>`). On the public repo both legs always run; Actions is free
+        # there.
+        leg: ${{ fromJSON(github.event.repository.private && github.event_name != 'workflow_dispatch' && '["linux-x86_64"]' || '["linux-x86_64", "macos-arm64"]') }}
+    runs-on: ${{ matrix.leg == 'macos-arm64' && 'macos-14' || 'ubuntu-24.04' }}
+    env:
+      # Linux: the -O3 portable build (x86-64-v2), GPU-free; it emits
+      # pion-server-dev.
+      BUILD_TASK: ${{ matrix.leg == 'macos-arm64' && 'build' || 'build-portable' }}
+      BINARY: ${{ matrix.leg == 'macos-arm64' && './pion-server' || './pion-server-dev' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          # Cache on the lockfile: the toolchain is pinned exactly (mojo
+          # ==1.1.0) precisely so it cannot float, so the key is stable until
+          # someone changes it deliberately.
+          cache: true
+          cache-key: pixi-${{ matrix.leg }}-${{ hashFiles('pixi.lock') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Drop the tracked metallib, so the build has to make one
+        # As in release.yml: without this, nothing can tell whether this
+        # runner's Xcode compiled the shader or the tracked copy was reused.
+        if: matrix.leg == 'macos-arm64'
+        run: rm src/ffi/metal_compute.metallib
+
+      - name: Build
+        run: pixi run ${{ env.BUILD_TASK }}
+
+      - name: Metal library was rebuilt
+        if: matrix.leg == 'macos-arm64'
+        run: |
+          test -f src/ffi/metal_compute.metallib && exit 0
+          echo "::error::no metallib: the shader step was skipped or failed"
+          # build-ffi discards the shader compiler's stderr; show it here.
+          xcrun -sdk macosx metal -c src/ffi/metal_compute.metal -o /tmp/metal_compute.air || true
+          exit 1
+
+      - name: Report what was built
+        run: |
+          ls -la ${{ env.BINARY }}
+          ${{ env.BINARY }} --version
+
+      - name: Closed vector library matches its open reference
+        # D11: every routine in vendor/pion-vector/<platform>/libpion_vector.a
+        # against src/vector/reference/ on the same inputs — beams bit-exact,
+        # PKM FP32 within 1e-4. Only macOS has a vendored archive today; Linux
+        # builds run the reference itself until gh #348.
+        if: matrix.leg == 'macos-arm64'
+        run: pixi run test-vector-differential
+
+      - name: Start server
+        # Port 1974 is not a preference: tests/test_parity.py hardcodes it and
+        # ignores --port. --no-auto-detect --no-auto-embed keeps the embedding
+        # sidecar out of a correctness run (it would force -w 1 anyway and adds
+        # a model download).
+        run: |
+          ${{ env.BINARY }} -p 1974 -w 1 --no-auto-detect --no-auto-embed \
+            > /tmp/pion-ci.log 2>&1 &
+          for i in $(seq 1 40); do
+            if python3 -c "import socket;socket.create_connection(('127.0.0.1',1974),timeout=1)" 2>/dev/null; then
+              echo "server up after ${i} attempts"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::server never accepted a connection"; cat /tmp/pion-ci.log; exit 1
+
+      - name: Gate 1 — wire invariants
+        run: python3 tests/test_raw.py --port 1974
+
+      - name: Gate 2 — RESP parity vs Redis semantics
+        run: python3 tests/test_parity.py
+
+      - name: Vector search finds the right neighbours
+        # gh #341: the x86-64-v2 INT8 dot read the query as unsigned and
+        # recall@10 fell to 0.001 while every other step here stayed green —
+        # none of them issues a vector query. Planted ground truth, stdlib only,
+        # ~1 s; on a simulated #341 build it reports recall 0.000.
+        run: python3 tests/test_vector_recall_smoke.py --port 1974
+
+      - name: Dispatch sweep — every command consumes its own frame
+        # 289 commands x 5 argument shapes. Each shape added here found real
+        # desyncs; an arm that stops consuming at its required arity is
+        # invisible until an optional argument is supplied.
+        run: python3 tests/test_dispatch_sweep.py --port 1974
+
+      - name: Hostile frames — the server must survive
+        run: python3 tests/test_resp_malformed.py --port 1974
+
+      - name: Transaction shapes
+        run: python3 tests/test_tx_probe.py --port 1974
+
+      - name: README quick-start prerequisites
+        # The README's vector snippet opens with `pip install redis numpy`. The
+        # test below strips that line and runs the rest with this interpreter,
+        # so the install has to happen here.
+        run: python3 -m pip install redis numpy
+
+      - name: README quick start runs as written
+        run: python3 tests/test_gh254_readme_quickstart.py --port 1974
+
+      - name: Package, as release.yml does
+        # package_release.sh had never run on a runner. It refuses a tree the
+        # build has dirtied, and a full-Xcode build rewrites the tracked
+        # metallib, so the first tagged release would have died at this step.
+        run: |
+          if [ "${{ env.BINARY }}" != "./pion-server" ]; then
+            mv "${{ env.BINARY }}" pion-server
+          fi
+          bash scripts/package_release.sh
+          ls -la dist/*.tar.gz
+
+      - name: Server log on failure
+        if: failure()
+        run: cat /tmp/pion-ci.log || true

@@ -1,0 +1,25 @@
+name: Feature request
+description: Something Pion should do and does not
+labels: [feature]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >-
+        The workload, not the feature. The best requests describe a problem we
+        had not pictured.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What do you do today instead?
+      description: >-
+        Including "nothing, I gave up" — that is useful information about how
+        much the gap costs.
+  - type: textarea
+    id: shape
+    attributes:
+      label: What would the API look like?
+      description: Optional. A sketch of the commands or calls you would want.

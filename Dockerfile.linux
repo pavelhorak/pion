@@ -1,0 +1,44 @@
+# Pion Linux ARM64 Development Container
+# Usage: see docker/run-linux.sh
+#
+# Kernel: Linux 6.8 (via Colima/VZ) — io_uring RECV_MULTISHOT + SEND_ZC supported.
+# Run with: --security-opt seccomp=unconfined  (required for io_uring syscalls)
+# Platform: linux/arm64 (native on Apple Silicon via Colima)
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.pixi/bin:${PATH}"
+
+# System deps: gcc for fcntl_wrap.c, redis-tools for benchmark client, misc
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    ca-certificates \
+    redis-tools \
+    python3 \
+    python3-pip \
+    netcat-openbsd \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pixi (detects linux-aarch64 automatically)
+# gh #417 (I-15): pin the pixi version so the image build is hermetic — the
+# installer otherwise serves whatever is latest on build day, while pixi.lock
+# was written by a specific pixi, and a lock-format change breaks the build
+# with no code change.
+ENV PIXI_VERSION=v0.70.2
+RUN curl -fsSL https://pixi.sh/install.sh | bash
+
+WORKDIR /pion
+
+# Copy only the pixi manifest + lock first (layer cache: only re-install if deps change)
+COPY pixi.toml pixi.lock ./
+
+# Install the pixi environment (downloads mojo for linux-aarch64)
+# This is the slow step (~2-5 min first time); cached in image layers after that.
+RUN pixi install
+
+# Default: drop into bash with pixi env active
+CMD ["bash", "-c", "exec bash --login"]

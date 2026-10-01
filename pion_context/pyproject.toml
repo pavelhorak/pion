@@ -1,0 +1,30 @@
+[project]
+name = "pion-context"
+version = "0.1.0"
+description = "Pion semantic codebase search for Claude Code — codebase indexing, conversation memory, speculative prefetch"
+license = "Apache-2.0"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "redis>=4.5",
+    "numpy>=1.24",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+pion-context = "pion_context.cli:main"
+
+# gh #427 (I-9): standard nested layout. The package files used to sit beside
+# this pyproject.toml with `where = [".."]` reaching UP to find them, so the
+# sdist (rooted at this dir) contained no code and the wheel duplicated the tree.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pion_context*"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

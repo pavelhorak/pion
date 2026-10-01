@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pion-autogen"
+version = "0.1.0"
+description = "AutoGen memory backend backed by Pion — semantic vector memory for multi-agent systems"
+readme = "README.md"
+requires-python = ">=3.10"
+# Apache-2.0 since 2026-09-22 (decided with the other client packages —
+# see doc/licensing.md). gh #256 had corrected an earlier "MIT" to the then-BSL;
+# the in-package LICENSE carries the verbatim text and hatchling ships it.
+license = { text = "Apache-2.0" }
+keywords = ["autogen", "memory", "pion", "ai-agents", "vector-database"]
+dependencies = [
+    "redis>=4.6.0",
+    "autogen-core>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "autogen-agentchat>=0.4.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pion_autogen"]

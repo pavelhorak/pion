@@ -1,0 +1,191 @@
+# Networking: Event Loops & Protocol
+
+Pion's networking layer provides five event loop configurations plus a zero-copy RESP parser. The backend is selected by CLI flag at startup.
+
+---
+
+## Event Loop Tiers
+
+| Tier | Flag | Syscall model | Best for | Platforms |
+|---|---|---|---|---|
+| **XDP/AF_XDP** | `--xdp --xdp-iface eth0` | Kernel bypass: NIC→BPF→AF_XDP→UMEM | +13% vs io_uring (P=1), multi-worker ready | Linux 5.4+, CAP_NET_ADMIN |
+| **io_uring SQPOLL** | `--sqpoll` | Kernel SQ polling thread (no enter() on hot path) | Experimental — hangs under load | Linux 5.11+, root/CAP_SYS_NICE |
+| **io_uring** | `--iouring` (default on Linux) | Batched enter(): 2 syscalls per batch regardless of K fds | Multi-connection production (memtier, P>=10) | Linux 5.4+ |
+| **epoll** | `--epoll` | epoll_wait + read + send per fd: 2K+1 syscalls per batch of K ready fds | Per-command P=1 benchmarks (w=1) | Linux 2.6+ |
+| **kqueue** | (default on macOS) | kevent per tick | macOS development | macOS |
+
+**Backend selection by CLI flag:** `--xdp` → XDP, `--sqpoll` → SQPOLL, `--iouring` → io_uring (Linux default), `--epoll` → epoll, no flag on macOS → kqueue. This is NOT a fallback chain — each backend is explicitly selected.
+
+---
+
+## kqueue (macOS)
+
+`run_server_kqueue()` in `engine.mojo` — default on macOS. Uses `kevent()` per tick with `EVFILT_READ` for accept/recv and `EVFILT_WRITE` for EAGAIN flush. Stack-allocated `KEvent` via `stack_allocation[1, KEvent]()`.
+
+P=1 macOS localhost ceiling: ~250K RPS (TCP/kevent limit, not Pion compute).
+
+---
+
+## epoll (Linux, `--epoll`)
+
+`run_server_epoll()` in `engine.mojo` — opt-in on Linux via `--epoll`. Uses `epoll_wait()` + per-fd `read()` + `send()`.
+
+- Per-fd syscall model: 2K+1 syscalls per batch of K ready fds (1 epoll_wait + K reads + K sends)
+- Best for P=1 w=1 benchmarks: 91-96K RPS, matching Redis/Valkey parity
+- **Limitation at w>1:** connection drops at >=800 concurrent connections (inherent per-fd syscall ceiling). Use io_uring for high-connection multi-worker.
+
+---
+
+## io_uring (Linux, default)
+
+`run_server_uring()` in `engine.mojo` — default on Linux. Wraps `io_uring_setup()`, SQE submission, CQE harvesting via C FFI (`src/ffi/uring_wrap.c`).
+
+- SQE batch: submit accept + recv in one `io_uring_enter()` call — 2 syscalls per batch regardless of K fds
+- CQE harvesting: drain completion ring each tick
+- Best for multi-connection production workloads (memtier, P>=10)
+
+### SQPOLL mode (`--sqpoll`)
+
+**Experimental — hangs under load.** Kernel spawns a dedicated SQ polling thread that consumes SQEs from the submission ring without requiring `io_uring_enter()`. The Mojo event loop only calls `enter()` when:
+1. The kernel thread goes idle (`IORING_SQ_NEED_WAKEUP` flag in `sq_flags`)
+2. Waiting for CQEs (`min_complete > 0`)
+
+Eliminates one syscall per event loop iteration on the hot path. Graceful fallback: if SQPOLL setup fails (requires root or CAP_SYS_NICE), retries without SQPOLL.
+
+---
+
+## io_uring vs epoll Tradeoff
+
+This is Pion's key networking design tradeoff on Linux:
+
+- **io_uring** batches syscalls: 2 per batch (1 enter for submit + 1 enter for CQE wait) regardless of how many fds are ready. Wins at high concurrency.
+- **epoll** uses per-fd syscalls: 2K+1 per batch of K ready fds. Simpler path per fd wins when K=1.
+
+**P=1 w=1 (single fd per wake):** epoll 96K vs io_uring 70K — epoll wins by 35%.
+**P>=10:** Both crush Redis. io_uring's batching advantage grows with connection count.
+
+### Measured Throughput (memtier_benchmark, mixed SET/GET)
+
+| Configuration | Ops/sec |
+|---|:---:|
+| epoll w=16 P=50 | 6.23M |
+| io_uring w=16 P=50 | 5.81M |
+| io_uring w=32 P=50 d=256 | **14.0M** (peak) |
+
+### P=1
+
+At P=1 the Linux localhost TCP path caps every engine at ~96K RPS. Pion with `--epoll` runs at parity with Redis there (91-96K vs 95-96K), not above it; its advantage is at pipeline depth P>=10.
+
+---
+
+## XDP/eBPF Kernel Bypass (`--xdp`)
+
+Zero-copy packet processing: BPF program filters at NIC driver level, redirects to AF_XDP socket in userspace.
+
+### Architecture
+
+```
+NIC driver → XDP BPF filter (port match) → AF_XDP socket → UMEM shared mmap
+  → Mojo poll_rx() → frame_ptr() into UMEM (zero-copy) → extract TCP payload
+  → fast_path.process_data_plane() → ResponseWriter.buffer
+  → send_data_ack() → build TCP response in UMEM TX frame → AF_XDP TX ring → NIC
+```
+
+### Components
+
+| Component | File | Role |
+|---|---|---|
+| BPF filter | `src/ffi/xdp_kern.c` | Compiled to BPF bytecode, attaches to NIC driver. Matches TCP port → redirects to AF_XDP via XSKMAP |
+| AF_XDP socket | `src/ffi/xdp_wrap.c` | UMEM setup (16MB shared mmap, 4096×4KB frames), fill/completion/RX/TX ring management |
+| TCP-Lite | `src/io/xdp.mojo` | `XDPEngine` with `TCPConnection` table (65536 entries, indexed by source port) |
+| Event loop | `src/network/engine.mojo` | `run_server_xdp()` — polls AF_XDP RX ring in batches of 64 frames |
+
+### TCP-Lite state machine
+
+Minimal TCP for controlled internal links: SYN→SYN+ACK, ACK, DATA+PSH→ACK+response, FIN→FIN+ACK, RST. Connection table: 65536 entries indexed by client source port. No retransmission, congestion control, or OOO reassembly (assumes reliable internal network). IP/TCP checksums computed in C helpers.
+
+### Implementation notes
+
+1. **Multi-frame TX fragmentation:** `pion_xdp_send_fragmented()` in `xdp_wrap.c` splits responses >4042B into multiple TCP segments with proper seq/ack continuation. Handles TX ring exhaustion with kick+drain+retry.
+2. **Shared XSKMAP for multi-worker:** BPF program + XSKMAP created once before worker spawn via `pion_xdp_create_shared_xskmap()` and `pion_xdp_attach_bpf()`. Each worker calls `pion_xdp_create_worker()` to create its own AF_XDP socket + UMEM and register in the shared map.
+3. **Automatic flow steering:** `pion_xdp_setup_flow_steering()` runs `ethtool -N` at startup to direct target port traffic to the correct RX queue. Rules cleaned up on exit.
+4. **SIGINT/SIGTERM signal handlers:** `pion_xdp_register_signal_handlers()` installs `sigaction` handlers that detach BPF from NIC via netlink (IFLA_XDP_FD=-1) and remove flow steering rules before exit.
+5. **Loopback TCP fallback:** TCP listener is polled every tick in the XDP event loop (non-blocking accept + recv/send). Supports up to 256 concurrent loopback clients (redis-cli, health checks). Loopback traffic bypasses the NIC so XDP can't see it.
+
+### Requirements
+
+Linux 5.4+, CAP_NET_ADMIN (or root), AF_XDP-capable NIC driver, `--security-opt seccomp=unconfined` in Docker.
+
+### CLI
+
+```bash
+./pion-server --xdp --xdp-iface eth0 -w 1        # Single-worker XDP
+./pion-server --xdp --xdp-iface eth0 -w 10 --independent-workers   # Multi-worker XDP (shared XSKMAP)
+./pion-server --sqpoll -w 10 --independent-workers   # io_uring SQPOLL
+```
+
+---
+
+## RESP Parser
+
+### Fast Path (`fast_path.mojo`)
+
+Zero-allocation dispatch for 34 hot commands. `b0_lower = b0 | 0x20` for case-insensitive matching, ordered by frequency (GET first). Returns `consumed > 0` on success, `0` for slow-path fallback.
+
+### Slow Path (`slow_path.mojo`)
+
+RESP3 tokenizer over a per-handler, heap-resident token table (up to 2048 tokens per command; longer commands get a clean `-ERR`). `cmd_matches_N()` byte dispatch (no `.upper()`). Handles FT.*, AI.*, CONFIG, INFO, and all commands not yet promoted to fast path.
+
+### Response Writer (`response_writer.mojo`)
+
+Pre-allocated 4 MB response buffer per worker. `append_*_response()` methods write directly to buffer. `flush_response()` sends via `send()` or `writev()` (scatter-gather for values >512B). Lazy 4 MB pending buffer allocation per fd on first EAGAIN.
+
+---
+
+## Binary Protocol (externalized attention, port 1975)
+
+When `--kvcache` is enabled, Pion listens on a second port (main_port + 1, default 1975) for a binary wire protocol optimized for bulk tensor operations.
+
+### Frame format
+
+```
+[magic:2B = 0xCA5E][cmd:1B][body_len:4B LE][body...]
+```
+
+### Commands
+
+Opcodes (from the `comptime CMD_*` block in `src/network/binary_protocol.mojo`):
+
+| Byte | Command | Description |
+|:---:|---|---|
+| 0x01 | KV.STORE | Store a KV-prefix blob |
+| 0x02 | KV.FETCH | Fetch a KV-prefix blob (~50us latency) |
+| 0x10 | LAYER.STORE | Store per-layer tensor blob |
+| 0x11 | LAYER.FETCH | Fetch per-layer tensor blob |
+| 0x12 | LAYER.FETCH_BATCH | Fetch several layers in one frame |
+| 0x13 | LAYER.EXTEND | Append tokens to a stored layer |
+| 0x20 | ATTEND.CREATE | Create attention session (key_dim, value_dim) |
+| 0x21 | ATTEND.STORE | Stage token KV pairs (3.67M tok/s at 128d) |
+| 0x22 | ATTEND.FINALIZE | Batch build HNSW index from staged keys (1.0s for 128K tokens) |
+| 0x23 | ATTEND.QUERY | Top-k HNSW search (86us per layer at 128K tokens) |
+| 0x24 | ATTEND.PREFIX.QUERY_FUSED | Fused sparse-mask prefix query |
+| 0x31–0x36 | MOE.EXPERT.{FETCH,PREFETCH,PIN,UNPIN,INFO,STATS} | MoE expert paging |
+| 0x37 | AUTH | Authenticate the binary connection (under `--requirepass`) |
+| 0xFF | PING | Binary keepalive |
+
+Connections on port 1975 are routed to the binary handler via `local_affinity[fd] == 2`. The binary protocol avoids RESP parsing overhead entirely, enabling 3.67M tok/s store throughput for bulk attention data.
+
+RESP-based equivalents (KV.STORE, KV.FETCH, KV.INFO, ATTEND.*) are also available on port 1974 for compatibility.
+
+### Python client
+
+`vllm-pion/` package provides `PionKVClient`, `PionAttentionClient`, and `ExternalizedAttentionLayer` for integration with vLLM/MLX inference engines.
+
+---
+
+## Socket Configuration
+
+- `TCP_NODELAY` on accepted sockets (not listening socket)
+- Shared listen fd across workers (no `SO_REUSEPORT`); workers compete for `accept()`
+- Kernel backlog: 65535 (queues connections during startup hash map initialization)
+- Non-blocking sockets (`O_NONBLOCK`) on all client connections

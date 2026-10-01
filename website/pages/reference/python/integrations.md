@@ -1,0 +1,22 @@
+# LangGraph · AutoGen · LlamaIndex · exo
+
+Four small Apache-2.0 packages that plug Pion into frameworks people already
+use. Each README is included at build time.
+
+## `pion-langgraph` — agent state persistence
+
+<!-- include-file: pion-langgraph/README.md | strip-h1 | shift:2 -->
+
+## `pion-autogen` — semantic agent memory
+
+<!-- include-file: pion-autogen/README.md | strip-h1 | shift:2 -->
+
+## `pion-llamaindex` — vector store for RAG
+
+<!-- include-file: pion-llamaindex/README.md | strip-h1 | shift:2 -->
+
+## `pion-exo` — Mac cluster inference hook
+
+<!-- include-section: README.md | ### Mac Cluster Inference -->
+
+<!-- include-file: pion-exo/README.md | strip-h1 | shift:2 -->

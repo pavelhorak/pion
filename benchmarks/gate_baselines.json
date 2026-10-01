@@ -1,0 +1,131 @@
+{
+  "_README": [
+    "Single source of truth for the KV pre-push gate thresholds.",
+    "",
+    "`min` is the gate floor: a measured value BELOW it fails the gate.",
+    "`known_good` is the reference run the floor was derived from (min ~= 95% of it).",
+    "",
+    "RULES:",
+    "  1. A floor is NEVER lowered to make a run pass. A miss is diagnosed.",
+    "  2. A floor may be ratcheted UP off a recorded multi-run session, and the",
+    "     new number recorded with the runs behind it.",
+    "  3. `min` is stored explicitly, not computed, so a change to the tolerance",
+    "     constant can never silently move a shipped floor. check_baselines.py",
+    "     warns if a `min` drifts from 95% of its `known_good` by more than 1 RPS.",
+    "",
+    "Mac and Linux tables are NOT interchangeable: EPYC 8124P @ 2.45 GHz produces",
+    "~30% of Mac M-series KV throughput at parity (clock + IPC), and Naples- vs",
+    "Milan-class chips flip the io_uring/epoll crossover at P=1 (doc/epoll_vs_iouring.md)."
+  ],
+  "tolerance": 0.95,
+  "profiles": {
+    "mac": {
+      "description": "Mac (Apple Silicon)",
+      "pipelines": {
+        "10": {
+          "source": "benchmark run 2026-04-04, -c 50 -n 100K -P 10 -w 1, Apple Silicon, Mojo 0.26.3",
+          "row_notes": {
+            "SADD": "stale-low: fixed-cost dominated at -n 100000 (gh #189, measured 2.10-2.27M). Per-row A/B needs -n 4M+.",
+            "PING_INLINE": "stale-low: same fixed-cost artifact (gh #189, measured 2.26M).",
+            "ZPOPMIN": "stale-low: same fixed-cost artifact (gh #189).",
+            "LRANGE_100 (first 100 elements)": "client-bound: server ~12% CPU, measures the bench client's reply parser (gh #189).",
+            "LRANGE_300 (first 300 elements)": "client-bound (gh #189); rides the gate line, isolate 3 runs before blaming a diff.",
+            "LRANGE_500 (first 500 elements)": "client-bound (gh #189).",
+            "LRANGE_600 (first 600 elements)": "client-bound (gh #189).",
+            "XADD": "the only clearly server-bound row in this table (gh #189). ZADD marginally so."
+          },
+          "commands": {
+            "GET":                              {"min": 1979166, "known_good": 2083333},
+            "SET":                              {"min": 2065217, "known_good": 2173913},
+            "INCR":                             {"min": 1979166, "known_good": 2083333},
+            "HSET":                             {"min": 2065217, "known_good": 2173913},
+            "LPUSH":                            {"min": 2021276, "known_good": 2127659},
+            "RPUSH":                            {"min": 1979166, "known_good": 2083333},
+            "LPOP":                             {"min": 1979166, "known_good": 2083333},
+            "RPOP":                             {"min": 1979166, "known_good": 2083333},
+            "SADD":                             {"min": 1532258, "known_good": 1612903},
+            "SPOP":                             {"min": 2065217, "known_good": 2173913},
+            "ZADD":                             {"min": 2021276, "known_good": 2127659},
+            "ZPOPMIN":                          {"min": 1666666, "known_good": 1754386},
+            "MSET (10 keys)":                   {"min": 1900000, "known_good": 2000000},
+            "PING_INLINE":                      {"min": 1397058, "known_good": 1470588},
+            "PING_MBULK":                       {"min": 2021276, "known_good": 2127659},
+            "XADD":                             {"min": 1696428, "known_good": 1785714},
+            "LRANGE_100 (first 100 elements)":  {"min":  251322, "known_good":  264550},
+            "LRANGE_300 (first 300 elements)":  {"min":   97236, "known_good":  102354},
+            "LRANGE_500 (first 500 elements)":  {"min":   53429, "known_good":   56242},
+            "LRANGE_600 (first 600 elements)":  {"min":   49633, "known_good":   52246}
+          }
+        },
+        "1": {
+          "source": "conservative core-6 fallback; not a certified floor table",
+          "partial": true,
+          "commands": {
+            "GET":   {"min": 209000, "known_good": null},
+            "SET":   {"min": 209000, "known_good": null},
+            "INCR":  {"min": 209000, "known_good": null},
+            "HSET":  {"min": 209000, "known_good": null},
+            "LPUSH": {"min": 209000, "known_good": null},
+            "RPUSH": {"min": 209000, "known_good": null}
+          }
+        },
+        "100": {
+          "source": "conservative core-6 fallback; not a certified floor table",
+          "partial": true,
+          "commands": {
+            "GET":   {"min":  8550000, "known_good": null},
+            "SET":   {"min":  8550000, "known_good": null},
+            "INCR":  {"min":  9500000, "known_good": null},
+            "HSET":  {"min":  9500000, "known_good": null},
+            "LPUSH": {"min":  9500000, "known_good": null},
+            "RPUSH": {"min":  8550000, "known_good": null}
+          }
+        },
+        "1000": {
+          "source": "conservative core-6 fallback; not a certified floor table",
+          "partial": true,
+          "commands": {
+            "GET":   {"min":  9500000, "known_good": null},
+            "SET":   {"min":  9500000, "known_good": null},
+            "INCR":  {"min": 11400000, "known_good": null},
+            "HSET":  {"min": 13300000, "known_good": null},
+            "LPUSH": {"min": 13300000, "known_good": null},
+            "RPUSH": {"min": 11400000, "known_good": null}
+          }
+        }
+      }
+    },
+    "linux-epyc-8124p": {
+      "description": "Linux EPYC 8124P @ 2.45 GHz (Naples-class)",
+      "pipelines": {
+        "10": {
+          "source": "2026-05-02, commit b214fbe, valkey-benchmark -w 1 P=10 (gh #56)",
+          "excluded": {
+            "XADD": "not measured on the reference run; add a floor when re-measured on this CPU class."
+          },
+          "commands": {
+            "GET":                              {"min": 589950, "known_good": 621000},
+            "SET":                              {"min": 698250, "known_good": 735000},
+            "INCR":                             {"min": 575700, "known_good": 606000},
+            "HSET":                             {"min": 561450, "known_good": 591000},
+            "LPUSH":                            {"min": 668800, "known_good": 704000},
+            "RPUSH":                            {"min": 582350, "known_good": 613000},
+            "LPOP":                             {"min": 589950, "known_good": 621000},
+            "RPOP":                             {"min": 582350, "known_good": 613000},
+            "SADD":                             {"min": 561450, "known_good": 591000},
+            "SPOP":                             {"min": 589950, "known_good": 621000},
+            "ZADD":                             {"min": 551950, "known_good": 581000},
+            "ZPOPMIN":                          {"min": 549100, "known_good": 578000},
+            "MSET (10 keys)":                   {"min": 470250, "known_good": 495000},
+            "PING_INLINE":                      {"min": 542450, "known_good": 571000},
+            "PING_MBULK":                       {"min": 571900, "known_good": 602000},
+            "LRANGE_100 (first 100 elements)":  {"min": 167200, "known_good": 176000},
+            "LRANGE_300 (first 300 elements)":  {"min":  53200, "known_good":  56000},
+            "LRANGE_500 (first 500 elements)":  {"min":  31350, "known_good":  33000},
+            "LRANGE_600 (first 600 elements)":  {"min":  26600, "known_good":  28000}
+          }
+        }
+      }
+    }
+  }
+}

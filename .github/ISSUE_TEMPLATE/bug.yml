@@ -1,0 +1,46 @@
+name: Bug report
+description: Something behaves differently from Redis, or from what the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Wire-level bugs are the ones worth your time and ours. A wrong reply, a
+        connection that desyncs, data that does not survive a restart — those
+        get fixed first.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `./pion-server --version`
+      placeholder: "pion-server 0.9.0+abc1234 (2026-10-01)"
+    validations: { required: true }
+  - type: input
+    id: invocation
+    attributes:
+      label: How was the server started?
+      description: The exact command line, flags included.
+      placeholder: "./pion-server --kvcache -w 1"
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: What you sent and what came back
+      description: |
+        A `redis-cli` transcript is ideal. If a client library is involved, name
+        it and its version — several past bugs were the library's handshake, not
+        the server.
+      render: shell
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: If real Redis does something different, say what it does. That comparison is usually the whole bug report.
+    validations: { required: true }
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "macOS 15 / M4, or Ubuntu 24.04 / EPYC 7313P"
+    validations: { required: true }

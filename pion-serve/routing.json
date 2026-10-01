@@ -1,0 +1,58 @@
+{
+  "_comment": "Example routing config for pion-serve --route. Each tier requires 'backend' and 'model'; 'cost_per_mtok' (USD per million tokens) is optional but used in --route stats. Override only the tiers you want to change; the loader merges with DEFAULT_ROUTING (Anthropic three-tier) for any tier not specified. Backends: claude, ollama, vllm, openai, gemini, llamacpp, max.",
+
+  "simple": {
+    "backend": "claude",
+    "model": "claude-haiku-4-5-20251001",
+    "cost_per_mtok": 0.25
+  },
+  "medium": {
+    "backend": "claude",
+    "model": "claude-sonnet-4-6",
+    "cost_per_mtok": 3.00
+  },
+  "complex": {
+    "backend": "claude",
+    "model": "claude-opus-4-7",
+    "cost_per_mtok": 15.00
+  },
+
+  "_alternative_examples": {
+    "_comment": "Drop these into the top-level tiers above to switch backends. Examples only; remove this _alternative_examples block before use.",
+
+    "ollama_local_for_simple": {
+      "backend": "ollama",
+      "model": "gemma2:2b",
+      "base_url": "http://127.0.0.1:11434",
+      "cost_per_mtok": 0.0
+    },
+    "vllm_self_hosted_medium": {
+      "backend": "vllm",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "base_url": "http://127.0.0.1:8000",
+      "cost_per_mtok": 0.0
+    },
+    "openai_complex": {
+      "backend": "openai",
+      "model": "gpt-4o",
+      "cost_per_mtok": 5.00
+    },
+    "gemini_complex": {
+      "backend": "gemini",
+      "model": "gemini-2.5-pro",
+      "cost_per_mtok": 1.25
+    },
+    "llamacpp_local_simple": {
+      "backend": "llamacpp",
+      "model": "phi-3-mini-4k-instruct.Q4_K_M.gguf",
+      "base_url": "http://127.0.0.1:8080",
+      "cost_per_mtok": 0.0
+    },
+    "max_self_hosted_medium": {
+      "backend": "max",
+      "model": "modularai/Llama-3.1-8B-Instruct-GGUF",
+      "base_url": "http://127.0.0.1:8000",
+      "cost_per_mtok": 0.0
+    }
+  }
+}

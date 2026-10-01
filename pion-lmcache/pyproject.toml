@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pion-lmcache"
+version = "0.1.0"
+description = "Pion adapter for LMCache — structured KV.PREFIX.* + V-store + WAL persistence as an LMCache remote backend"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["lmcache", "pion", "kv-cache", "vllm", "redis"]
+dependencies = [
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+torch = ["torch>=2.0.0"]
+lmcache = ["lmcache>=0.2.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pion_lmcache"]

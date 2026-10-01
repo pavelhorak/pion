@@ -1,0 +1,191 @@
+# Pion docs — https://pion.pavelhorak.com/docs/
+#
+# Source of truth is doc/*.md plus the files website/gen_pages.py derives at
+# build time (CLI flags from src/main.mojo, the command index from the
+# generated command table, the package READMEs, the root files). Nothing
+# generated is committed. Build: see website/README.md.
+site_name: Pion
+site_description: Pion — memory engine for AI inference. Documentation.
+site_url: https://pion.pavelhorak.com/docs/
+repo_url: https://github.com/pavelhorak/pion
+repo_name: pavelhorak/pion
+edit_uri: edit/main/doc/
+docs_dir: doc
+site_dir: _site/docs
+copyright: >
+  © 2025–2026 Pavel Horak · Apache-2.0 · <code>libpion_vector</code> under its own free binary licence ·
+  <a href="https://pion.pavelhorak.com/">pion.pavelhorak.com</a>
+
+theme:
+  name: material
+  language: en
+  logo: assets/pion-mark.svg
+  favicon: assets/pion-icon.svg
+  font:
+    text: Source Sans 3
+    code: IBM Plex Mono
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - navigation.tracking
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - content.action.edit
+    - toc.follow
+
+extra_css:
+  - assets/extra.css
+
+extra:
+  homepage: https://pion.pavelhorak.com/
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/pavelhorak/pion
+      name: Pion on GitHub
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - def_list
+  - toc:
+      permalink: "¶"
+      toc_depth: 3
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      base_path: [".", "doc"]
+      check_paths: true
+
+plugins:
+  - search
+  - gen-files:
+      scripts:
+        - website/gen_pages.py
+  - section-index
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [pion-vllm-mlx, pion-lmcache, mcp, pion_context, pion_glide, pion-langgraph, pion-autogen, pion-llamaindex]
+          options:
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            docstring_style: google
+            docstring_options:
+              returns_multiple_items: false
+              returns_named_value: false
+              ignore_init_summary: true
+            members_order: source
+            merge_init_into_class: true
+            show_signature_annotations: true
+            separate_signature: true
+            filters: ["!^_"]
+
+hooks:
+  - website/hooks.py
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    absolute_links: relative_to_docs
+    unrecognized_links: warn
+    anchors: info
+
+# Which doc/ files are built is decided by publication/doc_allowlist.txt,
+# applied in website/hooks.py.
+
+nav:
+  - Overview: index.md
+  - Get started:
+      - Install: getting-started/install.md
+      - First five minutes: getting-started/first-five-minutes.md
+      - Where Pion does not help: getting-started/where-it-does-not-help.md
+      - Licensing: licensing.md
+  - Concepts:
+      - The memory planes: concepts/memory-planes.md
+      - Shared KV cache: concepts/shared-kv-cache.md
+      - Workers and keyspaces: concepts/workers-and-keyspaces.md
+      - Persistence and durability: persistence.md
+      - Security model: concepts/security-model.md
+      - Embeddings: embeddings.md
+      - Data types: data_types.md
+  - Reference:
+      - CLI flags: reference/cli-flags.md
+      - Configuration and profiles: configuration.md
+      - Command index: reference/command-index.md
+      - Redis-compatible commands: command_matrix.md
+      - Pion-native commands:
+          - reference/commands/index.md
+          - KV.PREFIX.*: reference/commands/kv-prefix.md
+          - V.* (V-store): reference/commands/v-store.md
+          - ATTEND.* and ATTEND.PREFIX.*: reference/commands/attend.md
+          - SSM.PREFIX.*: reference/commands/ssm-prefix.md
+          - MOE.EXPERT.*: reference/commands/moe-expert.md
+          - FT.* and VSET: reference/commands/vector.md
+          - AI.*: reference/commands/ai.md
+          - RAG.* · AI.KNN_LM.* · NEURON.PKM.*: reference/commands/rag-knn-pkm.md
+          - PION.STATS and INFO: reference/commands/stats.md
+      - Python API:
+          - pion-vllm-mlx: reference/python/pion-vllm-mlx.md
+          - pion-lmcache: reference/python/pion-lmcache.md
+          - pion-mcp: reference/python/pion-mcp.md
+          - pion-context: reference/python/pion-context.md
+          - pion-glide: reference/python/pion-glide.md
+          - LangGraph · AutoGen · LlamaIndex · exo: reference/python/integrations.md
+          - Client APIs: client_apis.md
+      - Wire protocols: networking.md
+  - Guides & examples:
+      - Examples: guides/examples.md
+      - Reproducers: guides/reproducers.md
+      - Pion Serve: pion_serve.md
+      - AI gateway: ai_gateway.md
+      - Codebase search (Claude Code hooks): codebase_search.md
+  - Operations:
+      - Running in production: operations.md
+      - Docker and deployment: guides/docker.md
+      - Cluster and replication: distributed_systems.md
+      - Multi-tenant: multi_tenant.md
+      - Benchmarking your box: benchmarking_guide.md
+  - Internals:
+      - Architecture: architecture.md
+      - Memory management: memory_management.md
+      - Vector engine: vector_engine.md
+      - Shared KV cache — full reference: shared_kv_cache.md
+      - Development guide: development_guide.md
+      - Project:
+          - Contributing: project/contributing.md
+          - Security policy: project/security.md
+          - Code of conduct: project/code-of-conduct.md
+          - Contributor licence agreement: project/cla.md
+          - Changelog: project/changelog.md

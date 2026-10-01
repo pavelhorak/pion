@@ -1,0 +1,40 @@
+[project]
+name = "vllm-pion"
+version = "0.2.0"
+description = "Pion Semantic KV Cache — inference acceleration via HNSW-indexed KV cache reuse"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = [
+    "numpy>=1.24",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+serve = [
+    "torch>=2.0",
+    "transformers>=4.38",
+]
+openai-embed = [
+    "openai>=1.0",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/pavelhorak/pion"
+Source = "https://github.com/pavelhorak/pion"
+
+# gh #416 (I-3/J-2): declare the package explicitly. The flat layout also holds a
+# `hooks/` directory (a git-hook shell script, not a Python package), so
+# setuptools' auto-discovery found two top-level packages and refused to build.
+[tool.setuptools]
+packages = ["vllm_pion"]
+
+# gh #416 (I-13): no console script. `pion-serve` collided with the documented
+# proxy (pion-serve/serve.py); run this package's CLI as `python -m vllm_pion.cli`.
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

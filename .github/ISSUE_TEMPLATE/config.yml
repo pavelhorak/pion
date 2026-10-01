@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea
+    url: https://github.com/pavelhorak/pion/discussions
+    about: Discussions is a better place than an issue for "how do I", "should this work", and design conversations.

@@ -1,0 +1,149 @@
+Pion Vector Binary Licence, version 1.0
+
+Copyright 2025-2026 Pavel Horak <pion@pavelhorak.com>
+
+This licence covers the Library only. Pion itself, including all of its
+source code and the open reference implementation of the algorithms the
+Library contains, is licensed under the Apache License, Version 2.0, in the
+LICENSE file at the root of the Pion repository. Nothing in this licence
+limits any right that the Apache License grants you in Pion.
+
+
+1. Definitions
+
+"Licensor" means Pavel Horak.
+
+"Library" means the object code files distributed under the directory
+vendor/pion-vector/ of the Pion repository (the static archives named
+libpion_vector.a, one per platform, together with their MANIFEST and
+SHA256SUMS files), and the same object code as linked into a Pion executable.
+
+"Pion" means the software published by the Licensor under the name Pion at
+https://github.com/pavelhorak/pion, and any work derived from it, whether or
+not modified by you.
+
+"You" means the individual or legal entity exercising rights under this
+licence.
+
+
+2. Grant
+
+Subject to the conditions in this licence, the Licensor grants you a
+worldwide, royalty-free, non-exclusive, non-transferable licence to:
+
+  (a) use the Library, for any purpose, including commercial purposes, as
+      part of Pion;
+
+  (b) link the Library into Pion, including into a version of Pion that you
+      have modified; and
+
+  (c) reproduce and distribute the Library, and Pion executables that
+      contain it, as permitted by section 3.
+
+The Licensor also grants you a licence, on the same terms, under any patent
+claims the Licensor owns or controls that would necessarily be infringed by
+using the Library as permitted by this licence.
+
+
+3. Redistribution
+
+You may redistribute the Library, or a Pion executable that contains it,
+only if:
+
+  (a) the Library is unmodified;
+
+  (b) it is distributed together with, or as part of, Pion;
+
+  (c) a copy of this licence accompanies it; and
+
+  (d) you do not remove or alter any copyright or licence notice in or
+      accompanying it.
+
+Recipients receive their licence to the Library directly from the Licensor,
+under this licence. You may not impose any further restriction on them.
+
+
+4. Managed services
+
+You may not use the Library, or a Pion executable that contains it, to offer
+Pion to third parties as a hosted or managed database service, key-value
+store service, vector search service, or KV cache service — that is, a
+service in which the functionality of Pion itself is what those third
+parties are offered.
+
+This restriction does not apply to running Pion inside an application or
+service whose functionality is something other than Pion itself, even if
+third parties use that application or service. A licence permitting managed
+services is available from the Licensor on request.
+
+Pion built without the Library (for example with `pixi run build-open`) is
+not subject to this section; it is governed only by the Apache License.
+
+
+5. Restrictions
+
+You may not:
+
+  (a) modify, adapt or translate the Library, or create derivative works of
+      the Library itself (linking it into Pion as permitted by section 2 is
+      not a derivative work of the Library for this purpose); or
+
+  (b) decompile, disassemble or otherwise reverse engineer the Library,
+
+except to the extent that applicable law expressly permits it
+notwithstanding this limitation — including, where it applies, Articles 5(3)
+and 6 of Directive 2009/24/EC on the legal protection of computer programs.
+
+
+6. Reservation of rights and trademarks
+
+The Library is licensed, not sold. The Licensor reserves all rights not
+expressly granted in this licence. This licence grants no right to use the
+name "Pion", the Pion logo, or any trademark of the Licensor, except as
+required for reasonable and customary use in describing the origin of the
+Library.
+
+
+7. Termination
+
+If you fail to comply with this licence, your rights under it terminate
+automatically. If you cure the failure within 30 days of receiving notice of
+it from the Licensor, your rights are reinstated, unless the Licensor has
+previously notified you of a failure to comply with this licence.
+
+If you start litigation (including a cross-claim or counterclaim) alleging
+that the Library infringes a patent, the patent licence in section 2 ends
+for you on the date that litigation is filed.
+
+Sections 6, 8 and 9 survive termination. Termination does not affect the
+licence of anyone who received the Library from you in compliance with this
+licence.
+
+
+8. No warranty
+
+THE LIBRARY IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING WITHOUT LIMITATION ANY WARRANTY OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE OR NON-INFRINGEMENT, TO THE MAXIMUM
+EXTENT PERMITTED BY APPLICABLE LAW.
+
+
+9. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT WILL THE
+LICENSOR BE LIABLE TO YOU FOR ANY DAMAGES, WHETHER DIRECT, INDIRECT,
+SPECIAL, INCIDENTAL OR CONSEQUENTIAL, ARISING OUT OF THIS LICENCE OR THE USE
+OF OR INABILITY TO USE THE LIBRARY, EVEN IF THE LICENSOR HAS BEEN ADVISED OF
+THE POSSIBILITY OF SUCH DAMAGES. NOTHING IN THIS LICENCE LIMITS LIABILITY
+THAT CANNOT BE LIMITED UNDER APPLICABLE LAW.
+
+
+10. Other terms
+
+If any provision of this licence is held unenforceable, it will be enforced
+to the maximum extent permissible and the remaining provisions remain in
+effect. This licence is the entire agreement between you and the Licensor
+concerning the Library.
+
+The Licensor may publish new versions of this licence. A copy of the Library
+you received under one version remains available to you under that version.

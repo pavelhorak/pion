@@ -1,0 +1,133 @@
+Pion
+Copyright 2025-2026 Pavel Horak
+
+Pion is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The object code under vendor/pion-vector/ (libpion_vector, the tuned vector
+search kernels) is NOT licensed under the Apache License. It is licensed under
+the Pion Vector Binary Licence in vendor/pion-vector/LICENSE, and a Pion binary
+that links it is subject to that licence as to the library. Building with
+`pixi run build-open` links no such code.
+
+This product includes or depends on the following third-party software.
+
+
+================================================================================
+Vendored source (compiled into the Pion binary)
+================================================================================
+
+Lua 5.1.5 — Lua.org, PUC-Rio (https://www.lua.org)
+Compiled into liblua.a for EVAL, EVALSHA, SCRIPT, FUNCTION and FCALL.
+
+  Copyright (C) 1994-2012 Lua.org, PUC-Rio.
+
+  Permission is hereby granted, free of charge, to any person obtaining
+  a copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to
+  the following conditions:
+
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+lua-cjson (fpconv.c, strbuf.c, lua_cjson.c) — Mark Pulford
+JSON encode/decode available to Lua scripts.
+
+  Copyright (c) 2010-2012 Mark Pulford <mark@kyne.com.au>
+
+  Permission is hereby granted, free of charge, to any person obtaining
+  a copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to
+  the following conditions:
+
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+Language, runtime, and redistributed libraries
+================================================================================
+
+Mojo and the Modular runtime — Modular Inc. (https://www.modular.com)
+Pion is written in Mojo. A prebuilt Pion binary or container image is
+statically linked against, and redistributes in object form, the Modular
+runtime libraries (libKGENCompilerRTShared, libAsyncRTRuntimeGlobals,
+libMSupportGlobals). Those libraries are proprietary to Modular Inc. and are
+redistributed under the Modular Community License
+(https://www.modular.com/legal/community); all rights in them are reserved by
+Modular Inc. Building Pion from source obtains them through the Modular
+toolchain and redistributes nothing.
+
+
+================================================================================
+Wire-protocol compatibility (no code from these projects is included)
+================================================================================
+
+Redis — Redis Ltd. (https://redis.io)
+Valkey — the Valkey project, a Linux Foundation project (https://valkey.io)
+Pion implements the RESP2/RESP3 wire protocol for client compatibility with
+Redis and Valkey. Pion is an independent implementation and is not affiliated
+with, endorsed by, or sponsored by Redis Ltd. or the Valkey project.
+
+
+================================================================================
+Acknowledgements
+================================================================================
+
+Pion's design draws on published research and interoperates with a number of
+open-source projects. None of the following contributes code to Pion; they are
+acknowledged here for their ideas or as integration targets:
+
+  HNSW — Malkov & Yashunin, "Efficient and Robust Approximate Nearest
+    Neighbor Search using Hierarchical Navigable Small World Graphs" (2016):
+    the approximate-nearest-neighbor algorithm behind Pion's vector search.
+  The training-free sparse-attention and quantization literature that informs
+    Pion's sparse-mask attention and INT4/INT3/INT2 vector compression.
+  vLLM (https://github.com/vllm-project/vllm) and LMCache
+    (https://github.com/LMCache/LMCache): interface targets for externalized
+    attention and KV-cache tensor storage.
+  mlx-lm — Apple / MLX contributors (https://github.com/ml-explore/mlx-lm):
+    the Apple Silicon inference library the pion-vllm-mlx consumer integrates
+    with. Apache-2.0.
+  Ollama (https://ollama.com): a local embedding/LLM provider Pion can use.
+  Superlinked SIE (https://github.com/superlinked/sie): an optional embedding
+    and reranking backend. Apache-2.0.
+  oMLX (https://github.com/jundot/omlx): a Mac-native inference server whose
+    tiered KV-cache persistence informed Pion's SSD-tier design. Apache-2.0.
+  Sentence-Transformers / all-MiniLM-L6-v2 — the default auto-embed model.
+  LangChain / LangGraph, AutoGen (Microsoft), LlamaIndex: frameworks for which
+    Pion ships integration packages.
+  memtier_benchmark (Redis Ltd.) and VectorDBBench (Zilliz Inc.): benchmark
+    harnesses used to measure Pion.
+
+
+================================================================================
+Platform APIs
+================================================================================
+
+io_uring and AF_XDP — the Linux kernel project: high-performance I/O
+  interfaces used by the network tier on Linux.
+Metal and the Foundation and NaturalLanguage frameworks — Apple Inc.: used on
+  macOS for GPU attention kernels and on-device embeddings.

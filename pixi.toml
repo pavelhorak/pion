@@ -1,0 +1,132 @@
+[workspace]
+channels = ["https://conda.modular.com/max", "conda-forge"]
+name = "Pion"
+platforms = ["osx-arm64", "linux-aarch64", "linux-64"]
+version = "0.1.0"
+
+[dependencies]
+mojo = "==1.1.0"  # Mojo 1.1.0 (2026-09-17), migrated from 1.0.0 on 2026-09-28 (branch chore/mojo-1.1). 1.0 GA (2026-08-11) came from 1.0.0b2 on 2026-08-12. Pinned exactly: gate thresholds are perf baselines, so the toolchain must not float. parallelize moved to the `max` package — workers are raw pthreads (src/ffi/worker_spawn_wrap.c); do NOT add a max dependency for the server build.
+python = ">=3.11"
+pip = "*"
+
+[target.linux-aarch64.dependencies]
+mojo = "==1.1.0"  # Mojo 1.1.0 (2026-09-17), migrated from 1.0.0 on 2026-09-28 (branch chore/mojo-1.1). 1.0 GA (2026-08-11) came from 1.0.0b2 on 2026-08-12. Pinned exactly: gate thresholds are perf baselines, so the toolchain must not float. parallelize moved to the `max` package — workers are raw pthreads (src/ffi/worker_spawn_wrap.c); do NOT add a max dependency for the server build.
+
+[target.linux-64.dependencies]
+mojo = "==1.1.0"  # Mojo 1.1.0 (2026-09-17), migrated from 1.0.0 on 2026-09-28 (branch chore/mojo-1.1). 1.0 GA (2026-08-11) came from 1.0.0b2 on 2026-08-12. Pinned exactly: gate thresholds are perf baselines, so the toolchain must not float. parallelize moved to the `max` package — workers are raw pthreads (src/ffi/worker_spawn_wrap.c); do NOT add a max dependency for the server build.
+
+[target.linux-aarch64.tasks]
+vectordbbench = "venv_zvec_linux/bin/vectordbbench"
+# ssm_state_wrap.c (gh #65 SSM.PREFIX.STORE/FETCH/DROP, pure POSIX) had been
+# omitted from the Linux build-ffi/link list — Mac side compiled + linked it
+# (see [tasks].build-ffi below). Linux build was failing at link with
+# undefined references to pion_ssm_{init,store,fetch,drop,size}. Restoring
+# parity with the Mac link list.
+build-ffi = "gcc -O3 -c src/ffi/crash_wrap.c -o src/ffi/crash_wrap.o && gcc -O3 -c src/ffi/fcntl_wrap.c -o src/ffi/fcntl_wrap.o && gcc -O3 -c src/ffi/uring_wrap.c -o src/ffi/uring_wrap.o && gcc -O3 -c src/ffi/xdp_wrap.c -o src/ffi/xdp_wrap.o && gcc -O3 -c src/ffi/ssm_state_wrap.c -o src/ffi/ssm_state_wrap.o && gcc -O3 -c src/ffi/moe_warm_pool.c -o src/ffi/moe_warm_pool.o && gcc -O3 -c src/ffi/build_pool_wrap.c -o src/ffi/build_pool_wrap.o && gcc -O3 -c src/ffi/worker_spawn_wrap.c -o src/ffi/worker_spawn_wrap.o && bash scripts/build_lua.sh"
+build = { cmd = "mojo build -I . src/main.mojo -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker --export-dynamic -Xlinker -u -Xlinker pion_gh199_build_lane -Xlinker -u -Xlinker pion_worker_entry -Xlinker -lm -Xlinker -lpthread -o pion-server", depends-on = ["stamp-version", "build-ffi"] }
+
+[target.linux-64.tasks]
+# CUDA path (gh #9): nvcc compiles cuda_kernels.cu (sdpa_q1 dense + sparse,
+# fp32 + fp16) and cuda_wrap.c (per-worker session table + C ABI bridge).
+# Both link into pion-server via -lcudart. The build sentinel `command -v
+# nvcc` lets the build skip CUDA cleanly on hosts without nvcc / cudart
+# (no-op stubs would still be needed in cuda_wrap.c for that path; for now
+# the Linux build of Pion REQUIRES nvcc + cudart at /usr/local/cuda).
+build-ffi = "gcc -O3 -c src/ffi/crash_wrap.c -o src/ffi/crash_wrap.o && gcc -O3 -c src/ffi/fcntl_wrap.c -o src/ffi/fcntl_wrap.o && gcc -O3 -c src/ffi/uring_wrap.c -o src/ffi/uring_wrap.o && gcc -O3 -c src/ffi/xdp_wrap.c -o src/ffi/xdp_wrap.o && gcc -O3 -c src/ffi/ssm_state_wrap.c -o src/ffi/ssm_state_wrap.o && gcc -O3 -c src/ffi/moe_warm_pool.c -o src/ffi/moe_warm_pool.o && /usr/local/cuda/bin/nvcc -O3 -std=c++17 -Xcompiler -fPIC -arch=sm_89 -c src/ffi/cuda_kernels.cu -o src/ffi/cuda_kernels.o && /usr/local/cuda/bin/nvcc -O3 -std=c++17 -Xcompiler -fPIC -arch=sm_89 -c src/ffi/cuda_wrap.c -o src/ffi/cuda_wrap.o && gcc -O3 -c src/ffi/build_pool_wrap.c -o src/ffi/build_pool_wrap.o && gcc -O3 -c src/ffi/worker_spawn_wrap.c -o src/ffi/worker_spawn_wrap.o && bash scripts/build_lua.sh"
+build = { cmd = "mojo build -I . src/main.mojo -D PION_CUDA -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/cuda_kernels.o -Xlinker src/ffi/cuda_wrap.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker -L/usr/local/cuda/lib64 -Xlinker -lcudart -Xlinker -lstdc++ -Xlinker --export-dynamic -Xlinker -u -Xlinker pion_gh199_build_lane -Xlinker -u -Xlinker pion_worker_entry -Xlinker -lm -Xlinker -lpthread -o pion-server", depends-on = ["stamp-version", "build-ffi"] }
+
+# gh #83: GPU-free CI / OSS-newcomer build. No nvcc, no cudart, no GPU.
+# Mirrors the linux-aarch64 FFI list (POSIX shims + Lua only — no CUDA
+# objects, no Metal) and omits `-D PION_CUDA` so every pion_cuda_sdpa_*
+# external_call is comptime-elided (see cuda_attention_engine.mojo).
+#
+# --target-cpu x86-64-v2 is LOAD-BEARING. Mojo's --target-cpu defaults to
+# the *host* CPU, so an unpinned build bakes in whatever ISA the build
+# runner happens to have (often AVX-512). GitHub's hosted fleet is a CPU
+# mix: the binary then SIGILLs ("Illegal instruction") at worker init —
+# the first SIMD-heavy code (Swiss-table probe / HNSW kernels) — on any
+# runner missing that ISA. The crash is per-runner, so it looked flaky
+# (green on the build runner, red on others). x86-64-v2 (SSE4.2/POPCNT)
+# is the portable floor every hosted runner supports; we trade peak SIMD
+# for "runs everywhere", which is the right call for a correctness gate.
+#
+# -O3 (not -O0/-O1): the lower levels hit *separate* x86-64 Linux stdlib
+# SEGV bugs unrelated to ISA — -O0 over-reads small argv in `atol`'s UTF-8
+# SIMD validation (SIGSEGV before the banner); -O1 SEGVs in main() HNSW
+# setup. -O3 is the only level that reaches worker init cleanly. Build is
+# slow (~20-30 min on a 4-core runner) — correctness over speed.
+#
+# These were driven by .github/workflows/ci.yml, removed because GitHub-hosted
+# runners bill metered minutes on a private repo. The tasks stay: they are the
+# portable-Linux build (`--target-cpu x86-64-v2`, so the binary doesn't SIGILL
+# on a different host), and they are what any free replacement — a local script
+# or a self-hosted runner — should invoke.
+# `build-portable` is a RELEASE build, despite the `pion-server-dev` output name
+# it has carried since it was CI-only. -O3, --target-cpu x86-64-v2 so the binary
+# runs on any x86-64 host rather than baking in the build machine's ISA (an
+# unpinned target SIGILLs elsewhere). It is what the README sends GPU-free Linux
+# users to and what the amd64 Docker image is built from. It was called
+# `build-dev-ci`, which told every reader it was a debug build; `build-dev` is
+# the -O0 one.
+build-ffi-portable = "gcc -O3 -c src/ffi/crash_wrap.c -o src/ffi/crash_wrap.o && gcc -O3 -c src/ffi/fcntl_wrap.c -o src/ffi/fcntl_wrap.o && gcc -O3 -c src/ffi/uring_wrap.c -o src/ffi/uring_wrap.o && gcc -O3 -c src/ffi/xdp_wrap.c -o src/ffi/xdp_wrap.o && gcc -O3 -c src/ffi/ssm_state_wrap.c -o src/ffi/ssm_state_wrap.o && gcc -O3 -c src/ffi/moe_warm_pool.c -o src/ffi/moe_warm_pool.o && gcc -O3 -c src/ffi/build_pool_wrap.c -o src/ffi/build_pool_wrap.o && gcc -O3 -c src/ffi/worker_spawn_wrap.c -o src/ffi/worker_spawn_wrap.o && bash scripts/build_lua.sh"
+build-portable = { cmd = "mojo build -I . src/main.mojo -O3 --target-cpu x86-64-v2 -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker --export-dynamic -Xlinker -u -Xlinker pion_gh199_build_lane -Xlinker -u -Xlinker pion_worker_entry -Xlinker --export-dynamic -Xlinker -u -Xlinker pion_gh199_build_lane -Xlinker -u -Xlinker pion_worker_entry -Xlinker -lm -Xlinker -lpthread -o pion-server-dev", depends-on = ["stamp-version", "build-ffi-portable"] }
+
+# Stage 4c io_uring variant (gh #78). Opt-in build that recompiles
+# moe_warm_pool.c with -DPION_MOE_WARM_USE_IO_URING and links pion-server
+# against -luring. Requires `liburing-dev` (apt) or `liburing` (dnf) on
+# the host. Outputs `pion-server-iouring` so it doesn't shadow the
+# default-Linux build. Use this binary head-to-head against `pion-server`
+# (sync pread path) on the same workload — bench is a substrate-level
+# IO-saturation test, not a KV/vector bench.
+build-ffi-iouring = "gcc -O3 -c src/ffi/crash_wrap.c -o src/ffi/crash_wrap.o && gcc -O3 -c src/ffi/fcntl_wrap.c -o src/ffi/fcntl_wrap.o && gcc -O3 -c src/ffi/uring_wrap.c -o src/ffi/uring_wrap.o && gcc -O3 -c src/ffi/xdp_wrap.c -o src/ffi/xdp_wrap.o && gcc -O3 -c src/ffi/ssm_state_wrap.c -o src/ffi/ssm_state_wrap.o && gcc -O3 -c src/ffi/moe_warm_pool.c -DPION_MOE_WARM_USE_IO_URING -o src/ffi/moe_warm_pool.o && /usr/local/cuda/bin/nvcc -O3 -std=c++17 -Xcompiler -fPIC -arch=sm_89 -c src/ffi/cuda_kernels.cu -o src/ffi/cuda_kernels.o && /usr/local/cuda/bin/nvcc -O3 -std=c++17 -Xcompiler -fPIC -arch=sm_89 -c src/ffi/cuda_wrap.c -o src/ffi/cuda_wrap.o && gcc -O3 -c src/ffi/build_pool_wrap.c -o src/ffi/build_pool_wrap.o && gcc -O3 -c src/ffi/worker_spawn_wrap.c -o src/ffi/worker_spawn_wrap.o && bash scripts/build_lua.sh"
+build-iouring = { cmd = "mojo build -I . src/main.mojo -D PION_CUDA -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/cuda_kernels.o -Xlinker src/ffi/cuda_wrap.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker -L/usr/local/cuda/lib64 -Xlinker -lcudart -Xlinker -luring -Xlinker -lstdc++ -Xlinker --export-dynamic -Xlinker -u -Xlinker pion_gh199_build_lane -Xlinker -u -Xlinker pion_worker_entry -Xlinker --export-dynamic -Xlinker -u -Xlinker pion_gh199_build_lane -Xlinker -u -Xlinker pion_worker_entry -Xlinker -lm -Xlinker -lpthread -o pion-server-iouring", depends-on = ["stamp-version", "build-ffi-iouring"] }
+
+[tasks]
+stamp-version = "bash scripts/stamp_version.sh"
+install-inference = "pip install torch transformers sentence-transformers"
+# gh #190: every FFI compile carries -O3 — clang/gcc default to -O0, which
+# shipped a 3-10× slower sparse-attention block selector (metal_wrap.m) for
+# months. IEEE-preserving (no -ffast-math — NEVER add it: it perturbs cold-tier
+# bookkeeping and selector top-K ties), so output is bit-identical.
+# Default release build-ffi: compiles all FFI shims including xdp_wrap.c
+# (its `#else /* !__linux__ */` block at line 1282 emits no-op stubs on
+# macOS) and dev_macos_stubs.c (epoll + glibc errno stubs). Both are
+# always linked. At -O3 they get DCE'd; at -O0 (build-dev) they keep
+# the link valid without breaking platform behavior.
+build-ffi = "gcc -O3 -c src/ffi/crash_wrap.c -o src/ffi/crash_wrap.o && gcc -O3 -c src/ffi/fcntl_wrap.c -o src/ffi/fcntl_wrap.o && gcc -O3 -c src/ffi/uring_wrap.c -o src/ffi/uring_wrap.o && gcc -O3 -c src/ffi/xdp_wrap.c -o src/ffi/xdp_wrap.o && gcc -O3 -c src/ffi/dev_macos_stubs.c -o src/ffi/dev_macos_stubs.o && gcc -O3 -c src/ffi/ssm_state_wrap.c -o src/ffi/ssm_state_wrap.o && gcc -O3 -c src/ffi/moe_warm_pool.c -o src/ffi/moe_warm_pool.o && clang -O3 -c -fobjc-arc src/ffi/metal_wrap.m -o src/ffi/metal_wrap.o && clang -O3 -c -fobjc-arc src/ffi/nle_wrap.m -o src/ffi/nle_wrap.o && gcc -O3 -c src/ffi/build_pool_wrap.c -o src/ffi/build_pool_wrap.o && gcc -O3 -c src/ffi/worker_spawn_wrap.c -o src/ffi/worker_spawn_wrap.o && bash scripts/build_lua.sh && bash -c 'xcrun -sdk macosx metal -c src/ffi/metal_compute.metal -o src/ffi/metal_compute.air 2>/dev/null && xcrun -sdk macosx metallib src/ffi/metal_compute.air -o src/ffi/metal_compute.metallib 2>/dev/null && rm -f src/ffi/metal_compute.air && echo [Metal] || { echo \"[Metal] skipped — install full Xcode (not just CLT) for --metal-attention: xcode-select -s /Applications/Xcode.app/Contents/Developer\" >&2; true; }'"
+build = { cmd = "mojo build -I . src/main.mojo -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/dev_macos_stubs.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/metal_wrap.o -Xlinker src/ffi/nle_wrap.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker -export_dynamic -Xlinker -u -Xlinker _pion_gh199_build_lane -Xlinker -u -Xlinker _pion_worker_entry -Xlinker -framework -Xlinker Metal -Xlinker -framework -Xlinker Foundation -Xlinker -framework -Xlinker NaturalLanguage -D PION_HELD_VECTOR -Xlinker vendor/pion-vector/macos-arm64/libpion_vector.a -o pion-server", depends-on = ["stamp-version", "build-ffi"] }
+# D11: `build` links the closed vector library vendored under
+# vendor/pion-vector/ (tuned 1536 beams + PKM). `build-open` builds the SAME
+# engine against the open reference in src/vector/reference/ — identical
+# results, slower vector search (doc/vector_engine.md § Open build). The
+# archive is built from a separate private tree: vendor/pion-vector/README.md.
+build-open = { cmd = "mojo build -I . src/main.mojo -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/dev_macos_stubs.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/metal_wrap.o -Xlinker src/ffi/nle_wrap.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker -export_dynamic -Xlinker -u -Xlinker _pion_gh199_build_lane -Xlinker -u -Xlinker _pion_worker_entry -Xlinker -framework -Xlinker Metal -Xlinker -framework -Xlinker Foundation -Xlinker -framework -Xlinker NaturalLanguage -o pion-server", depends-on = ["stamp-version", "build-ffi"] }
+# gh #349: Mojo 1.0 marks an out-of-line call `tail` when its pointer args carry
+# an untracked origin, which lets LLVM drop stores into a stack buffer the
+# callee reads. Scans the server's unoptimized IR (~9 min) plus the held vector
+# library; both must report 0. Run after touching stack_allocation, short-String
+# or InlineArray pointers that cross into a non-@always_inline function.
+audit-tail-alloca = "bash -c 'mkdir -p build && mojo build -I . src/main.mojo -D PION_HELD_VECTOR --emit llvm -o build/pion.ll && python3 tools/audit_tail_alloca.py build/pion.ll && if [ -f held/pion_vector.mojo ]; then mojo build -I . -D ASSERT=none --emit llvm held/pion_vector.mojo -o build/pion_vector.ll && python3 tools/audit_tail_alloca.py build/pion_vector.ll; else echo held/ absent: audited the server only; fi'"
+test-vector-differential = "bash -c 'mojo build -I . -D PION_HELD_VECTOR tests/test_vector_differential.mojo -Xlinker vendor/pion-vector/macos-arm64/libpion_vector.a -o /tmp/pion_vdiff && /tmp/pion_vdiff'"
+# Dev iteration build: -O0 (no LLVM optimization passes), 4-5× faster
+# than the default build (~290 s → ~70 s on a 47K-line / 107-file
+# codebase). Use for "does it compile, do raw tests pass" loops. Never
+# use for benchmarks — the binary skips vectorization, inlining, loop
+# unrolling, and SIMD codegen that the perf numbers depend on. Output
+# binary is `pion-server-dev` so it doesn't shadow the release build.
+build-dev = { cmd = "mojo build -I . src/main.mojo -O0 -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/dev_macos_stubs.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/metal_wrap.o -Xlinker src/ffi/nle_wrap.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker -export_dynamic -Xlinker -u -Xlinker _pion_gh199_build_lane -Xlinker -u -Xlinker _pion_worker_entry -Xlinker -framework -Xlinker Metal -Xlinker -framework -Xlinker Foundation -Xlinker -framework -Xlinker NaturalLanguage -D PION_HELD_VECTOR -Xlinker vendor/pion-vector/macos-arm64/libpion_vector.a -o pion-server-dev", depends-on = ["build-ffi"] }
+build-lib = { cmd = "mojo build --emit shared-lib -I . src/lib/pion_memory.mojo -Xlinker src/ffi/uring_wrap.o -o libpion_memory.dylib", depends-on = ["build-ffi"] }
+bench-kv = "pixi run build && pkill -9 pion-server || true && nohup ./pion-server > pion.log 2>&1 & sleep 2 && memtier_benchmark -p 1974 -c 50 -t 4 --test-time 10 --pipeline 10 --distinct-client-seed && pkill -9 pion-server"
+bench-industry = "pixi run build && pkill -9 pion-server || true && nohup ./pion-server -p 6379 > pion.log 2>&1 & sleep 2 && docker run --rm --add-host=host.docker.internal:host-gateway redis/vector-db-benchmark vector-db-benchmark --engines redis-hnsw-m-16-ef-128 --datasets random-100-euclidean --host host.docker.internal --queries 1000 && pkill -9 pion-server"
+bench-vector = "mojo run -I . vector-bench.mojo"
+bench-all = "pixi run bench-kv && pixi run bench-vector"
+install-vdbbench = "pip install 'vectordb-bench[redis]'"
+bench-vdb = "bash -c 'python3 benchmarks/VectorDBBench/vectordb-benchmark.py --pion-only --ef-runtime 150 --workers 10'"
+
+bench-fp32 = "mojo run -I . tests/benchmark_fp32_hnsw.mojo"
+# AMX/Accelerate decision-gate microbench (issue #47).
+# Builds a standalone binary linked against Apple's Accelerate framework
+# (which dispatches to AMX on M-series), runs the bench, then deletes the binary.
+bench-amx = "bash -c 'mojo build -I . tests/bench_amx_distance.mojo -Xlinker -framework -Xlinker Accelerate -o bench-amx-distance && ./bench-amx-distance && rm -f bench-amx-distance'"
+vectordbbench = "venv_zvec/bin/vectordbbench"
+gate-metal-attention = "bash -c 'pkill -9 -f pion-server 2>/dev/null; sleep 1; nohup ./pion-server --metal-attention -w 1 > /tmp/pion_gate_metal.log 2>&1 & sleep 3; python3.11 tests/bench_pion_metal_attention.py --gate; rc=$?; pkill -9 -f pion-server 2>/dev/null; exit $rc'"

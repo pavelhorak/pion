@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-11T06:02:52Z",
+  "corpus": {
+    "path": "examples/cag_legal_demo/corpus/opinions.txt",
+    "hash": "d08e799f1b68ba6d",
+    "n_paragraphs": 107,
+    "n_chars": 59162,
+    "n_tokens": 12327
+  },
+  "calibration": {
+    "cluster": "A",
+    "n_qa": 30,
+    "rag_baseline": {
+      "f1": 0.5290074740074739,
+      "found": 0.7333333333333333,
+      "ttft_ms": 1789.8578055823843
+    },
+    "pure_cag_baseline": {
+      "f1": 0.7058914193696803,
+      "found": 0.9,
+      "ttft_ms": 1494.5423903642222,
+      "speedup_vs_rag": 1.1975958775891216,
+      "mean_entropy": 1.618603515625,
+      "mean_margin": 1.4901041666666666
+    },
+    "tier_fired": 3,
+    "te": 99.0,
+    "tm": 0.0,
+    "gated_in_sample": {
+      "f1": 0.7058914193696803,
+      "found": 0.9,
+      "fallback_rate": 0.0,
+      "speedup": 1.1975958775891216
+    },
+    "gated_heldout_cv": {
+      "f1": 0.7058914193696803,
+      "found": 0.9,
+      "fallback_rate": 0.0,
+      "speedup": 3.7667641836112113,
+      "k_folds": 3,
+      "n_total_eval": 30
+    },
+    "per_fold": [
+      {
+        "fold": 0,
+        "te": 99.0,
+        "tm": 0.0,
+        "tier": 3,
+        "n_eval": 10,
+        "f1": 0.7460869565217391,
+        "found": 0.8,
+        "fallback_rate": 0.0,
+        "speedup": 5.258833532075043
+      },
+      {
+        "fold": 1,
+        "te": 99.0,
+        "tm": 0.0,
+        "tier": 3,
+        "n_eval": 10,
+        "f1": 0.7571428571428571,
+        "found": 0.9,
+        "fallback_rate": 0.0,
+        "speedup": 5.504816029566758
+      },
+      {
+        "fold": 2,
+        "te": 3.3,
+        "tm": 1.8,
+        "tier": 1,
+        "n_eval": 10,
+        "f1": 0.6144444444444445,
+        "found": 1.0,
+        "fallback_rate": 0.0,
+        "speedup": 0.536642989191833
+      }
+    ],
+    "model": "mlx-community/Llama-3.1-8B-Instruct-4bit",
+    "wall_s": 291.5,
+    "qa_source": "examples/cag_legal_demo/calibration_qa.jsonl"
+  },
+  "state_path": "examples/cag_legal_demo/calibration_state.json"
+}

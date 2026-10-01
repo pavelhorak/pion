@@ -1,0 +1,92 @@
+# The website: https://pion.pavelhorak.com/ (landing) and /docs/ (MkDocs).
+#
+# Everything on it is derived from files that already have to be right —
+# README.md, doc/*.md, the --help printer, the generated command table, the
+# package READMEs — so a docs push is a push to main. The build is strict:
+# a broken link, a nav entry without a file, a file without a nav entry, or
+# a README region that went missing fails the job before anything deploys.
+#
+# The deploy job is guarded to the public repository. On the private working
+# tree the build still runs (so the site is checked on every change) and the
+# deploy is skipped rather than failing against a repo with Pages off.
+
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'doc/**'
+      - 'website/**'
+      - 'mkdocs.yml'
+      - 'README.md'
+      - 'VERSION'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'SECURITY.md'
+      - 'CODE_OF_CONDUCT.md'
+      - 'CLA.md'
+      - 'src/main.mojo'
+      - 'src/commands/command_table.mojo'
+      - 'tools/gen_command_table.py'
+      - 'tools/redis_*.txt'
+      - 'examples/README.md'
+      - 'benchmarks/reproducers/README.md'
+      - 'pion-vllm-mlx/**'
+      - 'pion-lmcache/**'
+      - 'mcp/**'
+      - 'pion_context/**'
+      - 'pion_glide/**'
+      - 'pion-langgraph/**'
+      - 'pion-autogen/**'
+      - 'pion-llamaindex/**'
+      - 'pion-exo/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  DISABLE_MKDOCS_2_WARNING: "true"
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: website/requirements.txt
+      - name: Install the site tooling
+        run: python3 -m pip install -r website/requirements.txt
+      - name: Build the docs (strict — warnings fail)
+        run: python3 -m mkdocs build --strict
+      - name: Build the landing page from README regions
+        run: python3 website/landing/build_landing.py --out _site
+      - name: The site says what the repository says
+        run: python3 tests/test_docs_site.py --built _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: deploy to GitHub Pages
+    if: github.repository == 'pavelhorak/pion'
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

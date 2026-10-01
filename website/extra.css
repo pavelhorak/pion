@@ -1,0 +1,67 @@
+/* Pion docs — the visual system shared with the landing page.
+   Tokens derive from the logo: navy ink #082440, sky #05A1D8, soft sky #7FD4F0. */
+@import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&display=swap");
+
+:root, [data-md-color-scheme="default"] {
+  --pion-ink: #0B2440; --pion-ink-2: #3E5470; --pion-muted: #6B7F96;
+  --pion-accent: #0A7FB3; --pion-bright: #05A1D8; --pion-soft: #D5EDF8;
+  --pion-rule: #D3DDE7; --pion-code-bg: #0E1F30;
+  --md-primary-fg-color: #0B2440;
+  --md-primary-fg-color--light: #3E5470;
+  --md-primary-fg-color--dark: #082440;
+  --md-accent-fg-color: #0A7FB3;
+  --md-accent-fg-color--transparent: rgba(10,127,179,.1);
+  --md-typeset-a-color: #0A7FB3;
+  --md-default-bg-color: #F5F8FB;
+  --md-default-fg-color: #0B2440;
+  --md-default-fg-color--light: #3E5470;
+  --md-default-fg-color--lighter: #6B7F96;
+  --md-default-fg-color--lightest: #D3DDE7;
+  --md-code-bg-color: #EDF2F7;
+  --md-code-fg-color: #0B2440;
+  --md-typeset-table-color: #D3DDE7;
+}
+[data-md-color-scheme="slate"] {
+  --pion-ink: #E6EEF5; --pion-ink-2: #B9C9D8; --pion-muted: #8FA6BB;
+  --pion-accent: #3DBDE8; --pion-bright: #5FD0F2; --pion-soft: #123A4E;
+  --pion-rule: #213547; --pion-code-bg: #07111A;
+  --md-primary-fg-color: #10202E;
+  --md-accent-fg-color: #3DBDE8;
+  --md-typeset-a-color: #3DBDE8;
+  --md-default-bg-color: #0B1620;
+  --md-default-fg-color: #E6EEF5;
+  --md-default-fg-color--light: #B9C9D8;
+  --md-default-fg-color--lighter: #8FA6BB;
+  --md-default-fg-color--lightest: #213547;
+  --md-code-bg-color: #162A3B;
+  --md-code-fg-color: #DCE8F1;
+  --md-typeset-table-color: #213547;
+  --md-footer-bg-color: #07111A;
+}
+.md-typeset { font-size: .85rem; line-height: 1.6; }
+.md-typeset h1, .md-typeset h2, .md-typeset h3 {
+  font-family: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  font-weight: 600; letter-spacing: -.018em; text-wrap: balance;
+}
+.md-typeset h1 { font-size: 2.1em; color: var(--md-default-fg-color); }
+.md-typeset h2 { font-size: 1.45em; margin-top: 2.2em; padding-top: 1em; border-top: 1px solid var(--pion-rule); }
+.md-typeset h3 { font-size: 1.12em; }
+.md-typeset h4 { font-family: var(--md-code-font-family); font-weight: 500; font-size: .9em; letter-spacing: .02em; }
+.md-typeset code { font-size: .88em; border-radius: 4px; }
+.md-typeset pre > code { font-size: .8em; line-height: 1.6; }
+.md-typeset .highlight, .md-typeset pre { border-radius: 8px; }
+.md-typeset table:not([class]) { font-size: .8em; border: 0; }
+.md-typeset table:not([class]) th { font-family: var(--md-code-font-family); font-weight: 500; font-size: .82em; letter-spacing: .05em; text-transform: uppercase; color: var(--pion-muted); background: transparent; border-bottom: 1px solid var(--pion-rule); }
+.md-typeset table:not([class]) td { border-top: 1px solid var(--pion-rule); vertical-align: top; }
+.md-typeset .admonition, .md-typeset details { border-width: 0 0 0 3px; border-radius: 0 6px 6px 0; box-shadow: none; background: var(--md-code-bg-color); font-size: .8em; }
+.md-typeset blockquote { border-left: 3px solid var(--pion-bright); color: var(--md-default-fg-color--light); }
+.md-header { background: var(--md-primary-fg-color); }
+.md-header__button.md-logo img, .md-header__button.md-logo svg { height: 1.9rem; width: auto; }
+.md-header__topic .md-ellipsis { font-family: "Bricolage Grotesque", system-ui, sans-serif; font-weight: 700; letter-spacing: -.01em; }
+.md-nav__title { font-family: var(--md-code-font-family); font-size: .62rem; letter-spacing: .09em; text-transform: uppercase; color: var(--pion-muted); }
+.md-nav__item--section > .md-nav__link { font-family: var(--md-code-font-family); font-size: .62rem; letter-spacing: .09em; text-transform: uppercase; color: var(--pion-muted) !important; }
+.md-nav__link--active { color: var(--md-accent-fg-color) !important; font-weight: 600; }
+.pion-gen { font-family: var(--md-code-font-family); font-size: .62em; letter-spacing: .05em; color: var(--pion-muted); border: 1px solid var(--pion-rule); border-radius: 3px; padding: 0 .3em; vertical-align: middle; margin-left: .35em; }
+.pion-source { margin-top: 2.6em; padding-top: .8em; border-top: 1px solid var(--pion-rule); font-family: var(--md-code-font-family); font-size: .72em; color: var(--pion-muted); }
+.pion-source a { color: var(--pion-muted); }
+.md-typeset .pion-cli td:first-child { font-family: var(--md-code-font-family); white-space: nowrap; }

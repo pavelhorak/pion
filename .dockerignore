@@ -1,0 +1,65 @@
+# Build artifacts (the plain `pion-server` binary is deliberately NOT here —
+# the runtime-prebuilt target COPYs it from the context; gh #108)
+pion-server-dev
+pion-server-baseline
+pion-server-fixed
+pion-server-linux
+pion-server-iouring
+pion
+*.o
+*.log
+*.jsonl
+
+# PUBLISH-SAFETY: strategy docs, session state, memories must never enter a
+# builder's context (one COPY away from a published layer).
+localtemp
+memory
+session_logs
+dist
+experiments
+pion.wal.*
+pion.vstore.*
+pion.blob.*
+pion.snapshot.*
+pion.ssm.*
+pion.hnsw.*
+pion-*.crash.log
+pion-*.status
+
+# Pixi environment (large, platform-specific; installed inside the container
+# by the from-source target). The runtime-prebuilt target needs exactly the
+# runtime libs, re-included below.
+#
+# This list is a deliberate SUPERSET — Mojo 1.0 ships only three of these, and
+# libNVPTX/libcudart are platform-dependent. Do not prune it to "what exists
+# here": the Dockerfile copies each through a bracket glob and then asks the
+# binary which ones it actually needs, so a name that matches nothing costs
+# nothing, while a name missing from this list is invisible to that check.
+.pixi/**
+!.pixi/envs/default/lib/libKGENCompilerRTShared.so
+!.pixi/envs/default/lib/libAsyncRTMojoBindings.so
+!.pixi/envs/default/lib/libMSupportGlobals.so
+!.pixi/envs/default/lib/libAsyncRTRuntimeGlobals.so
+!.pixi/envs/default/lib/libNVPTX.so
+!.pixi/envs/default/lib/libcudart.so.12
+
+# Git objects (large; not needed in image)
+.git
+
+# Benchmark data (large parquets)
+benchmarks/VectorDBBench/dataset/
+
+# macOS artifacts
+.DS_Store
+**/.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp

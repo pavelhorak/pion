@@ -1,0 +1,26 @@
+library: libpion_vector
+platform: macos-arm64 (target-cpu apple-m1)
+abi: 1
+source: 2ce30f17661cf58d (sha256 of the held sources + the open view/ABI files)
+built: 2026-09-29T22:34:43Z with Mojo 1.1.0 (8189361e)
+exports:
+  _pion_v_abi_version
+  _pion_v_beam_1536
+  _pion_v_pkm_combine_topk
+  _pion_v_pkm_rescore_f32
+  _pion_v_pkm_scores_f32
+  _pion_v_pkm_scores_i8
+  _pion_v_pkm_sort_desc
+  _pion_v_pkm_topk_max
+  _pion_v_quant_beam_1536
+undefined:
+  _KGEN_CompilerRT_AlignedAlloc
+  _KGEN_CompilerRT_AlignedFree
+  _bzero
+  _dup
+  _fclose
+  _fdopen
+  _fflush
+  _memcpy
+  _memmove
+  _write

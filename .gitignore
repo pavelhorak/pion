@@ -1,0 +1,143 @@
+# pixi environments
+.pixi/
+.pixi-linux/
+
+# Binaries (exact names, not the pion/ Python package directory)
+/pion
+!/pion/
+pion-server
+pion-server-dev
+core
+pion-server-linux
+mcp/dist
+libpion_memory.dylib
+libpion_memory.so
+
+# Persistence & Logs
+*.log
+*.wal
+*.snapshot
+pion.snapshot.*
+*.dfs
+*.txt
+# ...but NOT the publication lists. `*.txt` silently swallowed all four of them
+# (strip_list / forbidden_tokens / token_allowlist / substitutions), so the
+# entire leak-prevention mechanism lived only in one working tree and a clone
+# got scripts/export_public.sh with nothing to feed it. `git add -A` reports
+# nothing when it skips an ignored file, which is why this went unnoticed
+# through the commit that claimed to add them.
+!publication/*.txt
+# Same trap, second instance: tools/redis_arity.txt is DATA that a shipped tool
+# reads. Untracked, `gen_command_table.py` silently emits an arity table with 0
+# of 322 entries instead of 237 — so a public clone regenerating the table
+# would lose queue-time arity validation (gh #220) without any error, and the
+# shipped test_command_table_drift.py fails for them on checkout.
+!tools/*.txt
+# Third instance of the same trap: the docs-site build (ci.yml source-checks and
+# pages.yml) installs website/requirements.txt, which *.txt swallowed — so both
+# public workflows failed on the first run and the docs site never deployed.
+!website/requirements.txt
+dump.rdb
+logs
+pion.hnsw.*
+pion.wal.*
+# gh #163 blob arena segments (sparse, up to 1 GiB each)
+pion.blob.*
+# V-store WAL/snapshot (e.g. pion.vstore.wal.0)
+pion.vstore.*
+# SSM state WAL (e.g. pion.ssm.wal.0, pion.ssm.state.0)
+pion.ssm.*
+# gh #138 breadcrumbs: pion-<port>.status / pion-<port>.crash.log / supervisor log
+# (the latter two already match *.log; listed so the trio stays obvious)
+pion-*.status
+pion-*.crash.log
+pion-supervisor-*.log
+
+# Build artifacts
+*.o
+# static libraries (e.g. src/ffi/lua/liblua.a from scripts/build_lua.sh)
+*.a
+# D11: the vendored closed vector library IS tracked — it is what `pixi run build` links.
+!vendor/pion-vector/**/libpion_vector.a
+*.metallib
+src/ffi/metal_compute.air
+
+# Generated benchmark artefacts (regenerable from build scripts)
+benchmarks/knnlm/*.npy
+
+# gh #23 CAG hybrid: keep the bench fixtures alongside the harnesses so the
+# reproducer is self-contained (overrides the global *.txt rule above).
+!experiments/gh23_cag_hybrid/pion_serve_fixtures/foundation_corpus.txt
+
+# cag_legal_demo: keep the SCOTUS-opinions corpus alongside the README +
+# calibration state so the demo is one-command spinnable.
+!examples/cag_legal_demo/corpus/opinions.txt
+
+# Local Claude Code runtime
+.claude/scheduled_tasks.lock
+
+# Gemini CLI per-project config symlinks (untracked IDE state from a
+# different tool; not part of the Pion project itself)
+.antigravitycli/
+
+# Separate frontend project (not part of the Pion server)
+site/
+
+# Compiled benchmark binaries (Mach-O / ELF executables; sources are tracked)
+benchmarks/gpu_attention_proto/gpu_attention_bench
+benchmarks/gpu_attention_proto/minimal_gpu
+
+# Development Scraps
+# Root-level throwaway scripts (tests/ and benchmarks/ are tracked normally)
+/test_*.py
+/test_*.mojo
+venv_zvec
+venv_zvec_linux
+__pycache__
+
+localtemp/
+
+# Secrets
+.env
+.env.*
+
+# System / IDE
+.DS_Store
+.vscode/
+
+venv_exp2
+experiment_2_results.json
+examples/.kv_cache/
+
+# Root-level throwaway session/results files
+results.tsv
+results/*.json
+SESSION_SCALEWAY_BRIEF.md
+SESSION_VAST_AI_BRIEF.md
+linux_fix.md
+
+# Model weights (large binaries)
+models/
+localtemp/binaries/
+benchmarks/uma_attention/phase0/phase0_bench
+benchmarks/uma_attention/phase1/phase1_bench
+benchmarks/uma_attention/phase2/phase2_bench
+benchmarks/uma_attention/phase0/uma_kernels.air
+benchmarks/uma_attention/phase0/uma_kernels.metallib
+
+# Pion Serve experiment artifacts
+pion-serve/*.jsonl
+pion-serve/*.png
+
+# Local helper for managing tmux'd Claude Code sessions (per-user)
+claude-tmux.sh
+
+# gh #108 release tarballs
+dist/
+# gh #109 Gate 2c server log
+pion_gate2c.log
+
+# website (gh #303 / launch): build output and the local tooling venv
+_site/
+.venv-site/
+.cache/

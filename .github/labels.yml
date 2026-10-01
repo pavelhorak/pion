@@ -1,0 +1,40 @@
+# The public label taxonomy. Apply with: scripts/sync_labels.sh <owner/repo>
+#
+# Small on purpose. Every label here is either set by a template or workflow,
+# or is a decision a maintainer makes during triage; anything else is noise a
+# stranger has to decode. Labels used only in the private development tracker
+# deliberately do not exist in the public one.
+
+# ── type (issue templates set these) ──
+- { name: bug,          color: d73a4a, description: "Behaves differently from Redis or from the docs" }
+- { name: performance,  color: fbca04, description: "A benchmark number looks wrong" }
+- { name: feature,      color: a2eeef, description: "Something Pion does not do yet" }
+- { name: docs,         color: 0075ca, description: "Documentation is wrong, missing or unclear" }
+- { name: question,     color: d876e3, description: "Usage question — Discussions is usually the better place" }
+
+# ── area (the PR labeler sets these from changed paths) ──
+- { name: "area: wire",          color: c5def5, description: "RESP/RESP3 protocol, command dispatch, keyspace commands" }
+- { name: "area: kv-cache",      color: c5def5, description: "KV.PREFIX / ATTEND / V-store / Metal attention / pion-vllm-mlx" }
+- { name: "area: serve",         color: c5def5, description: "pion-serve, FLARE gateway, MCP server" }
+- { name: "area: vector",        color: c5def5, description: "HNSW, FT.* / V* search, quantization, libpion_vector" }
+- { name: "area: persistence",   color: c5def5, description: "WAL, snapshots, blob tier, restart" }
+- { name: "area: build-release", color: c5def5, description: "Build, packaging, Docker, CI, release artifacts" }
+- { name: "area: website",       color: c5def5, description: "The documentation site" }
+
+# ── platform (issue-triage reads the template's Platform field) ──
+- { name: "platform: mac",   color: bfd4f2, description: "macOS / Apple Silicon" }
+- { name: "platform: linux", color: bfd4f2, description: "Linux (x86-64 or arm64)" }
+
+# ── priority (set during triage) ──
+- { name: P0, color: b60205, description: "Crash, connection desync, or data loss — fixed first" }
+- { name: P1, color: e99695, description: "Wrong result or broken documented path" }
+- { name: P2, color: f9d0c4, description: "Everything else worth doing" }
+
+# ── status ──
+- { name: needs-triage, color: ededed, description: "Not looked at yet (set on every new issue)" }
+- { name: needs-repro,  color: ededed, description: "Cannot reproduce from the report as written" }
+- { name: confirmed,    color: 0e8a16, description: "Reproduced by a maintainer" }
+
+# ── contribution ──
+- { name: good first issue, color: 7057ff, description: "Small, well-scoped, a good way in" }
+- { name: help wanted,      color: 008672, description: "Needs hardware or expertise the maintainer lacks" }

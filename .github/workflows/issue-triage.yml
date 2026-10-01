@@ -1,0 +1,36 @@
+name: issue-triage
+# On every new issue: add needs-triage, add platform:* from the template's
+# Platform field, and — if the reported version is older than the latest
+# release — ask once for a retry on the latest. No API key, no bot account,
+# no stale-bot: closing early reporters' issues for silence punishes exactly
+# the people a new project most needs. Logic: .github/scripts/issue_triage.js
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      # The default branch's own script — never code from the issue.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { triage } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue_triage.js`);
+            const issue = context.payload.issue;
+            let latest = null;
+            try {
+              latest = (await github.rest.repos.getLatestRelease(context.repo)).data.tag_name;
+            } catch (e) { /* no release yet */ }
+            const { labels, comment } = triage(issue.body || "", latest);
+            await github.rest.issues.addLabels({ ...context.repo, issue_number: issue.number, labels });
+            if (comment) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: issue.number, body: comment });
+            }

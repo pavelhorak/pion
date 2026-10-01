@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pion-vllm-mlx"
+version = "0.1.0"
+description = "Pion attention backend for vllm-mlx — V offloading + GPU attention on Apple Silicon"
+requires-python = ">=3.10"
+# Apache-2.0 since 2026-09-21: this is a client library people vendor into
+# their own stacks (the server was BSL then; it is Apache-2.0 since 2026-09). Metadata is
+# what a dependency scanner reads; ./LICENSE is the verbatim Apache-2.0 text
+# and travels inside the wheel/sdist (a build from this directory cannot reach
+# ../LICENSE). Licence map: ../doc/licensing.md.
+license = { text = "Apache-2.0" }
+license-files = ["LICENSE"]
+keywords = ["vllm", "mlx", "pion", "attention", "kv-cache", "apple-silicon"]
+# gh #263: everything below is what a PyPI project page renders. Without
+# `readme` the page is blank, which for the package that IS the launch pitch is
+# the whole first impression.
+readme = "README.md"
+authors = [{ name = "Pavel Horak" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: GPU",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=1.24.0",
+    "redis>=4.6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+# gh #263: mlx-lm is a PRIVATE seam for this package — install_pion_attention_patch()
+# replaces mlx_lm.models.base.scaled_dot_product_attention and rebinds the
+# snapshot-bound name in every imported mlx_lm.models.* module. Ceiling is the
+# tested version (0.31.3, latest on PyPI 2026-09-02); pion_vllm_mlx._compat
+# re-checks the actual signature at patch time, since a version is only a proxy
+# for the thing that breaks. Move both together.
+#
+# The floor is 0.20.1, not the 0.20.0 this used to name — mlx-lm has no 0.20.0
+# on PyPI (it goes 0.19.3 -> 0.20.1), so the old bound was unsatisfiable as
+# written and had certainly never been run. 0.20.1 is tested by
+# pion-vllm-mlx/tests/run_mlx_version_matrix.sh.
+mlx = ["mlx>=0.10.0", "mlx-lm>=0.20.1,<0.32"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pion_vllm_mlx"]
+
+[project.urls]
+Homepage = "https://github.com/pavelhorak/pion"
+Issues = "https://github.com/pavelhorak/pion/issues"
+Documentation = "https://github.com/pavelhorak/pion/blob/main/doc/shared_kv_cache.md"
