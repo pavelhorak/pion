@@ -246,6 +246,21 @@ Cache-hit expert serving ~**5 ms** regardless of backing tier (RAM LRU → SSD �
 > [`SECURITY.md`](SECURITY.md#outbound-connections--no-telemetry).
 <!-- --8<-- [end:security] -->
 
+### Homebrew (macOS)
+
+macOS 14 or later on Apple Silicon:
+
+```bash
+brew install pavelhorak/tap/pion
+brew services start pion         # 127.0.0.1:1974; restarts at login and after a crash
+redis-cli -p 1974 PING           # +PONG
+```
+
+As a service, Pion keeps its WAL, snapshots and crash log in
+`$(brew --prefix)/var/pion` and logs to `$(brew --prefix)/var/log/pion.log`.
+`pion-server` is also on your PATH; run by hand, it writes its data to the
+directory you start it from.
+
 ### Docker
 
 Each release publishes a multi-arch image (linux/amd64 and linux/arm64) to
@@ -288,7 +303,7 @@ container restarts. Three things worth knowing:
 
 ### Prebuilt binary (no build)
 
-macOS on Apple Silicon — the fastest path from nothing to a serving Pion:
+macOS 14 or later on Apple Silicon, without Homebrew:
 
 ```bash
 curl -fsSL https://github.com/pavelhorak/pion/releases/latest/download/pion-macos-arm64.tar.gz | tar xz
