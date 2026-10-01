@@ -83,9 +83,11 @@ def build(out_dir: Path) -> Path:
     hero_lede = inline(pitch)
 
     # ── install tabs ──
-    prebuilt = S.section(readme, "### Prebuilt binary (no build)")
-    mac_code = code(S.fences(prebuilt, "bash")[0])
-    mac_note = md(first_paragraph(prebuilt.split("```")[2]))
+    brew = S.section(readme, "### Homebrew (macOS)")
+    mac_code = code(S.fences(brew, "bash")[0])
+    mac_note = (md(first_paragraph(brew.split("```")[2]))
+                + '<p>Without Homebrew, the release tarball is on the '
+                  '<a href="/docs/getting-started/install/">install page</a>.</p>')
     pip_html = md(S.region(readme, "pip-install"))
     docker = S.section(readme, "### Docker")
     docker_code = code(S.fences(docker, "bash")[0])
@@ -153,6 +155,7 @@ def build(out_dir: Path) -> Path:
         "different_html": different, "omlx_html": omlx,
         "tile_kv_fig": tile_kv, "tile_vec_fig": tile_vec, "tile_dur_fig": tile_dur,
         "license_html": license_html,
+        "analytics": S.analytics_beacon(S.analytics_token()),
     }
     page = tpl
     for k, v in fill.items():

@@ -161,12 +161,22 @@ def main():
     check("both TTFT rows with factors", "50.6×" in landing and "24×" in landing and "64.7 ms" in landing)
     check("the 64K row is labelled NIAH-class", "326×" in landing and "NIAH-class" in landing)
     check("the honesty figure", "0.86×" in landing)
-    check("install: the release curl", "releases/latest/download/pion-macos-arm64.tar.gz" in landing)
+    check("install: Homebrew first on macOS", "brew install pavelhorak/tap/pion" in landing)
+    check("install: the tarball is one click away", 'href="/docs/getting-started/install/"' in landing)
     check("install: docker run", "docker run" in landing)
     check("the comparison table names its competitors", all(t in landing for t in ("LMCache", "SGLang", "oMLX")))
     check("the licence footer", "Apache-2.0" in landing and "libpion_vector" in landing)
     check("links into the docs", 'href="/docs/' in landing)
     check("version stamped from VERSION", S.read("VERSION").strip() in landing)
+
+    print("\n[6] analytics: Cloudflare's cookieless beacon, only with a configured token")
+    token = S.analytics_token()
+    check("the beacon is empty without a token and carries it with one",
+          S.analytics_beacon("") == "" and "tok123" in S.analytics_beacon("tok123"))
+    install = (built / "docs" / "getting-started" / "install" / "index.html").read_text(encoding="utf-8")
+    for where, page_html in (("landing page", landing), ("docs pages", install)):
+        check(f"beacon on the {where} iff a token is set (token {'set' if token else 'empty'})",
+              ("cloudflareinsights.com" in page_html) == bool(token))
 
     print(f"\n{len(passes)} passed, {len(failures)} failed")
     for n_, d in failures:

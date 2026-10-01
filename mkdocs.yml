@@ -57,6 +57,10 @@ extra_css:
 
 extra:
   homepage: https://pion.pavelhorak.com/
+  # Cloudflare Web Analytics site token: no cookies, no personal data. Empty
+  # means off, so a fork's build reports to no one. The docs (website/hooks.py)
+  # and the landing page (website/landing/build_landing.py) both read it here.
+  cloudflare_web_analytics_token: ""
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/pavelhorak/pion

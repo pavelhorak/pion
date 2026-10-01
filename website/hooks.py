@@ -14,7 +14,11 @@ the list is absent and doc/ already holds only the allowlisted files.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sitelib as S  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "doc"
@@ -72,3 +76,9 @@ def on_page_markdown(markdown: str, page, config, files) -> str:
         return m.group(1) + new + m.group(3)
 
     return _LINK.sub(fix, markdown)
+
+
+def on_post_page(output: str, page, config) -> str:
+    """Add the analytics beacon to every docs page when a token is configured."""
+    beacon = S.analytics_beacon(config.extra.get("cloudflare_web_analytics_token", ""))
+    return output.replace("</body>", beacon + "</body>", 1) if beacon else output

@@ -236,3 +236,19 @@ def matrix_sections() -> list[tuple[str, str, set[str]]]:
     if cur_title is not None:
         out.append((cur_title, slugify(re.sub(r"`", "", cur_title), "-"), cur_names))
     return out
+
+
+def analytics_token() -> str:
+    """The Cloudflare Web Analytics site token (mkdocs.yml `extra`), or ""."""
+    m = re.search(r'^\s+cloudflare_web_analytics_token:\s*"([^"]*)"', read("mkdocs.yml"), re.M)
+    return m.group(1) if m else ""
+
+
+def analytics_beacon(token: str) -> str:
+    """Cloudflare's cookieless beacon, or "" without a token, so a fork's build
+    of the site reports to no one. One definition serves the docs (hooks.py)
+    and the landing page (build_landing.py)."""
+    if not token:
+        return ""
+    return ('<script defer src="https://static.cloudflareinsights.com/beacon.min.js" '
+            f"data-cf-beacon='{{\"token\": \"{token}\"}}'></script>")
