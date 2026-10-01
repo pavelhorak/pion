@@ -113,7 +113,7 @@ def build(out_dir: Path) -> Path:
     r64 = [r for r in table_rows(S.region(readme, "two-numbers")) if "64K" in r[0]]
     if r64:
         numbers_rows += (f"<tr><td>{inline(r64[0][0])} — 100% needle recall attending <strong>0.78%</strong> of the prefix</td>"
-                         f"<td class=\"num\"></td><td class=\"num\"></td><td class=\"x\">{inline(r64[0][3])}<small>NIAH-class only</small></td></tr>\n")
+                         f"<td class=\"num\">{inline(r64[0][1])}</td><td class=\"num\">{inline(r64[0][2])}</td><td class=\"x\">{inline(r64[0][3])}<small>NIAH-class only</small></td></tr>\n")
     numbers_note = md("\n\n".join(p for p in re.split(r"\n\s*\n", two) if not p.startswith("|")), "website/landing")
 
     # ── where it does not help ──
@@ -134,8 +134,8 @@ def build(out_dir: Path) -> Path:
     glance = {r[0]: r[1] for r in table_rows(S.section(readme, "## At a Glance")) if len(r) == 2}
     def g(key):
         return inline(glance.get(key, ""))
-    tile_kv = f"{g('Peak KV throughput')} · P99 {g('P99 latency')}"
-    tile_vec = f"Recall@100 {g('Recall@100')} · QPS {g('Vector QPS')}"
+    tile_kv = g('Peak KV throughput')
+    tile_vec = f"QPS {g('Vector QPS')} · Recall@100 {g('Recall@100')}"
     tile_dur = g("Persistence")
 
     # ── footer ──

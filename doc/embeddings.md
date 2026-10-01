@@ -10,7 +10,7 @@ FT.ADDTEXT and FT.SEARCHTEXT are implemented and working. Pion supports four emb
 
 ### Embedding Cascade
 
-1. **Apple NLEmbedding (`--nle-embed`, macOS only):** Apple's system `NaturalLanguage` framework. 512-dim sentence embeddings, ANE-accelerated on Apple Silicon, **no Python sidecar, no model download**. Selected first when available; falls through if NLE doesn't recognize the input. See `src/ffi/nle_wrap.m` and `src/network/nle_embedding_engine.mojo`.
+1. **Apple NLEmbedding (`--nle-embed`, macOS only):** Apple's system `NaturalLanguage` framework. 512-dim sentence embeddings, **no Python sidecar, no model download**. Selected first when available; falls through if NLE doesn't recognize the input. See `src/ffi/nle_wrap.m` and `src/network/nle_embedding_engine.mojo`.
 2. **Auto-embed sidecar (cross-platform default):** Pion auto-launches a Python inference sidecar with **MiniLM-L6-v2** (384 dimensions, ~90 MB download on first run). Requires `torch` + `transformers` — install with `pixi run install-inference`. Disable with `--no-auto-embed` or `--profile kv`.
 3. **SIE (`superlinked/sie`, opt-in via pion-serve `--sie-url`):** OpenAI-compatible `/v1/embeddings` server with 85+ MTEB-verified models, autoscale-to-zero K8s deployment, Apache 2.0. Recommended when the deployment already runs SIE for production traffic. Explicit URL only — no auto-detect on port 8000 (collision with vLLM / FastAPI / generic web apps). When the URL is set, slots into the pion-serve cascade ahead of Ollama. Force-select via `--embed-backend sie --sie-url http://host:8000`; force-fail if unreachable (no cascade fall-through).
 4. **Ollama** (auto-detected): If Ollama is running on port 11434 with `nomic-embed-text` (768 dimensions), Pion uses it via HTTP. Detected automatically at startup unless `--no-auto-detect` is set.
@@ -134,7 +134,7 @@ The auto-embed sidecar (`src/inference/worker.py`) loads MiniLM-L6-v2 via PyTorc
 
 - **Model:** Apple-bundled English sentence embedding (system framework, no download)
 - **Dimension:** 512
-- **Acceleration:** ANE on Apple Silicon via Apple's high-level API
+- **Acceleration:** chosen by Apple's framework; Pion calls the high-level API and does not pick the compute unit
 - **Startup:** initialized at first worker spawn, ~milliseconds (no model load)
 - **Semantic cache threshold:** 0.80 (NLE's vector space is less discriminating than MiniLM-L6-v2 between paraphrases vs topic shifts; tune per-deployment)
 - **Coverage:** `AI.EMBED`, `AI.SEMANTIC_CACHE`, `AI.MEMORY`, `FT.SEARCHTEXT`, `AI.FLARE.*`

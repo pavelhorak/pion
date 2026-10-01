@@ -182,7 +182,7 @@ When `--kvcache` is enabled, the semantic routing modules are activated:
 | SemanticRouter | `src/network/semantic_router.mojo` | HNSW/FP32 routing table indexed by node centroid embeddings |
 | route commands | `src/commands/route.mojo` | AI.ROUTE.REGISTER, AI.ROUTE.UPDATE, AI.ROUTE, AI.ROUTE.REMOVE, AI.ROUTE.INFO handlers |
 
-**Routing strategy:** FP32 brute-force cosine similarity for <=16 nodes (zero recall loss); HNSW O(log N) for >16 nodes. Per-node capacity limits, exclude filters. 88% routing accuracy, 0.14ms/route, 7K QPS.
+**Routing strategy:** FP32 brute-force cosine similarity for <=16 nodes (zero recall loss); HNSW O(log N) for >16 nodes. Per-node capacity limits, exclude filters. 88% routing accuracy (7 of 8 test queries), 0.14ms/route, 7K QPS.
 
 ---
 

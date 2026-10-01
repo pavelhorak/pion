@@ -3,7 +3,7 @@
 Token-ID-indexed storage for K and V tensors, one session per `<ns>_pk` /
 `<ns>_pv` pair created by `KV.PREFIX.REGISTER`. The wire forms of
 `V.STOREBATCH` and `V.FETCH … RANGE` / `BATCH` are in the
-[M14 externalized-attention table](attend.md#m14-externalized-attention-commands)
+[externalized-attention table](attend.md#externalized-attention-commands)
 and the [`KV.PREFIX.*` page](kv-prefix.md); this page covers the storage
 formats.
 

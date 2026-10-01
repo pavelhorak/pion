@@ -10,12 +10,13 @@ Usage:
     # In-process path (default, no server needed):
     python3 examples/prompt_cache_demo.py
 
-    # Cross-process path (requires Pion):
+    # Cross-process path (requires Pion; the Homebrew service already runs
+    # with these flags):
     ./pion-server --kvcache --metal-attention -w 1
     python3 examples/prompt_cache_demo.py --backend pion
 
 Prerequisites:
-    pip install -e pion-vllm-mlx/[mlx]   # mlx + mlx-lm pulled in
+    pip install 'pion-vllm-mlx[mlx]'   # mlx + mlx-lm pulled in
 """
 from __future__ import annotations
 
@@ -59,7 +60,7 @@ sys.path.insert(0, str(REPO_ROOT / "pion-vllm-mlx"))
 try:
     from pion_vllm_mlx import PionPromptCache, install_pion_attention_patch
 except ImportError:
-    print("pion_vllm_mlx not found: pip install -e pion-vllm-mlx/")
+    print("pion_vllm_mlx not found: pip install 'pion-vllm-mlx[mlx]'")
     sys.exit(1)
 
 MODEL_ID = "mlx-community/Llama-3.2-1B-Instruct-4bit"

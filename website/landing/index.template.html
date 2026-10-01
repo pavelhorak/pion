@@ -218,7 +218,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
           <div class="install-note">{{install_mac_note}}</div>
         </div>
         <div id="tab-pip" role="tabpanel" aria-labelledby="t-pip" hidden>
-          <div class="install-note">{{install_pip_html}}<p>The client for the prompt-cache path. It needs a running <code>pion-server --kvcache --metal-attention -w 1</code> from the macOS tab.</p></div>
+          <div class="install-note">{{install_pip_html}}<p>The client for the prompt-cache path. It needs Pion running with <code>--kvcache --metal-attention</code>: the Homebrew service does that; otherwise start the binary with those flags.</p></div>
         </div>
         <div id="tab-docker" role="tabpanel" aria-labelledby="t-docker" hidden>
           <div class="code"><button type="button" class="copy">Copy</button><pre>{{install_docker_code}}</pre></div>
@@ -303,7 +303,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
         </div>
         <div class="tile">
           <h3>Vector search in the same process</h3>
-          <p>HNSW with SIMD INT8 kernels, <code>FT.CREATE</code>/<code>FT.SEARCH</code>, the Redis 8 VSET commands (one vector set per key), BM25 and hybrid retrieval, an in-process embedding model so the first request just works.</p>
+          <p>HNSW with SIMD INT8 kernels, <code>FT.CREATE</code>/<code>FT.SEARCH</code>, the Redis 8 VSET commands (one vector set per key), BM25 and hybrid retrieval, and built-in text embedding on macOS (Apple's NLEmbedding, on in the Homebrew service), so semantic search needs no separate model server.</p>
           <p class="fig">{{tile_vec_fig}}</p>
           <p class="caveat">One index per server; L2 and COSINE, anything else refused at FT.CREATE.</p>
         </div>
@@ -311,7 +311,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
           <h3>One binary, durable by default</h3>
           <p>Zero-allocation hot path, mmap WAL with segment rotation, snapshots, blob arenas for large values, crash breadcrumbs and a 1 Hz status file that survives an OOM kill.</p>
           <p class="fig">{{tile_dur_fig}}</p>
-          <p class="caveat">Loopback by default. No TLS, no maxmemory — read the security model first.</p>
+          <p class="caveat">Loopback by default. No TLS, and <code>--maxmemory</code> refuses writes rather than evicting — read the security model first.</p>
         </div>
       </div>
     </div>
@@ -325,7 +325,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
           <a class="chip" href="/docs/reference/python/pion-vllm-mlx/"><b>mlx-lm</b> · PionPromptCache</a>
           <a class="chip" href="/docs/reference/python/pion-lmcache/"><b>LMCache</b> · resp://localhost:1974</a>
           <a class="chip" href="/docs/client_apis/"><b>redis-py</b> · go-redis · ioredis · GLIDE</a>
-          <a class="chip" href="/docs/reference/python/pion-mcp/"><b>MCP</b> · 25 tools for agents</a>
+          <a class="chip" href="/docs/reference/python/pion-mcp/"><b>MCP</b> · 38 tools for agents</a>
           <a class="chip" href="/docs/reference/python/integrations/"><b>LangGraph</b> · AutoGen · LlamaIndex</a>
           <a class="chip" href="/docs/ai_gateway/"><b>RedisVL</b> · LangChain, unmodified</a>
           <a class="chip" href="/docs/pion_serve/"><b>Pion Serve</b> · OpenAI-compatible proxy</a>

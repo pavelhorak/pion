@@ -5,22 +5,33 @@ different process, a different model object, or a restarted server can reuse
 (Stage 1), plus an attention patch that lets Pion compute the attention over
 that prefix itself (Stage 2).
 
+Time to first token on Llama-3.2-1B-4bit with a 2,048-token prefix: 1,530 ms
+cold in vanilla mlx-lm, **30.2 ms** warm in the same process (50.6×), and
+**64.7 ms** from a separate process over the wire (24×, against 1,558 ms). With
+a prefix under about a thousand tokens there is little to save; the
+[Pion README](https://github.com/pavelhorak/pion#readme) has the sweep.
+
 Stage 2 runs on three lanes, auto-selected by `PionPromptCache`:
 
-| Lane | Where it runs | TTFT p50 (Llama-3.2-1B-4bit, 5×20 prefill) |
+| Lane | Where it runs | TTFT p50, short system-prompt prefixes (Llama-3.2-1B-4bit, 100 requests) |
 |---|---|---|
 | 1. **In-process** (default, same-process consumer) | MLX in the calling process; zero wire roundtrips | **28.2 ms** (6.51× vs vanilla cold) |
 | 2. **Binary fast lane** (port+1, `0xCA5E` frames) | Cross-process via `sendmsg` scatter-gather + single RTT | 92.1 ms |
 | 3. **RESP fallback** | Plain RESP, for older Pion servers without the binary listener | 108.6 ms |
 
-Plus `HybridRetrievalCache` for RAG: chunk-id-keyed K/V hydration (4.5× p50 / 99.3 % token agreement on SQuAD v2).
+Plus `HybridRetrievalCache` for RAG: chunk-id-keyed K/V hydration (4.5× p50 TTFT and 99.3% token agreement on a 100-query SQuAD v2 run, [`stage1_hybrid_recall_bench.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/stage1_hybrid_recall_bench.py)).
 
 ## Install
 
 ```bash
 pip install 'pion-vllm-mlx[mlx]'
-# from a checkout, with dev tools:
-pip install -e 'pion-vllm-mlx/[dev,mlx]'
+```
+
+It talks to a Pion server started with the prompt cache enabled:
+
+```bash
+brew install pavelhorak/tap/pion && brew services start pion   # macOS; the service runs with these flags
+./pion-server --kvcache --metal-attention                       # or from a release tarball / source build
 ```
 
 The `mlx` extra pins **`mlx-lm>=0.20.1,<0.32`**. That ceiling is not decoration:
@@ -32,17 +43,16 @@ than failing as a `TypeError` inside your generation loop. To see the seam:
 
 ```bash
 python -c "import pion_vllm_mlx as p; print(p.mlx_lm_seam_report())"
-python pion-vllm-mlx/tests/test_mlx_lm_seam.py          # one version
-pion-vllm-mlx/tests/run_mlx_version_matrix.sh           # the whole matrix
 ```
+
+From a checkout of the [Pion repository](https://github.com/pavelhorak/pion),
+`pip install -e 'pion-vllm-mlx/[dev,mlx]'` adds the dev tools, then
+`python pion-vllm-mlx/tests/test_mlx_lm_seam.py` checks one mlx-lm version and
+`pion-vllm-mlx/tests/run_mlx_version_matrix.sh` the whole matrix.
 
 The MLX dependency is optional because the package can act as a wire-compatibility shim on machines that don't have MLX (e.g. a Linux test runner). Lanes 2 and 3 work without MLX in the consumer; lane 1 requires it.
 
-Lanes 2 / 3 require Pion built with `--kvcache --metal-attention`:
-
-```bash
-./pion-server --kvcache --metal-attention -w 1
-```
+Lanes 2 and 3 need the server started with `--kvcache --metal-attention`, as above.
 
 ## Usage
 
@@ -66,7 +76,7 @@ prefix's K/V already in it, so mlx-lm decodes at native speed. The namespace
 names one exact token sequence for one model and quantization — key it on the
 tokens, never the text, and change it when either changes. The first process to
 ask pays the prefill once; every later call, from any process, fetches it.
-Runnable with timings: [`examples/prompt_cache_demo.py`](../examples/prompt_cache_demo.py).
+Runnable with timings: [`examples/prompt_cache_demo.py`](https://github.com/pavelhorak/pion/blob/main/examples/prompt_cache_demo.py).
 
 ### Stage 2 — Pion computes the attention over the prefix
 
@@ -102,14 +112,14 @@ Hybrid models supported (per-layer routing): **Llama-3.2-1B-Instruct-4bit**, **Q
 
 ## Docs
 
-- Main project: [`../README.md`](../README.md)
-- Shared KV cache design: [`../doc/shared_kv_cache.md`](../doc/shared_kv_cache.md)
-- 64K NIAH reproducer (Gemma 4): [`../examples/sparse_mask_64k_niah.py`](../examples/sparse_mask_64k_niah.py)
+- Main project: [github.com/pavelhorak/pion](https://github.com/pavelhorak/pion) · website: [pion.pavelhorak.com](https://pion.pavelhorak.com/)
+- Shared KV cache design: [`doc/shared_kv_cache.md`](https://github.com/pavelhorak/pion/blob/main/doc/shared_kv_cache.md)
+- 64K NIAH reproducer (Gemma 4): [`examples/sparse_mask_64k_niah.py`](https://github.com/pavelhorak/pion/blob/main/examples/sparse_mask_64k_niah.py)
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](LICENSE) in this directory. Pion's client
+Apache-2.0 — see [`LICENSE`](https://github.com/pavelhorak/pion/blob/main/pion-vllm-mlx/LICENSE). Pion's client
 packages are deliberately permissive so they can be vendored into any stack;
 the Pion **server** this package talks to is Apache-2.0 too, with one closed
 binary library for its tuned vector kernels. The full map of what is under
-which licence is [`doc/licensing.md`](../doc/licensing.md).
+which licence is [`doc/licensing.md`](https://github.com/pavelhorak/pion/blob/main/doc/licensing.md).

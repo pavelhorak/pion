@@ -164,6 +164,10 @@ head-to-head on same machine — Linux Colima 8-CPU, 2026-03-23):
 
 macOS (M-series): 8,134 QPS mean (3-run stable), recall 0.9371, load ~16.5s vs Redis 50.4s.
 
+These figures are from an earlier build (spring 2026). The build as of
+2026-09-30 measures ~9.4K QPS at recall 0.960 on an M4 Mac mini, at the same
+gate configuration (50K × 1536-d, ef=150).
+
 ## License
 
 Apache-2.0. Pion's satellites are deliberately permissive so they can be vendored

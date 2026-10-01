@@ -40,6 +40,8 @@ quantizer targets the scale the reader will actually see.
 
 Cross-instance verified: a fresh second client (separate socket, separate model object) sees `+HIT` before any local work, fetches K/V the first client stored, and produces a **bit-identical 50-token greedy completion (BLEU 1.0000)**.
 
+These rows are this harness's own workload (150 requests, 5 prompts × 30 queries, at its `--prompt-repeats 8` prefix), so they do not line up with the README's two headline numbers: **24×** is one separate process hitting a 2,048-token prefix (`benchmarks/reproducers/cross_process_ttft.py`), and **50.6×** is Stage 2 in the same process (below).
+
 ---
 
 ## Quick Start

@@ -571,7 +571,7 @@ Requires `--kvcache` flag. Python client: `vllm-pion/` package (`PionKVClient`, 
 | AI.ROUTE.REMOVE | **SLOW** | ❌ | Remove node from routing table |
 | AI.ROUTE.INFO | **SLOW** | ❌ | Per-node stats: routed count, capacity, endpoint |
 
-Routing strategy: FP32 brute-force cosine for <=16 nodes (perfect accuracy); HNSW O(log N) for >16 nodes. 88% routing accuracy with Ollama embeddings.
+Routing strategy: FP32 brute-force cosine for <=16 nodes (perfect accuracy); HNSW O(log N) for >16 nodes. 88% routing accuracy with Ollama embeddings (7 of 8 test queries).
 
 Requires `--kvcache` flag.
 

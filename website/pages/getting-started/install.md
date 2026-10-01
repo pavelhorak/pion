@@ -14,8 +14,9 @@ README's own install section, included at build time.
 
 === "Python client"
 
-    The client for the prompt-cache path. It needs a running
-    `pion-server --kvcache --metal-attention -w 1` from the macOS tab.
+    The client for the prompt-cache path. It needs Pion running with
+    `--kvcache --metal-attention`: the Homebrew service does that; otherwise
+    start the binary with those flags.
 
 <!-- include-region: README.md | pip-install | indent:4 -->
 

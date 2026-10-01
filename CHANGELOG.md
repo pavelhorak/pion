@@ -4,7 +4,28 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [0.9.0] — unreleased
+## [0.9.1] — 2026-10-01
+
+Packaging and documentation only; the server's behaviour is unchanged.
+
+- **`pion-vllm-mlx` 0.1.1.** The 0.1.0 page on PyPI still said the package was
+  not on PyPI, told you to install it from a checkout, and its links resolved
+  only inside the repository. Fixed.
+- **Homebrew's service runs the prompt cache.** `brew services start pion` now
+  starts the server with `--kvcache --metal-attention --nle-embed`, so the four
+  `PionPromptCache` lines and the semantic cache work against it as installed;
+  before, they failed with `ERR V-store not enabled`. Idle memory is about
+  113 MB.
+- **The README and the website match their sources again.** Vector numbers carry
+  their date and machine (the current build: ~9.4K QPS at recall 0.960 on an M4
+  Mac mini); at P=1 Pion is at parity with Redis, not "ties or beats" it; the
+  64K row shows its denominators; multi-chunk hybrid retrieval is documented as
+  shipped; MoE pruning states its quality cost. Claims with no measurement
+  behind them are gone: ANE acceleration for NLEmbedding, a 60% cache hit rate,
+  a 60× expert-fetch factor, a P=1 P99 figure, and a Docker image variant that
+  does not exist.
+
+## [0.9.0] — 2026-10-01
 
 **The first public release.** Pion is a Redis-wire-compatible memory engine
 for AI inference: it keeps your model's KV cache across processes, restarts and
@@ -39,8 +60,8 @@ correctness surface is well tested, but the operational surface has gaps that a
   of the prefix, bit-identical greedy decode. NIAH-class retrieval only.
 - **MoE expert paging** (`MOE.EXPERT.*`) — a 51.6 GB model on a 16 GB Mac, with
   a cross-process API and access histograms.
-- **Semantic cache, vector search, BM25, hybrid retrieval**, and an in-process
-  embedding model, all behind the same RESP wire.
+- **Semantic cache, vector search, BM25, hybrid retrieval**, and built-in text
+  embedding on macOS (`--nle-embed`), all behind the same RESP wire.
 - **The engine underneath**: 2.2M+ ops/sec on a single Mac worker at P=10,
   14.0M peak on EPYC (w=32, P=50), parity with Redis at P=1. This is the
   on-ramp, not the pitch.
@@ -79,9 +100,9 @@ marketing:
 
 The differential harness runs every command against a real `redis-server` and
 reports only disagreements. Current state: 1,071 wrong-type probes → 15
-divergences, **all of them the deliberate HLL fence**, 0 desyncs; 733/733 on
-the correct-type matrix; dispatch sweep 1,470/1,470 across 289 commands and 5
-argument shapes; Gate 1 114/114.
+divergences, **all of them the deliberate HLL fence**, 0 desyncs; 757/757 on
+the correct-type matrix; dispatch sweep 1,485/1,485 probes across 292 commands
+and 5 argument shapes; Gate 1 115/115.
 
 That harness found most of what 0.x fixed, including several bugs that returned
 a plausible wrong answer rather than an error — the class that no type-confusion

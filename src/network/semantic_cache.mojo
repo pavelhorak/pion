@@ -117,7 +117,7 @@ struct SemanticCache(Movable):
                    out_buf: Pointer[Float32, MutUntrackedOrigin],
                    is_query: Bool = True) -> Bool:
         """Public embed cascade — fills *caller's* buffer at self.dimensions.
-        Cascade: NLEmbedding (Mac native, ANE) → InferenceBridge (PyTorch sidecar)
+        Cascade: NLEmbedding (Mac native) → InferenceBridge (PyTorch sidecar)
         → HTTP EmbeddingClient (Ollama / OpenAI / MAX). Use this from any
         embedding call site; keeps the cascade in one place so --nle-embed
         flips on for every embed-using surface, not just AI.SEMANTIC_CACHE.

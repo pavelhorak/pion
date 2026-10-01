@@ -381,7 +381,7 @@ def _print_help():
     print("      --auto-embed          auto-launch the embedding sidecar (default on)")
     print("      --no-auto-embed       disable the auto sidecar (use Ollama or --emb-enabled)")
     print("      --no-auto-detect      skip Ollama auto-probe at startup")
-    print("      --nle-embed           macOS Apple NLEmbedding (512-dim, ANE-accelerated, no Python)")
+    print("      --nle-embed           macOS Apple NLEmbedding (512-dim, no Python)")
     print("")
     print("Cluster / replication")
     print("      --cluster                     enable cluster mode (gossip + CLUSTER NODES)")
@@ -423,7 +423,7 @@ def main():
 
     var auto_detect = True   # auto-probe Ollama unless --no-auto-detect is passed
     var auto_embed = True    # A3: auto-launch embedding sidecar when no external server available
-    var nle_embed = False    # macOS Apple NLEmbedding (no PyTorch sidecar, 512-dim, ANE-accelerated)
+    var nle_embed = False    # macOS Apple NLEmbedding (no PyTorch sidecar, 512-dim)
     var inference_socket_explicit = False  # gh #424: keep the per-port default unless overridden
     var i = 1
     while i < len(args):
@@ -810,7 +810,7 @@ def main():
 
     # --nle-embed claims the embedding backend before auto-detect/auto-embed
     # would otherwise win it. Apple NLEmbedding via the system NaturalLanguage
-    # framework — 512-dim sentence embeddings, ANE-accelerated, no Python.
+    # framework — 512-dim sentence embeddings, no Python.
     if nle_embed and config.server.profile != "kv":
         config.embedding.enabled = True
         config.embedding.nle = True
@@ -818,7 +818,7 @@ def main():
         config.embedding.threshold = 0.80   # NLE uses different vector space than MiniLM; calibrate later
         config.embedding.model = "apple-nle-sentence-en"
         config.embedding.host = ""          # disables HTTP fallback path
-        print("--nle-embed: Apple NLEmbedding (512-dim, ANE-accelerated, no Python)")
+        print("--nle-embed: Apple NLEmbedding (512-dim, no Python)")
         print("    AI.SEMANTIC_CACHE SET/GET will use the system NaturalLanguage framework")
 
     # Auto-detect Ollama if neither --emb-enabled nor --flare nor --nle-embed was set

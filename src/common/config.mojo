@@ -169,7 +169,7 @@ struct EmbeddingConfig(Copyable, Movable, ImplicitlyCopyable):
     var dimensions: Int
     var threshold: Float32  # cosine similarity threshold (0–1); 0.95 = very high similarity
     var enabled: Bool
-    var nle: Bool           # Apple NLEmbedding (macOS, ANE-accelerated, 512-dim)
+    var nle: Bool           # Apple NLEmbedding (macOS, 512-dim)
     # gh #140: asymmetric retrievers (EmbeddingGemma, E5, BGE) are trained with
     # distinct query/document instruction prefixes and lose accuracy without
     # them. Empty by default — symmetric models must NOT get a prefix.

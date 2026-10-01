@@ -8,7 +8,7 @@ Pion's networking layer provides five event loop configurations plus a zero-copy
 
 | Tier | Flag | Syscall model | Best for | Platforms |
 |---|---|---|---|---|
-| **XDP/AF_XDP** | `--xdp --xdp-iface eth0` | Kernel bypass: NIC→BPF→AF_XDP→UMEM | +13% vs io_uring (P=1), multi-worker ready | Linux 5.4+, CAP_NET_ADMIN |
+| **XDP/AF_XDP** | `--xdp --xdp-iface eth0` | Kernel bypass: NIC→BPF→AF_XDP→UMEM | io_uring's throughput at P=1 with a 29% lower p99, multi-worker ready | Linux 5.4+, CAP_NET_ADMIN |
 | **io_uring SQPOLL** | `--sqpoll` | Kernel SQ polling thread (no enter() on hot path) | Experimental — hangs under load | Linux 5.11+, root/CAP_SYS_NICE |
 | **io_uring** | `--iouring` (default on Linux) | Batched enter(): 2 syscalls per batch regardless of K fds | Multi-connection production (memtier, P>=10) | Linux 5.4+ |
 | **epoll** | `--epoll` | epoll_wait + read + send per fd: 2K+1 syscalls per batch of K ready fds | Per-command P=1 benchmarks (w=1) | Linux 2.6+ |
