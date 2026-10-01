@@ -50,9 +50,7 @@ Start the server:
 ./pion-server --kvcache -w 1
 ```
 
-Then, from Python (install from a checkout with `pip install -e 'pion-vllm-mlx/[mlx]'` —
-not on PyPI yet):
-<!-- FLIP: becomes `pip install 'pion-vllm-mlx[mlx]'` when the package is published -->
+Then, from Python (`pip install 'pion-vllm-mlx[mlx]'`):
 
 ```python
 from mlx_lm import load, generate

@@ -61,8 +61,7 @@ the prefix itself ([`pion-vllm-mlx/README.md`](pion-vllm-mlx/README.md)).
 <!-- --8<-- [start:pip-install] -->
 Runnable end to end, with the before/after timings printed:
 [`examples/prompt_cache_demo.py`](examples/prompt_cache_demo.py). Install with
-<!-- FLIP: becomes `pip install 'pion-vllm-mlx[mlx]'` when the package is published -->
-`pip install -e 'pion-vllm-mlx/[mlx]'` (not on PyPI yet).
+`pip install 'pion-vllm-mlx[mlx]'`.
 <!-- --8<-- [end:pip-install] -->
 
 <!-- --8<-- [start:two-numbers] -->
@@ -249,18 +248,22 @@ Cache-hit expert serving ~**5 ms** regardless of backing tier (RAM LRU → SSD �
 
 ### Docker
 
-<!-- FLIP: a published ghcr.io image replaces the build-it-first instruction -->
-No image is published to a registry yet, so build one first — hermetically from
-source, or in seconds around a binary you already have:
+Each release publishes a multi-arch image (linux/amd64 and linux/arm64) to
+GitHub Container Registry:
+
+```bash
+docker run -p 1974:1974 -v pion-data:/data ghcr.io/pavelhorak/pion
+redis-cli -p 1974 PING     # +PONG
+```
+
+To build one yourself, hermetically from source or in seconds around a binary
+you already have:
 
 ```bash
 docker build -t pion .                              # from source, ~20 min
 docker build --target runtime-prebuilt -t pion .    # wraps ./pion-server, seconds
                                                     # (Linux host only — the image
                                                     #  runs the binary in the context)
-
-docker run -p 1974:1974 -v pion-data:/data pion
-redis-cli -p 1974 PING     # +PONG
 ```
 
 The from-source target is verified end to end as of 0.985 on linux/arm64: a
@@ -287,9 +290,6 @@ container restarts. Three things worth knowing:
 
 macOS on Apple Silicon — the fastest path from nothing to a serving Pion:
 
-<!-- FLIP: the curl below resolves only after the first `v*` tag's release.yml run has published the assets and /releases/latest points at it. Until then, use "From source". Remove this note once a release exists. -->
-> **If this 404s, the first release has not been published yet** — build [from source](#from-source) below (a couple of commands with pixi), or use the Docker image. This block works the moment the first tagged release is out.
-
 ```bash
 curl -fsSL https://github.com/pavelhorak/pion/releases/latest/download/pion-macos-arm64.tar.gz | tar xz
 cd pion-*-macos-arm64
@@ -307,11 +307,11 @@ rpath points at the build machine's toolchain, and the wrapper is what points it
 at the bundled `lib/`. WAL, snapshots and blob arenas are written to the working
 directory you launch from.
 
-<!-- FLIP: release.yml now produces Linux x86_64 and arm64 tarballs; rewrite this once the first tagged release has published them -->
-For **Linux and other platforms** there is no prebuilt tarball yet: use the
-Docker image above, or build from source. `scripts/package_release.sh` produces
-a tarball for whatever platform you run it on, so a Linux release is a matter of
-running it on a Linux box.
+**Linux** tarballs come from the same release, for x86_64 and arm64: swap the
+file name in the `curl` above for `pion-linux-x86_64.tar.gz` or
+`pion-linux-arm64.tar.gz`. The x86_64 build is the portable one (x86-64-v2, no
+GPU code). Linux builds run the open reference vector kernels rather than the
+tuned macOS ones, so vector search is slower there.
 
 ### From source
 

@@ -29,7 +29,7 @@ try:
     import mlx.core as mx
     from mlx_lm import load as mlx_load
 except ImportError:
-    print("mlx and mlx-lm are required: pip install -e 'pion-vllm-mlx/[mlx]'")
+    print("mlx and mlx-lm are required: pip install 'pion-vllm-mlx[mlx]'")
     sys.exit(1)
 
 # gh #263: generate_step moved from mlx_lm.utils to mlx_lm.generate somewhere

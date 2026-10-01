@@ -213,9 +213,9 @@ jobs:
   # amd64 runner, so the arm64 half did the full -O3 Mojo build under QEMU user
   # emulation — 20-35 min native, far longer emulated, with no timeout (6 h
   # default). Each leg here builds on hardware of its own architecture and pushes
-  # by digest; container-manifest merges them. NOTE: a package pushed to ghcr is
-  # PRIVATE by default — after the first run, set the package visibility to
-  # public in the repo settings, or `docker pull ghcr.io/pavelhorak/pion` 404s.
+  # by digest; container-manifest merges them. Pushed from the public repo, the
+  # package inherits its visibility: after the first run (v0.9.0) anonymous
+  # pulls of both tags worked with no settings change.
   container:
     name: ghcr ${{ matrix.platform }}
     needs: build
@@ -294,3 +294,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: pion-vllm-mlx/dist/
+          # pion-vllm-mlx is versioned on its own, and most Pion releases will
+          # not bump it. PyPI refuses to re-upload an existing version, so
+          # without this every such release would end with a red PyPI job.
+          skip-existing: true

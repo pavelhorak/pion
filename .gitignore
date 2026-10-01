@@ -37,6 +37,10 @@ pion.snapshot.*
 # pages.yml) installs website/requirements.txt, which *.txt swallowed — so both
 # public workflows failed on the first run and the docs site never deployed.
 !website/requirements.txt
+# Fourth instance, found seeding the public repo (2026-10-01): the FLARE
+# gateway's install file. export_public.sh step 3c now fails on any shipped
+# file a rule here would drop, so the next one is caught before a push.
+!flare_gateway/requirements.txt
 dump.rdb
 logs
 pion.hnsw.*
@@ -60,6 +64,9 @@ pion-supervisor-*.log
 # D11: the vendored closed vector library IS tracked — it is what `pixi run build` links.
 !vendor/pion-vector/**/libpion_vector.a
 *.metallib
+# The one metallib that ships: a Command Line Tools checkout cannot compile it,
+# and the release tarball bundles it.
+!src/ffi/metal_compute.metallib
 src/ffi/metal_compute.air
 
 # Generated benchmark artefacts (regenerable from build scripts)

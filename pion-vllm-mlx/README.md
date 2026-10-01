@@ -18,13 +18,10 @@ Plus `HybridRetrievalCache` for RAG: chunk-id-keyed K/V hydration (4.5× p50 / 9
 ## Install
 
 ```bash
-pip install -e pion-vllm-mlx/
-# optional: dev tools + MLX
+pip install 'pion-vllm-mlx[mlx]'
+# from a checkout, with dev tools:
 pip install -e 'pion-vllm-mlx/[dev,mlx]'
 ```
-
-Not on PyPI yet — the distribution is built and verified, the upload is
-pending. When it lands this becomes `pip install 'pion-vllm-mlx[mlx]'`.
 
 The `mlx` extra pins **`mlx-lm>=0.20.1,<0.32`**. That ceiling is not decoration:
 `install_pion_attention_patch()` replaces a *private* mlx-lm function and rebinds
