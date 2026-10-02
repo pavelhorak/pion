@@ -41,5 +41,8 @@ service; no warranty; no decompilation except as permitted by applicable law.
 A Pion built with `pixi run build-open` contains none of this code and is
 Apache-2.0 alone.
 
-Platforms vendored today: `macos-arm64`. Linux builds use the open reference
-until the Linux archives are vendored and linked.
+Platforms vendored today: `macos-arm64`, `linux-x86_64`, `linux-aarch64`.
+The x86-64 archive carries two builds of every routine, x86-64-v2 and AVX-512
+VNNI, and runs the x86-64-v2 one. The VNNI build has not been verified on VNNI
+hardware yet, so it runs only when `PION_VECTOR_VNNI=1` opts in;
+`pion_v_isa()` reports which build a process uses.

@@ -1,8 +1,8 @@
 library: libpion_vector
-platform: macos-arm64 (target-cpu apple-m1)
+platform: linux-aarch64 (target-cpu neoverse-n1)
 abi: 1
 source: 5d37c744df566e45 (sha256 of the held sources + the open view/ABI files)
-built: 2026-10-02T20:20:15Z with Mojo 1.1.0 (8189361e)
+built: 2026-10-02T20:20:14Z with Mojo 1.1.0 (8189361e)
 exports:
   pion_v_abi_version
   pion_v_beam_1536
@@ -16,11 +16,11 @@ exports:
 undefined:
   KGEN_CompilerRT_AlignedAlloc
   KGEN_CompilerRT_AlignedFree
-  bzero
   dup
   fclose
   fdopen
   fflush
   memcpy
   memmove
+  memset
   write

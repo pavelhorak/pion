@@ -129,12 +129,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # statically linked (MIT requires the notice in all copies) and the image
 # redistributes the Modular runtime dylibs; NOTICE reproduces both verbatim.
 COPY LICENSE NOTICE /opt/pion/
+# The binary links the closed libpion_vector, so its licence travels with it,
+# under the name the release tarballs use.
+COPY vendor/pion-vector/LICENSE /opt/pion/LICENSE-pion-vector
 
 # OCI image metadata so `docker inspect` / registries show the source and licence.
 LABEL org.opencontainers.image.title="Pion" \
       org.opencontainers.image.description="Deterministically low-latency KV + vector database, wire-compatible with Redis/Valkey" \
       org.opencontainers.image.source="https://github.com/pavelhorak/pion" \
-      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.licenses="Apache-2.0 AND LicenseRef-Pion-Vector-Binary-Licence" \
       org.opencontainers.image.documentation="https://github.com/pavelhorak/pion/blob/main/README.md"
 
 ENV LD_LIBRARY_PATH=/opt/pion/lib

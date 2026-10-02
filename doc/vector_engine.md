@@ -349,9 +349,9 @@ every quantizer and dequantizer, the Metal shaders, and this document.
 
 | Build | Vector code | Use |
 |---|---|---|
-| `pixi run build` | links `libpion_vector.a` (`-D PION_HELD_VECTOR`) | default; what releases ship |
-| `pixi run build-open` | `src/vector/reference/` | auditors, ports, anyone who will not run a binary they cannot read |
-| any other build (iOS, a bare `mojo build`, Linux until the Linux archives ship) | `src/vector/reference/` | — |
+| `pixi run build` (macOS arm64, Linux arm64), `build-portable` (Linux x86-64) | links `libpion_vector.a` (`-D PION_HELD_VECTOR`) | default; what releases and the Docker image ship |
+| `pixi run build-open` (all three platforms) | `src/vector/reference/` | auditors, ports, anyone who will not run a binary they cannot read |
+| any other build (iOS, a bare `mojo build`) | `src/vector/reference/` | — |
 
 **The references are the same algorithms with the tuning removed** — same
 traversal, same heaps, same per-lane float formula — and return bit-identical

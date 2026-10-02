@@ -1,0 +1,51 @@
+library: libpion_vector
+platform: linux-x86_64 (target-cpu x86-64-v2; icelake-server (VNNI) only with PION_VECTOR_VNNI=1)
+abi: 1
+source: 5d37c744df566e45 (sha256 of the held sources + the open view/ABI files)
+built: 2026-10-02T20:22:21Z with Mojo 1.1.0 (8189361e)
+exports:
+  pion_v_abi_version
+  pion_v_abi_version_v2
+  pion_v_abi_version_vnni
+  pion_v_beam_1536
+  pion_v_beam_1536_v2
+  pion_v_beam_1536_vnni
+  pion_v_isa
+  pion_v_pkm_combine_topk
+  pion_v_pkm_combine_topk_v2
+  pion_v_pkm_combine_topk_vnni
+  pion_v_pkm_rescore_f32
+  pion_v_pkm_rescore_f32_v2
+  pion_v_pkm_rescore_f32_vnni
+  pion_v_pkm_scores_f32
+  pion_v_pkm_scores_f32_v2
+  pion_v_pkm_scores_f32_vnni
+  pion_v_pkm_scores_i8
+  pion_v_pkm_scores_i8_v2
+  pion_v_pkm_scores_i8_vnni
+  pion_v_pkm_sort_desc
+  pion_v_pkm_sort_desc_v2
+  pion_v_pkm_sort_desc_vnni
+  pion_v_pkm_topk_max
+  pion_v_pkm_topk_max_v2
+  pion_v_pkm_topk_max_vnni
+  pion_v_quant_beam_1536
+  pion_v_quant_beam_1536_v2
+  pion_v_quant_beam_1536_vnni
+undefined:
+  KGEN_CompilerRT_AlignedAlloc
+  KGEN_CompilerRT_AlignedFree
+  __cpu_features2
+  __cpu_indicator_init
+  __cpu_model
+  __extendhfsf2
+  dup
+  fclose
+  fdopen
+  fflush
+  fmaf
+  getenv
+  memcpy
+  memmove
+  memset
+  write

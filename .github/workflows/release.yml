@@ -139,9 +139,9 @@ jobs:
           exit 1
 
       - name: Closed vector library matches its open reference
-        # D11: the release notes carry this result. macOS only until Linux
-        # archives are vendored (gh #348).
-        if: matrix.os == 'macos-14'
+        # D11: the release notes carry this result. Every platform links its
+        # own vendored archive; on x86 the dispatcher runs the x86-64-v2 build
+        # unless PION_VECTOR_VNNI=1 opts in to the VNNI one.
         run: pixi run test-vector-differential
 
       - name: Correctness before packaging
