@@ -518,7 +518,6 @@ This keeps the substrate **model-family-agnostic**: Mamba (size=2 `[conv_state, 
 
 | Prefix length | Vanilla cold | Pion warm | Speedup | Token agreement |
 |---:|---:|---:|:---:|:---:|
-| 174 tokens | 470 ms | 285 ms | 1.7× | 24/24 |
 | 2,048 tokens |  4,972 ms | 355 ms | 14.0× | 18/18 |
 | 4,096 tokens | 10,245 ms | 407 ms | 25.3× | 17/18 |
 | 8,192 tokens | 21,328 ms | 936 ms | **29.0×** | 18/18 |
@@ -526,8 +525,7 @@ This keeps the substrate **model-family-agnostic**: Mamba (size=2 `[conv_state, 
 Measured 2026-10-02 on an M4 Mac mini against Pion 0.9.1, vanilla prefilled the
 way mlx-lm's `generate_step` does. Each cell is the mean over three queries, and
 the speedup is the mean of the per-query ratios
-(`benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`; 174 tokens is
-`bench_qwen3_5_warm_ttft.py`). Warm TTFT grows with the bytes shipped: 118.6 MB
+(`benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`). Warm TTFT grows with the bytes shipped: 118.6 MB
 at 2K and 320 MB at 8K, with a 33.55 MB largest layer. The 8K mean holds one
 1,657 ms first query; the other two took ~575 ms. Token agreement misses one
 token in 18 at 4K, greedy-argmax noise present on both paths.

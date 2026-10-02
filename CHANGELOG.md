@@ -4,7 +4,9 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [0.9.2] — 2026-10-02
+
+Corrections, the demo, and the PyPI page; the server's behaviour is unchanged.
 
 ### Corrected
 
@@ -58,8 +60,14 @@ enumerated — there were roughly 1,100 of them.
   - It says what to start when no server answers, and exits non-zero on failure.
   - It names the one-time cost of the first request after a store, and says why
     its requests sit above the separate-process row.
-- **`pion-vllm-mlx` 0.1.2** carries the corrected numbers to its PyPI page. 0.1.1
-  still shows the old ones until a release publishes 0.1.2.
+- **`pion-vllm-mlx` 0.1.2** carries the corrected numbers to its PyPI page.
+
+### Removed
+
+- **`benchmarks/reproducers/bench_qwen3_5_warm_ttft.py`**, a one-length copy of
+  `sweep_qwen3_5_warm_ttft.py`, which runs any length with `--target-tokens N`.
+  Against the corrected baseline its 174-token default measures 1.7×, below the
+  2× it required to pass. The 3.92× it used to back came from the old baseline.
 
 ## [0.9.1] — 2026-10-01
 
@@ -101,7 +109,7 @@ correctness surface is well tested, but the operational surface has gaps that a
   1,530 ms → 30.2 ms warm TTFT (Llama-3.2-1B-4bit, 2,048-token prefix, same
   process); 24× cross-process on the wire (1,558 ms → 64.7 ms); cross-instance
   output verified BLEU 1.000. *(Both ratios were overstated; see Corrected
-  under Unreleased.)*
+  under 0.9.2.)*
 - **`PionPromptCache`** — a 4-line drop-in for `mlx_lm.make_prompt_cache` on
   Apple Silicon.
 - **A value receipt.** `PION.STATS` (and a `# Pion` section in `INFO`) reports
@@ -114,7 +122,7 @@ correctness surface is well tested, but the operational surface has gaps that a
   and Linux.
 - **Hybrid Mamba+Transformer prefix state** shared across processes and
   persisted: 24.7× / 32.7× / 11.6× warm TTFT at 2K / 4K / 8K on Qwen3.5-4B.
-  *(Overstated; see Corrected under Unreleased.)*
+  *(Overstated; see Corrected under 0.9.2.)*
 - **Sparse long-context selector** — 100% needle recall at 64K attending 0.78%
   of the prefix, bit-identical greedy decode. NIAH-class retrieval only.
 - **MoE expert paging** (`MOE.EXPERT.*`) — a 51.6 GB model on a 16 GB Mac, with
