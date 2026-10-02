@@ -137,7 +137,7 @@ cp LICENSE "$STAGE/"
 # A `pixi run build` binary links the closed libpion_vector, whose own licence
 # must travel with it (its section 3(c)). ASK THE BINARY which backend it
 # carries rather than inferring it from the platform: a build-open binary, or
-# any platform not yet vendored (gh #348), contains no closed code and ships
+# any platform without a vendored archive (iOS today), contains no closed code and ships
 # Apache-2.0 alone. An unreadable --version is a refusal, not a guess — shipping
 # the library without its licence is the one mistake here that is not cosmetic.
 VEC_LINE="$(./pion-server --version 2>/dev/null | grep '^vector:' || true)"

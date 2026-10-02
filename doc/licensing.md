@@ -16,8 +16,8 @@ files disagree, the files win.
 | **The engine** — everything under `src/`, including the open reference vector kernels in `src/vector/reference/` | **Apache-2.0** | [`LICENSE`](../LICENSE) |
 | Everything else not listed below — `tests/`, `tools/`, `benchmarks/`, `scripts/`, `docker/`, `examples/`, `doc/`, `pion-serve/`, `flare_gateway/`, `vllm-pion/`, `pion_memory.py` | Apache-2.0 | [`LICENSE`](../LICENSE) |
 | **`libpion_vector`** — the object code under `vendor/pion-vector/`: tuned 1536-dim beam searches (INT8, PolarQuant, TurboQuant, NanoQuant) and product-key-memory kernels | **Pion Vector Binary Licence** — free, closed | [`vendor/pion-vector/LICENSE`](../vendor/pion-vector/LICENSE) |
-| **Release tarballs** built with `pixi run build` (they link `libpion_vector`) | Apache-2.0 for Pion, plus the binary licence for the library inside it; both texts are in the tarball | both of the above |
-| The **Docker image**, and any build made with `pixi run build-open` (Linux builds today, until the Linux library archives ship) | Apache-2.0 only — no closed code is linked | [`LICENSE`](../LICENSE) |
+| **Release tarballs and the Docker image**, built with `pixi run build` (`build-portable` on Linux x86-64), which link `libpion_vector` on macOS arm64, Linux x86-64 and Linux arm64 | Apache-2.0 for Pion, plus the binary licence for the library inside it; both texts ship with the binary (`LICENSE`, `LICENSE-pion-vector`) | both of the above |
+| Any build made with `pixi run build-open`, and the v0.9.2 Linux tarballs and image, which predate the Linux archives | Apache-2.0 only — no closed code is linked | [`LICENSE`](../LICENSE) |
 | **`pion-vllm-mlx`** — the mlx-lm prompt cache and attention patch (PyPI: `pion-vllm-mlx`) | Apache-2.0 | [`pion-vllm-mlx/LICENSE`](../pion-vllm-mlx/LICENSE) |
 | **`pion-mcp`** (`mcp/`) — the MCP agent-memory server | Apache-2.0 | [`mcp/LICENSE`](../mcp/LICENSE) |
 | **`pion-lmcache`** — the LMCache connector | Apache-2.0 | [`pion-lmcache/LICENSE`](../pion-lmcache/LICENSE) |
@@ -113,6 +113,9 @@ Nothing withheld is needed to build, run or test what is published.
   `pion-autogen`, `pion-llamaindex`, `pion-exo`) into an Apache/MIT project?*
   Yes — they are Apache-2.0 and self-contained, and none of them contains the
   library.
-- *Is the Docker image under the same licence as the binary?* It is Apache-2.0
-  only: the image is built on Linux, which links the open reference until the
-  Linux archives ship.
+- *Is the Docker image under the same licence as the binary?* Yes, from the
+  release after v0.9.2: its binary links `libpion_vector` exactly as a release
+  tarball does, and both licence texts are in the image at `/opt/pion/LICENSE`
+  and `/opt/pion/LICENSE-pion-vector`. The v0.9.2 image predates the Linux
+  archives and is Apache-2.0 only. For a binary with no closed code, run
+  `pixi run build-open`; it exists on macOS and on both Linux targets.

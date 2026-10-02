@@ -86,15 +86,15 @@ jobs:
         # macOS minutes count 10x against the private dev repo's free monthly
         # allotment, which Pages draws on too. So on a private repo the macOS
         # leg runs only when started by hand (`gh workflow run CI --ref
-        # <branch>`). On the public repo both legs always run; Actions is free
-        # there.
-        leg: ${{ fromJSON(github.event.repository.private && github.event_name != 'workflow_dispatch' && '["linux-x86_64"]' || '["linux-x86_64", "macos-arm64"]') }}
-    runs-on: ${{ matrix.leg == 'macos-arm64' && 'macos-14' || 'ubuntu-24.04' }}
+        # <branch>`). On the public repo every leg always runs; Actions is free
+        # there, arm64 Linux runners included.
+        leg: ${{ fromJSON(github.event.repository.private && github.event_name != 'workflow_dispatch' && '["linux-x86_64"]' || '["linux-x86_64", "linux-arm64", "macos-arm64"]') }}
+    runs-on: ${{ matrix.leg == 'macos-arm64' && 'macos-14' || matrix.leg == 'linux-arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     env:
-      # Linux: the -O3 portable build (x86-64-v2), GPU-free; it emits
-      # pion-server-dev.
-      BUILD_TASK: ${{ matrix.leg == 'macos-arm64' && 'build' || 'build-portable' }}
-      BINARY: ${{ matrix.leg == 'macos-arm64' && './pion-server' || './pion-server-dev' }}
+      # Linux x86-64: the -O3 portable build (x86-64-v2), GPU-free; it emits
+      # pion-server-dev. Linux arm64 and macOS: `build`, as release.yml does.
+      BUILD_TASK: ${{ matrix.leg == 'linux-x86_64' && 'build-portable' || 'build' }}
+      BINARY: ${{ matrix.leg == 'linux-x86_64' && './pion-server-dev' || './pion-server' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -137,10 +137,16 @@ jobs:
       - name: Closed vector library matches its open reference
         # D11: every routine in vendor/pion-vector/<platform>/libpion_vector.a
         # against src/vector/reference/ on the same inputs — beams bit-exact,
-        # PKM FP32 within 1e-4. Only macOS has a vendored archive today; Linux
-        # builds run the reference itself until gh #348.
-        if: matrix.leg == 'macos-arm64'
-        run: pixi run test-vector-differential
+        # PKM FP32 within 1e-4. Every platform links its own vendored archive;
+        # on x86 the dispatcher runs the x86-64-v2 build unless
+        # PION_VECTOR_VNNI=1 opts in to the VNNI one. The runner's CPU goes in
+        # the log, since an x86 result can depend on it.
+        run: |
+          if [ -r /proc/cpuinfo ]; then
+            grep -m1 'model name' /proc/cpuinfo || true
+            grep -o -w -E 'avx2|fma|avx512f|avx512_vnni|avx_vnni' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          fi
+          pixi run test-vector-differential
 
       - name: Start server
         # Port 1974 is not a preference: tests/test_parity.py hardcodes it and
