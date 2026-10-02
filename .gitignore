@@ -83,6 +83,15 @@ benchmarks/knnlm/*.npy
 # Local Claude Code runtime
 .claude/scheduled_tasks.lock
 
+# Maintainer-local files that stay private: Claude Code config and project
+# notes, scratch notes, the embedding model and benchmark run logs. Some are
+# symlinks, which a trailing-slash pattern would not match.
+/.claude
+CLAUDE.local.md
+/localtemp
+/models
+benchmark_results.md
+
 # Gemini CLI per-project config symlinks (untracked IDE state from a
 # different tool; not part of the Pion project itself)
 .antigravitycli/
