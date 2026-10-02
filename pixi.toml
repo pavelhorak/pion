@@ -28,8 +28,10 @@ build = { cmd = "mojo build -I . -D PION_HELD_VECTOR src/main.mojo -Xlinker src/
 # reference kernels, no closed code) that doc/licensing.md promises.
 build-open = { cmd = "mojo build -I . src/main.mojo -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker --export-dynamic -Xlinker -u -Xlinker pion_gh199_build_lane -Xlinker -u -Xlinker pion_worker_entry -Xlinker -lm -Xlinker -lpthread -o pion-server", depends-on = ["stamp-version", "build-ffi"] }
 # The generic task links the macOS archive; each Linux target runs the
-# differential against its own. -lm: the kernels call fmaf.
-test-vector-differential = "bash -c 'mojo build -I . -D PION_HELD_VECTOR tests/test_vector_differential.mojo -Xlinker vendor/pion-vector/linux-aarch64/libpion_vector.a -Xlinker -lm -o /tmp/pion_vdiff && /tmp/pion_vdiff'"
+# differential against its own, with the reference compiled for the archive's
+# target CPU so both sides make the same FMA and vector-width choices.
+# -lm: the kernels call fmaf.
+test-vector-differential = "bash -c 'mojo build -I . -D PION_HELD_VECTOR --target-cpu neoverse-n1 tests/test_vector_differential.mojo -Xlinker vendor/pion-vector/linux-aarch64/libpion_vector.a -Xlinker -lm -o /tmp/pion_vdiff && /tmp/pion_vdiff'"
 
 [target.linux-64.tasks]
 # CUDA path (gh #9): nvcc compiles cuda_kernels.cu (sdpa_q1 dense + sparse,
@@ -41,8 +43,12 @@ test-vector-differential = "bash -c 'mojo build -I . -D PION_HELD_VECTOR tests/t
 build-ffi = "gcc -O3 -c src/ffi/crash_wrap.c -o src/ffi/crash_wrap.o && gcc -O3 -c src/ffi/fcntl_wrap.c -o src/ffi/fcntl_wrap.o && gcc -O3 -c src/ffi/uring_wrap.c -o src/ffi/uring_wrap.o && gcc -O3 -c src/ffi/xdp_wrap.c -o src/ffi/xdp_wrap.o && gcc -O3 -c src/ffi/ssm_state_wrap.c -o src/ffi/ssm_state_wrap.o && gcc -O3 -c src/ffi/moe_warm_pool.c -o src/ffi/moe_warm_pool.o && /usr/local/cuda/bin/nvcc -O3 -std=c++17 -Xcompiler -fPIC -arch=sm_89 -c src/ffi/cuda_kernels.cu -o src/ffi/cuda_kernels.o && /usr/local/cuda/bin/nvcc -O3 -std=c++17 -Xcompiler -fPIC -arch=sm_89 -c src/ffi/cuda_wrap.c -o src/ffi/cuda_wrap.o && gcc -O3 -c src/ffi/build_pool_wrap.c -o src/ffi/build_pool_wrap.o && gcc -O3 -c src/ffi/worker_spawn_wrap.c -o src/ffi/worker_spawn_wrap.o && bash scripts/build_lua.sh"
 build = { cmd = "mojo build -I . -D PION_HELD_VECTOR src/main.mojo -D PION_CUDA -Xlinker src/ffi/crash_wrap.o -Xlinker src/ffi/build_pool_wrap.o -Xlinker src/ffi/worker_spawn_wrap.o -Xlinker src/ffi/fcntl_wrap.o -Xlinker src/ffi/uring_wrap.o -Xlinker src/ffi/xdp_wrap.o -Xlinker src/ffi/ssm_state_wrap.o -Xlinker src/ffi/moe_warm_pool.o -Xlinker src/ffi/cuda_kernels.o -Xlinker src/ffi/cuda_wrap.o -Xlinker src/ffi/lua_wrap.o -Xlinker src/ffi/lua/liblua.a -Xlinker -L/usr/local/cuda/lib64 -Xlinker -lcudart -Xlinker -lstdc++ -Xlinker --export-dynamic -Xlinker -u -Xlinker pion_gh199_build_lane -Xlinker -u -Xlinker pion_worker_entry -Xlinker vendor/pion-vector/linux-x86_64/libpion_vector.a -Xlinker -lm -Xlinker -lpthread -o pion-server", depends-on = ["stamp-version", "build-ffi"] }
 # The generic task links the macOS archive; each Linux target runs the
-# differential against its own. -lm: the x86 kernels call fmaf.
-test-vector-differential = "bash -c 'mojo build -I . -D PION_HELD_VECTOR tests/test_vector_differential.mojo -Xlinker vendor/pion-vector/linux-x86_64/libpion_vector.a -Xlinker -lm -o /tmp/pion_vdiff && /tmp/pion_vdiff'"
+# differential against its own. The reference is compiled for x86-64-v2, the
+# build the dispatcher runs: compiled for the runner's own CPU it fuses a*b+c
+# into FMA and widens FP32 reductions, and the quant beams' FP32 re-rank then
+# differs in the last bit while INT8 and PKM still match (first CI run,
+# 2026-10-02). -lm: the x86 kernels call fmaf.
+test-vector-differential = "bash -c 'mojo build -I . -D PION_HELD_VECTOR --target-cpu x86-64-v2 tests/test_vector_differential.mojo -Xlinker vendor/pion-vector/linux-x86_64/libpion_vector.a -Xlinker -lm -o /tmp/pion_vdiff && /tmp/pion_vdiff'"
 
 # gh #83: GPU-free CI / OSS-newcomer build. No nvcc, no cudart, no GPU.
 # Mirrors the linux-aarch64 FFI list (POSIX shims + Lua only — no CUDA

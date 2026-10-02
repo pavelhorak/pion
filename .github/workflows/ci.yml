@@ -139,8 +139,14 @@ jobs:
         # against src/vector/reference/ on the same inputs — beams bit-exact,
         # PKM FP32 within 1e-4. Every platform links its own vendored archive;
         # on x86 the dispatcher runs the x86-64-v2 build unless
-        # PION_VECTOR_VNNI=1 opts in to the VNNI one.
-        run: pixi run test-vector-differential
+        # PION_VECTOR_VNNI=1 opts in to the VNNI one. The runner's CPU goes in
+        # the log, since an x86 result can depend on it.
+        run: |
+          if [ -r /proc/cpuinfo ]; then
+            grep -m1 'model name' /proc/cpuinfo || true
+            grep -o -w -E 'avx2|fma|avx512f|avx512_vnni|avx_vnni' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          fi
+          pixi run test-vector-differential
 
       - name: Start server
         # Port 1974 is not a preference: tests/test_parity.py hardcodes it and
