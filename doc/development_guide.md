@@ -33,7 +33,7 @@ Two build profiles. Use `build-dev` for iteration; reserve `build` for benchmark
 
 | task | flags | time | binary | when to use |
 |---|---|---:|---|---|
-| `pixi run build` | `-O3` (default), full LLVM optimization, monomorphization, SIMD codegen | ~290 s | `pion-server` (~3.5 MB) | benchmarks, `/gate`, before push |
+| `pixi run build` | `-O3` (default), full LLVM optimization, monomorphization, SIMD codegen | ~290 s | `pion-server` (~4 MB) | benchmarks, the perf gate, before push |
 | `pixi run build-dev` | `-O0`, no optimization, no DCE | ~15 s | `pion-server-dev` (~28 MB) | "does it compile + raw tests pass" iteration |
 
 `build-dev` is **19× faster** but the binary skips vectorization, inlining, loop unrolling, and SIMD codegen — never benchmark a `pion-server-dev` build, the perf numbers depend on `-O3`. The dev binary passes the correctness tests (`test_raw.py`), so it's safe for "did my change break anything?" loops; for the actual perf gates run a release build.

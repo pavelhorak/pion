@@ -6,14 +6,20 @@ Thanks for considering a contribution. Pion is Apache-2.0, with one closed binar
 
 Every PR that touches Mojo source or wire-protocol surface must show:
 
-1. **Green build** — `pixi run build` exits clean (release `-O3` binary, ~3.5 MB on Mac, comparable on Linux).
+1. **Green build** — `pixi run build` exits clean (release `-O3` binary, ~4 MB on Mac, comparable on Linux).
 2. **Green correctness gate** — `python3 tests/test_raw.py` (114 invariants) + `python3 tests/test_parity.py` (RESP parity vs Redis).
 3. **Green perf gate when the change can affect the hot path** — KV memtier + VectorDBBench above the documented baselines. The floors are in [`benchmarks/gate_baselines.json`](benchmarks/gate_baselines.json); run via:
 
    ```bash
-   /gate                              # all 4 gates on Mac
-   /gate --gate-profile linux-epyc-8124p   # bare-metal Linux
+   python3 benchmarks/preflight.py    # is the machine quiet enough to measure?
+   python3 benchmarks/valkey-benchmark/valkey-benchmark.py -c 50 -n 100000 -P 10 -w 1 --pion-only --gate
+   python3 benchmarks/memtier-benchmark/memtier-benchmark.py --pion-only --profiles throughput,pipeline -w 1 --gate
+   python3 benchmarks/VectorDBBench/vectordb-benchmark.py --pion-only --ef-runtime 150 --workers 10 --gate
    ```
+
+   On bare-metal Linux, add `--gate-profile linux-epyc-8124p` to the memtier and
+   vector commands. The vector harness needs VectorDBBench installed; see
+   [`doc/benchmarking_guide.md`](doc/benchmarking_guide.md).
 
    PRs that don't touch the network engine / KV path / vector kernels can skip Gates 3 + 4.
 
@@ -77,7 +83,7 @@ The short version:
   they do not refer to issues in this repository. Cite this repository's
   issues as `#N`.
 - Don't bypass commit hooks (`--no-verify` / `--no-gpg-sign`). If a hook fails, fix the underlying issue.
-- Don't push to `main` directly. Open a PR even for trivial fixes — but note that opening one runs no checks (see above), so the gate output you paste into the description is the only evidence a reviewer has.
+- Don't push to `main` directly. Open a PR even for trivial fixes. CI runs the correctness gates on it; for a change that can touch the hot path, the perf-gate output you paste into the description is the only performance evidence a reviewer has.
 
 ## Test conventions
 
