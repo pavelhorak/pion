@@ -78,9 +78,12 @@ The 64K row holds **100% needle recall while attending 0.78% of the prefix
 budget** — that is needle-in-a-haystack-class retrieval, not a claim about every
 long-context task — and it is steady state: the first warm call in a process also
 compiles the Metal kernels, about 1.3 s. The first row is same-process; from a separate **process**, over the
-wire, the same prefix measures **17×** (1,242 → 73.9 ms). Cross-instance output is verified
+wire, the same prefix measures **17×** (1,242 → 73.9 ms). A shorter prefix saves less:
+the same measurement gives 11× at 1,035 tokens, 4.5× at 268, and 1.5× at 34,
+where the saving is about 15 ms. Cross-instance output is verified
 **BLEU 1.000** on a 50-token greedy completion — a separate socket and a separate
-model object produce the same text. Sources: [`cross_process_ttft.py`](benchmarks/reproducers/cross_process_ttft.py) `--same` for both 1B rows,
+model object produce the same text. Sources: [`cross_process_ttft.py`](benchmarks/reproducers/cross_process_ttft.py) `--same` for both 1B rows
+(`--prefix-tokens` for the shorter prefixes),
 [`examples/sparse_mask_64k_niah.py`](examples/sparse_mask_64k_niah.py).
 The vanilla side times the first token the way mlx-lm's own `generate_step`
 produces it. Until 2026-10-02 it also computed logits at every prompt position,

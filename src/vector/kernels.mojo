@@ -203,9 +203,11 @@ def calibrate_per_group(
         var range_val = gmax - gmin
         group_scales[g] = Float32(254.0) / range_val if range_val > 0 else Float32(1.0)
 
-# ── x86 INT8 dot product intrinsics (from MAX kernels vnni_intrinsics.mojo) ──
-# Signed INT8×INT8 → INT32 dot product using mask decomposition.
-# On AVX2: pmaddubsw + pmaddwd. On SSE4: ssse3 variant. On VNNI: fused vpdpbusd.
+# ── x86 INT8 dot product intrinsics ──
+# Signed INT8×INT8 → INT32 dot product. On VNNI (after MAX kernels'
+# vnni_intrinsics.mojo): fused vpdpbusd over a biased (unsigned) first operand,
+# minus a correction term. Without VNNI: both operands sign-extended to int16,
+# then pmaddwd + phaddd.
 
 @always_inline
 def _x86_sdot_int8_vnni(acc: SIMD[DType.int32, 4], a: SIMD[DType.int8, 16], b: SIMD[DType.int8, 16]) -> SIMD[DType.int32, 4]:
@@ -268,7 +270,8 @@ def _x86_sdot_int8_sse(acc: SIMD[DType.int32, 4], a: SIMD[DType.int8, 16], b: SI
 def sdot_int8(acc: SIMD[DType.int32, 4], a: SIMD[DType.int8, 16], b: SIMD[DType.int8, 16]) -> SIMD[DType.int32, 4]:
     """ISA-dispatched INT8 dot product: acc[i] += sum(a[4i+k]*b[4i+k], k=0..3).
     - x86 VNNI: AVX512-VNNI vpdpbusd (single µop, fused 4-byte dot)
-    - x86 AVX2/SSE: pmaddubsw + pmaddwd mask decomposition (from MAX kernels)
+    - x86 without VNNI: sign-extend to int16, pmaddwd + phaddd (exact; see
+      `_x86_sdot_int8_sse` for the unsigned-by-signed bug it replaced)
     - ARM +dotprod (ARMv8.2): NEON SDOT (single instruction)
     - anything else: portable int32 widening fallback (SMULL/SMLAL)
 

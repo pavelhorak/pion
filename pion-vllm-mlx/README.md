@@ -7,9 +7,10 @@ that prefix itself (Stage 2).
 
 Time to first token on Llama-3.2-1B-4bit with a 2,049-token prefix and a
 16-token question: 1,242 ms cold in vanilla mlx-lm, **61.9 ms** warm in the same
-process (20×), and **73.9 ms** from a separate process over the wire (17×). With
-a prefix under about a thousand tokens there is little to save; the
-[Pion README](https://github.com/pavelhorak/pion#readme) has the sweep.
+process (20×), and **73.9 ms** from a separate process over the wire (17×). A
+shorter prefix saves less: 11× at 1,035 tokens, 4.5× at 268, and 1.5× at 34,
+where the saving is about 15 ms. The
+[Pion README](https://github.com/pavelhorak/pion#readme) has the sources.
 
 Stage 2 runs on three lanes, auto-selected by `PionPromptCache`:
 
