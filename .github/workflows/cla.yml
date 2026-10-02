@@ -51,7 +51,10 @@ jobs:
           path-to-signatures: 'signatures/version1/cla.json'
           path-to-document: 'https://github.com/pavelhorak/pion/blob/main/CLA.md'
           branch: 'cla-signatures'
-          allowlist: 'pavelhorak,dependabot[bot]'
+          # `claude` is the co-author GitHub resolves for the Co-Authored-By:
+          # Claude trailer on the maintainer's AI-assisted commits; the human
+          # committer still has to be on this list or have signed.
+          allowlist: 'pavelhorak,dependabot[bot],claude'
           custom-notsigned-prcomment: >-
             Thanks for the pull request — before it can be merged, Pion needs a
             signed Contributor Licence Agreement. This is because any future
