@@ -25,8 +25,8 @@ caching effect in isolation from retrieval quality).
 
 Paths:
   A) text-RAG baseline   — cold prefill (context + question), decode, score
-  B) hybrid (inproc)     — ingest context as chunk (NOT timed), warm-decode
-                           question with hydrated K/V, score
+  B) hybrid (inproc)     — ingest context as chunk (NOT timed), hydrate its
+                           K/V and decode the question (both timed), score
   C) hybrid (pion lane)  — same but cross-process via pion-server --kvcache
 
 For each query and each path: TTFT (ms) for the timed portion, and whether
@@ -76,10 +76,24 @@ def load_dataset_sample(n: int, seed: int = 0):
 
 
 def greedy_decode(model, prompt_ids: List[int], n_steps: int, cache) -> tuple:
-    """Returns (decoded_token_ids, ttft_ms)."""
+    """Returns (decoded_token_ids, ttft_ms).
+
+    The first token is produced the way mlx_lm.generate_step does it: every
+    prompt token but the last in 2,048-token chunks with only the cache state
+    evaluated, then the last token alone. Until 2026-10-02 this evaluated one
+    forward's logits at every prompt position, which no generation computes,
+    and that made the text-RAG baseline too slow.
+    """
     x = mx.array([prompt_ids])
     t0 = time.perf_counter()
-    out = model(x, cache=cache)
+    done, n = 0, x.shape[1]
+    while n - done > 1:
+        step = min(2048, n - done - 1)
+        model(x[:, done:done + step], cache=cache)
+        mx.eval([c.state for c in cache])
+        mx.clear_cache()       # as generate_step does after each prefill chunk
+        done += step
+    out = model(x[:, done:], cache=cache)
     mx.eval(out)
     ttft = (time.perf_counter() - t0) * 1000
     tok_id = int(mx.argmax(out[0, -1]).item())
@@ -96,9 +110,13 @@ def greedy_decode(model, prompt_ids: List[int], n_steps: int, cache) -> tuple:
 def warm_decode_via_hybrid(model, hr: HybridRetrievalCache, chunk_id: str,
                             suffix_ids: List[int], n_steps: int) -> tuple:
     """Hybrid path: K/V already ingested. Hydrate cache + forward suffix.
-    Returns (decoded_token_ids, ttft_ms)."""
+    Returns (decoded_token_ids, ttft_ms) — the hydration is inside the time to
+    first token (until 2026-10-02 it was not, which flattered this side)."""
+    t0 = time.perf_counter()
     cache, suffix = hr.prepare(chunk_id, suffix_ids)
-    return greedy_decode(model, suffix, n_steps, cache)
+    prepare_ms = (time.perf_counter() - t0) * 1000
+    decoded, ttft = greedy_decode(model, suffix, n_steps, cache)
+    return decoded, prepare_ms + ttft
 
 
 def answer_found(decoded_text: str, gold_answers: List[str]) -> bool:

@@ -61,6 +61,30 @@ def system_prompt(i: int, repeats: int) -> str:
     return (SYSTEM_PROMPTS[i % len(SYSTEM_PROMPTS)] + SYSTEM_PADDING) * repeats
 
 
+PREFILL_STEP = 2048          # mlx_lm.generate_step's default prefill_step_size
+
+
+def first_token_logits(model, ids, cache):
+    """The first token's logits after `ids`, computed the way mlx_lm.generate_step does.
+
+    Every token but the last runs through the model in PREFILL_STEP chunks with
+    only the cache state evaluated; the last token alone yields the logits.
+    Until 2026-10-02 both paths here evaluated one forward's logits over every
+    position — a vocabulary projection no generation computes — which made the
+    cold side ~30% slow at 2K tokens and the reduction too large.
+    """
+    done, n = 0, ids.shape[1]
+    while n - done > 1:
+        step = min(PREFILL_STEP, n - done - 1)
+        model(ids[:, done:done + step], cache=cache)
+        mx.eval([c.state for c in cache])
+        mx.clear_cache()       # as generate_step does after each prefill chunk
+        done += step
+    last = model(ids[:, done:], cache=cache)[0, -1]
+    mx.eval(last)
+    return last
+
+
 def main(args) -> int:
     print(f"PionPromptCache workload  model={args.model}  prompts={args.prompts}  q={args.queries}  vquant={args.vquant}")
 
@@ -86,8 +110,7 @@ def main(args) -> int:
     # Warmup
     full_w = mx.array([sys_tokens[0] + tok.encode(USER_QUERIES[0])])
     for _ in range(args.warmup):
-        out = model(full_w, cache=make_prompt_cache(model))
-        mx.eval(out)
+        first_token_logits(model, full_w, make_prompt_cache(model))
 
     # ── A: standalone (cold every request) ──────────────────────────────────
     print("[A] standalone — cold prefill every request")
@@ -96,11 +119,11 @@ def main(args) -> int:
     a_t0 = time.perf_counter()
     for (pi, q) in workload:
         full = mx.array([sys_tokens[pi] + tok.encode(q)])
+        cache = make_prompt_cache(model)
         t0 = time.perf_counter()
-        out = model(full, cache=make_prompt_cache(model))
-        mx.eval(out)
+        last = first_token_logits(model, full, cache)
         a_ttfts.append((time.perf_counter() - t0) * 1000)
-        a_first_by_key[(pi, q)] = int(mx.argmax(out[0, -1]).item())
+        a_first_by_key[(pi, q)] = int(mx.argmax(last).item())
     a_wall = time.perf_counter() - a_t0
     a_throughput = len(workload) / a_wall
 
@@ -122,8 +145,7 @@ def main(args) -> int:
         is_cold = pi not in seen_prompts
         t0 = time.perf_counter()
         cache = pc.get_or_prefill(sys_tokens[pi], ns)
-        out = model(suffix, cache=cache)
-        mx.eval(out)
+        last = first_token_logits(model, suffix, cache)
         dt = (time.perf_counter() - t0) * 1000
         c_ttfts.append(dt)
         if is_cold:
@@ -131,7 +153,7 @@ def main(args) -> int:
             seen_prompts.add(pi)
         else:
             c_ttfts_warm.append(dt)
-        c_first_by_key[(pi, q)] = int(mx.argmax(out[0, -1]).item())
+        c_first_by_key[(pi, q)] = int(mx.argmax(last).item())
     c_wall = time.perf_counter() - c_t0
     c_throughput = len(workload) / c_wall
 

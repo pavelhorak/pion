@@ -35,19 +35,22 @@ Setup:
     ./pion-server --kvcache --metal-attention -w 1
     python3 benchmarks/reproducers/bench_qwen3_5_warm_ttft.py
 
-Result on 2026-05-13 (Mac M4, Qwen3.5-4B-MLX-4bit, 174-token prefix, 3 queries):
-    Vanilla cold per-query: ~543 ms TTFT
-    Pion warm per-query:    ~138 ms TTFT
-    Mean speedup:           3.92×
-    Token agreement:        100% (8/8 bit-perfect, all 3 queries)
+Result on 2026-10-02 (M4 Mac mini, Pion 0.9.1, Qwen3.5-4B-MLX-4bit, 174-token
+prefix, 3 queries), vanilla prefilled the way mlx-lm's generate_step does:
+    Vanilla cold per-query: ~470 ms TTFT
+    Pion warm per-query:    ~285 ms TTFT
+    Mean speedup:           1.67×
+    Token agreement:        100% (8/8, all 3 queries)
+
+That is below the 2x this script requires before it exits 0. The bar was set
+against the 2026-05-13 run, which reported 3.92x with a vanilla side that also
+computed logits at every prompt position. At 174 tokens there is little
+prefill to skip; sweep_qwen3_5_warm_ttft.py has 2K-8K (14x / 25x / 29x).
 
 Why this matters:
-- This is the first demonstrated TTFT win on a hybrid Mamba+Transformer model
-  served from Pion. The mlx-lm + Pion combo is currently the only OSS path
-  that prefix-shares BOTH layer types (linear + softmax) — vLLM/SGLang/LMCache
-  ship cross-instance KV for softmax-only attention.
-- 3.92× at 174-token prefix scales: at 64K prefix the ratio would be 50×+ per
-  the gh #73 sparse-mask result on similar TTFT scaling.
+- Pion carries both layer types of a hybrid Mamba+Transformer model across
+  processes: the linear layers' state through SSM.PREFIX.*, the softmax
+  layers' K/V alongside it, bit-equal on replay.
 
 Caveats:
 - Spike uses uniform SSM.PREFIX.* path for both layer types. Production-shape
@@ -134,7 +137,23 @@ def deserialize_into(c, blob):
 
 
 def greedy_first_token(model, ids, cache):
-    out = model(mx.array([ids]), cache=cache)
+    """First token after `ids`, prefilled the way mlx_lm.generate_step does.
+
+    Every token but the last runs in 2,048-token chunks with only the cache
+    state evaluated; the last token alone gives the logits. Until 2026-10-02
+    this evaluated one forward's logits over every position, which no
+    generation computes, so the vanilla side was too slow and the speedup
+    too high.
+    """
+    x = mx.array([ids])
+    done, n = 0, x.shape[1]
+    while n - done > 1:
+        step = min(2048, n - done - 1)
+        model(x[:, done:done + step], cache=cache)
+        mx.eval([c.state for c in cache])
+        mx.clear_cache()       # as generate_step does after each prefill chunk
+        done += step
+    out = model(x[:, done:], cache=cache)
     mx.eval(out)
     return out, int(mx.argmax(out[0, -1]).item())
 
@@ -188,8 +207,8 @@ def main(args) -> int:
     print("[B] Pion warm — prefill ONCE, ship via wire, fetch per query")
     t0 = time.perf_counter()
     cache_prefix = make_prompt_cache(model)
-    out = model(mx.array([prefix_ids]), cache=cache_prefix)
-    mx.eval(out)
+    model(mx.array([prefix_ids]), cache=cache_prefix)
+    mx.eval([c.state for c in cache_prefix])    # the cache is what ships; no logits needed
     total_bytes = 0
     for i, c in enumerate(cache_prefix):
         blob = serialize_layer(c)

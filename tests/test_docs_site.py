@@ -156,9 +156,13 @@ def main():
     check("no unfilled placeholder", not re.search(r"\{\{\w+\}\}", landing))
     check("the four lines", "get_or_prefill" in landing and "PionPromptCache(model" in landing)
     # The second row was "9.26×" (846 → 91 ms) until 2026-09-23: a real run from a
-    # different workload, shown beside a 2,048-token row it did not match. It is
-    # now the separate-process measurement at the same prefix (cross_process_ttft.py).
-    check("both TTFT rows with factors", "50.6×" in landing and "24×" in landing and "64.7 ms" in landing)
+    # different workload, shown beside a 2,048-token row it did not match. Both rows
+    # now come from cross_process_ttft.py (--same adds the first), and since
+    # 2026-10-02 their vanilla side prefills the way mlx-lm's generate_step does —
+    # the earlier 50.6× / 24× computed logits at every prompt position.
+    check("both TTFT rows with factors", "20×" in landing and "17×" in landing and "73.9 ms" in landing)
+    # The correction sentence names the retired factors, so check the retired cells.
+    check("the retired TTFT cells are gone", "1,530 ms" not in landing and "64.7 ms" not in landing)
     check("the 64K row is labelled NIAH-class", "326×" in landing and "NIAH-class" in landing)
     check("the honesty figure", "0.86×" in landing)
     check("install: Homebrew first on macOS", "brew install pavelhorak/tap/pion" in landing)

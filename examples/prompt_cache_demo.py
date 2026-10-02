@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """
-prompt_cache_demo.py — 5-minute PionPromptCache headline demo.
+prompt_cache_demo.py — the README's four PionPromptCache lines, timed.
 
-Shows the in-process fast lane (Stage 2, gh #50): cold prefill warms Pion,
-warm forward skips prefill entirely. No Pion server needed for the in-process
-path — K/V lives as MLX arrays inside this process.
+Prefills a ~2,048-token shared prefix the way vanilla mlx-lm does, then gets
+the same prefix's K/V from Pion instead, and generates the same answer both
+ways. Prints the time to first token for each, and both answers, which must
+match.
 
-Usage:
-    # In-process path (default, no server needed):
+Usage — Pion must be running with --kvcache (the Homebrew service is):
+    brew services start pion                        # or, from a tarball or build:
+    ./pion-server --kvcache --metal-attention -w 1
     python3 examples/prompt_cache_demo.py
 
-    # Cross-process path (requires Pion; the Homebrew service already runs
-    # with these flags):
-    ./pion-server --kvcache --metal-attention -w 1
-    python3 examples/prompt_cache_demo.py --backend pion
+The first run stores the prefix in Pion; later runs, in any process, find it
+there. Each run times five requests the way an app makes them (fetch the
+prefix's K/V, then generate a full answer), prints every time to first token,
+and takes the ratio from their median. The first request in a process also
+pays that process's one-time setup.
+
+    python3 examples/prompt_cache_demo.py --prefix-tokens 33
+shows the small end: a 34-token prefix leaves about 15 ms of prefill to skip.
+
+    python3 examples/prompt_cache_demo.py --backend inproc
+needs no server and only checks that mlx-lm runs: it re-prefills every time,
+so it prints ~1x by construction.
 
 Prerequisites:
     pip install 'pion-vllm-mlx[mlx]'   # mlx + mlx-lm pulled in
@@ -22,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -58,7 +69,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "pion-vllm-mlx"))
 
 try:
-    from pion_vllm_mlx import PionPromptCache, install_pion_attention_patch
+    from pion_vllm_mlx import PionPromptCache
 except ImportError:
     print("pion_vllm_mlx not found: pip install 'pion-vllm-mlx[mlx]'")
     sys.exit(1)
@@ -70,21 +81,12 @@ SYSTEM_PROMPT = (
 PREFIX = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{SYSTEM_PROMPT}<|eot_id|>"
 
 # gh #264: the demo used to run with this ~33-token prefix and nothing else, and
-# it therefore DISCONFIRMED the pitch — measured 1.13x on the inproc backend and
-# 0.86x on the wire, because at 33 tokens there is no prefill worth saving and
-# the round-trip costs more than recomputing it. The mechanism is fine; the
-# workload was outside the regime the claim comes from. Same code path, only the
-# prefix length varying:
-#
-#     prefix tokens   vanilla cold   pion warm   speedup
-#                33        332 ms      152 ms      2.18x
-#               267        444 ms      164 ms      2.71x
-#             1,034      1,024 ms      308 ms      3.33x
-#             2,061      2,113 ms       91 ms     23.18x
-#
-# So the default is now a 2,048-token prefix — the size the documented numbers
-# were measured at. --prefix-tokens 33 reproduces the old behaviour, which is
-# worth seeing: it is the honest picture of when this technique does nothing.
+# it therefore DISCONFIRMED the pitch — 1.13x on the inproc backend and 0.86x on
+# the wire, because at 33 tokens there is almost no prefill to save. The default
+# is now a 2,048-token prefix; --prefix-tokens 33 still shows the small end. The
+# whole curve, each point from separate processes, is cross_process_ttft.py's
+# sweep (2026-10-02, M4 Mac mini, Pion 0.9.1): 1.5x at 34 tokens, 4.5x at 268,
+# 11x at 1,035 and 17x at 2,049.
 _FILLER = ("The assistant is helpful, precise, and answers in one sentence. ")
 
 
@@ -137,44 +139,71 @@ def _generate(model, tok, cache, suffix_text: str) -> tuple[str, float, float]:
     return tok.decode(tokens), (ttft if ttft is not None else total), total
 
 
+def _not_reachable(args, err) -> int:
+    print(f"\nPion is not answering on {args.host}:{args.port} ({err}). Start it first:")
+    print("    brew services start pion                        # Homebrew")
+    print("    ./pion-server --kvcache --metal-attention -w 1  # tarball or source build")
+    print("or run this demo with --backend inproc (no server; it re-prefills, so it shows ~1x).")
+    return 2
+
+
+def _refused(err) -> int:
+    print(f"\nPion refused to store the prefix: {err}")
+    print("The prompt cache needs the server started with --kvcache "
+          "(the Homebrew service already is).")
+    return 2
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--backend", choices=["inproc", "pion"], default="inproc")
+    ap = argparse.ArgumentParser(
+        description="Time the README's four PionPromptCache lines against vanilla mlx-lm.")
+    ap.add_argument("--backend", choices=["pion", "inproc"], default="pion",
+                    help="pion (default): get the prefix's K/V from a Pion server. "
+                         "inproc: no server; re-prefills every time, so it only "
+                         "checks that mlx-lm runs and prints ~1x.")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=1974)
     ap.add_argument("--model", default=MODEL_ID)
     ap.add_argument("--prefix-tokens", type=int, default=2048,
                     help="Length of the shared system prefix. The win scales with "
                          "this: below a few hundred tokens there is nothing to reuse.")
+    ap.add_argument("--requests", type=int, default=5,
+                    help="Timed requests on the cached side; the ratio uses their median.")
     args = ap.parse_args()
 
     print(f"Loading {args.model} …")
     model, tok = mlx_load(args.model)
 
-    if args.backend == "pion":
-        install_pion_attention_patch()
-        # gh #264: the model is PionPromptCache's FIRST parameter and defaults
-        # to None. Omitting it made --backend pion — the only mode that shows
-        # cross-session reuse — die inside get_or_prefill with
-        # "'NoneType' object has no attribute 'layers'".
-        pc = PionPromptCache(model, host=args.host, port=args.port)
-        namespace = f"demo|llama321b|fp16|system_v1|{args.prefix_tokens}"
-    else:
-        pc = None
+    from mlx_lm.models.cache import make_prompt_cache
 
     prefix_ids = tok.encode(_build_prefix(tok, args.prefix_tokens),
                             add_special_tokens=False)
     print(f"Shared prefix: {len(prefix_ids)} tokens "
           f"(--prefix-tokens {args.prefix_tokens})")
 
-    from mlx_lm.models.cache import make_prompt_cache
+    pc = None
+    stored = False
+    namespace = None
+    hits_before = 0
+    if args.backend == "pion":
+        # The key names everything the K/V depends on: model, token ids, dtype.
+        namespace = PionPromptCache.make_namespace(
+            args.model, "prompt_cache_demo", "fp16", ",".join(map(str, prefix_ids)))
+        try:
+            pc = PionPromptCache(model, host=args.host, port=args.port)
+            stored = pc.lookup(namespace)
+        except OSError as e:
+            return _not_reachable(args, e)
 
-    # gh #264: BOTH passes used to prefill (or fetch) OUTSIDE the timer and then
-    # time only the suffix — so "cold" and "warm" measured the same thing and the
-    # demo could never show more than noise (measured 1.13x / 0.86x). The prefill
-    # is the entire cost being saved; it has to be inside the clock.
+    # One short untimed forward first, so neither side pays Metal's one-time
+    # kernel compile inside its clock (cross_process_ttft.py does the same).
+    warm = make_prompt_cache(model)
+    model(mx.array(prefix_ids[:64])[None], cache=warm)
+    mx.eval([c.state for c in warm])
 
-    # --- Path A: vanilla mlx-lm. Prefills the prefix on every request. ---
+    # gh #264: the prefill is the whole cost being saved, so it is inside the
+    # clock on both sides. Vanilla is mlx-lm's own path: the prefix prefilled
+    # with only the cache evaluated, then generate_step over the suffix.
     print("\n[vanilla] cold prefill of the whole prefix, then generate …")
     t0 = time.perf_counter()
     cache = make_prompt_cache(model)
@@ -182,54 +211,76 @@ def main():
     mx.eval([c.state for c in cache])
     cold_prefix = time.perf_counter() - t0
     cold_out, cold_first, cold_gen = _generate(model, tok, cache, SUFFIX)
-    # TTFT = the prefix phase + _generate's own first-token time. Reading the
-    # clock after _generate returned timed the WHOLE answer while printing
-    # "Time to first token" — decode time diluted the ratio (8.2x printed where
-    # the first-token ratio was ~25x at 2,048 tokens; 1.6x printed at 33).
     cold_ttft = cold_prefix + cold_first
     cold_total = cold_prefix + cold_gen
-    print(f"[vanilla] {cold_ttft*1000:>8.1f} ms to first token  ·  {cold_total*1000:.1f} ms to the full answer  →  {cold_out!r}")
+    print(f"[vanilla] {cold_ttft*1000:>8.1f} ms to first token  ·  "
+          f"{cold_total*1000:.1f} ms to the full answer  →  {cold_out!r}")
 
-    # --- Path B: Pion. The prefix is already prefilled; this is a cache hit. ---
-    print("\n[pion]    warming the cache once (not timed) …")
     if pc is not None:
-        pc.get_or_prefill(prefix_ids, namespace=namespace)
-    else:
-        warm_seed = make_prompt_cache(model)
-        model(mx.array(prefix_ids)[None], cache=warm_seed)
-        mx.eval([c.state for c in warm_seed])
+        if stored:
+            print("\n[pion]    the prefix is already in Pion (an earlier run, or "
+                  "another process, stored it)")
+        else:
+            print("\n[pion]    the prefix is not in Pion yet: prefilling it once and "
+                  "storing it (not timed) …")
+            try:
+                pc.get_or_prefill(prefix_ids, namespace=namespace)
+            except RuntimeError as e:
+                return _refused(e)
+        hits_before = pc.hits
 
-    print("[pion]    hitting it …")
-    t0 = time.perf_counter()
-    if pc is not None:
-        cache = pc.get_or_prefill(prefix_ids, namespace=namespace)
-    else:
-        # The inproc path has nothing to fetch from — it re-prefills, which is
-        # why this backend reports ~1x and the note below says so.
-        cache = make_prompt_cache(model)
-        model(mx.array(prefix_ids)[None], cache=cache)
-        mx.eval([c.state for c in cache])
-    warm_prefix = time.perf_counter() - t0
-    warm_out, warm_first, warm_gen = _generate(model, tok, cache, SUFFIX)
-    warm_ttft = warm_prefix + warm_first
-    warm_total = warm_prefix + warm_gen
-    print(f"[pion]    {warm_ttft*1000:>8.1f} ms to first token  ·  {warm_total*1000:.1f} ms to the full answer  →  {warm_out!r}")
+    def request():
+        """One request as an app makes it: get the prefix's cache, then generate."""
+        t0 = time.perf_counter()
+        if pc is not None:
+            cache = pc.get_or_prefill(prefix_ids, namespace=namespace)
+        else:
+            # inproc has nothing to fetch from: it re-prefills, by construction.
+            cache = make_prompt_cache(model)
+            model(mx.array(prefix_ids)[None], cache=cache)
+            mx.eval([c.state for c in cache])
+        got = time.perf_counter() - t0
+        out, first, gen = _generate(model, tok, cache, SUFFIX)
+        return out, got + first, got + gen
 
-    if cold_out != warm_out:
+    label = "pion" if pc is not None else "inproc"
+    runs = [request() for _ in range(max(1, args.requests))]
+    ttfts = [r[1] * 1000 for r in runs]
+    each = "a fetch and a full answer" if pc is not None else "a re-prefill and a full answer"
+    print(f"[{label}]{' ' * (9 - len(label))}{len(runs)} requests, each {each}, "
+          f"ms to first token: " + " · ".join(f"{t:.1f}" for t in ttfts))
+    print(f"[{label}]{' ' * (9 - len(label))}answer: {runs[-1][0]!r}")
+
+    if pc is not None and pc.hits - hits_before != len(runs):
+        print("\n!! a timed request was not a cache hit, so its time includes a "
+              "prefill — please report it")
+    if any(r[0] != cold_out for r in runs):
         print("\n!! outputs differ — that is a bug, please report it:")
         print(f"   vanilla: {cold_out!r}")
-        print(f"   pion   : {warm_out!r}")
+        for i, r in enumerate(runs):
+            if r[0] != cold_out:
+                print(f"   request {i + 1}: {r[0]!r}")
 
+    warm_ttft = statistics.median(r[1] for r in runs)
+    warm_total = statistics.median(r[2] for r in runs)
     ratio = cold_ttft / warm_ttft if warm_ttft > 0 else float("inf")
-    print(f"\nTime to first token: {cold_ttft*1000:.1f} ms → {warm_ttft*1000:.1f} ms"
-          f"   ({ratio:.2f}× faster, backend={args.backend},"
-          f" {len(prefix_ids)}-token prefix)")
+    print(f"\nTime to first token: {cold_ttft*1000:.1f} ms → {warm_ttft*1000:.1f} ms, the median"
+          f"   ({ratio:.2f}×, backend={args.backend}, {len(prefix_ids)}-token prefix)")
     print(f"Full answer:         {cold_total*1000:.1f} ms → {warm_total*1000:.1f} ms"
-          f"   (decode itself is unchanged — Pion saves the prefill)")
-    if args.backend == "inproc":
-        print("Note: inproc path recomputes prefill on each call — "
-              "run with --backend pion to see cross-session KV reuse.")
+          + ("   (decode itself is unchanged — Pion saves the prefill)" if pc is not None else ""))
+    if pc is not None and not stored:
+        print("The first request ran right after this process stored the prefix and "
+              "pays its one-time setup;\nrun the demo again to time requests in a "
+              "fresh process, the way another process would find the prefix.")
+    if pc is not None:
+        print("Every request here follows a full answer in this process. Requests like that "
+              "measure slower than the\nREADME's separate-process row, which times a fresh "
+              "process's first request\n(benchmarks/reproducers/cross_process_ttft.py).")
+    if pc is None:
+        print("Note: inproc re-prefills on every request, so ~1x is the expected "
+              "result — run without --backend inproc, with Pion up, to see the "
+              "prefix reused.")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

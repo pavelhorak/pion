@@ -8,7 +8,7 @@ Quick index. Start with the **5-minute demo** at the top; the rest are research 
 
 | Script | What it shows | Prerequisites |
 |---|---|---|
-| [`prompt_cache_demo.py`](prompt_cache_demo.py) | **Shared KV Cache** — the four `PionPromptCache` lines, vanilla cold prefill vs Pion warm hit, TTFT printed for both, outputs compared. Default `--prefix-tokens 2048`; `--prefix-tokens 33` reproduces the case where Pion loses. | `pip install -e ../pion-vllm-mlx/[mlx]` · mlx-lm · the default in-process path needs **no server**; `--backend pion` (cross-process reuse) needs Pion running `--kvcache --metal-attention -w 1` |
+| [`prompt_cache_demo.py`](prompt_cache_demo.py) | **Shared KV Cache** — the four `PionPromptCache` lines, timed: vanilla mlx-lm's cold prefill against five Pion requests (each a fetch and a full answer), TTFT for all of them, the median's ratio, outputs compared. Default `--prefix-tokens 2048`; `--prefix-tokens 33` shows the small end, where there is little prefill to save. | `pip install 'pion-vllm-mlx[mlx]'` · Pion running with `--kvcache` (the Homebrew service is, or `./pion-server --kvcache --metal-attention -w 1`); `--backend inproc` needs no server but re-prefills, so it prints ~1× |
 | [`cag_legal_demo/`](cag_legal_demo/README.md) | **CAG-hybrid pion-serve** — 4 SCOTUS opinions, calibration, head-to-head vs Vector-RAG. Self-contained with corpus + calibration state. | pion-serve, Ollama |
 
 ---

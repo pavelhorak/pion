@@ -304,14 +304,34 @@ def fetch_prefix(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+PREFILL_STEP = 2048          # mlx_lm.generate_step's default prefill_step_size
+
+
 def forward_logits(model, ids: mx.array, cache=None) -> tuple[float, mx.array]:
-    """Run one forward; return (ttft_ms, last-token logits)."""
+    """Prefill `ids` the way mlx_lm.generate_step does; return (ttft_ms, last-token logits).
+
+    Every token but the last runs through the model in PREFILL_STEP chunks with
+    only the cache state evaluated; the last token alone yields the logits.
+    Until 2026-10-02 this evaluated one forward's logits over all of `ids` — a
+    vocabulary projection at every position, which no generation computes — so
+    every cold baseline timed with it was too slow (~30% at 2K tokens on
+    Llama-3.2-1B) and every speedup against it too high.
+    """
+    if cache is None:
+        cache = make_prompt_cache(model)
     mx.eval(ids)
     t0 = time.perf_counter()
-    out = model(ids, cache=cache)
-    mx.eval(out)
+    done, n = 0, ids.shape[1]
+    while n - done > 1:
+        step = min(PREFILL_STEP, n - done - 1)
+        model(ids[:, done:done + step], cache=cache)
+        mx.eval([c.state for c in cache])
+        mx.clear_cache()       # as generate_step does after each prefill chunk
+        done += step
+    last = model(ids[:, done:], cache=cache)[0, -1]
+    mx.eval(last)
     ttft_ms = (time.perf_counter() - t0) * 1000
-    return ttft_ms, out[0, -1]
+    return ttft_ms, last
 
 
 def quant_storage_bytes(per_layer, fmt: str, kv_dim: int) -> int:

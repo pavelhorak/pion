@@ -18,14 +18,14 @@ text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)             #
 
 | Time to first token, Apple Silicon | vanilla mlx-lm | Pion warm | |
 |---|---:|---:|:---:|
-| Llama-3.2-1B-4bit, 2,048-token prefix, **same process** | 1,530 ms | **30.2 ms** | **50.6×** |
-| Same model and prefix, **from a separate process**, over the wire | 1,558 ms | 64.7 ms | **24×** |
+| Llama-3.2-1B-4bit, 2,049-token prefix, **same process** | 1,242 ms | **61.9 ms** | **20×** |
+| Same model and prefix, **from a separate process**, over the wire | 1,242 ms | 73.9 ms | **17×** |
 
-The two rows differ by *where the attention runs*; the second pays a wire hop
-for a cache a separate process wrote, and reproduces the vanilla output at
-BLEU 1.000. Each row has a reproducer:
-[`tests/bench_ttft.py`](../tests/bench_ttft.py) and
-[`cross_process_ttft.py`](../benchmarks/reproducers/cross_process_ttft.py).
+The two rows differ only by *where the cache comes from*: the first is the
+process that computed it, the second fetches what a separate process wrote and
+reproduces the vanilla output at BLEU 1.000. Both come from
+[`cross_process_ttft.py`](../benchmarks/reproducers/cross_process_ttft.py)
+(`--same` adds the first).
 Read the limits before installing: it caches prefill, not decode, and it
 only pays off when a long prefix is really reused.
 

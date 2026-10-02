@@ -205,7 +205,7 @@ def main():
     # PionPromptCache is a MANAGER, not a cache: `model` is its first
     # parameter, it has no update_and_fetch/state, and the object mlx-lm
     # consumes comes from make_pion_prompt_cache() (Stage 2 — the path the
-    # 50.6× number is measured on) or get_or_prefill() (Stage 1). None of the
+    # same-process number is measured on) or get_or_prefill() (Stage 1). None of the
     # copies sits inside "## Quick Start", so sections [1]-[5] could not see
     # them. The shape is pinned against the SOURCE (ast), not against another
     # doc — a doc agreeing with a doc proves nothing.

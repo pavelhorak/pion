@@ -4,6 +4,63 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Corrected
+
+- **Time-to-first-token ratios were too high, and one row was mislabelled.**
+  Every TTFT harness timed vanilla mlx-lm as one forward over the whole prompt,
+  with its logits evaluated. That computes the vocabulary projection at every
+  prompt position. mlx-lm's own `generate_step` never does: it prefills with only
+  the cache evaluated, then runs the last token alone. So the cold side was ~30%
+  slow at 2K tokens (1,624 vs 1,246 ms, same first token), and every ratio
+  against it was too high.
+
+  Each harness now prefills the way `generate_step` does, checked within 2% of
+  it. Re-measured 2026-10-02 on an M4 Mac mini against Pion 0.9.1:
+  - **From a separate process, 2,049-token prefix and a 16-token question:**
+    1,242 → 73.9 ms, **17×** (was 1,558 → 64.7 ms, 24×). Prefix sweep:
+    1.5× / 4.5× / 11× / 17× at 34 / 268 / 1,035 / 2,049 tokens (was
+    1.6× / 6.0× / 16.4× / 24×).
+  - **Same process, same prompt and question:** 1,242 → 61.9 ms, **20×** (was
+    1,530 → 30.2 ms, 50.6×). That row was also mislabelled. `tests/bench_ttft.py`
+    built a fresh `PionPromptCache` for every request, so it timed Stage 2's
+    wire lane, where Pion computes the attention, and not the in-process lane
+    the README named. Its one-token suffix was a best case besides. Both 1B rows
+    now come from `cross_process_ttft.py` (`--same` adds this one), and
+    `bench_ttft.py` times both lanes; at 2,048 tokens with a one-token suffix
+    the wire lane is 28.6× and the in-process lane 86×.
+  - **Stage 2 lanes at ~316-token prefixes:** in-process 4.8× (was 6.51×).
+    Binary and RESP p50 are 127 and 131 ms (were 92.1 and 108.6 ms); the old
+    figures ran the suffix in one pass, and mlx-lm runs it in two.
+  - **The mixed workloads (mean over all requests, cold ones included):**
+    Stage 1 3.1× at ~316 tokens and 5.4× at ~2,514 (were 5.07× and 6.96×).
+    Stage 2's in-process lane 4.8× and 13.2× (were 3.31× and 6.75×). These two
+    went up; the harness behind the old Stage 2 pair is not recorded.
+  - **Stage-1 workload, 5 prompts × 30 queries:** 612 → 84 ms, 7.3× (was
+    846 → 91 ms, 9.26×).
+  - **Qwen3.5-4B hybrid at 2K / 4K / 8K:** 14.0× / 25.3× / 29.0× (vanilla
+    5.0 / 10.2 / 21.3 s). The 0.9.0 notes below said
+    24.7× / 32.7× / 11.6×, and the reproducer README said 24.77× / 36.0× / 29.5×.
+  - **Hybrid retrieval, 100 SQuAD v2 queries:** 3.0× p50 in-process and 2.7×
+    over the wire (was 4.5×). That bench also left the cache hydration
+    (`prepare()`) out of its clock.
+
+  The 64K sparse row is unchanged: its vanilla prefill is chunked and never
+  computed the extra logits.
+
+### Changed
+
+- **`examples/prompt_cache_demo.py` shows what a tester will see.**
+  - It runs against Pion by default. The old default re-prefilled and printed
+    ~1× by construction.
+  - It times five requests the way an app makes them and reports their median.
+  - It says what to start when no server answers, and exits non-zero on failure.
+  - It names the one-time cost of the first request after a store, and says why
+    its requests sit above the separate-process row.
+- **`pion-vllm-mlx` 0.1.2** carries the corrected numbers to its PyPI page. 0.1.1
+  still shows the old ones until a release publishes 0.1.2.
+
 ## [0.9.1] — 2026-10-01
 
 Packaging and documentation only; the server's behaviour is unchanged.
@@ -43,7 +100,8 @@ correctness surface is well tested, but the operational surface has gaps that a
   a different model object or a different machine reads the same prefix.
   1,530 ms → 30.2 ms warm TTFT (Llama-3.2-1B-4bit, 2,048-token prefix, same
   process); 24× cross-process on the wire (1,558 ms → 64.7 ms); cross-instance
-  output verified BLEU 1.000.
+  output verified BLEU 1.000. *(Both ratios were overstated; see Corrected
+  under Unreleased.)*
 - **`PionPromptCache`** — a 4-line drop-in for `mlx_lm.make_prompt_cache` on
   Apple Silicon.
 - **A value receipt.** `PION.STATS` (and a `# Pion` section in `INFO`) reports
@@ -56,6 +114,7 @@ correctness surface is well tested, but the operational surface has gaps that a
   and Linux.
 - **Hybrid Mamba+Transformer prefix state** shared across processes and
   persisted: 24.7× / 32.7× / 11.6× warm TTFT at 2K / 4K / 8K on Qwen3.5-4B.
+  *(Overstated; see Corrected under Unreleased.)*
 - **Sparse long-context selector** — 100% needle recall at 64K attending 0.78%
   of the prefix, bit-identical greedy decode. NIAH-class retrieval only.
 - **MoE expert paging** (`MOE.EXPERT.*`) — a 51.6 GB model on a 16 GB Mac, with

@@ -35,12 +35,17 @@ quantizer targets the scale the reader will actually see.
 
 | Model | Cold TTFT | Warm TTFT | Reduction | Throughput | First-token |
 |---|---:|---:|---:|---:|:---:|
-| Llama-3.2-1B-Instruct-4bit | 846 ms | **91 ms** | **89.2%** (9.26×) | 9.20× | 100% (50/50) |
-| Llama-3.2-3B-Instruct-4bit | 2075 ms | **278 ms** | **86.6%** (7.47×) | 7.46× | 100% (50/50) |
+| Llama-3.2-1B-Instruct-4bit | 612 ms | **84 ms** | **86.3%** (7.30×) | 7.25× | 100% (50/50) |
+
+Measured 2026-10-02 on an M4 Mac mini against Pion 0.9.1, with the cold side
+prefilled the way mlx-lm's `generate_step` does. Until then this table read
+846 → 91 ms (9.26×) for 1B and 2,075 → 278 ms (7.47×) for 3B, against a cold
+side that also computed logits at every prompt position, which no generation
+does. The 3B row is not re-measured yet, so it is not shown.
 
 Cross-instance verified: a fresh second client (separate socket, separate model object) sees `+HIT` before any local work, fetches K/V the first client stored, and produces a **bit-identical 50-token greedy completion (BLEU 1.0000)**.
 
-These rows are this harness's own workload (150 requests, 5 prompts × 30 queries, at its `--prompt-repeats 8` prefix), so they do not line up with the README's two headline numbers: **24×** is one separate process hitting a 2,048-token prefix (`benchmarks/reproducers/cross_process_ttft.py`), and **50.6×** is Stage 2 in the same process (below).
+This row is this harness's own workload (150 requests, 5 prompts × 30 queries, at its `--prompt-repeats 8` prefix), so it does not line up with the README's two headline numbers: **17×** is one separate process hitting a 2,049-token prefix (`benchmarks/reproducers/cross_process_ttft.py`), and **20×** is the process that stored the prefix asking again, through Stage 2's in-process lane (`cross_process_ttft.py --same`; the table below times each lane on its own).
 
 ---
 
@@ -375,22 +380,29 @@ cache = make_pion_prompt_cache(model, ns, pc, len(prompt_ids))
 out = model(suffix_ids, cache=cache)                      # attention runs on sidecar
 ```
 
-#### Measured TTFT win (warm path, median of 4 runs)
+#### Measured TTFT win (warm path, median of 10 runs; 2026-10-02, M4 Mac mini, Pion 0.9.1)
 
-| Model | Prompt | Vanilla cold | Cache-rebuild (Stage 1) | Stage-2 patch | C vs A | C vs B |
-|---|---:|---:|---:|---:|---:|---:|
-| Llama-3.2-1B-4bit | 256  | 185.8 ms |  11.5 ms | 23.8 ms |  7.81× | 0.48× — B wins (small N, RT cost dominates) |
-| Llama-3.2-1B-4bit | 1024 | 742.7 ms |  35.1 ms | 26.0 ms | 28.58× | **1.35×** |
-| Llama-3.2-1B-4bit | 2048 | 1530 ms  |  83.8 ms | **30.2 ms** | **50.63×** | **2.77×** |
-| Llama-3.2-3B-4bit | 1024 | 1951 ms  | 136.7 ms | **53.7 ms** | **36.35×** | **2.55×** |
+| Model | Prompt | Vanilla cold | Stage 1 rebuild (B) | Stage 2, wire lane (C) | Stage 2, in-process (D) |
+|---|---:|---:|---:|---:|---:|
+| Llama-3.2-1B-4bit | 256  | 155.3 ms | 14.7 ms (10.6×) | 26.2 ms (5.9×) | 10.1 ms (15.5×) |
+| Llama-3.2-1B-4bit | 1024 | 603.3 ms | 32.7 ms (18.5×) | 28.5 ms (21.2×) | 11.0 ms (54.7×) |
+| Llama-3.2-1B-4bit | 2048 | 1,219.7 ms | 43.8 ms (27.8×) | 42.6 ms (28.6×) | **14.1 ms (86×)** |
 
-Crossover at ~512 tokens. Below that, K/V transfer + rebuild is small
-enough that the per-layer ATTEND.PREFIX.QUERY round-trip dominates and
-Stage 1 wins. Above ~1K tokens, K/V transfer cost becomes the
-bottleneck for Stage 1 and Stage 2 sails away.
+Every warm path restores all prompt tokens but the last, then runs the last
+one, and every path reproduces vanilla's first token. A one-token suffix is
+the best case for a cache. A real question adds its own prefill: with a
+16-token question the in-process lane takes 61.9 ms at 2,049 tokens
+(`cross_process_ttft.py --same`).
 
-`tests/bench_ttft.py` reproduces these numbers across `(model, prompt_len)`.
-Warm/cold TTFT ratio: 0.020 (1B/2K) and 0.028 (3B/1K).
+Above ~1K tokens, Stage 1 and Stage 2's wire lane are close; in April Stage 1's
+rebuild took 83.8 ms at 2K. Below that, the wire lane's per-layer round trips
+cost more than the transfer, and Stage 1 wins. The in-process lane wins at every
+length because it moves nothing, but only the process that prefilled has it.
+
+`tests/bench_ttft.py --runs 11` reproduces the table. It used to show one
+"Stage-2 patch" column at 50.63× (2K). That column was the wire lane, timed
+against a vanilla side that computed logits at every prompt position. Its 3B
+row is not re-measured.
 
 #### Wire-protocol details (for clients implementing their own consumer)
 
@@ -438,13 +450,23 @@ or to validate cross-process behavior on a single machine.
 
 | Config | TTFT mean | **TTFT p50** | wire calls/req | speedup vs vanilla |
 |---|---:|---:|---:|---:|
-| RESP (legacy) | 108.0 ms | 108.6 ms | 16 (1.63 ms ea) | 2.39× |
-| Binary lane | 91.6 ms | 92.1 ms | 16 (0.99 ms ea) | 2.81× |
-| **In-process fast lane** | **39.6 ms** | **28.2 ms** | **0** | **6.51×** |
+| RESP (legacy) | 127.6 ms | 130.9 ms | 32 (0.85 ms ea) | 1.68× |
+| Binary lane | 122.6 ms | 127.3 ms | 32 (0.79 ms ea) | 1.75× |
+| **In-process fast lane** | **43.5 ms** | **35.2 ms** | **0** | **4.83×** |
 
-100% first-token agreement vs vanilla mlx-lm (50/50). The 28.2 ms p50
-matches a vanilla MLX `KVCache` upper bound (26.8 ms p50 measured
-standalone) — the in-process path is essentially free over native MLX.
+Measured 2026-10-02 on an M4 Mac mini against Pion 0.9.1: ~316-token
+prefixes, vanilla ~210 ms a request, 100% first-token agreement with
+vanilla mlx-lm (50/50) on every lane. The wire lanes make 32 calls a
+request because mlx-lm runs the suffix in two passes (all but its last
+token, then the last) and each pass queries every layer. Speedups are
+mean against mean.
+
+Until 2026-10-02 this table read 108.6 / 92.1 / 28.2 ms p50 and 2.39× /
+2.81× / 6.51×. Its vanilla side evaluated logits at every prompt position,
+which no generation computes, and its wire lanes ran the suffix in one
+pass, which mlx-lm does not. The sentence that followed compared the
+in-process lane with "a vanilla MLX `KVCache` upper bound (26.8 ms p50
+measured standalone)"; no harness for that number exists, so it is gone.
 
 #### Mental model — why the wire path was paying so much
 
@@ -496,16 +518,23 @@ This keeps the substrate **model-family-agnostic**: Mamba (size=2 `[conv_state, 
 
 | Prefix length | Vanilla cold | Pion warm | Speedup | Token agreement |
 |---:|---:|---:|:---:|:---:|
-| 174 tokens | — | — | 3.3× | — |
-| 2,048 tokens |  6,080 ms |   246 ms | 24.77× | 18/18 |
-| 4,096 tokens | 12,757 ms |   390 ms | **32.7×** | 16/18 |
-| 8,192 tokens | 27,598 ms | 2,373 ms | 11.6× | 18/18 |
+| 174 tokens | 470 ms | 285 ms | 1.7× | 24/24 |
+| 2,048 tokens |  4,972 ms | 355 ms | 14.0× | 18/18 |
+| 4,096 tokens | 10,245 ms | 407 ms | 25.3× | 17/18 |
+| 8,192 tokens | 21,328 ms | 936 ms | **29.0×** | 18/18 |
 
-**The speedup peaks at 4K.** Warm TTFT is roughly constant up to 4K (246 → 390 ms)
-and then jumps to 2,373 ms at 8K, because the wire-fetch term grows with shipped
-bytes (max layer 33.55 MB at L=8192) while vanilla prefill grows only linearly —
-so 8K measures 11.6×, below 4K's 32.7×. Token agreement is 18/18 at 2K and 8K and 16/18 at 4K (greedy-argmax
-non-determinism present in both the vanilla and Pion paths).
+Measured 2026-10-02 on an M4 Mac mini against Pion 0.9.1, vanilla prefilled the
+way mlx-lm's `generate_step` does. Each cell is the mean over three queries, and
+the speedup is the mean of the per-query ratios
+(`benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`; 174 tokens is
+`bench_qwen3_5_warm_ttft.py`). Warm TTFT grows with the bytes shipped: 118.6 MB
+at 2K and 320 MB at 8K, with a 33.55 MB largest layer. The 8K mean holds one
+1,657 ms first query; the other two took ~575 ms. Token agreement misses one
+token in 18 at 4K, greedy-argmax noise present on both paths.
+
+Until 2026-10-02 this table read 3.3× / 24.77× / 32.7× / 11.6×, with a peak at
+4K. Its vanilla side also computed logits at every prompt position, and its 8K
+warm fetch took 2,373 ms.
 
 18/18 layers bit-perfect across the cleanly-typed split path (24 GatedDeltaNet via `SSM.PREFIX.*`, 8 Qwen3NextAttention via `KV.PREFIX.*` + `V.STOREBATCH`). `PionPromptCache` is hybrid-aware — `_classify_cache` walks the cache list and routes per-slot. Drop-in for mixed-cache models: `pc = PionPromptCache(model, vquant="fp16", port=1974); cache = pc.get_or_prefill(prefix_ids, namespace=ns)`. Reproducer: `benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`. Practical ceiling on the current wire is L=8192 (max layer 33.55 MB at 64 MB CLIENT_BUF_SIZE); past 8K needs streaming `SSM.PREFIX.FETCH` / `V.FETCH RANGE`.
 
@@ -601,7 +630,7 @@ Measured on a 20-question / 50-token-greedy BLEU eval against the standalone ref
 
 Concrete fits for this build (single-instance, MLX, Apple Silicon, ≥95% hit rate, prefix-dominated):
 
-1. **Multi-tenant SaaS with a fixed system prompt.** The 9.3× warm-TTFT measurement (5 prompts × 30 queries, 96.7% hit rate) is exactly this shape.
+1. **Multi-tenant SaaS with a fixed system prompt.** The 7.3× warm-TTFT measurement (5 prompts × 30 queries, 96.7% hit rate) is exactly this shape.
 2. **Local LLM apps on Apple Silicon (Mac/iOS).** An embedded engine; chat with a reused system prompt.
 3. **Mac cluster inference (exo, vllm-mlx).** Cross-instance verified — multiple Macs share one Pion via TCP.
 4. **RAG with a fixed document corpus, contiguous order.** Cache `[system + chunks_in_canonical_order]`. Arbitrary chunk recomposition is **not** safe (causal attention — chunk B's K is rotated for positions it will not occupy).
@@ -692,25 +721,25 @@ KV-cache traffic — it's no longer required.
 
 To reproduce the headlines:
 
-**Stage 1 (cache-rebuild) — 89.2% TTFT reduction at 1B:**
+**Stage 1 (cache-rebuild) — 86% TTFT reduction at 1B:**
 
 ```bash
 ./pion-server --kvcache -w 1 &
-pixi run python pion-vllm-mlx/tests/test_prompt_cache_workload.py \
-    --vquant fp16 --prompts 5 --queries 30 --prompt-repeats 8
-# Expected: TTFT 846 → 91 ms (89.2%), throughput 9.2×, first-token 100%
+python3 pion-vllm-mlx/tests/test_prompt_cache_workload.py \
+    --vquant fp16 --prompts 5 --queries 30 --prompt-repeats 8   # with pion-vllm-mlx[mlx] installed
+# Measured 2026-10-02, M4 Mac mini: TTFT 612 → 84 ms (86.3%), throughput 7.3×, first-token 100%
 ```
 
-**Stage 2 (mlx-lm monkey-patch) — 50.6× faster than vanilla, 2.77× over Stage 1:**
+**Stage 2 (mlx-lm monkey-patch): both lanes against vanilla and Stage 1:**
 
 ```bash
 ./pion-server --kvcache --metal-attention -w 1 &  # Metal handles both decode (M=1) and batched-Q (M>1) TTFT
-.pixi/envs/default/bin/python tests/bench_ttft.py --start \
-    --prompt-tokens 2048 --runs 5
-# Expected at Llama-3.2-1B/2K (warm TTFT median):
-#   Path A vanilla cold:        1530 ms
-#   Path B cache-rebuild:         84 ms  (18.3×)
-#   Path C Stage-2 patch:         30 ms  (50.6×)
+python3 tests/bench_ttft.py --prompt-tokens 2048 --runs 11   # with pion-vllm-mlx[mlx] installed
+# Measured 2026-10-02, Llama-3.2-1B/2K, M4 Mac mini (warm TTFT median, one-token suffix):
+#   Path A vanilla cold:                1220 ms
+#   Path B cache-rebuild (Stage 1):       44 ms  (28×)
+#   Path C Stage 2, wire lane:            43 ms  (29×)
+#   Path D Stage 2, in-process lane:      14 ms  (86×)
 ```
 
 **Cross-worker (`-w 4`) without auto-cap:**

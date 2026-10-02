@@ -2,7 +2,10 @@
 # ---------------------------------------------------------------------------
 # REPRODUCER -- backs a published number.
 #
-# Claim: Qwen3.5-4B hybrid warm-TTFT sweep: 24.77x / 36.0x / 29.5x at 2K / 4K / 8K.
+# Claim: Qwen3.5-4B hybrid warm-TTFT sweep: 14.0x / 25.3x / 29.0x at 2K / 4K / 8K
+# (2026-10-02, M4 Mac mini, Pion 0.9.1; results/stage1_qwen3_5_prefix_sweep_2026_10_02.json).
+# Before the vanilla side prefilled the way mlx-lm's generate_step does, this
+# line read 24.77x / 36.0x / 29.5x.
 #
 # Requires: Apple Silicon + MLX + Qwen3.5-4B-MLX-4bit (~2.5 GB download).
 #   Needs a Pion server with --kvcache.
@@ -138,7 +141,23 @@ def deserialize_into(c, blob):
 
 
 def greedy_first_token(model, ids, cache):
-    out = model(mx.array([ids]), cache=cache)
+    """First token after `ids`, prefilled the way mlx_lm.generate_step does.
+
+    Every token but the last runs in 2,048-token chunks with only the cache
+    state evaluated; the last token alone gives the logits. Until 2026-10-02
+    this evaluated one forward's logits over every position, which no
+    generation computes, so the vanilla side was too slow and the speedup
+    too high.
+    """
+    x = mx.array([ids])
+    done, n = 0, x.shape[1]
+    while n - done > 1:
+        step = min(2048, n - done - 1)
+        model(x[:, done:done + step], cache=cache)
+        mx.eval([c.state for c in cache])
+        mx.clear_cache()       # as generate_step does after each prefill chunk
+        done += step
+    out = model(x[:, done:], cache=cache)
     mx.eval(out)
     return out, int(mx.argmax(out[0, -1]).item())
 
@@ -181,8 +200,8 @@ def run_one_L(model, tok, r, L: int, session_id: str, n_gen: int):
     print("  [B] Pion warm — one-time prefill, fetch per query")
     t0 = time.perf_counter()
     cache_prefix = make_prompt_cache(model)
-    out = model(mx.array([prefix_ids]), cache=cache_prefix)
-    mx.eval(out)
+    model(mx.array([prefix_ids]), cache=cache_prefix)
+    mx.eval([c.state for c in cache_prefix])    # the cache is what ships; no logits needed
     total_bytes = 0
     max_blob = 0
     for i, c in enumerate(cache_prefix):

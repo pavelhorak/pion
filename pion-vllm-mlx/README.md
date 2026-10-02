@@ -5,21 +5,21 @@ different process, a different model object, or a restarted server can reuse
 (Stage 1), plus an attention patch that lets Pion compute the attention over
 that prefix itself (Stage 2).
 
-Time to first token on Llama-3.2-1B-4bit with a 2,048-token prefix: 1,530 ms
-cold in vanilla mlx-lm, **30.2 ms** warm in the same process (50.6×), and
-**64.7 ms** from a separate process over the wire (24×, against 1,558 ms). With
+Time to first token on Llama-3.2-1B-4bit with a 2,049-token prefix and a
+16-token question: 1,242 ms cold in vanilla mlx-lm, **61.9 ms** warm in the same
+process (20×), and **73.9 ms** from a separate process over the wire (17×). With
 a prefix under about a thousand tokens there is little to save; the
 [Pion README](https://github.com/pavelhorak/pion#readme) has the sweep.
 
 Stage 2 runs on three lanes, auto-selected by `PionPromptCache`:
 
-| Lane | Where it runs | TTFT p50, short system-prompt prefixes (Llama-3.2-1B-4bit, 100 requests) |
+| Lane | Where it runs | TTFT p50, ~316-token system-prompt prefixes (Llama-3.2-1B-4bit, 100 requests; vanilla ~210 ms) |
 |---|---|---|
-| 1. **In-process** (default, same-process consumer) | MLX in the calling process; zero wire roundtrips | **28.2 ms** (6.51× vs vanilla cold) |
-| 2. **Binary fast lane** (port+1, `0xCA5E` frames) | Cross-process via `sendmsg` scatter-gather + single RTT | 92.1 ms |
-| 3. **RESP fallback** | Plain RESP, for older Pion servers without the binary listener | 108.6 ms |
+| 1. **In-process** (default, same-process consumer) | MLX in the calling process; zero wire roundtrips | **35.2 ms** (4.8× vs vanilla cold, mean against mean) |
+| 2. **Binary fast lane** (port+1, `0xCA5E` frames) | Cross-process via `sendmsg` scatter-gather, one round trip per layer per pass | 127 ms |
+| 3. **RESP fallback** | Plain RESP, for older Pion servers without the binary listener | 131 ms |
 
-Plus `HybridRetrievalCache` for RAG: chunk-id-keyed K/V hydration (4.5× p50 TTFT and 99.3% token agreement on a 100-query SQuAD v2 run, [`stage1_hybrid_recall_bench.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/stage1_hybrid_recall_bench.py)).
+Plus `HybridRetrievalCache` for RAG: chunk-id-keyed K/V hydration (3.0× p50 TTFT and 98.3% token agreement on a 100-query SQuAD v2 run, [`stage1_hybrid_recall_bench.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/stage1_hybrid_recall_bench.py)).
 
 ## Install
 
@@ -98,8 +98,8 @@ text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)
 ```
 
 When the cold prefill ran in this same process the prefix stays resident as MLX
-arrays (lane 1, zero wire round trips — the 30.2 ms / 50.6× row in the main
-README). From any other process the patch uses lane 2 or 3, and then **every
+arrays (lane 1, zero wire round trips — the 61.9 ms / 20× same-process row in
+the main README). From any other process the patch uses lane 2 or 3, and then **every
 decode step pays one round trip per layer**: on a 1B model that roughly triples
 the per-token decode cost. So for a consumer that only generates text from
 another process, the four Stage-1 lines above are the faster end-to-end path;
