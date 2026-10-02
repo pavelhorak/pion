@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import atexit
 import json
 import subprocess
 import time
@@ -426,6 +427,10 @@ def main():
     # nothing stopped an existing one from being LOADED.
     redis_dir = tempfile.mkdtemp(prefix="pion-bench-redis-")
     valkey_dir = tempfile.mkdtemp(prefix="pion-bench-valkey-")
+    # Removed at exit, on sys.exit() and Ctrl-C too. Every run used to leave
+    # this pair behind, --pion-only included: ~150 had piled up in $TMPDIR.
+    for d in (redis_dir, valkey_dir):
+        atexit.register(shutil.rmtree, d, ignore_errors=True)
     servers = {
         "Redis": {"cmd": f"redis-server --port 6379 --save '' --appendonly no --dir {redis_dir}", "port": 6379},
         "Valkey": {"cmd": f"{os.path.join(_valkey_root(), 'src', 'valkey-server')} --port 6380 --save '' --appendonly no --dir {valkey_dir}", "port": 6380},
