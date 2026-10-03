@@ -213,7 +213,7 @@ caveats under each table as part of the number.
 | **P99 latency** | 8.9ms | **1.6ms** (5.6× lower) |
 | **Ingest** (50K) | 50.2s | **9.0s** (5.6× faster) |
 
-*Linux bare metal, AMD EPYC 7313P, measured 2026-04-06 with the tuned kernels then in the tree. The v0.9.2 Linux release tarballs run the open reference kernels, which are slower at 1536 dims ([licensing](doc/licensing.md)); source builds since 2026-10-02 link the tuned library on Linux too. The current build on an M4 Mac mini measures ~9.4K QPS at recall 0.960 (gate configuration, 2026-09-30). The harnesses to rerun both are in `benchmarks/`; raw run logs are not published.*
+*Linux bare metal, AMD EPYC 7313P, measured 2026-04-06 with the tuned kernels then in the tree. Linux release tarballs link the tuned library from v0.9.3 on; earlier ones ran the open reference kernels ([licensing](doc/licensing.md)). The current build on an M4 Mac mini measures ~9.4K QPS at recall 0.960 (gate configuration, 2026-09-30). The harnesses to rerun both are in `benchmarks/`; raw run logs are not published.*
 
 ### Expert paging — models beyond RAM (substrate validation)
 
@@ -336,9 +336,8 @@ directory you launch from.
 **Linux** tarballs come from the same release, for x86_64 and arm64: swap the
 file name in the `curl` above for `pion-linux-x86_64.tar.gz` or
 `pion-linux-arm64.tar.gz`. The x86_64 build is the portable one (x86-64-v2, no
-GPU code). The v0.9.2 Linux tarballs run the open reference vector kernels
-rather than the tuned ones, so vector search is slower there; source builds
-since 2026-10-02 link the tuned library on Linux too.
+GPU code). From v0.9.3 the Linux tarballs link the same tuned vector library
+as the macOS one; earlier ones ran the open reference kernels.
 
 ### From source
 
@@ -674,7 +673,7 @@ from pion_llamaindex import PionVectorStore  # pip install -e pion-llamaindex/
 from pion_exo import PionAttentionHook    # pip install -e pion-exo/
 hook = PionAttentionHook(pion_host="192.168.1.100", mode="gpu_attention")
 
-# vllm-mlx integration -- attention backend with Pion V offloading
+# mlx-lm prompt cache; with stage2=True Pion computes the attention (pion-vllm-mlx/README.md)
 from pion_vllm_mlx import PionPromptCache           # pip install 'pion-vllm-mlx[mlx]'
 ```
 
