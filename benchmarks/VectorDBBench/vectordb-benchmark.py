@@ -183,6 +183,17 @@ def extract_results(output, db_label):
     return None
 
 
+def index_never_built(res):
+    """True when VectorDBBench never sent FT.OPTIMIZE, so every query ran
+    against an index that was never built. Stock VectorDBBench's Redis client
+    has an empty optimize(), and the run then reports recall 0.0 at an
+    impossible QPS (182K, measured 2026-10-03) after a 0.0001 s "build"."""
+    try:
+        return float(res["optimize_time"]) < 0.05 and float(res["recall"]) < 0.1
+    except (KeyError, ValueError):
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pion-only", action="store_true",
@@ -210,7 +221,7 @@ def main():
     parser.add_argument("--gate-profile", choices=["mac", "linux-epyc-8124p"], default="mac",
                         help="Which CPU-class baseline to enforce. mac=Apple Silicon "
                              "(recall ≥ 0.940, QPS ≥ 7900, FT.OPTIMIZE ≤ 25s — default), "
-                             "linux-epyc-8124p=EPYC 8124P @ 2.45 GHz Naples-class "
+                             "linux-epyc-8124p=EPYC 8124P @ 2.45 GHz Zen 4c Siena "
                              "(recall ≥ 0.940, QPS ≥ 4280, FT.OPTIMIZE ≤ 28s, 50K w=16). "
                              "See gh #56.")
     parser.add_argument("--dim", type=int, default=None,
@@ -403,7 +414,8 @@ def main():
             f"{skip_load_flags}"
         )
         res = extract_results(out, "pion")
-        if res:
+        never_built = bool(res) and index_never_built(res)
+        if res and not never_built:
             gpu_tag = " GPU" if args.gpu else ""
             res["name"] = f"Pion V27{gpu_tag} (ef={ef}, w={args.workers})"
             bench_results.append(res)
@@ -415,6 +427,15 @@ def main():
             clean_pion_state()
         else:
             print(f"[Pion] Leaving server alive on port {PION_PORT} (PION_BENCH_NO_CLEANUP=1)")
+        # After the server is stopped, so a refusal leaks no process.
+        if never_built:
+            print(f"\nERROR: FT.OPTIMIZE never ran (index build {res['optimize_time']} s, "
+                  f"recall {res['recall']}), so the queries searched an empty index.\n"
+                  "Stock VectorDBBench's Redis client has an empty optimize(). Run\n"
+                  "`pixi run install-vdbbench`: it installs VectorDBBench where this\n"
+                  "harness runs it and patches optimize() to send FT.OPTIMIZE.",
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Prepend to benchmark_results.md
     if bench_results:
@@ -440,14 +461,14 @@ def main():
     # Gate mode: check Pion results against baselines
     if args.gate:
         # Mac (Apple Silicon) baselines — historical default. ef=150, w=10, 50K case.
-        # Linux EPYC 8124P @ 2.45 GHz (Naples) baselines — gh #56. Source: 2026-05-02 commit b214fbe,
+        # Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena) baselines — gh #56. Source: 2026-05-02 commit b214fbe,
         # 50K case, w=16, ef=150 → measured 4,506 QPS / recall 0.9443 / FT.OPTIMIZE 26.8s.
         # 95% thresholds: recall ≥ 0.940 (same), QPS ≥ 4280 (95% of 4506), FT.OPTIMIZE ≤ 28s (≈ 105% of 26.8).
         if args.gate_profile == "linux-epyc-8124p":
             RECALL_MIN = 0.940
             QPS_MIN = 4280
             OPTIMIZE_MAX = 28.0
-            profile_name = "Linux EPYC 8124P @ 2.45 GHz (Naples-class, w=16)"
+            profile_name = "Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena, w=16)"
         else:
             RECALL_MIN = 0.940
             # Ratcheted 7400 -> 7900 on 2026-08-13 by explicit decision. Note

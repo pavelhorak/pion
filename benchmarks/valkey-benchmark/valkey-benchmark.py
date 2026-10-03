@@ -158,7 +158,7 @@ def parse_args():
                              "overwrites the live gate_baselines.json.")
     parser.add_argument("--gate-profile", choices=["mac", "linux-epyc-8124p"], default="mac",
                         help="Which CPU-class baseline table to use. mac=Apple Silicon (default), "
-                             "linux-epyc-8124p=EPYC 8124P @ 2.45 GHz Naples-class (gh #56). "
+                             "linux-epyc-8124p=EPYC 8124P @ 2.45 GHz Zen 4c Siena (gh #56). "
                              "Mac and Linux gates are NOT interchangeable.")
     return parser.parse_args()
 

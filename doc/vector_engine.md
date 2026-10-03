@@ -381,6 +381,22 @@ latency +12%. **Nothing else changes between the two builds** — KV
 throughput, prompt-cache TTFT and every other headline number come from open
 code.
 
+**On Linux x86-64** (INT8, same gate config, 2026-10-03). The machine was a
+Ryzen 9 9950X (Zen 5), rented with no other tenant and run with `--epoll`.
+The open build was the v0.9.2 release binary and the library build v0.9.3,
+which share a toolchain and engine source. Three rounds ran, with the order
+rotated:
+
+| Search | Median QPS (3 runs) | Open build (5,836 QPS) | Recall@100 (all) |
+|---|:---:|:---:|:---:|
+| `libpion_vector`, x86-64-v2 build (default) | 7,610 | **−23.3%** (rounds: −24.4, −14.9, −14.3) | 0.960 |
+| `libpion_vector`, VNNI build (`PION_VECTOR_VNNI=1`) | 8,534 | **−31.6%** (rounds: −32.6, −14.3, −32.8) | 0.960 |
+
+The VNNI build passed the differential on this machine, with 0 differences
+against the reference compiled for `icelake-server`. It stays opt-in: its lead
+over the default build (+12% on the medians, but one round tied) is not
+settled. Linux arm64 has not been measured.
+
 The interface is open too: `src/vector/vector_abi.mojo` (the calls),
 `beam_view.mojo` and `quant_beam_view.mojo` (the argument structs, whose
 field order is ABI). `INFO` reports `pion_vector:` and `--version` a
@@ -521,14 +537,14 @@ EF_RUNTIME = 200               # Query-time beam width (matches Pion default)
 PORT = 6379
 ```
 
-The `redis` subcommand sends the full FT.CREATE → HSET (bulk ingest) → FT.SEARCH loop. Pion handles all three natively; no Lua scripts or modules required.
+The `redis` subcommand sends FT.CREATE → HSET (bulk ingest) → FT.OPTIMIZE → FT.SEARCH, all handled natively by Pion; no Lua scripts or modules required. Stock VectorDBBench skips the FT.OPTIMIZE step, because its Redis client's `optimize()` is empty, so the install task patches it.
 
 **CLI entry point**: `vectordbbench redis` (installed by `pixi run install-vdbbench`). Use `vectordbbench --help` to list available backends.
 
 ### Install VectorDBBench
 
 ```bash
-pixi run install-vdbbench   # pip install 'vectordb-bench[redis]'
+pixi run install-vdbbench   # venv_zvec, VectorDBBench 1.0.22, optimize() patched to send FT.OPTIMIZE
 ```
 
 ---

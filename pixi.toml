@@ -16,7 +16,6 @@ mojo = "==1.1.0"  # Mojo 1.1.0 (2026-09-17), migrated from 1.0.0 on 2026-09-28 (
 mojo = "==1.1.0"  # Mojo 1.1.0 (2026-09-17), migrated from 1.0.0 on 2026-09-28 (branch chore/mojo-1.1). 1.0 GA (2026-08-11) came from 1.0.0b2 on 2026-08-12. Pinned exactly: gate thresholds are perf baselines, so the toolchain must not float. parallelize moved to the `max` package — workers are raw pthreads (src/ffi/worker_spawn_wrap.c); do NOT add a max dependency for the server build.
 
 [target.linux-aarch64.tasks]
-vectordbbench = "venv_zvec_linux/bin/vectordbbench"
 # ssm_state_wrap.c (gh #65 SSM.PREFIX.STORE/FETCH/DROP, pure POSIX) had been
 # omitted from the Linux build-ffi/link list — Mac side compiled + linked it
 # (see [tasks].build-ffi below). Linux build was failing at link with
@@ -138,7 +137,10 @@ bench-kv = "pixi run build && pkill -9 pion-server || true && nohup ./pion-serve
 bench-industry = "pixi run build && pkill -9 pion-server || true && nohup ./pion-server -p 6379 > pion.log 2>&1 & sleep 2 && docker run --rm --add-host=host.docker.internal:host-gateway redis/vector-db-benchmark vector-db-benchmark --engines redis-hnsw-m-16-ef-128 --datasets random-100-euclidean --host host.docker.internal --queries 1000 && pkill -9 pion-server"
 bench-vector = "mojo run -I . vector-bench.mojo"
 bench-all = "pixi run bench-kv && pixi run bench-vector"
-install-vdbbench = "pip install 'vectordb-bench[redis]'"
+# Creates venv_zvec (what `vectordbbench` below runs, on every platform) and
+# patches VectorDBBench's Redis client to send FT.OPTIMIZE; stock, it never
+# does, and the vector harness then measures an empty index.
+install-vdbbench = "bash benchmarks/VectorDBBench/install_vectordbbench.sh"
 bench-vdb = "bash -c 'python3 benchmarks/VectorDBBench/vectordb-benchmark.py --pion-only --ef-runtime 150 --workers 10'"
 
 bench-fp32 = "mojo run -I . tests/benchmark_fp32_hnsw.mojo"

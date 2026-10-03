@@ -385,7 +385,7 @@ def main():
     parser.add_argument("--gate-profile", choices=["mac", "linux-epyc-8124p"], default="mac",
                         help="Which CPU-class baseline to enforce. mac=Apple Silicon "
                              "-w 1 (throughput P=1 ≥ 330K, pipeline P=10 ≥ 2.4M, default); "
-                             "linux-epyc-8124p=EPYC 8124P @ 2.45 GHz Naples-class -w 32 "
+                             "linux-epyc-8124p=EPYC 8124P @ 2.45 GHz Zen 4c Siena -w 32 "
                              "(throughput P=1 ≥ 252K, pipeline P=10 ≥ 1.95M). "
                              "See gh #56.")
     args = parser.parse_args()
@@ -612,7 +612,7 @@ def main():
         # Per-CPU-class gate-floor baselines for mixed SET/GET workload (ops/sec),
         # keyed by pipeline depth. See gh #56.
         if args.gate_profile == "linux-epyc-8124p":
-            # EPYC 8124P @ 2.45 GHz, Naples-class, -w 32. Source: 2026-05-02 commit
+            # EPYC 8124P @ 2.45 GHz, Zen 4c Siena, -w 32. Source: 2026-05-02 commit
             # b214fbe — throughput P=1 = 265.6K, pipeline P=10 = 2.06M, pipeline_deep
             # P=30 = 4.48M. 95% thresholds below.
             GATE_BASELINES = {
@@ -620,7 +620,7 @@ def main():
                 10: 1_950_000,  # ~95% of 2.06M (pipeline profile)
                 30: 4_250_000,  # ~95% of 4.48M (pipeline_deep, when run)
             }
-            profile_label = "Linux EPYC 8124P @ 2.45 GHz (Naples-class, -w 32)"
+            profile_label = "Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena, -w 32)"
         else:
             # Mac-side baselines, Apple Silicon -w 1. Aligned with /gate.md (Gate 3)
             # on 2026-05-03.

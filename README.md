@@ -337,7 +337,10 @@ directory you launch from.
 file name in the `curl` above for `pion-linux-x86_64.tar.gz` or
 `pion-linux-arm64.tar.gz`. The x86_64 build is the portable one (x86-64-v2, no
 GPU code). From v0.9.3 the Linux tarballs link the same tuned vector library
-as the macOS one; earlier ones ran the open reference kernels.
+as the macOS one; earlier ones ran the open reference kernels. They need glibc
+2.38 or newer: Ubuntu 24.04, Debian 13, Fedora 39 or later. On an older system
+the binary stops with `GLIBC_2.38 not found`; use the Docker image above
+instead.
 
 ### From source
 

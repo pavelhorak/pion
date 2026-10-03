@@ -155,6 +155,21 @@ service." ;;
         echo "FATAL: cannot tell which vector backend ./pion-server links ('$VEC_LINE')"; exit 1 ;;
 esac
 
+# The oldest glibc this binary runs on, read from the symbol versions it
+# references rather than assumed from the build host. Nothing said so until
+# 2026-10-03, and the binary stops on an older system with "GLIBC_2.38 not
+# found".
+REQ_LINE=""
+if [ "$OS" = Linux ]; then
+    GLIBC_MIN="$(grep -a -o 'GLIBC_2\.[0-9]*' ./pion-server | sort -t. -k2 -n -u | tail -1 || true)"
+    if [ -n "$GLIBC_MIN" ]; then
+        REQ_LINE="Requires glibc ${GLIBC_MIN#GLIBC_} or newer. On an older system the binary
+stops with \"${GLIBC_MIN} not found\"; run the Docker image
+(ghcr.io/pavelhorak/pion) there instead.
+"
+    fi
+fi
+
 # Runtime libraries: ASK THE BINARY, don't hardcode a list.
 #
 # The old hardcoded set still named libAsyncRTMojoBindings, which the Mojo 1.0
@@ -245,7 +260,7 @@ Run:
 
 Any Redis client connects: redis-cli -p 1974
 
-The wrapper sets ${LIBPATH_VAR} to the bundled lib/ directory; the raw
+${REQ_LINE}The wrapper sets ${LIBPATH_VAR} to the bundled lib/ directory; the raw
 binary in bin/ will not start without it. WAL, snapshots, and blob arenas
 are written to the current working directory.
 
