@@ -14,8 +14,8 @@
     "     warns if a `min` drifts from 95% of its `known_good` by more than 1 RPS.",
     "",
     "Mac and Linux tables are NOT interchangeable: EPYC 8124P @ 2.45 GHz produces",
-    "~30% of Mac M-series KV throughput at parity (clock + IPC), and Naples- vs",
-    "Milan-class chips flip the io_uring/epoll crossover at P=1 (doc/epoll_vs_iouring.md)."
+    "~30% of Mac M-series KV throughput at parity (clock + IPC), and Siena (Zen 4c)",
+    "and Milan (Zen 3) chips flip the io_uring/epoll crossover at P=1 (doc/epoll_vs_iouring.md)."
   ],
   "tolerance": 0.95,
   "profiles": {
@@ -96,7 +96,7 @@
       }
     },
     "linux-epyc-8124p": {
-      "description": "Linux EPYC 8124P @ 2.45 GHz (Naples-class)",
+      "description": "Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena)",
       "pipelines": {
         "10": {
           "source": "2026-05-02, commit b214fbe, valkey-benchmark -w 1 P=10 (gh #56)",

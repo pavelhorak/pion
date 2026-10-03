@@ -4,6 +4,39 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Measured
+
+- **What the open build costs on Linux x86-64.** The machine was a Ryzen 9
+  9950X (Zen 5), and the test was INT8 in the gate configuration with three
+  rounds in rotated order.
+  - The open reference gives 5,836 QPS.
+  - `libpion_vector`'s default x86-64-v2 build gives 7,610 (open is −23%).
+  - Its VNNI build gives 8,534 (open is −32%).
+  - Recall@100 is 0.960 in every run.
+  - The VNNI build also passed the differential on this machine. It stays
+    opt-in until its lead over the default build is settled. Details are in
+    [vector_engine.md](doc/vector_engine.md#open-build-and-the-closed-vector-library).
+
+### Fixed
+
+- **The vector benchmark ran nowhere but the maintainer's machine.**
+  - `pixi run install-vdbbench` installed VectorDBBench into the pixi
+    environment, while the harness runs it from `venv_zvec/`.
+  - Stock VectorDBBench never sends `FT.OPTIMIZE`, so every query searched an
+    index that was never built: recall 0.0 at an impossible QPS.
+  - The task now creates `venv_zvec` and patches the client, on every
+    platform. The harness refuses a run whose index was never built and names
+    the task.
+- **The Linux tarballs now state their minimum glibc (2.38).** The README and
+  each Linux tarball's `README.txt` say so; the tarball reads the version from
+  the binary itself. On an older system, such as Ubuntu 22.04 or Debian 12,
+  the binary stops with `GLIBC_2.38 not found`, and the Docker image is the
+  way to run it.
+- **The Linux gate profile's CPU is labelled correctly.** The EPYC 8124P is a
+  Zen 4c "Siena" part, not "Naples-class".
+
 ## [0.9.3] — 2026-10-03
 
 The Linux binaries link the tuned vector library, and the PyPI page gives the

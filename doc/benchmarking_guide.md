@@ -90,10 +90,15 @@ or read a standalone `-t mset` against the floor.
 dataset (1536 dims, 50K vectors).
 
 ```bash
-pixi run install-vdbbench   # pip install 'vectordb-bench[redis]'; use Python 3.11 — 3.14 breaks vectordbbench
+pixi run install-vdbbench   # venv_zvec with Python 3.11 or 3.12; 3.14 breaks vectordbbench
 python3 benchmarks/VectorDBBench/vectordb-benchmark.py --pion-only --ef-runtime 150 --workers 10
 python3 benchmarks/VectorDBBench/vectordb-benchmark.py --pion-only --ef-runtime 150 --workers 10 --gate
 ```
+
+`install-vdbbench` also patches VectorDBBench, whose stock Redis client never
+sends `FT.OPTIMIZE`. Unpatched, every query searches an index that was never
+built: recall 0.0 at an impossible QPS. The harness refuses such a run and
+names the task.
 
 | Parameter | Value |
 |---|---|
