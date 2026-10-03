@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pion-vllm-mlx"
-version = "0.1.2"
-description = "Pion attention backend for vllm-mlx — V offloading + GPU attention on Apple Silicon"
+version = "0.1.3"
+description = "Pion prompt cache for mlx-lm on Apple Silicon — reuse a prefix's K/V across processes and restarts"
 requires-python = ">=3.10"
 # Apache-2.0 since 2026-09-21: this is a client library people vendor into
 # their own stacks (the server was BSL then; it is Apache-2.0 since 2026-09). Metadata is
@@ -14,7 +14,7 @@ requires-python = ">=3.10"
 # ../LICENSE). Licence map: ../doc/licensing.md.
 license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
-keywords = ["vllm", "mlx", "pion", "attention", "kv-cache", "apple-silicon"]
+keywords = ["mlx", "mlx-lm", "pion", "prompt-cache", "kv-cache", "attention", "apple-silicon"]
 # gh #263: everything below is what a PyPI project page renders. Without
 # `readme` the page is blank, which for the package that IS the launch pitch is
 # the whole first impression.

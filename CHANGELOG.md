@@ -4,6 +4,48 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [0.9.3] — 2026-10-03
+
+The Linux binaries link the tuned vector library, and the PyPI page gives the
+prefix sweep. The macOS server is unchanged apart from its version.
+
+### Changed
+
+- **The Linux tarballs and the Docker image link `libpion_vector`.** It is the
+  free closed library with the tuned 1536-dim beam searches and product-key
+  kernels. Until now only the macOS build linked it, and the Linux builds ran
+  the open reference kernels in `src/vector/reference/`.
+  - Every release leg (macOS arm64, Linux x86-64, Linux arm64) checks the
+    library against its open reference before packaging. The check,
+    `pixi run test-vector-differential`, requires identical results.
+  - On x86-64 the library runs its x86-64-v2 build. Its AVX-512 VNNI build
+    stays opt-in (`PION_VECTOR_VNNI=1`) until it has passed that check on VNNI
+    hardware.
+  - The speed difference on Linux has not been measured. On an M4 Mac the open
+    kernels are 22–34% slower at 1536 dims
+    ([vector_engine.md](doc/vector_engine.md#open-build-and-the-closed-vector-library)).
+  - The image carries the library's licence at `/opt/pion/LICENSE-pion-vector`,
+    as the tarballs do, and its licence label names both licences.
+  - `pixi run build-open`, the build with no closed code, now exists on both
+    Linux targets too.
+- **`pion-vllm-mlx` 0.1.3.** Its PyPI page gives the prefix sweep from a
+  separate process: 11× at 1,035 tokens, 4.5× at 268 and 1.5× at 34. The 0.1.2
+  page said that a prefix under about a thousand tokens has little to save,
+  which the 0.9.2 measurements contradict. The README gives the same sweep.
+  The page's summary line now describes the prompt cache. It used to describe
+  an attention backend for vllm-mlx, a module the package no longer contains.
+  The package's code is unchanged.
+- **CI runs on Linux arm64 too**, alongside Linux x86-64 and macOS arm64.
+  CONTRIBUTING gives the perf-gate commands. Before, it named `/gate`, a
+  command that does not ship with the repository, and said that opening a pull
+  request runs no checks.
+
+### Fixed
+
+- **`benchmarks/valkey-benchmark/valkey-benchmark.py` removes its temp
+  directories at exit.** Every run left a Redis and a Valkey data directory in
+  `$TMPDIR`, `--pion-only` runs included.
+
 ## [0.9.2] — 2026-10-02
 
 Corrections, the demo, and the PyPI page; the server's behaviour is unchanged.
