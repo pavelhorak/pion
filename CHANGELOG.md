@@ -6,6 +6,50 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-10-04
+
+`pion-vllm-mlx` 0.1.4 works with mlx-lm 0.32, which took code fixes as well as
+a wider cap. The server changes only in what it logs when it stops.
+
+### Changed
+
+- **`pion-vllm-mlx` 0.1.4 works with mlx-lm 0.32.** mlx-lm 0.32.0 came out on
+  2026-10-01, its first release since April, and the `mlx` extra capped it at
+  `<0.32`. Installing the extra beside mlx-lm 0.32 failed to resolve, or
+  downgraded mlx-lm to 0.31.3, which lacks every architecture added since
+  April. The cap is now `<0.33`. Three things 0.32 broke behind the cap are
+  fixed:
+  - **`HybridRetrievalCache`** loaded chunk K/V by assigning a cache's
+    `state`. 0.32 added the offset to `state`, so hydrating a chunk in
+    process raised `ValueError`.
+  - **The hybrid-model wire path** (Qwen3.5-style models, and
+    `softmax_bitexact`) serialized each cache slot by reading `state` by
+    position. On 0.32 that tuple also holds Python scalars and, for an
+    attention slot, the step-padded buffers. Slots are now read and written
+    through attributes every supported mlx-lm has, so a stored blob is the
+    same whichever version wrote it. A restored rotating cache also gets its
+    write index back.
+  - **`pion-vllm-mlx serve`** wraps mlx-lm's single-request path, which takes
+    an extra argument in 0.32, so every request through `serve` would have
+    raised `TypeError`.
+
+  Checked on mlx-lm 0.31.3 and 0.32.0 against this release's server (M4 Mac
+  mini):
+  - The 20 mlx test files whose models are cached here pass on both. Tests
+    that need Gemma 4 or Qwen models were not run.
+  - A `serve` smoke test passes on both: chat, streaming, the Anthropic
+    endpoint, and a restarted `serve` that restores 881 of 882 prompt tokens
+    from Pion and gives the same greedy answer.
+  - The seam test gained a model-free round trip for each cache class. The
+    version matrix runs it on 0.20.1, 0.24.1, 0.28.4, 0.31.3 and 0.32.0.
+  - `benchmarks/reproducers/cross_process_ttft.py` on mlx-lm 0.32.0
+    (2,049-token prefix) measured 1,242 ms cold, 63–64 ms for a hit from a
+    fresh process and 40 ms in the same process. That is at or above the
+    published 17× and 20×, which stay as published.
+  - The two Qwen3.5 reproducers in `benchmarks/reproducers/` read `state` the
+    same way and are ported. Their changed functions were checked on
+    synthetic caches; the reproducers were not re-run on the model.
+
 ### Measured
 
 - **What the open build costs on Linux x86-64.** The machine was a Ryzen 9
@@ -36,6 +80,12 @@ enumerated — there were roughly 1,100 of them.
   way to run it.
 - **The Linux gate profile's CPU is labelled correctly.** The EPYC 8124P is a
   Zen 4c "Siena" part, not "Naples-class".
+- **A clean stop no longer logs a worker death.** After SIGTERM, SIGINT or
+  `SHUTDOWN`, each worker flushes its WAL and returns, and the thread wrapper
+  reported every return as `worker 0 DIED (event loop returned)`. Each
+  `brew services stop pion` wrote one into the service log. A drained worker
+  now logs `worker 0 stopped (shutdown)`; `DIED` is kept for a worker that
+  returns without a shutdown request.
 
 ## [0.9.3] — 2026-10-03
 

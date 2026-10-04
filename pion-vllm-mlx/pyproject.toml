@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pion-vllm-mlx"
-version = "0.1.3"
+version = "0.1.4"
 description = "Pion prompt cache for mlx-lm on Apple Silicon — reuse a prefix's K/V across processes and restarts"
 requires-python = ">=3.10"
 # Apache-2.0 since 2026-09-21: this is a client library people vendor into
@@ -44,7 +44,7 @@ dev = ["pytest"]
 # gh #263: mlx-lm is a PRIVATE seam for this package — install_pion_attention_patch()
 # replaces mlx_lm.models.base.scaled_dot_product_attention and rebinds the
 # snapshot-bound name in every imported mlx_lm.models.* module. Ceiling is the
-# tested version (0.31.3, latest on PyPI 2026-09-02); pion_vllm_mlx._compat
+# tested version (0.32.0, latest on PyPI 2026-10-04); pion_vllm_mlx._compat
 # re-checks the actual signature at patch time, since a version is only a proxy
 # for the thing that breaks. Move both together.
 #
@@ -52,7 +52,7 @@ dev = ["pytest"]
 # on PyPI (it goes 0.19.3 -> 0.20.1), so the old bound was unsatisfiable as
 # written and had certainly never been run. 0.20.1 is tested by
 # pion-vllm-mlx/tests/run_mlx_version_matrix.sh.
-mlx = ["mlx>=0.10.0", "mlx-lm>=0.20.1,<0.32"]
+mlx = ["mlx>=0.10.0", "mlx-lm>=0.20.1,<0.33"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["pion_vllm_mlx"]

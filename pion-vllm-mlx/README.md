@@ -35,7 +35,7 @@ brew install pavelhorak/tap/pion && brew services start pion   # macOS; the serv
 ./pion-server --kvcache --metal-attention                       # or from a release tarball / source build
 ```
 
-The `mlx` extra pins **`mlx-lm>=0.20.1,<0.32`**. That ceiling is not decoration:
+The `mlx` extra pins **`mlx-lm>=0.20.1,<0.33`**. That ceiling is not decoration:
 `install_pion_attention_patch()` replaces a *private* mlx-lm function and rebinds
 the snapshot-bound name inside every imported `mlx_lm.models.*` module. The
 signature is re-checked at patch time, so an incompatible mlx-lm raises

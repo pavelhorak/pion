@@ -47,10 +47,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Floor, two points between, and the tested ceiling. Keep the last entry
-        # in step with pion-vllm-mlx/pyproject.toml's `<0.32` and
+        # Floor, three points between (0.31.3 was the ceiling until
+        # pion-vllm-mlx 0.1.4), and the tested ceiling. Keep the last entry in
+        # step with pion-vllm-mlx/pyproject.toml's `<0.33` and
         # pion_vllm_mlx/_compat.py's MAX_TESTED_MLX_LM.
-        mlx_lm: ["0.20.1", "0.24.1", "0.28.4", "0.31.3"]
+        mlx_lm: ["0.20.1", "0.24.1", "0.28.4", "0.31.3", "0.32.0"]
     name: mlx-lm ${{ matrix.mlx_lm }}
     steps:
       - uses: actions/checkout@v4
