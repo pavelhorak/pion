@@ -863,9 +863,11 @@ def main(argv=None):
             S.ResponseGenerator._is_batchable = lambda self, args: False
             orig_single = S.ResponseGenerator._serve_single
 
-            def _serve_single(self, request):
+            # mlx-lm 0.32 added a second argument (the generation stream);
+            # pass through whatever the installed version sends.
+            def _serve_single(self, request, *rest):
                 self.prompt_cache.req_args = request[2]
-                return orig_single(self, request)
+                return orig_single(self, request, *rest)
 
             S.ResponseGenerator._serve_single = _serve_single
             S.stream_generate = make_stream_generate(S.stream_generate, cache)

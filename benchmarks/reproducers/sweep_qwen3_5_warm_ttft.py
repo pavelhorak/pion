@@ -100,20 +100,22 @@ def serialize_layer(c):
     arrays = {}
     meta_bits = []
     ctype = type(c).__name__
+    # Attributes, not `c.state`: mlx-lm 0.32 widened `state` with scalars and
+    # made a KVCache's `state` return its step-padded buffers.
     if ctype == "KVCache":
-        k, v = c.state
+        k, v = c.keys[..., : c.offset, :], c.values[..., : c.offset, :]
         mx.eval(k, v)
         arrays["k"] = k
         arrays["v"] = v
         meta_bits.append("type=KVCache")
         meta_bits.append(f"offset={c.offset}")
     elif ctype == "ArraysCache":
-        for i, a in enumerate(c.state):
+        for i, a in enumerate(c.cache):
             if a is not None:
                 mx.eval(a)
                 arrays[f"a{i}"] = a
         meta_bits.append("type=ArraysCache")
-        meta_bits.append(f"narr={len(c.state)}")
+        meta_bits.append(f"narr={len(c.cache)}")
     meta = "|".join(meta_bits)
     with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as f:
         path = f.name
@@ -133,11 +135,11 @@ def deserialize_into(c, blob):
     os.unlink(path)
     meta = dict(p.split("=", 1) for p in md.get("meta", "").split("|") if "=" in p)
     if meta.get("type") == "KVCache":
-        c.state = (arrays["k"], arrays["v"])
+        c.keys, c.values = arrays["k"], arrays["v"]
         c.offset = int(meta["offset"])
     elif meta.get("type") == "ArraysCache":
         n = int(meta["narr"])
-        c.state = [arrays.get(f"a{i}") for i in range(n)]
+        c.cache = [arrays.get(f"a{i}") for i in range(n)]
 
 
 def greedy_first_token(model, ids, cache):

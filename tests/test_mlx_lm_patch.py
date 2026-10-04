@@ -14,7 +14,7 @@ Asserts:
 
 Requires:
   - ./pion-server --kvcache --metal-attention -w 1
-  - mlx_lm 0.31.x with mlx-community/Llama-3.2-1B-Instruct-4bit cached.
+  - mlx_lm 0.31.x or 0.32.x with mlx-community/Llama-3.2-1B-Instruct-4bit cached.
 """
 from __future__ import annotations
 

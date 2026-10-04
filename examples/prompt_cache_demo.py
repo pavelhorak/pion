@@ -60,7 +60,7 @@ except ImportError:
         print(
             "this mlx-lm (%s) exposes generate_step in neither mlx_lm.generate "
             "nor mlx_lm.utils.\nInstall a tested version: "
-            "pip install 'mlx-lm>=0.20.0,<0.32'"
+            "pip install 'mlx-lm>=0.20.1,<0.33'"
             % getattr(mlx_lm, "__version__", "unknown")
         )
         sys.exit(1)

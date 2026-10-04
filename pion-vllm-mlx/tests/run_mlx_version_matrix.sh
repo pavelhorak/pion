@@ -26,9 +26,10 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
 
 PY="${PY:-python3.12}"
-# Floor, two points in between, and the tested ceiling. Keep the last entry in
-# step with pion-vllm-mlx/pyproject.toml and pion_vllm_mlx/_compat.py.
-DEFAULT_VERSIONS=(0.20.1 0.24.1 0.28.4 0.31.3)
+# Floor, three points in between (0.31.3 was the ceiling until pion-vllm-mlx
+# 0.1.4), and the tested ceiling. Keep the last entry in step with
+# pion-vllm-mlx/pyproject.toml and pion_vllm_mlx/_compat.py.
+DEFAULT_VERSIONS=(0.20.1 0.24.1 0.28.4 0.31.3 0.32.0)
 VERSIONS=("${@:-}")
 [ -z "${VERSIONS[0]:-}" ] && VERSIONS=("${DEFAULT_VERSIONS[@]}")
 

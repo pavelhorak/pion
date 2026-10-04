@@ -7,8 +7,8 @@
  *
  * ctx is an Int64 slot array packed by main() (see main.mojo for the layout).
  * main() blocks in here on pthread_join — the workers run their event loops
- * forever, matching the old parallelize[worker_task](n, n) never-returns
- * behavior — so everything ctx points at outlives the workers.
+ * until a shutdown drain (gh #259) returns them — so everything ctx points at
+ * outlives the workers.
  */
 #include <pthread.h>
 #include <dlfcn.h>
@@ -17,6 +17,9 @@
 #include <stdlib.h>
 
 typedef void (*pion_worker_fn)(int64_t* ctx, int64_t idx);
+
+/* crash_wrap.c: every link line that takes this file takes that one too. */
+int pion_shutdown_requested(void);
 
 struct _pion_worker_arg {
     pion_worker_fn fn;
@@ -27,12 +30,19 @@ struct _pion_worker_arg {
 static void* _pion_worker_trampoline(void* p) {
     struct _pion_worker_arg* a = (struct _pion_worker_arg*)p;
     a->fn(a->ctx, a->idx);
-    /* Workers never return in normal operation — this line firing means the
-     * worker died (raised out of its body or exited early). Unbuffered C
-     * stderr on purpose: a Mojo print from a dying pthread can be lost in a
-     * buffered stdout, which made worker deaths invisible during the Mojo
-     * 1.0 migration (only the gh #138 status file hinted). */
-    fprintf(stderr, "[pion] worker %lld DIED (event loop returned)\n", (long long)a->idx);
+    /* A worker returns on purpose only after SIGTERM, SIGINT or SHUTDOWN: its
+     * event loop flushes the WAL and returns (gh #259). That is how every
+     * supervisor stops the server, so it is reported as a stop. Before this
+     * check, each `brew services stop pion` wrote a worker death into the
+     * service log. Any other return means the worker died (raised out of its
+     * body or exited early). Unbuffered C stderr on purpose: a Mojo print from
+     * a dying pthread can be lost in a buffered stdout, which made worker
+     * deaths invisible during the Mojo 1.0 migration (only the gh #138 status
+     * file hinted). */
+    if (pion_shutdown_requested())
+        fprintf(stderr, "[pion] worker %lld stopped (shutdown)\n", (long long)a->idx);
+    else
+        fprintf(stderr, "[pion] worker %lld DIED (event loop returned)\n", (long long)a->idx);
     return NULL;
 }
 

@@ -37,6 +37,8 @@ from typing import Optional
 
 import numpy as np
 
+from pion_vllm_mlx._compat import set_slot_arrays, slot_arrays
+
 
 # gh #50: Binary protocol opcodes mirrored from src/network/binary_protocol.mojo.
 # Used by the Stage-2 fast lane in attend_query_fused — skips RESP framing on
@@ -1257,9 +1259,12 @@ class PionPromptCache:
         mx, _ = _require_mlx()
         import os as _os
         import tempfile as _tempfile
+        # Never `c.state`: mlx-lm 0.32 widened it with scalars and padded
+        # buffers, which would change (or break) the blob. See _compat.
+        contents = slot_arrays(c)
         arrays: dict = {}
-        meta_bits = [f"type={type(c).__name__}", f"narr={len(c.state)}"]
-        for i, a in enumerate(c.state):
+        meta_bits = [f"type={type(c).__name__}", f"narr={len(contents)}"]
+        for i, a in enumerate(contents):
             if a is not None:
                 mx.eval(a)
                 arrays[f"a{i}"] = a
@@ -1273,7 +1278,7 @@ class PionPromptCache:
         return blob
 
     def _restore_arrays_cache(self, c, blob: bytes) -> None:
-        """safetensors bytes → c.state."""
+        """safetensors bytes → the slot's contents (see _compat.set_slot_arrays)."""
         mx, _ = _require_mlx()
         import os as _os
         import tempfile as _tempfile
@@ -1285,7 +1290,7 @@ class PionPromptCache:
         _os.unlink(path)
         meta = dict(p.split("=", 1) for p in md.get("meta", "").split("|") if "=" in p)
         narr = int(meta.get("narr", 0))
-        c.state = [arrays.get(f"a{i}") for i in range(narr)]
+        set_slot_arrays(c, [arrays.get(f"a{i}") for i in range(narr)])
 
     def _kv_to_flat(self, c, prefix_len: int):
         """KVCache → (k_fp32_flat, v_fp32_flat, H, D) for V.STOREBATCH.
@@ -1327,9 +1332,9 @@ class PionPromptCache:
           by softmax-rank 0..N_softmax-1, after KV.PREFIX.REGISTER creates
           the K and V sessions with uniform kv_dim.
         """
-        # softmax_bitexact: store softmax anchors opaquely too (bit-exact). The
-        # KVCache slot's `.state` is (keys, values) — the same opaque safetensors
-        # serializer used for linear ArraysCache slots round-trips it in the
+        # softmax_bitexact: store softmax anchors opaquely too (bit-exact). A
+        # KVCache slot's contents are (keys, values) — the same opaque safetensors
+        # serializer used for linear ArraysCache slots round-trips them in the
         # native dtype, with no fp16 V-store loss. Slot indices are unique across
         # the cache list, so linear and softmax never collide on SSM.PREFIX keys.
         # KV.PREFIX.REGISTER always runs — it is what makes KV.PREFIX.LOOKUP

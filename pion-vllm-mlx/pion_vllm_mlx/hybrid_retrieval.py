@@ -73,6 +73,8 @@ import os
 from pathlib import Path
 from typing import Literal
 
+from pion_vllm_mlx._compat import set_slot_arrays
+
 
 def _require_mlx():
     import mlx.core as mx
@@ -153,7 +155,7 @@ class HybridRetrievalCache:
         """Run forward pass on the chunk and snapshot per-layer K/V as MLX arrays.
 
         Returned shape per layer: (1, n_kv_heads, prefix_len, head_dim) fp16,
-        ready to be replayed via cache.state setter for bit-perfect reuse.
+        ready to be loaded with _compat.set_slot_arrays for bit-perfect reuse.
         """
         mx, make_prompt_cache = _require_mlx()
         cache = make_prompt_cache(self.model)
@@ -246,9 +248,7 @@ class HybridRetrievalCache:
                 )
             cache = make_prompt_cache(self.model)
             for li in range(self.n_layers):
-                k_mx, v_mx = per_layer[li]
-                cache[li].state = (k_mx, v_mx)
-                cache[li].offset = chunk_token_count
+                set_slot_arrays(cache[li], per_layer[li], offset=chunk_token_count)
             self.hydrate_count += 1
             return cache, suffix_token_ids
 
@@ -412,8 +412,7 @@ class HybridRetrievalCache:
             k_all = mx.concatenate(per_layer_k[li], axis=2)
             v_all = mx.concatenate(per_layer_v[li], axis=2)
             mx.eval(k_all, v_all)
-            cache[li].state = (k_all, v_all)
-            cache[li].offset = pos
+            set_slot_arrays(cache[li], (k_all, v_all), offset=pos)
         self.hydrate_count += 1
         return cache, suffix_token_ids
 

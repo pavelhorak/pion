@@ -164,7 +164,7 @@ class PionPrefixCache:
 
     # mlx-lm's generate_step does `mx.eval([c.state for c in prompt_cache])`
     # after the prompt is processed, on every cache entry, on every version
-    # from 0.20.1 to 0.31.3. Without this property a make_pion_prompt_cache()
+    # from 0.20.1 to 0.32.0. Without this property a make_pion_prompt_cache()
     # list could only be driven by a hand-rolled model(x, cache=...) loop —
     # which is what bench_ttft.py and test_mlx_lm_patch.py do, and why the
     # README's "drop-in" claim went unexercised: the one call an mlx-lm user

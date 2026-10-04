@@ -32,7 +32,9 @@ def check(name, ok, detail=""):
     fails += (not ok)
 
 import redis
-def rc(): return redis.Redis(port=PORT)
+# RESP2: stats() reads PION.STATS as a flat array, and redis-py 8 defaults to
+# RESP3, where the reply is a map.
+def rc(): return redis.Redis(port=PORT, protocol=2)
 
 def stats():
     r = rc().execute_command("PION.STATS")

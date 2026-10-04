@@ -42,6 +42,80 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print(f"  FAIL  {name}" + (f" — {detail}" if detail else ""))
 
 
+def _check_slot_round_trips() -> None:
+    """`_compat.slot_arrays` / `set_slot_arrays` and the SSM.PREFIX serializer.
+
+    A slot is filled, read, loaded into a fresh slot of the same class, and both
+    slots then take the same next token: equal outputs mean the restored slot
+    holds the same tokens at the same offset and write index.
+    """
+    import mlx.core as mx
+    from mlx_lm.models import cache as cache_mod
+    from pion_vllm_mlx._compat import set_slot_arrays, slot_arrays
+    from pion_vllm_mlx.prompt_cache import PionPromptCache
+
+    def same(a, b) -> bool:
+        return a.shape == b.shape and a.dtype == b.dtype and bool(mx.array_equal(a, b))
+
+    def kv(n: int, seed: int):
+        mx.random.seed(seed)
+        return (mx.random.normal((1, 2, n, 8)).astype(mx.float16),
+                mx.random.normal((1, 2, n, 8)).astype(mx.float16))
+
+    to_blob = PionPromptCache._serialize_arrays_cache     # neither reads `self`
+    from_blob = PionPromptCache._restore_arrays_cache
+
+    # The full-window rotating case is the one where the write index matters:
+    # without it, the next token lands on a token the window must keep.
+    kv_classes = (
+        ("KVCache", lambda: cache_mod.KVCache(), 5),
+        ("RotatingKVCache", lambda: cache_mod.RotatingKVCache(max_size=16), 5),
+        ("RotatingKVCache, full window, keep=2",
+         lambda: cache_mod.RotatingKVCache(max_size=8, keep=2), 8),
+    )
+    for name, make, n in kv_classes:
+        orig = make()
+        orig.update_and_fetch(*kv(n, 1))
+        got = slot_arrays(orig)
+        check(f"{name}: slot_arrays gives keys and values for the {n} tokens held",
+              len(got) == 2 and got[0].shape[2] == n and got[1].shape[2] == n,
+              f"shapes {[getattr(a, 'shape', None) for a in got]}")
+
+        restored = make()
+        from_blob(None, restored, to_blob(None, orig))
+        back = slot_arrays(restored)
+        check(f"{name}: the SSM.PREFIX blob restores the same arrays",
+              len(back) == 2 and all(same(a, b) for a, b in zip(got, back)))
+
+        # Copies: a full slot hands out its own arrays, and a later in-place
+        # write to one slot would otherwise show up in the other.
+        loaded = make()
+        set_slot_arrays(loaded, [mx.array(a) for a in got])
+        nxt = kv(1, 2)
+        a_k, a_v = orig.update_and_fetch(*nxt)
+        b_k, b_v = loaded.update_and_fetch(*nxt)
+        check(f"{name}: a loaded slot takes the next token as the original does",
+              loaded.offset == orig.offset == n + 1 and same(a_k, b_k) and same(a_v, b_v),
+              f"offset {loaded.offset} vs {orig.offset}")
+
+    # ArraysCache arrived in 0.2x; 0.32 removed MambaCache, which subclassed it.
+    if hasattr(cache_mod, "ArraysCache"):
+        name, make = "ArraysCache", lambda: cache_mod.ArraysCache(size=2)
+    else:
+        name, make = "MambaCache", cache_mod.MambaCache
+    mx.random.seed(3)
+    orig = make()
+    orig[0] = mx.random.normal((1, 3, 16))
+    orig[1] = mx.random.normal((1, 4, 8, 16))
+    got = slot_arrays(orig)
+    check(f"{name}: slot_arrays gives its two arrays",
+          len(got) == 2 and all(same(got[i], orig[i]) for i in range(2)))
+    restored = make()
+    from_blob(None, restored, to_blob(None, orig))
+    check(f"{name}: the SSM.PREFIX blob restores the same arrays",
+          all(same(restored[i], orig[i]) for i in range(2)))
+
+
 def main() -> int:
     try:
         import mlx_lm
@@ -157,6 +231,13 @@ def main() -> int:
           "found in neither mlx_lm.generate nor mlx_lm.utils")
     if where:
         print(f"        (generate_step lives in {', '.join(where)})")
+
+    # mlx-lm 0.32 folded each cache's scalars into `state` and made a KVCache's
+    # `state` return its step-padded buffers. HybridRetrievalCache (which
+    # assigned `state`) and the SSM.PREFIX serializer (which read it by
+    # position) broke on it, and nothing download-free noticed.
+    print("\n§8 a cache slot's contents survive a round trip, with no model")
+    _check_slot_round_trips()
 
     print(f"\n{'=' * 60}")
     print(f"mlx-lm {version}: {PASS} passed, {FAIL} failed")

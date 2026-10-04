@@ -76,7 +76,9 @@ def save_cache_state(cache) -> List[Tuple[np.ndarray, np.ndarray, int]]:
     """Snapshot every layer's KV cache as numpy arrays plus offset."""
     snap = []
     for c in cache:
-        keys, values = c.state
+        # Attributes, not `c.state`: mlx-lm 0.32 widened `state` with scalars
+        # and made it return the step-padded buffers.
+        keys, values = c.keys[..., : c.offset, :], c.values[..., : c.offset, :]
         snap.append((np.array(keys, copy=True),
                      np.array(values, copy=True),
                      c.offset))
@@ -86,7 +88,7 @@ def save_cache_state(cache) -> List[Tuple[np.ndarray, np.ndarray, int]]:
 def restore_cache_state(cache, snap) -> None:
     """Populate every layer's cache from a snapshot. Mirrors KV.HYDRATE."""
     for c, (k_np, v_np, off) in zip(cache, snap):
-        c.state = (mx.array(k_np), mx.array(v_np))
+        c.keys, c.values = mx.array(k_np), mx.array(v_np)
         c.offset = off
 
 

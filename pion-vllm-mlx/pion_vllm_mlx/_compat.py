@@ -18,8 +18,8 @@ Two checks, deliberately weighted differently:
   the pyproject ceiling already stops pip from resolving an untested one by
   default. What must never happen is a *silent* run on an untested version.
 
-Tested: mlx-lm 0.20.1, 0.22.5, 0.24.1, 0.28.4, 0.29.1, 0.31.3 (0.31.3 is the
-latest on PyPI as of 2026-09-02) via
+Tested: mlx-lm 0.20.1, 0.22.5, 0.24.1, 0.28.4, 0.29.1, 0.31.3, 0.32.0 (0.32.0 is
+the latest on PyPI as of 2026-10-04) via
 ``pion-vllm-mlx/tests/run_mlx_version_matrix.sh``.
 """
 from __future__ import annotations
@@ -30,8 +30,8 @@ from typing import Any, Optional
 
 # Mirrors pion-vllm-mlx/pyproject.toml's `mlx` extra. Change both together.
 MIN_MLX_LM = "0.20.1"   # 0.20.0 was never published to PyPI
-MAX_TESTED_MLX_LM = "0.31.3"
-CEILING_MLX_LM = "0.32"          # exclusive, as in `mlx-lm>=0.20.0,<0.32`
+MAX_TESTED_MLX_LM = "0.32.0"
+CEILING_MLX_LM = "0.33"          # exclusive, as in `mlx-lm>=0.20.1,<0.33`
 
 #: Parameter names of ``mlx_lm.models.base.scaled_dot_product_attention`` as of
 #: the tested ceiling, in order. ``sinks`` is the recent addition.
@@ -188,3 +188,52 @@ def check_mlx_lm_seam(*, warn_untested: bool = True) -> dict:
         )
 
     return report
+
+
+# ── Cache slot contents ───────────────────────────────────────────────────────
+#
+# Up to 0.31, a cache slot's ``state`` was its contents: an ArraysCache's list of
+# arrays, or a KVCache's (keys, values) sliced to the tokens it holds. The
+# scalars (offset, window, quantization) lived in a separate ``meta_state``.
+# mlx-lm 0.32 removed ``meta_state`` and folded those scalars into ``state``, so
+# ``state`` now has a different length for every cache class, and a KVCache's
+# ``state`` returns its step-padded buffers. Reading ``state`` by position, or
+# assigning it a list, therefore breaks on 0.32: loudly on a length mismatch,
+# silently on a padded buffer. These two functions go through attributes that
+# every supported version has, so the SSM.PREFIX blobs built from them are the
+# same whichever mlx-lm wrote them.
+
+
+def slot_arrays(c) -> list:
+    """The arrays one cache slot holds, laid out as mlx-lm <=0.31's ``state``.
+
+    ArraysCache / MambaCache: its list of arrays (entries may be None).
+    KVCache / RotatingKVCache: ``[keys, values]``, sliced to the tokens held.
+    """
+    if isinstance(getattr(c, "cache", None), list):
+        return list(c.cache)
+    if hasattr(c, "keys_and_values"):       # mlx-lm >= 0.32
+        return list(c.keys_and_values())
+    return list(c.state)                    # mlx-lm <= 0.31: already sliced
+
+
+def set_slot_arrays(c, arrays, offset: Optional[int] = None) -> None:
+    """Load ``arrays``, laid out as ``slot_arrays`` returns them, into a fresh slot.
+
+    A KV slot then holds ``offset`` tokens, by default as many as the keys
+    carry. A RotatingKVCache also gets its write index: once its window is
+    full, its next token is written there, and from index 0 it would overwrite
+    a token the window keeps. Restoring a rotating cache that has already
+    wrapped is out of scope: two arrays cannot say where the window starts.
+    The slot takes the arrays themselves, not copies, as assigning ``state``
+    did.
+    """
+    if isinstance(getattr(c, "cache", None), list):
+        c.cache = list(arrays)
+        return
+    keys, values = arrays
+    c.keys, c.values = keys, values
+    n = int(keys.shape[2])
+    c.offset = n if offset is None else int(offset)
+    if hasattr(c, "_idx"):
+        c._idx = n

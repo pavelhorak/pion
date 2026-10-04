@@ -36,8 +36,13 @@ What is asserted:
       an impatient operator is never stuck. This is the guard on the latch: a
       shutdown request that could hang would be worse than the lossy re-raise
       it replaced.
+  [6] in [1]-[4], stderr says the worker stopped for the shutdown and never
+      that it DIED. The drain returns the worker from its event loop on
+      purpose; until 0.9.4 the thread trampoline reported every return as a
+      death, so each routine stop logged one.
 
-Measured: 19/19 on the fix, 9 failures on 0.980+3a49edf.
+Measured: 19/19 on the fix, 9 failures on 0.980+3a49edf. With [6]: 27/27 on
+0.9.4; on 0.9.3 the other 19 pass and all 8 of [6]'s checks fail.
 
 Usage: python3 tests/test_gh259_graceful_shutdown.py [./pion-server]
 """
@@ -95,10 +100,11 @@ class Client:
         except OSError: pass
 
 
-def spawn():
+def spawn(stderr=None):
     return subprocess.Popen(
         [BINARY, "-p", str(PORT), "-w", "1", "--no-auto-detect", "--no-auto-embed"],
-        cwd=WORKDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cwd=WORKDIR, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL if stderr is None else stderr)
 
 
 def connect(timeout=40):
@@ -131,7 +137,9 @@ def crash_log_text():
 def cycle(stop_fn, label, expect_exit_zero=True):
     """Write KEYS, stop the server via stop_fn, restart, count survivors."""
     shutil.rmtree(WORKDIR, ignore_errors=True); os.makedirs(WORKDIR, exist_ok=True)
-    proc = spawn()
+    err_path = os.path.join(WORKDIR, "stderr.log")
+    with open(err_path, "wb") as err:
+        proc = spawn(stderr=err)
     c = connect()
     keys = write_keys(c, "g")
     rc = stop_fn(proc, c)
@@ -146,6 +154,14 @@ def cycle(stop_fn, label, expect_exit_zero=True):
         log = crash_log_text()
         check(f"{label}: breadcrumb records a clean exit",
               "PION EXIT" in log, "no PION EXIT line in the crash log")
+        # The drain returns the worker from its event loop on purpose. Until
+        # 0.9.4 the thread trampoline reported every return as a death, so a
+        # routine stop wrote "worker 0 DIED" into the service log.
+        err = open(err_path, errors="replace").read()
+        check(f"{label}: no worker is reported dead", "DIED" not in err,
+              next((l for l in err.splitlines() if "DIED" in l), ""))
+        check(f"{label}: the worker reports stopping for the shutdown",
+              "worker 0 stopped (shutdown)" in err, "no such line on stderr")
 
     proc2 = spawn()
     try:
