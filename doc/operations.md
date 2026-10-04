@@ -360,8 +360,9 @@ libraries the binary needs, and the wrapper points the loader at them.
 
 **Metal shader library (macOS).** `--metal-attention` loads
 `metal_compute.metallib`, searched relative to the **executable**: `<exe>/`,
-`<exe>/../lib`, `<exe>/../share/pion`, `<exe>/../src/ffi`, then the working
-directory for a source checkout. `PION_METAL_LIB` overrides the search. The
+`<exe>/../lib`, `<exe>/../share/pion`, `<exe>/../src/ffi`, `<exe>/src/ffi` (a
+source build at the repo root), then the working directory.
+`PION_METAL_LIB` overrides the search. The
 banner prints `Metal Attn: requested`, and the engine then prints
 `Metal Attn: ACTIVE (<path>)` or `Metal Attn: NOT ACTIVE` under the same key, so
 one grep answers whether it is running.

@@ -134,7 +134,12 @@ COPY LICENSE NOTICE /opt/pion/
 COPY vendor/pion-vector/LICENSE /opt/pion/LICENSE-pion-vector
 
 # OCI image metadata so `docker inspect` / registries show the source and licence.
+# The release passes PION_VERSION from VERSION. Without it the version label is
+# the base image's (ubuntu:24.04 sets "24.04"), which is what every image up to
+# 0.9.4 carried.
+ARG PION_VERSION=dev
 LABEL org.opencontainers.image.title="Pion" \
+      org.opencontainers.image.version="${PION_VERSION}" \
       org.opencontainers.image.description="Deterministically low-latency KV + vector database, wire-compatible with Redis/Valkey" \
       org.opencontainers.image.source="https://github.com/pavelhorak/pion" \
       org.opencontainers.image.licenses="Apache-2.0 AND LicenseRef-Pion-Vector-Binary-Licence" \
