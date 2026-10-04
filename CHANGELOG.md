@@ -6,6 +6,23 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A source build finds its Metal library from any directory.**
+  `pixi run build` puts `./pion-server` at the repo root and the shader
+  library in `src/ffi/`. The search covered that layout only relative to the
+  working directory. A source build started from anywhere else, a data
+  directory for instance, therefore reported `Metal Attn: NOT ACTIVE` and fell
+  back to the MLX bridge. The search now also looks in `src/ffi/` next to the
+  binary, and `tests/test_metallib_discovery.py` starts one from a temporary
+  directory. Release tarballs were not affected: they find the library in
+  `lib/`.
+- **The Docker image's version label is Pion's.**
+  `org.opencontainers.image.version` was `24.04`, inherited from the Ubuntu
+  base image, on every image through 0.9.4. The release now sets it from
+  `VERSION` and checks the pushed image's label against the tag, which also
+  stops a tag cut without bumping `VERSION`.
+
 ## [0.9.4] — 2026-10-04
 
 `pion-vllm-mlx` 0.1.4 works with mlx-lm 0.32, which took code fixes as well as

@@ -241,6 +241,7 @@ jobs:
         run: |
           IMAGE="ghcr.io/${{ github.repository_owner }}/pion"
           docker buildx build --platform "${{ matrix.platform }}" \
+            --build-arg PION_VERSION="$(cat VERSION)" \
             --output "type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true" \
             --metadata-file /tmp/metadata.json .
           DIGEST="$(python3 -c "import json;print(json.load(open('/tmp/metadata.json'))['containerimage.digest'])")"
@@ -277,6 +278,24 @@ jobs:
           for f in /tmp/digests/*; do REFS="${REFS} ${IMAGE}@sha256:$(basename "$f")"; done
           docker buildx imagetools create \
             -t "${IMAGE}:${TAG#v}" -t "${IMAGE}:latest" ${REFS}
+      - name: Check the image's version label against the tag
+        # Every image up to 0.9.4 said "24.04", the base image's label. The
+        # label comes from VERSION, so this also fails a tag cut without
+        # bumping VERSION.
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/pion"
+          docker buildx imagetools inspect "${IMAGE}:${TAG#v}" --format '{{json .Image}}' > /tmp/image.json
+          python3 - "${TAG#v}" <<'EOF'
+          import json, sys
+          want = sys.argv[1]
+          images = json.load(open("/tmp/image.json"))
+          got = {p: (i.get("config") or {}).get("Labels", {}).get("org.opencontainers.image.version")
+                 for p, i in images.items()}
+          print("version label per platform:", got)
+          if not got or any(v != want for v in got.values()):
+              sys.exit(f"version label {got} is not {want}")
+          EOF
 
   pypi:
     name: pion-vllm-mlx to PyPI

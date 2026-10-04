@@ -607,6 +607,12 @@ server = "self"
 tier = "gate"
 
 [[test]]
+file = "tests/test_metallib_discovery.py"
+server = "self"
+tier = "gate"
+requires = ["macos", "file:src/ffi/metal_compute.metallib"]
+
+[[test]]
 file = "tests/test_gh260_wal_full_refuses.py"
 server = "self"
 tier = "gate"

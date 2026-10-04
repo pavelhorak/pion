@@ -55,6 +55,11 @@ static NSArray<NSString *> *pion_metal_dirs(void) {
         [dirs addObject:[bin stringByAppendingPathComponent:@"../lib"]];   /* tarball bin/ + lib/ */
         [dirs addObject:[bin stringByAppendingPathComponent:@"../share/pion"]];
         [dirs addObject:[bin stringByAppendingPathComponent:@"../src/ffi"]];
+        /* A source build is ./pion-server at the repo root, with the library
+         * in src/ffi beside it. Without this entry, a checkout binary started
+         * from any other directory found nothing and fell back to the MLX
+         * bridge: the CWD-relative entries below only work from the root. */
+        [dirs addObject:[bin stringByAppendingPathComponent:@"src/ffi"]];
     }
     [dirs addObject:@"src/ffi"];   /* source checkout, CWD-relative — unchanged */
     [dirs addObject:@"."];
