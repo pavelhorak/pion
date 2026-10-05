@@ -1317,6 +1317,17 @@ def main():
             sig_iface.as_c_string_slice(), UInt16(config.server.port)
         )
 
+    # Each connection is one fd, and every per-fd table holds 65536 entries. A
+    # stock Linux login allows 1024 open files, which capped the server at about
+    # a thousand clients; raise the soft limit as Redis does.
+    var _nofile_before = alloc[Int64](1)
+    _nofile_before[unsafe_offset=0] = 0
+    var _nofile = external_call["pion_raise_nofile", Int64](Int64(65536), _nofile_before)
+    if _nofile > _nofile_before[unsafe_offset=0] and _nofile_before[unsafe_offset=0] > 0:
+        print("Open-file limit raised from " + String(_nofile_before[unsafe_offset=0])
+              + " to " + String(_nofile))
+    _nofile_before.unsafe_free()
+
     # V3.1: single shared listen socket — all workers register with their own kqueue and race
     # to accept(). macOS delivers connections round-robin across workers → N× QPS scaling.
     var shared_listen_fd = create_listen_socket(config.server.port)
@@ -1662,18 +1673,20 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
         if CompilationTarget.is_macos() and worker_config.server.use_huge_pages:
             print("Warning: Huge Pages are not supported on macOS. Falling back to standard pages.")
             worker_config.server.use_huge_pages = False
-        # On Linux (Docker/CI), hugepages are rarely configured; disable by default.
-        # SlabAllocator already has a per-call fallback, but disabling here avoids
-        # the unnecessary syscall overhead and MAP_HUGETLB failures on every alloc.
-        if CompilationTarget.is_linux() and worker_config.server.use_huge_pages:
-            worker_config.server.use_huge_pages = False
+        # Linux: the profiles leave huge pages off (a stock box reserves none),
+        # so this is on only when `--huge-pages` asked for it. It used to be
+        # forced off here, which made that flag a no-op the banner still
+        # reported as on. SlabAllocator falls back to normal pages per mmap.
 
         # Step 5: Pin to P-cores (always on macOS; QoS class must be set before affinity).
         if CompilationTarget.is_macos():
             set_thread_qos_user_interactive()
         if worker_config.server.strict_affinity:
-            set_thread_affinity(i)
-            print("Worker " + String(i) + " pinned to CPU " + String(i))
+            var _aff = set_thread_affinity(i)
+            if _aff.byte_length() > 0:
+                print("Worker " + String(i) + " " + _aff)
+            else:
+                print("Worker " + String(i) + ": --affinity requested but not applied")
 
         # gh #258: same env-var fallback as main()'s parse. This loop rebuilds
         # each worker's config from argv, so anything main() resolved from the

@@ -274,20 +274,32 @@ def set_thread_qos_user_interactive():
         _ = external_call["pthread_set_qos_class_self_np", Int32](UInt32(0x21), Int32(0))
 
 @always_inline
-def set_thread_affinity(cpu_id: Int):
-    # macOS THREAD_AFFINITY_POLICY = 4, THREAD_AFFINITY_POLICY_COUNT = 1
-    comptime if not CompilationTarget.is_linux():
+def set_thread_affinity(cpu_id: Int) -> String:
+    """Apply `--affinity` to the calling worker thread and say what was applied
+    ("" when nothing was). Linux pins the thread to one CPU; macOS has no hard
+    pinning and sets an affinity tag, a scheduling hint (#20: Linux used to do
+    nothing here while the caller logged "pinned to CPU i")."""
+    comptime if CompilationTarget.is_linux():
+        var c = Int(external_call["pion_pin_current_thread", Int32](Int32(cpu_id)))
+        if c < 0:
+            return ""
+        return "pinned to CPU " + String(c)
+    else:
+        # macOS THREAD_AFFINITY_POLICY = 4, THREAD_AFFINITY_POLICY_COUNT = 1
         var policy = cpu_id
         var thread = external_call["mach_thread_self", UInt32]()
         var policy_ptr = alloc[Int](1)
         policy_ptr[unsafe_offset=0] = policy
-        _ = external_call["thread_policy_set", Int32](
+        var kr = external_call["thread_policy_set", Int32](
             thread,
             4, # THREAD_AFFINITY_POLICY
             policy_ptr,
             1  # THREAD_AFFINITY_POLICY_COUNT
         )
         policy_ptr.unsafe_free()
+        if kr != 0:
+            return ""
+        return "affinity tag " + String(cpu_id) + " (a macOS scheduling hint)"
 
 comptime CMD_GET = 0x00746567
 comptime CMD_MGET = 0x7465676d
