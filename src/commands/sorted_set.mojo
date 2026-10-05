@@ -122,6 +122,11 @@ def _zsetop_accumulate(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigi
                     mems.append(sp[].keys[slot]); scs.append(Float64(1.0))
         for mi in range(len(mems)):
             var contrib = scs[mi] * w
+            # Redis's rule for NaN (inf * 0, or inf + -inf when summing): the
+            # score becomes 0. MIN and MAX already ignore a NaN operand, as
+            # Redis's comparisons do. A NaN score would break the order.
+            if contrib != contrib:
+                contrib = 0.0
             var at = seen[].get(mems[mi])
             if at.is_none():
                 seen[].set(mems[mi], GenericValue.from_int(Int64(len(out_members))))
@@ -134,7 +139,8 @@ def _zsetop_accumulate(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigi
                 elif aggregate == ZAGG_MAX:
                     if contrib > out_scores[idx]: out_scores[idx] = contrib
                 else:
-                    out_scores[idx] = out_scores[idx] + contrib
+                    var _sum = out_scores[idx] + contrib
+                    out_scores[idx] = _sum if _sum == _sum else 0.0
     # `seen` BORROWS the sources' members (and out_members does too): it must
     # not free them. Destroying it normally freed every source member, so
     # ZUNION/ZINTER/ZDIFF — read-only — left the sources serving freed memory.
@@ -182,11 +188,7 @@ def _zsetop_parse_opts(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
 @always_inline
 def _zsetop_emit_score(mut writer: ResponseWriter, sc: Float64):
     """Integer-valued scores print bare (`2`, not `2.0`), as ZRANGE does."""
-    var si = Int64(sc)
-    if Float64(si) == sc: writer.append_bulk_int_response(si)
-    else:
-        var s = String(sc)
-        writer.append_bulk_string_response(s.unsafe_ptr(), s.byte_length())
+    writer.append_bulk_score_response(sc)
 
 
 @always_inline
@@ -388,6 +390,11 @@ def handle_zincrby(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int
                 if _zib_c[].obj == _zib_mem: _zib_old = _zib_c[].score; _zib_found = True
                 _zib_c = _zib_c[].forward[0]
             var _zib_new = _zib_old + Float64(_zib_inc)
+            if _zib_new != _zib_new:
+                # inf + -inf. Redis refuses and leaves the member as it was;
+                # a NaN score would break the order every range walks.
+                writer.append_error_response("ERR resulting score is not a number (NaN)")
+                return 3
             _zib_zp[].reset()
             for _ji in range(len(_zib_ss)):
                 if _zib_oo[_ji] == _zib_mem: _zib_zp[].insert(_zib_new, _zib_mem)
@@ -431,11 +438,7 @@ def _zr_emit(mut writer: ResponseWriter, objs: List[GenericValue],
     for _zi in range(_start, _start + _emitted):
         writer.append_bulk_value_response(objs[_zi])
         if with_scores:
-            var _sc = scores[_zi]; var _si = Int64(_sc)
-            if Float64(_si) == _sc: writer.append_bulk_int_response(_si)
-            else:
-                var _ss = String(_sc)
-                writer.append_bulk_string_response(_ss.unsafe_ptr(), _ss.byte_length())
+            writer.append_bulk_score_response(scores[_zi])
 
 
 def _zrange_index_rev(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], a_in: Int, b_in: Int, with_scores: Bool, cons: Int) raises -> Int:
@@ -621,9 +624,7 @@ def handle_zrange(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
                     if _zridx >= _zrng_a and _zridx <= _zrng_b:
                         writer.append_bulk_value_response(_zrc[].obj)
                         if _zrng_with:
-                            var _sc = _zrc[].score; var _si = Int64(_sc)
-                            if Float64(_si)==_sc: writer.append_bulk_int_response(_si)
-                            else: var _ss = String(_sc); writer.append_bulk_string_response(_ss.unsafe_ptr(), _ss.byte_length())
+                            writer.append_bulk_score_response(_zrc[].score)
                     if _zridx >= _zrng_b: break
                     _zridx += 1; _zrc = _zrc[].forward[0]
         else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -670,9 +671,7 @@ def handle_zrevrange(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
                 for _ri in range(_rev_b, _rev_a - 1, -1):
                     writer.append_bulk_value_response(_rvoo[_ri])
                     if _zrv_with:
-                        var _sc = _rvss[_ri]; var _si = Int64(_sc)
-                        if Float64(_si)==_sc: writer.append_bulk_int_response(_si)
-                        else: var _ss = String(_sc); writer.append_bulk_string_response(_ss.unsafe_ptr(), _ss.byte_length())
+                        writer.append_bulk_score_response(_rvss[_ri])
         else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         return _zrv_cons
     else:
@@ -739,9 +738,7 @@ def handle_zrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], 
         for _zi in range(len(_zbs_roo)):
             writer.append_bulk_value_response(_zbs_roo[_zi])
             if _zbs_with:
-                var _sc = _zbs_res[_zi]; var _si = Int64(_sc)
-                if Float64(_si)==_sc: writer.append_bulk_int_response(_si)
-                else: var _ss = String(_sc); writer.append_bulk_string_response(_ss.unsafe_ptr(), _ss.byte_length())
+                writer.append_bulk_score_response(_zbs_res[_zi])
         return _i - i
     else:
         writer.append_error_response("ERR wrong number of arguments for 'zrangebyscore' command")
@@ -802,9 +799,7 @@ def handle_zrevrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin
         for _zi in range(len(_zrvbs_roo)):
             writer.append_bulk_value_response(_zrvbs_roo[_zi])
             if _zrvbs_with:
-                var _sc = _zrvbs_res[_zi]; var _si = Int64(_sc)
-                if Float64(_si)==_sc: writer.append_bulk_int_response(_si)
-                else: var _ss = String(_sc); writer.append_bulk_string_response(_ss.unsafe_ptr(), _ss.byte_length())
+                writer.append_bulk_score_response(_zrvbs_res[_zi])
         return _i - i
     else:
         writer.append_error_response("ERR wrong number of arguments for 'zrevrangebyscore' command")
@@ -1235,11 +1230,7 @@ def handle_zmpop(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             var _pair = "*2\r\n"
             writer.append_to_response(_pair.unsafe_ptr(), _pair.byte_length())
             writer.append_bulk_value_response(_r.obj)
-            var _sc = _r.score; var _si = Int64(_sc)
-            if Float64(_si) == _sc: writer.append_bulk_int_response(_si)
-            else:
-                var _sstr = String(_sc)
-                writer.append_bulk_string_response(_sstr.unsafe_ptr(), _sstr.byte_length())
+            writer.append_bulk_score_response(_r.score)
             # gh #170: log the RESOLVED effect (a ZREM per popped member).
             if is_not_null(wal):
                 var _wl = 0
@@ -1292,9 +1283,7 @@ def handle_zpopmax(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int
                     if not _r.valid:
                         break
                     writer.append_bulk_value_response(_r.obj)
-                    var _sc = _r.score; var _si = Int64(_sc)
-                    if Float64(_si)==_sc: writer.append_bulk_int_response(_si)
-                    else: var _ss = String(_sc); writer.append_bulk_string_response(_ss.unsafe_ptr(), _ss.byte_length())
+                    writer.append_bulk_score_response(_r.score)
                     var _wl = 0
                     var _wp = gv_bytes(_r.obj, _wb, _wl)
                     _ = wal[].append_kv(12, tokens[i+1].ptr, tokens[i+1].length, _wp, _wl)
@@ -1353,9 +1342,7 @@ def handle_zrandmember(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i:
                     if is_null(_rc): _rc = _zrmp[].head[].forward[0]
                     writer.append_bulk_value_response(_rc[].obj)
                     if _zrm_with:
-                        var _sc = _rc[].score; var _si = Int64(_sc)
-                        if Float64(_si)==_sc: writer.append_bulk_int_response(_si)
-                        else: var _ss = String(_sc); writer.append_bulk_string_response(_ss.unsafe_ptr(), _ss.byte_length())
+                        writer.append_bulk_score_response(_rc[].score)
                     _emitted += 1; _rc = _rc[].forward[0]
             else:
                 var _rc = _zrmp[].head[].forward[0]
@@ -1401,9 +1388,7 @@ def handle_zmscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int
                 var _zsc = _zsp[].head[].forward[0]; var _zf = False
                 while is_not_null(_zsc):
                     if _zsc[].obj == _mem:
-                        var _sc = _zsc[].score; var _si = Int64(_sc)
-                        if Float64(_si)==_sc: writer.append_bulk_int_response(_si)
-                        else: var _ss = String(_sc); writer.append_bulk_string_response(_ss.unsafe_ptr(), _ss.byte_length())
+                        writer.append_bulk_score_response(_zsc[].score)
                         _zf = True; break
                     _zsc = _zsc[].forward[0]
                 if not _zf: writer.append_null_response()
@@ -1469,12 +1454,7 @@ def handle_zscan(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
                         _zsc = _zsc[].forward[0]
                         continue
                 writer.append_bulk_value_response(_zsc[].obj)
-                var _zss = _zsc[].score; var _zsi = Int64(_zss)
-                if Float64(_zsi) == _zss:
-                    writer.append_bulk_int_response(_zsi)
-                else:
-                    var _zsstr = String(_zss)
-                    writer.append_bulk_string_response(_zsstr.unsafe_ptr(), _zsstr.byte_length())
+                writer.append_bulk_score_response(_zsc[].score)
                 _zsc = _zsc[].forward[0]
             zs_mb.unsafe_free()
         return _i - i

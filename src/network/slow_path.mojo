@@ -17,7 +17,7 @@ from src.common.skip_list import SlabSkipList
 from src.common.list import SlabList
 from src.memory.slab_allocator import SlabAllocator
 from src.common.value import GenericValue, ValueType
-from src.common.utils import strict_atol, format_int_to_buf, format_float_to_buf, int_string_len, arg_eq, parse_int64_strict, parse_redis_double, DOUBLE_VALUE, DOUBLE_RANGE, DOUBLE_LONG, format_float64_to_buf, set_expiry, SETEXP_INVALID, SETEXP_EXPIRED
+from src.common.utils import strict_atol, format_int_to_buf, format_float_to_buf, int_string_len, arg_eq, parse_int64_strict, parse_redis_double, DOUBLE_VALUE, DOUBLE_RANGE, DOUBLE_LONG, set_expiry, SETEXP_INVALID, SETEXP_EXPIRED
 from src.common.metrics import ValueLedger
 from src.common.config import PionConfig
 from src.common.geohash import geohash_encode, geohash_decode, GeoHashBits, GEO_STEP_MAX
@@ -1679,12 +1679,20 @@ struct SlowPathHandler:
                             var _zchanged = Int64(0)
                             var _zincr_score = Float64(0.0)
                             var _zincr_applied = False
+                            var _zincr_nan = False
                             var _zbadopt = False
-                            # Redis rejects these combinations outright.
-                            if (_znx and _zxx) or (_znx and (_zgt or _zlt)) or (_zgt and _zlt):
+                            var _zbadmsg = String("")
+                            # Redis rejects these combinations outright, each
+                            # with its own message.
+                            if _znx and _zxx:
                                 _zbadopt = True
+                                _zbadmsg = "ERR XX and NX options at the same time are not compatible"
+                            elif (_znx and (_zgt or _zlt)) or (_zgt and _zlt):
+                                _zbadopt = True
+                                _zbadmsg = "ERR GT, LT, and/or NX options at the same time are not compatible"
                             elif _zincr and (j_zadd + 2) < cmd_end_tok:
                                 _zbadopt = True   # INCR takes exactly one pair
+                                _zbadmsg = "ERR INCR option supports a single increment-element pair"
                             # gh #393: every score is parsed — Redis's rules, "inf"
                             # included — BEFORE any pair is applied. A bad score in
                             # pair N used to leave pairs 1..N-1 applied behind the
@@ -1707,26 +1715,28 @@ struct SlowPathHandler:
                                     _zpair += 1
                                     if not _zo.ok:
                                         zadd_wrongtype = True; break
+                                    if _zo.nan:
+                                        _zincr_nan = True; break
                                     if _zo.applied:
                                         zadd_added += _zo.added
                                         _zchanged += _zo.changed
                                         _zincr_score = _zo.new_score
                                         _zincr_applied = True
                                     j_zadd += 2
-                            if _zbadopt: writer.append_error_response("ERR GT, LT, and/or NX options at the same time are not compatible")
+                            if _zbadopt: writer.append_error_response(_zbadmsg)
                             elif zadd_badfloat: writer.append_error_response("ERR value is not a valid float")
                             elif zadd_wrongtype: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                            elif _zincr_nan: writer.append_error_response("ERR resulting score is not a number (NaN)")
                             elif _zincr:
                                 # INCR replies with the NEW score, or nil when a
                                 # flag suppressed the write.
                                 if _zincr_applied:
-                                    # Float64, 17 significant digits: this went through
-                                    # Float32 with 6 decimals, so `ZADD z INCR 123456789 m`
-                                    # answered 123456792.
-                                    var _zsb = alloc[UInt8](48)
-                                    var _zt = format_float64_to_buf(_zsb, 0, _zincr_score)
-                                    writer.append_bulk_string_response(_zsb, _zt)
-                                    _zsb.unsafe_free()
+                                    # Redis answers with addReplyDouble, as ZINCRBY
+                                    # does: d2string digits, and a RESP3 double.
+                                    # This went through Float32 once (`ZADD z INCR
+                                    # 123456789 m` answered 123456792), then through
+                                    # 17 fixed decimals (1/3 as 0.33333333333333331).
+                                    writer.append_score_response(_zincr_score)
                                 else:
                                     writer.append_null_response()
                             elif _zch: writer.append_int_response(_zchanged)
@@ -3049,12 +3059,8 @@ struct SlowPathHandler:
                                         writer.append_bulk_value_response(zpmin_res.obj)
                                         # gh #251: was Int64(...), which truncated
                                         # a fractional score (1.5 -> "1").
-                                        var _zpi = Int64(zpmin_res.score)
-                                        if Float64(_zpi) == zpmin_res.score:
-                                            writer.append_bulk_int_response(_zpi)
-                                        else:
-                                            var _zps = String(zpmin_res.score)
-                                            writer.append_bulk_string_response(_zps.unsafe_ptr(), _zps.byte_length())
+                                        # #18: nor through Int64() (±inf).
+                                        writer.append_bulk_score_response(zpmin_res.score)
                                         # The fast path logs the resolved effect (ZREM of
                                         # the popped member, cmd 12); this path logged
                                         # nothing, so a replay resurrected every member

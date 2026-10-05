@@ -27,6 +27,7 @@ struct ZAddOutcome(Copyable, Movable):
     var added: Int64        # 1 only when a NEW member was inserted
     var changed: Int64      # 1 when added OR the score actually moved (CH counts this)
     var new_score: Float64
+    var nan: Bool           # INCR would leave NaN (inf + -inf): an error, nothing written
 
 
 struct IntCmdResult:
@@ -693,7 +694,7 @@ struct CommandDispatcher:
         if val.is_none():
             # XX must not CREATE the key — checked before allocating anything.
             if xx:
-                return ZAddOutcome(True, False, 0, 0, 0.0)
+                return ZAddOutcome(True, False, 0, 0, 0.0, False)
             zset_ptr = self.skip_list_pool[].acquire()
             zset_ptr.unsafe_write(SlabSkipList(16))
             var new_val = GenericValue()
@@ -703,7 +704,7 @@ struct CommandDispatcher:
         elif val.type.value == ValueType.ZSET:
             zset_ptr = val.as_zset().unsafe_bitcast[SlabSkipList]()
         else:
-            return ZAddOutcome(False, False, 0, 0, 0.0)
+            return ZAddOutcome(False, False, 0, 0, 0.0, False)
 
         var cur_gv = zset_ptr[].member_score(member_gv)
         var exists = not cur_gv.is_none()
@@ -713,16 +714,21 @@ struct CommandDispatcher:
         var target = (cur + score) if (incr and exists) else score
 
         if nx and exists:
-            return ZAddOutcome(True, False, 0, 0, 0.0)
+            return ZAddOutcome(True, False, 0, 0, 0.0, False)
         if xx and not exists:
-            return ZAddOutcome(True, False, 0, 0, 0.0)
+            return ZAddOutcome(True, False, 0, 0, 0.0, False)
+        # inf + -inf: Redis refuses with "resulting score is not a number" and
+        # changes nothing, checked after NX/XX and before GT/LT as it does. A
+        # NaN score has no place in the order at all.
+        if target != target:
+            return ZAddOutcome(True, False, 0, 0, 0.0, True)
         # GT/LT only gate an UPDATE; against a missing member they always allow
         # the insert (Redis treats "no member" as no bound, not as infinity —
         # the infinity rule is EXPIRE's, not ZADD's).
         if gt and exists and target <= cur:
-            return ZAddOutcome(True, False, 0, 0, 0.0)
+            return ZAddOutcome(True, False, 0, 0, 0.0, False)
         if lt and exists and target >= cur:
-            return ZAddOutcome(True, False, 0, 0, 0.0)
+            return ZAddOutcome(True, False, 0, 0, 0.0, False)
 
         # CH counts members ADDED plus members whose score actually moved. An
         # equal-score write is a no-op and must not count — `upsert` returns 0
@@ -732,7 +738,7 @@ struct CommandDispatcher:
         var added = zset_ptr[].upsert(target, member_gv)
         _ = self.wal[].append_scored(9, key.unsafe_ptr(), key.byte_length(),
                                      target, member.unsafe_ptr(), member.byte_length())
-        return ZAddOutcome(True, True, Int64(added), Int64(1) if moved else Int64(0), target)
+        return ZAddOutcome(True, True, Int64(added), Int64(1) if moved else Int64(0), target, False)
 
     @always_inline
     def execute_zpopmin(self, key: String) -> GenericValue:

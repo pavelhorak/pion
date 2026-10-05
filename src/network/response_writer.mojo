@@ -6,7 +6,7 @@ from std.sys import CompilationTarget
 
 from src.network.server import TCPServer
 from src.common.value import GenericValue, ValueType
-from src.common.utils import int_string_len, format_int_to_buf
+from src.common.utils import int_string_len, format_int_to_buf, score_prints_as_int, format_score
 from src.io.io_uring import IOUring
 
 # Response buffer size. Kept at 4MB for cache-friendly vector search performance.
@@ -431,8 +431,8 @@ struct ResponseWriter(Movable):
         Scoped to the two commands real Redis answers with the double type:
         INCRBYFLOAT / HINCRBYFLOAT / GEODIST stay bulk strings even under
         RESP3 in Redis 8 (probed 2026-08-03) — do not route them here."""
-        var si = Int64(score)
-        if Float64(si) == score:
+        if score_prints_as_int(score):   # #18: never Int64() an inf
+            var si = Int64(score)
             if self.proto != 3:
                 self.append_bulk_int_response(si)
                 return
@@ -445,8 +445,20 @@ struct ResponseWriter(Movable):
             self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
             self.offset += 2
         else:
-            var ss = String(score)
+            var ss = format_score(score)
             self.append_double_response(ss.unsafe_ptr(), ss.byte_length())
+
+    @always_inline
+    def append_bulk_score_response(mut self, score: Float64):
+        """A sorted-set score inside an array reply (WITHSCORES, the ZPOP and
+        ZMPOP families, ZMSCORE, ZSCAN): a bulk string, digits as Redis prints
+        them. Every such site used to carry its own `Int64(score)` round trip,
+        which read ±inf back as INT64_MIN on x86 (#18)."""
+        if score_prints_as_int(score):
+            self.append_bulk_int_response(Int64(score))
+        else:
+            var ss = format_score(score)
+            self.append_bulk_string_response(ss.unsafe_ptr(), ss.byte_length())
 
     @always_inline
     def append_empty_array_response(mut self):

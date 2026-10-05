@@ -2260,12 +2260,9 @@ struct FastPathHandler(Movable):
                             # correct, so the two ends of the same command family
                             # disagreed. Integer-valued scores still emit bare
                             # digits (Redis prints "3", not "3.0").
-                            var _zpm_i = Int64(score)
-                            if Float64(_zpm_i) == score:
-                                writer.append_bulk_int_response(_zpm_i)
-                            else:
-                                var _zpm_s = String(score)
-                                writer.append_bulk_string_response(_zpm_s.unsafe_ptr(), _zpm_s.byte_length())
+                            # #18: and never through Int64(), which read ±inf
+                            # back as INT64_MIN on x86.
+                            writer.append_bulk_score_response(score)
                             # gh #394: pop_min hands back the node's own payload; the
                             # reply above copied it, and nothing else holds it.
                             obj.free_str_payload()

@@ -265,6 +265,122 @@ def format_float_to_buf(buf: Pointer[UInt8, MutUntrackedOrigin], offset: Int, va
 
 
 @always_inline
+def score_prints_as_int(score: Float64) -> Bool:
+    """True when Redis prints a sorted-set score as a bare integer: its d2string
+    takes the integer path only for integral values within ±2^62 (double2ll's
+    LLONG_MAX/2 bound). Everything else goes through `format_score`.
+
+    #18: every score emitter used to test `Float64(Int64(score)) == score`.
+    Converting ±inf (or anything past Int64) to Int64 is undefined; LLVM folds
+    the round trip into a truncation test that ±inf passes, and x86's
+    cvttsd2si then yields INT64_MIN, so `ZADD k inf m` read back as
+    -9223372036854775808. The range test comes first and short-circuits, so
+    the conversion only ever sees values it can represent (NaN fails it too)."""
+    return score >= -4611686018427387904.0 and score <= 4611686018427387904.0 \
+        and Float64(Int64(score)) == score
+
+
+def format_score(score: Float64) -> String:
+    """Redis's d2string for a score `score_prints_as_int` rejects: `inf`,
+    `-inf`, `nan`, and otherwise the shortest round-trip digits laid out as its
+    fpconv_dtoa lays them out: plain digits up to 6 places past the last
+    significant one (`9223372036854776000`), plain decimals down to 1e-6
+    (`0.00001`), and `1e+20` / `1.5e-7` beyond those.
+
+    Known residual: fpconv is Grisu2, which for about 0.1% of full-precision
+    doubles emits a longer or differently-rounded digit string than the
+    shortest one (`-6016.9512179398635` for -6016.951217939863). Both parse
+    back to the same double; Pion emits the shortest, as Python's repr does."""
+    if score != score:
+        return "nan"
+    if score > 1.7976931348623157e308:
+        return "inf"
+    if score < -1.7976931348623157e308:
+        return "-inf"
+    if score == 0.0:
+        return "0"
+    # Shortest digits and the decimal exponent come from Mojo's own formatter
+    # ("1.5", "1e-05", "4.611686018427388e+18", "9007199254740992.0").
+    var s = String(score)
+    var p = s.unsafe_ptr()
+    var n = s.byte_length()
+    var i = 0
+    var neg = False
+    if n > 0 and p[0] == 45:   # '-'
+        neg = True
+        i = 1
+    var digits = String("")
+    var point = -1            # count of mantissa digits before the '.'
+    var nd_raw = 0
+    var exp10 = 0
+    while i < n:
+        var c = p[i]
+        if c == 46:           # '.'
+            point = nd_raw
+        elif c == 101 or c == 69:   # 'e' / 'E'
+            i += 1
+            var eneg = False
+            if i < n and (p[i] == 45 or p[i] == 43):
+                eneg = p[i] == 45
+                i += 1
+            while i < n:
+                exp10 = exp10 * 10 + Int(p[i] - 48)
+                i += 1
+            if eneg:
+                exp10 = -exp10
+            break
+        else:
+            digits += chr(Int(c))
+            nd_raw += 1
+        i += 1
+    if point < 0:
+        point = nd_raw
+    # value = digits * 10^K with digits stripped of leading and trailing zeros
+    var dp = digits.unsafe_ptr()
+    var lo = 0
+    while lo < nd_raw - 1 and dp[lo] == 48:
+        lo += 1
+    var hi = nd_raw
+    var K = point - nd_raw + exp10
+    while hi > lo + 1 and dp[hi - 1] == 48:
+        hi -= 1
+        K += 1
+    var nd = hi - lo
+    var out = String("-") if neg else String("")
+    var e = K + nd - 1
+    var ae = e if e >= 0 else -e
+    if K >= 0 and ae < nd + 7:
+        for j in range(lo, hi):
+            out += chr(Int(dp[j]))
+        for _ in range(K):
+            out += "0"
+        return out
+    if K < 0 and (K > -7 or ae < 4):
+        var offset = nd + K
+        if offset <= 0:
+            out += "0."
+            for _ in range(-offset):
+                out += "0"
+            for j in range(lo, hi):
+                out += chr(Int(dp[j]))
+        else:
+            for j in range(lo, lo + offset):
+                out += chr(Int(dp[j]))
+            out += "."
+            for j in range(lo + offset, hi):
+                out += chr(Int(dp[j]))
+        return out
+    out += chr(Int(dp[lo]))
+    if nd > 1:
+        out += "."
+        for j in range(lo + 1, hi):
+            out += chr(Int(dp[j]))
+    out += "e-" if e < 0 else "e+"
+    out += String(ae)
+    return out
+
+
+@always_inline
 def set_thread_qos_user_interactive():
     # Step 5: Pin this thread to P-cores (high-performance cores) on Apple Silicon.
     # pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE=0x21, relative_priority=0)
