@@ -47,7 +47,11 @@ build = { cmd = "mojo build -I . -D PION_HELD_VECTOR src/main.mojo -D PION_CUDA 
 # into FMA and widens FP32 reductions, and the quant beams' FP32 re-rank then
 # differs in the last bit while INT8 and PKM still match (first CI run,
 # 2026-10-02). -lm: the x86 kernels call fmaf.
-test-vector-differential = "bash -c 'mojo build -I . -D PION_HELD_VECTOR --target-cpu x86-64-v2 tests/test_vector_differential.mojo -Xlinker vendor/pion-vector/linux-x86_64/libpion_vector.a -Xlinker -lm -o /tmp/pion_vdiff && /tmp/pion_vdiff'"
+# The archive runs its VNNI build by default where the CPU has one; the
+# reference below is compiled for x86-64-v2, so pin the v2 build to compare like
+# with like on any host. The VNNI build has its own task, for VNNI hardware.
+test-vector-differential = "bash -c 'mojo build -I . -D PION_HELD_VECTOR --target-cpu x86-64-v2 tests/test_vector_differential.mojo -Xlinker vendor/pion-vector/linux-x86_64/libpion_vector.a -Xlinker -lm -o /tmp/pion_vdiff && PION_VECTOR_VNNI=0 /tmp/pion_vdiff'"
+test-vector-differential-vnni = "bash -c 'grep -q -w avx512_vnni /proc/cpuinfo || { echo \"needs an AVX-512 VNNI CPU\"; exit 1; }; mojo build -I . -D PION_HELD_VECTOR --target-cpu icelake-server tests/test_vector_differential.mojo -Xlinker vendor/pion-vector/linux-x86_64/libpion_vector.a -Xlinker -lm -o /tmp/pion_vdiff_vnni && /tmp/pion_vdiff_vnni'"
 
 # gh #83: GPU-free CI / OSS-newcomer build. No nvcc, no cudart, no GPU.
 # Mirrors the linux-aarch64 FFI list (POSIX shims + Lua only — no CUDA

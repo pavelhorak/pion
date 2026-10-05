@@ -137,10 +137,12 @@ jobs:
       - name: Closed vector library matches its open reference
         # D11: every routine in vendor/pion-vector/<platform>/libpion_vector.a
         # against src/vector/reference/ on the same inputs — beams bit-exact,
-        # PKM FP32 within 1e-4. Every platform links its own vendored archive;
-        # on x86 the dispatcher runs the x86-64-v2 build unless
-        # PION_VECTOR_VNNI=1 opts in to the VNNI one. The runner's CPU goes in
-        # the log, since an x86 result can depend on it.
+        # PKM FP32 within 1e-4. Every platform links its own vendored archive.
+        # On x86 the dispatcher runs the VNNI build where the CPU has one; the
+        # task pins PION_VECTOR_VNNI=0, so this compares the x86-64-v2 build with
+        # a reference compiled for the same CPU (the runners have no AVX-512
+        # anyway). The runner's CPU goes in the log, since an x86 result can
+        # depend on it.
         run: |
           if [ -r /proc/cpuinfo ]; then
             grep -m1 'model name' /proc/cpuinfo || true
