@@ -1479,3 +1479,11 @@ file = "tests/test_admin_commands.py"
 server = "self"
 tier = "gate"
 timeout = 300
+
+# #40: a local buffer read through a pointer cast through Int (its origin
+# erased) must outlive the read; canaried with every shape that shipped
+[[test]]
+file = "tests/test_audit_erased_origin.py"
+server = "none"
+tier = "gate"
+timeout = 120

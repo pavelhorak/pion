@@ -444,6 +444,7 @@ def _getkeys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens
                 var f = plist[k].flags
                 _write_flags(writer, Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(f.unsafe_ptr())),
                              f.byte_length())
+                _ = f^          # read through a pointer that does not keep it alive
             else:
                 writer.append_bulk_string_response(t.ptr, t.length)
         return
@@ -464,6 +465,7 @@ def _getkeys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens
             _write_flags(writer, sp + keys[k].flags, keys[k].flen)
         else:
             writer.append_bulk_string_response(t.ptr, t.length)
+    _ = specs^          # static, but `sp` would not keep a String alive
 
 
 def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,

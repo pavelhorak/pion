@@ -1352,7 +1352,10 @@ struct SlowPathHandler:
         # client-info is the line without its newline, as Redis records it
         var il = info.byte_length()
         if il > 0:
-            info = bytes_to_string(UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(info.unsafe_ptr())), il - 1)
+            var line = bytes_to_string(
+                UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(info.unsafe_ptr())), il - 1)
+            _ = info^   # alive until the copy above is made: the pointer does not keep it
+            info = line^
         self.acl_log.add(reason^, ctx^, object^, username^, info^)
 
     def _wrote_wrongpass(self, mut writer: ResponseWriter, start: Int) -> Bool:

@@ -183,7 +183,7 @@ def _shard_total_count(idx_buf: Pointer[UInt8, MutUntrackedOrigin], idx_len: Int
     """Find the total shard count from index.json by scanning for the
     `-of-NNNNN.safetensors` filename pattern. Returns -1 if not found.
     """
-    var pat = String("-of-")
+    var pat: StaticString = "-of-"
     var pat_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pat.unsafe_ptr()))
     var pat_len = pat.byte_length()
     var i = 0
@@ -292,7 +292,7 @@ def _find_data_offsets_for_key(buf: Pointer[UInt8, MutUntrackedOrigin], buf_len:
         var search_end = i + 1024 + key_len
         if search_end > buf_len:
             search_end = buf_len
-        var pat = String("\"data_offsets\":")
+        var pat: StaticString = "\"data_offsets\":"
         var pat_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pat.unsafe_ptr()))
         var pat_len = pat.byte_length()
         var j = i + 2 + key_len
@@ -1122,6 +1122,7 @@ struct MoEExpertTier:
                             var f = _find_data_offsets_for_key(hbuf, hbuf_len,
                                 Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key.unsafe_ptr())),
                                 key.byte_length(), ds2, de2)
+                            _ = key^    # read through a pointer that does not keep it alive
                             if f:
                                 var json_start = UInt64(ds2[])
                                 var json_end = UInt64(de2[])
@@ -1153,6 +1154,7 @@ struct MoEExpertTier:
                             var f = _find_data_offsets_for_key(hbuf, hbuf_len,
                                 Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key.unsafe_ptr())),
                                 key.byte_length(), ds3, de3)
+                            _ = key^    # read through a pointer that does not keep it alive
                             if f:
                                 var json_start = UInt64(ds3[])
                                 var json_end = UInt64(de3[])
@@ -1188,6 +1190,7 @@ struct MoEExpertTier:
                     var f = _find_data_offsets_for_key(hbuf, hbuf_len,
                         Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key.unsafe_ptr())),
                         key.byte_length(), ds, de)
+                    _ = key^    # read through a pointer that does not keep it alive
                     if f:
                         var json_start = UInt64(ds[])
                         var json_end = UInt64(de[])
@@ -1275,39 +1278,39 @@ struct MoEExpertTier:
             return False
 
         # Probe keys (handles both Gemma 4 nested + Phi-3.5/OLMoE flat layouts)
-        var key_num_layers = String("num_hidden_layers")
+        var key_num_layers: StaticString = "num_hidden_layers"
         var nl = _find_int_value(buf, n,
                                    Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_num_layers.unsafe_ptr())),
                                    key_num_layers.byte_length())
-        var key_num_experts_a = String("num_experts")
+        var key_num_experts_a: StaticString = "num_experts"
         var ne_a = _find_int_value(buf, n,
                                      Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_num_experts_a.unsafe_ptr())),
                                      key_num_experts_a.byte_length())
-        var key_num_experts_b = String("num_local_experts")
+        var key_num_experts_b: StaticString = "num_local_experts"
         var ne_b = _find_int_value(buf, n,
                                      Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_num_experts_b.unsafe_ptr())),
                                      key_num_experts_b.byte_length())
-        var key_topk_a = String("top_k_experts")
+        var key_topk_a: StaticString = "top_k_experts"
         var tk_a = _find_int_value(buf, n,
                                      Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_topk_a.unsafe_ptr())),
                                      key_topk_a.byte_length())
-        var key_topk_b = String("num_experts_per_tok")
+        var key_topk_b: StaticString = "num_experts_per_tok"
         var tk_b = _find_int_value(buf, n,
                                      Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_topk_b.unsafe_ptr())),
                                      key_topk_b.byte_length())
-        var key_bits = String("bits")
+        var key_bits: StaticString = "bits"
         var bits = _find_int_value(buf, n,
                                      Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_bits.unsafe_ptr())),
                                      key_bits.byte_length())
-        var key_gs = String("group_size")
+        var key_gs: StaticString = "group_size"
         var gs = _find_int_value(buf, n,
                                    Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_gs.unsafe_ptr())),
                                    key_gs.byte_length())
-        var key_hidden = String("hidden_size")
+        var key_hidden: StaticString = "hidden_size"
         var hidden = _find_int_value(buf, n,
                                        Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_hidden.unsafe_ptr())),
                                        key_hidden.byte_length())
-        var key_intermediate = String("moe_intermediate_size")
+        var key_intermediate: StaticString = "moe_intermediate_size"
         var inter = _find_int_value(buf, n,
                                       Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_intermediate.unsafe_ptr())),
                                       key_intermediate.byte_length())
@@ -1315,7 +1318,7 @@ struct MoEExpertTier:
         # uses intermediate_size for the MoE FFN since it has no separate
         # shared MLP).
         if inter <= 0:
-            var key_int2 = String("intermediate_size")
+            var key_int2: StaticString = "intermediate_size"
             inter = _find_int_value(buf, n,
                                        Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(key_int2.unsafe_ptr())),
                                        key_int2.byte_length())
@@ -1359,12 +1362,12 @@ struct MoEExpertTier:
         var n_shards = -1
         if idx_n > 0:
             # Count tensor entries: each maps to a "...safetensors" filename.
-            var pat_st = String(".safetensors\"")
+            var pat_st: StaticString = ".safetensors\""
             var total_t = _count_occurrences(idx_buf, idx_n,
                 Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pat_st.unsafe_ptr())),
                 pat_st.byte_length())
             # Count expert tensors: any key containing "experts.".
-            var pat_exp = String("experts.")
+            var pat_exp: StaticString = "experts."
             var exp_t = _count_occurrences(idx_buf, idx_n,
                 Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pat_exp.unsafe_ptr())),
                 pat_exp.byte_length())
@@ -1403,10 +1406,10 @@ struct MoEExpertTier:
                 var hdr_buf = alloc[UInt8](shard1_hdr_len + 16)
                 var got = _read_shard_header_json(shard1_path_local, hdr_buf, shard1_hdr_len + 16)
                 if got == shard1_hdr_len:
-                    var probe_a = String("language_model.model.layers.0.experts.switch_glu.gate_proj.weight")
-                    var probe_b = String("model.layers.0.block_sparse_moe.switch_mlp.gate_proj.weight")
-                    var probe_c = String("model.layers.0.mlp.experts.0.gate_proj.weight")
-                    var probe_d = String("model.layers.0.block_sparse_moe.experts.0.w1.weight")
+                    var probe_a: StaticString = "language_model.model.layers.0.experts.switch_glu.gate_proj.weight"
+                    var probe_b: StaticString = "model.layers.0.block_sparse_moe.switch_mlp.gate_proj.weight"
+                    var probe_c: StaticString = "model.layers.0.mlp.experts.0.gate_proj.weight"
+                    var probe_d: StaticString = "model.layers.0.block_sparse_moe.experts.0.w1.weight"
                     var ds = alloc[Int](1); var de = alloc[Int](1)
                     if _find_data_offsets_for_key(hdr_buf, got,
                             Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(probe_a.unsafe_ptr())),
