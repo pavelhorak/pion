@@ -1,6 +1,7 @@
 from src.common.ptr import null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
+from std.ffi import external_call
 from std.memory import unsafe_memset, unsafe_memcpy
 from std.sys.intrinsics import prefetch
 from std.bit import count_trailing_zeros
@@ -143,6 +144,25 @@ struct SlabHashMap(Movable):
             self.vec_tomb[].kill(self.vec_slot, self.vec_gen)
         self.vec_slot = -1
 
+    @no_inline
+    def _vector_field_set(mut self, key: GenericValue, value: GenericValue):
+        """A set of the indexed vector's field: the indexed vector stops being
+        this hash's, unless these are the bytes it already holds. Writing the
+        same vector again (an ingest script run twice, the README's snippet
+        run twice) must not take the document out of the index: after the
+        build nothing can put it back."""
+        var old = self.get(key)
+        var n = old.string_len()
+        if old.is_string() and value.is_string() and n == value.string_len():
+            var sa = alloc[UInt8](24)
+            var sb = alloc[UInt8](24)
+            var same = external_call["memcmp", Int32](old.as_string_safe(sa), value.as_string_safe(sb), n) == 0
+            sa.free()
+            sb.free()
+            if same:
+                return
+        self.drop_vector()
+
     @always_inline
     def _vector_field_touched(mut self, h: UInt64):
         """A set or remove of the field with hash `h`: when it is the indexed
@@ -245,7 +265,8 @@ struct SlabHashMap(Movable):
             self._rehash()
 
         var h = UInt64(key.__hash__())
-        self._vector_field_touched(h)    # #46
+        if self.vec_slot >= 0 and h == self.vec_field_h:
+            self._vector_field_set(key, value)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
 

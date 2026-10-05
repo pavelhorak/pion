@@ -8,7 +8,9 @@ document for a vector it no longer had (HSET of a new vector, HDEL of the
 field). Here each of those happens to a document of a built index, and the
 document's own vector must no longer find it — while the search still
 returns k live documents. Then the same holds across a restart, after SAVE,
-for a slot that died before FT.OPTIMIZE, and across workers.
+for a slot that died before FT.OPTIMIZE, and across workers. And what must
+NOT take a document out: writing its vector again with the same bytes (an
+ingest run twice), or a phantom empty index served before the real one.
 
     python3 tests/test_vector_doc_lifecycle.py [--port 6510]
 """
@@ -222,6 +224,50 @@ def run_generations(work: str, port: int):
     s.stop()
 
 
+def run_rewrites(work: str, port: int):
+    print("[5] writing the same vector again keeps a document; an empty served index blocks nothing")
+    s = Server(work, port, "rewrites")
+    c = s.start()
+    # the README's snippet run twice on one server: the same index created
+    # again, the same documents written again, optimized again
+    for run in (1, 2):
+        create(c, 10)
+        check(f"run {run}: FT.OPTIMIZE", c.cmd("FT.OPTIMIZE", "idx") == "OK")
+        got = knn(c, vec(4))
+        check(f"run {run}: every document is found", got[:1] == [b"doc:4"] and len(got) == K, repr(got))
+    c.cmd("HSET", "doc:5", "vec", vec(5))
+    check("the same vector again: the document stays found", knn(c, vec(5))[:1] == [b"doc:5"])
+    c.cmd("HSET", "doc:6", "vec", vec(6006))
+    gone(c, "doc:6", 6, "a different vector")
+    c.close()
+    s.stop()
+    # FT.OPTIMIZE before any FT.CREATE used to build and serve an empty index
+    # named by its argument; the real index's FT.CREATE then would not open
+    # ingest under it, and nothing it wrote was ever found
+    s = Server(work, port, "phantom")
+    c = s.start()
+    r = c.cmd("FT.OPTIMIZE", "nosuch")
+    check("FT.OPTIMIZE with no index refuses", str(r) == "Unknown index name", repr(r))
+    create(c, 10)
+    check("FT.OPTIMIZE", c.cmd("FT.OPTIMIZE", "idx") == "OK")
+    got = knn(c, vec(7))
+    check("the index created after it finds its documents", got[:1] == [b"doc:7"] and len(got) == K, repr(got))
+    c.close()
+    s.stop()
+    # an index built empty, then created again: ingest opens for it
+    s = Server(work, port, "empty")
+    c = s.start()
+    c.cmd("FT.CREATE", "idx", "SCHEMA", "vec", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32", "DIM", str(DIM),
+          "DISTANCE_METRIC", "L2")
+    check("an empty build", c.cmd("FT.OPTIMIZE", "idx") == "OK")
+    create(c, 10)
+    check("FT.OPTIMIZE", c.cmd("FT.OPTIMIZE", "idx") == "OK")
+    got = knn(c, vec(2))
+    check("FT.CREATE again over an empty index reopens ingest", got[:1] == [b"doc:2"] and len(got) == K, repr(got))
+    c.close()
+    s.stop()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=6510)
@@ -232,6 +278,7 @@ def main() -> int:
         run_prebuild(work, a.port)
         run_workers(work, a.port)
         run_generations(work, a.port)
+        run_rewrites(work, a.port)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{'ALL PASS' if not failures else f'{len(failures)} FAILED'}")

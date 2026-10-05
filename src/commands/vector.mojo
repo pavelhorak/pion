@@ -1537,6 +1537,19 @@ def handle_ft_optimize(
     Returns the new token index after consuming arguments."""
     var ci = i
     if ci + 1 < num_tokens: ci += 1  # skip index name arg
+    # Nothing to build: no FT.CREATE, no vectors ingested, no graph. It used to
+    # build and serve an EMPTY index named by its argument; FT.CREATE of the
+    # real index then saw an index being served and, since #46, would not
+    # reopen ingest for it — so its documents were never indexed and every
+    # search answered nothing. Refuse, as FT.INFO and FT.DROPINDEX do.
+    var _pending = UInt64(0)
+    if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].ingest_count):
+        _pending = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].ingest_count, UInt64(0))
+    var _defined = hnsw.index_name_len > 0 or hnsw.num_nodes > 0 or hnsw.index_ready or _pending > 0 \
+        or (is_not_null(shared_hnsw) and (shared_hnsw[].index_name_len > 0 or shared_hnsw[].pre_index_ready))
+    if not _defined:
+        writer.append_error_response("Unknown index name")
+        return ci
     # gh #403: the builder names the graph it builds. FT.CREATE registered the
     # name in the shared view, but the accept race usually hands FT.OPTIMIZE to
     # a different worker, whose local name was empty: `save_to_disk` then wrote
@@ -1900,8 +1913,9 @@ def handle_ft_create(
         # (clients do, defensively) restarted slot numbering under the live
         # index, so the next HSET renamed its slot 0. An HSET after FT.OPTIMIZE
         # is stored but not indexed — the documented ingest contract.
+        # An EMPTY served index has nothing to protect: ingest reopens for it.
         var _serving = is_not_null(shared_hnsw[].ready_atomic) and Atomic[Scalar[DType.uint64]].fetch_add[
-            ordering=Ordering.ACQUIRE](shared_hnsw[].ready_atomic, UInt64(0)) != 0
+            ordering=Ordering.ACQUIRE](shared_hnsw[].ready_atomic, UInt64(0)) != 0 and shared_hnsw[].num_nodes > 0
         if is_null(shared_hnsw[].ingest_fp32) and not _serving:
             var cap = hnsw.max_elements
             shared_hnsw[].ingest_fp32 = alloc[Float32](cap * hnsw.dim)
