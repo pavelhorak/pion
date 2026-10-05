@@ -34,6 +34,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAIL = []
 
@@ -101,13 +104,10 @@ class Server:
         self.log = os.path.join(self.dir, "server.log")
         self.p = subprocess.Popen([binary, "-p", str(port), "-w", "1", "--no-auto-detect", "--no-auto-embed"],
                                   cwd=self.dir, stdout=open(self.log, "w"), stderr=subprocess.STDOUT)
-        for _ in range(150):
-            try:
-                socket.create_connection(("127.0.0.1", port), timeout=1).close()
-                return
-            except OSError:
-                time.sleep(0.1)
-        raise SystemExit("server did not start")
+        try:
+            wait_ready_pid(port, self.p, 15)   # this process, not a lingering listener (#27)
+        except RuntimeError:
+            raise SystemExit("server did not start")
 
     def alive(self):
         try:
@@ -133,6 +133,7 @@ class Server:
         self.p.kill()
         self.p.wait()
         shutil.rmtree(self.dir, ignore_errors=True)
+        wait_port_free(self.port)   # the next scenario's server reuses the port
 
 
 def scenario_minimal(s):

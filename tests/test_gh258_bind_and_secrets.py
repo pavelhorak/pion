@@ -35,6 +35,8 @@ did exactly that on the worker-side listeners.)
 Usage: python3 tests/test_gh258_bind_and_secrets.py [./pion-server]
 """
 import os, re, socket, subprocess, sys, time, shutil
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_port_free  # noqa: E402
 
 BINARY = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server"))
 PORT = 1995
@@ -97,6 +99,10 @@ def stop(p):
         p.terminate()
         try: p.wait(timeout=20)
         except subprocess.TimeoutExpired: p.kill(); p.wait(timeout=10)
+    # The next case reuses the port, and wait_up() only connects: a killed
+    # server's lingering listener would pass it (#27). wait_ready_pid cannot
+    # be used there, as most cases set a password and a bare PING gets NOAUTH.
+    wait_port_free(PORT)
 
 
 def cmd(port, *args):

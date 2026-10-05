@@ -30,6 +30,9 @@ Usage: python3 tests/test_gh253_multiworker_fence.py [./pion-server]
 import os, socket, subprocess, sys, time, shutil
 from concurrent.futures import ThreadPoolExecutor
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
+
 BINARY = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server"))
 PORT = 1991
 WORKDIR = f"/tmp/pion_gh253_test_{PORT}"
@@ -134,13 +137,13 @@ def main():
     # ── Phase 1: the DEFAULT server is one coherent keyspace ────────────────
     proc = spawn([])
     try:
-        connect().close()
+        wait_ready_pid(PORT, proc, 45)   # this process, not a lingering listener (#27)
         nils, reads = nil_reads()
         check("default server: a concurrent pool reads its own writes",
               nils == 0, f"{nils}/{reads} nil reads — the default is multi-worker again")
     finally:
         proc.kill(); proc.wait(timeout=10)
-        time.sleep(0.5)
+        wait_port_free(PORT)   # phase 2 checks that nothing is listening
 
     # ── Phase 2: -w > 1 without the flag REFUSES ────────────────────────────
     proc = spawn(["-w", "4"])
@@ -156,6 +159,7 @@ def main():
     # ── Phase 3: -w > 1 WITH the flag starts, serves, and warns ─────────────
     proc = spawn(["-w", "4", "--independent-workers"])
     try:
+        wait_ready_pid(PORT, proc, 45)
         c = connect()
         check("-w 4 --independent-workers serves", c("PING") == b"+PONG")
         c.close()
@@ -174,7 +178,7 @@ def main():
         check("-w 4 --independent-workers prints the keyspace banner",
               "INDEPENDENT WORKERS" in out and "SEPARATE KEYSPACES" in out,
               repr(out[:400]))
-        time.sleep(0.5)
+        wait_port_free(PORT)
 
     # ── Phase 4: a cap back to 1 is not fenced ──────────────────────────────
     # --inference collapses any -w N to 1. The fence reads the FINAL count, so
@@ -183,6 +187,7 @@ def main():
     # apply_profile, and needs no external process.)
     proc = spawn(["-w", "4", "--profile", "ai"])
     try:
+        wait_ready_pid(PORT, proc, 45)
         c = connect()
         check("a profile that caps workers back to 1 is NOT fenced",
               c("PING") == b"+PONG")

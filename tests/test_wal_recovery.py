@@ -26,7 +26,7 @@ NUM_LIST_KEYS = 5
 
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from resp_strict import reader  # noqa: E402
+from resp_strict import reader, wait_ready_pid  # noqa: E402
 
 # ─── RESP helpers (self-contained, no external deps) ─────────────────────────
 
@@ -64,32 +64,20 @@ def connect(port, timeout=5.0):
 
 # ─── Server lifecycle ────────────────────────────────────────────────────────
 
-def wait_for_port(port, timeout=15):
+def wait_for_port(port, proc, timeout=15):
     """Poll until the server ANSWERS, not merely accepts.
 
     It listens before it initialises (clients queue rather than being
     refused), and after a restart the first reply waits for the hash map and
     the WAL replay. Returning on accept let the first GET time out at 2 s and
-    read as '' — the one "lost" key (wal:0) this test reported was that."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(max(1.0, deadline - time.monotonic()))
-            s.connect(("127.0.0.1", port))
-            s.sendall(b"*1\r\n$4\r\nPING\r\n")
-            buf = b""
-            while b"+PONG" not in buf:
-                chunk = s.recv(4096)
-                if not chunk:
-                    raise OSError("closed")
-                buf += chunk
-            s.close()
-            return True
-        except (ConnectionRefusedError, OSError):
-            s.close()
-            time.sleep(0.2)
-    return False
+    read as '' — the one "lost" key (wal:0) this test reported was that.
+    The answer must come from `proc` itself, not whatever else holds the
+    port (#27)."""
+    try:
+        wait_ready_pid(port, proc, timeout)
+        return True
+    except RuntimeError:
+        return False
 
 
 def wait_for_port_free(port, timeout=10):
@@ -271,7 +259,7 @@ def main():
         print(f"[1/6] Starting pion-server on port {PORT} (w={WORKERS})...")
         proc = start_server(binary, PORT, WORKERS, WORKDIR)
 
-        if not wait_for_port(PORT, timeout=15):
+        if not wait_for_port(PORT, proc, timeout=15):
             print("FATAL: Server did not start within 15s")
             kill_server(proc)
             sys.exit(1)
@@ -314,7 +302,7 @@ def main():
         print(f"[5/6] Restarting pion-server on port {PORT}...")
         proc = start_server(binary, PORT, WORKERS, WORKDIR)
 
-        if not wait_for_port(PORT, timeout=20):
+        if not wait_for_port(PORT, proc, timeout=20):
             print("FATAL: Server did not restart within 20s")
             kill_server(proc)
             sys.exit(1)

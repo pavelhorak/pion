@@ -7,7 +7,7 @@ Exercises every WAL effect record + snapshot v2 type in two crash modes:
 """
 import os, signal, socket, subprocess, sys, time, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from resp_strict import reader  # noqa: E402  (strict one-reply reads)
+from resp_strict import reader, wait_ready_pid  # noqa: E402  (strict one-reply reads)
 
 BINARY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server")
 PORT = 1977
@@ -26,7 +26,9 @@ def send(sock, *args):
     sock.sendall(encode(args))
     return reader(sock).read_raw().decode(errors="replace")
 
-def connect():
+def connect(proc):
+    # Ready = THIS process answering, not a killed server's lingering listener (#27).
+    wait_ready_pid(PORT, proc, 60)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
@@ -166,7 +168,7 @@ def run_mode(mode):
     shutil.rmtree(WORKDIR, ignore_errors=True)
     os.makedirs(WORKDIR, exist_ok=True)
     proc = start()
-    s = connect()
+    s = connect(proc)
     write_workload(s)
     if mode == "A":
         r = send(s, "SAVE")
@@ -175,7 +177,7 @@ def run_mode(mode):
     s.close()
     kill(proc)
     proc = start()
-    s = connect()
+    s = connect(proc)
     passed, failed, hll_ok = verify(s, mode)
     s.close()
     kill(proc)

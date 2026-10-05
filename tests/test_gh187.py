@@ -15,7 +15,7 @@ churn loop for the node leak.
 """
 import os, socket, subprocess, sys, time, shutil, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from resp_strict import reader  # noqa: E402  (strict one-reply reads)
+from resp_strict import reader, wait_ready_pid, wait_port_free  # noqa: E402  (strict one-reply reads)
 
 BINARY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server")
 PORT = 1979
@@ -52,7 +52,9 @@ def _await_ready(s, deadline_s=30.0):
     return s
 
 
-def connect():
+def connect(proc):
+    # Ready = THIS process answering, not a killed server's lingering listener (#27).
+    wait_ready_pid(PORT, proc, 60)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
@@ -92,7 +94,7 @@ def main():
     os.makedirs(WORKDIR, exist_ok=True)
     proc = start()
     try:
-        s = connect()
+        s = connect(proc)
 
         # ── 1. fast-path single-pair ZADD dedup ──
         r = send(s, "ZADD", "z", "1", "m")
@@ -144,9 +146,9 @@ def main():
 
         # ── 6. WAL replay dedups (ZADD m s1; ZADD m s2 replays to one member) ──
         proc.kill(); proc.wait(timeout=5)
-        time.sleep(0.5)
+        wait_port_free(PORT)
         proc = start()
-        s = connect()
+        s = connect(proc)
         r = send(s, "ZCARD", "z")
         check(":1" in r, "ZCARD is 1 after WAL replay", f"got {r!r}")
         r = send(s, "ZSCORE", "z", "m")

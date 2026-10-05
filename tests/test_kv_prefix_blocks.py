@@ -24,6 +24,9 @@ import sys
 import time
 import uuid
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
+
 PORT = 1976  # non-1974 to dodge the PionMesh iOS-app conflict.
 HOST = "127.0.0.1"
 
@@ -84,15 +87,12 @@ def _spawn_server() -> subprocess.Popen:
         [binary, "--kvcache", "-p", str(PORT), "-w", "1"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        try:
-            s = socket.create_connection((HOST, PORT), timeout=1); s.close()
-            return proc
-        except OSError:
-            time.sleep(0.2)
-    proc.kill()
-    raise RuntimeError("pion-server failed to start on port " + str(PORT))
+    try:
+        wait_ready_pid(PORT, proc, 60)   # this process, not a lingering listener (#27)
+    except RuntimeError:
+        proc.kill()
+        raise
+    return proc
 
 
 def _parse_bulk(reply: bytes) -> bytes | None:
@@ -184,6 +184,7 @@ def main() -> int:
         # ── [3] WAL replay: SIGKILL, restart, BLOCKS still works ────────────
         c.close()
         proc.kill(); proc.wait(timeout=5)
+        wait_port_free(PORT)
         proc = _spawn_server()
         c = Conn()
         r = c.call("KV.PREFIX.BLOCKS", ns_blk)
@@ -202,6 +203,7 @@ def main() -> int:
             print(f"[4] FAIL SAVE: {r[:60]!r}"); fail = True
         c.close()
         proc.kill(); proc.wait(timeout=5)
+        wait_port_free(PORT)
         # Now the snapshot must carry the block table even with an empty WAL.
         # Don't delete pion.wal.0 — wal_replay handles empty WALs fine, and
         # truncation already happened inside KV.PREFIX.SAVE.

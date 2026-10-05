@@ -33,7 +33,9 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIM, N = 1536, 64
@@ -112,13 +114,10 @@ class Server:
         if workers > 1:
             cmd.append("--independent-workers")
         self.p = subprocess.Popen(cmd, cwd=self.dir, stdout=open(self.log, "w"), stderr=subprocess.STDOUT)
-        for _ in range(150):
-            try:
-                socket.create_connection(("127.0.0.1", port), timeout=1).close()
-                return
-            except OSError:
-                time.sleep(0.1)
-        raise SystemExit("server did not start")
+        try:
+            wait_ready_pid(port, self.p, 15)   # this process, not a lingering listener (#27)
+        except RuntimeError:
+            raise SystemExit("server did not start")
 
     def healthy(self):
         text = open(self.log, errors="replace").read()
@@ -128,6 +127,7 @@ class Server:
         self.p.kill()
         self.p.wait()
         shutil.rmtree(self.dir, ignore_errors=True)
+        wait_port_free(self.port)   # the multi-worker server reuses the port
 
 
 def build(c):

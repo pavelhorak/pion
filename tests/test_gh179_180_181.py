@@ -19,7 +19,7 @@ survival across a WAL-replay restart.
 """
 import os, socket, subprocess, sys, time, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from resp_strict import reader  # noqa: E402  (strict one-reply reads)
+from resp_strict import reader, wait_ready_pid, wait_port_free  # noqa: E402  (strict one-reply reads)
 
 BINARY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server")
 PORT = 1981
@@ -85,7 +85,9 @@ def _await_ready(s, deadline_s=30.0):
     return s
 
 
-def connect():
+def connect(proc):
+    # Ready = THIS process answering, not a killed server's lingering listener (#27).
+    wait_ready_pid(PORT, proc, 60)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
@@ -113,7 +115,7 @@ def main():
     os.makedirs(WORKDIR, exist_ok=True)
     proc = start()
     try:
-        s = connect()
+        s = connect(proc)
 
         # ── gh #179: fractional ZADD scores ──
         r = send(s, "ZADD", "z", "1.5", "m")
@@ -221,8 +223,9 @@ def main():
         # ── WAL replay: GEO + fractional zset survive a restart ──
         s.close()
         proc.terminate(); proc.wait(timeout=10)
+        wait_port_free(PORT)
         proc = start()
-        s = connect()
+        s = connect(proc)
         r = send(s, "ZSCORE", "z", "m")
         check(bulk_payload(r) == "1.5", "replay: fractional score survives", f"got {r!r}")
         r = send(s, "GEODIST", "geo", "Palermo", "Catania", "km")
