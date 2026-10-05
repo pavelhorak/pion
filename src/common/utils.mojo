@@ -544,17 +544,19 @@ struct SetExpiry(Copyable, Movable, ImplicitlyCopyable):
 def set_expiry(v: Int64, unit_ms: Int64, relative: Bool, now_ns: Int64) -> SetExpiry:
     """The TTL argument of SET EX|PX|EXAT|PXAT, SETEX and PSETEX, resolved the
     way Redis's getExpireMillisecondsOrReply does (gh #393): non-positive, or
-    seconds that cannot scale to ms, is an error. A relative time whose sum
-    with now overflows ms is NOT an error there — the sum wraps negative and
-    the key is written already expired, so the reply is +OK and the key is
-    gone. A deadline already past ends the same way."""
+    seconds that cannot scale to ms, is an error, and so is a relative time
+    whose sum with now overflows ms (its "Overflow detected" check). That last
+    check reads a signed overflow, so a clang build of Redis (macOS) may drop
+    it and answer +OK with the key already expired; Linux builds answer the
+    error, which is what the check is for. A deadline already past is +OK and
+    the key is gone."""
     if v <= 0 or (unit_ms != 1 and v > I64_MAX // unit_ms):
         return SetExpiry(SETEXP_INVALID, 0)
     var ms = v * unit_ms
     var now_ms = now_ns // 1_000_000
     if relative:
         if ms > I64_MAX - now_ms:
-            return SetExpiry(SETEXP_EXPIRED, 0)
+            return SetExpiry(SETEXP_INVALID, 0)
         ms += now_ms
     if ms <= now_ms:
         return SetExpiry(SETEXP_EXPIRED, 0)

@@ -27,7 +27,10 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
 
-PORT = 1976  # non-1974 to dodge the PionMesh iOS-app conflict.
+# Not next to 1974: a server on port P also listens on P+1 and P+2, so 1976 is
+# the affinity port of any server on 1974 (the PionMesh app's port, and the
+# substrate gate's own server), and this test's server could not bind it.
+PORT = 6496
 HOST = "127.0.0.1"
 
 
