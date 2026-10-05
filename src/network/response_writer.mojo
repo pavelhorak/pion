@@ -68,6 +68,11 @@ struct ResponseWriter(Movable):
     # so plain increments are lockless. Exposed as INFO send_eagain_stalls —
     # the kill-test/observability signal for the substrate large-send path.
     var send_stalls: UInt64
+    # #36: a script's redis.call() writes its reply here and the engine reads
+    # it back. A capture writer never sends: flush keeps the bytes and the
+    # large-value paths append instead of writing to the client's fd. Last
+    # field (gh #149).
+    var capture: Bool
 
     def __init__(out self):
         self.buffer = alloc[UInt8](RESP_BUF_SIZE)
@@ -80,6 +85,7 @@ struct ResponseWriter(Movable):
         self.overflow_emitted = False
         self.proto = 2
         self.send_stalls = 0
+        self.capture = False
         for i in range(65536):
             self.pending_offsets[unsafe_offset=i] = 0
             self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
@@ -129,6 +135,8 @@ struct ResponseWriter(Movable):
 
     @always_inline
     def flush_response(mut self, fd: Int32, server: TCPServer, kq: Int32):
+        if self.capture:
+            return          # a script's reply stays for the engine to read
         if self.use_uring:
             self._flush_uring(fd)
         elif kq == -1:
@@ -707,7 +715,9 @@ struct ResponseWriter(Movable):
         4 bytes = 5 MB) → SIGSEGV in process_slow_path.
         """
         # Fits in buffer (with the same safety margin used elsewhere) → fast path.
-        if self.offset + length + 32 <= RESP_BUF_SIZE - 194304:
+        # A capture writer (a script's redis.call) never writes to the fd: a
+        # reply too large for it becomes the overflow error.
+        if self.capture or self.offset + length + 32 <= RESP_BUF_SIZE - 194304:
             self.append_bulk_string_response(data, length)
             return
         # Build RESP header `$<len>\r\n` in self.buffer.
@@ -755,7 +765,7 @@ struct ResponseWriter(Movable):
         Used by GET fast path for LMCache-size blobs (1-16MB)."""
         # Only use writev for values > 3MB that won't fit in the 4MB response buffer.
         # Smaller values go through the normal buffer path (faster, handles pipelining).
-        if val.type.value == ValueType.STRING and val.string_len() > 3 * 1024 * 1024 and val.type.value != ValueType.STRING_SSO:
+        if not self.capture and val.type.value == ValueType.STRING and val.string_len() > 3 * 1024 * 1024 and val.type.value != ValueType.STRING_SSO:
             # Build RESP header in response buffer: $<len>\r\n
             self.buffer[unsafe_offset=self.offset] = 36 # '$'
             self.offset += 1

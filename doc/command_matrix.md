@@ -296,62 +296,52 @@ or when both connections land on the same worker — see operations.md §2b.
 
 | Command | Redis 8 | Valkey 8 | Pion | Pion path | GLIDE | Notes |
 |---|:---:|:---:|:---:|:---:|:---:|---|
-| EVAL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Lua 5.1 scripting (sandboxed, cjson, 30 commands) |
-| EVALSHA | ✅ | ✅ | ✅ | **SLOW** | ✅ | SHA1-indexed script cache |
-| EVAL_RO | ✅ | ✅ | ❌ | — | ✅ | |
-| EVALSHA_RO | ✅ | ✅ | ❌ | — | ✅ | |
+| EVAL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Lua 5.1; `redis.call()` runs every command (see below) |
+| EVALSHA | ✅ | ✅ | ✅ | **SLOW** | ✅ | SHA1-indexed script cache; `NOSCRIPT No matching script. Please use EVAL.` |
+| EVAL_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | A write from the script is refused, as in Redis |
+| EVALSHA_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | As EVAL_RO |
 | SCRIPT LOAD | ✅ | ✅ | ✅ | **SLOW** | ✅ | Compile + cache, returns SHA1 |
 | SCRIPT EXISTS | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| SCRIPT FLUSH | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| FUNCTION LOAD | ✅ | ✅ | ✅ | **SLOW** | ✅ | `#!lua name=<lib>` shebang, `redis.register_function()`, REPLACE |
-| FUNCTION LIST | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns library names, engine, function names |
-| FUNCTION DELETE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Delete library by name |
-| FUNCTION DUMP | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns empty (no RDB serialization) |
-| FUNCTION RESTORE | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns +OK (stub) |
-| FUNCTION FLUSH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Clears all libraries |
-| FUNCTION STATS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns running_script count |
-| FCALL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Executes registered function with KEYS/ARGV |
-| FCALL_RO | ✅ | ✅ | ❌ | — | ✅ | |
+| SCRIPT FLUSH | ✅ | ✅ | ✅ | **SLOW** | ✅ | `ASYNC` / `SYNC` |
+| SCRIPT KILL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Always `NOTBUSY`: a worker answers nothing while a script runs (see `--lua-time-limit`) |
+| SCRIPT DEBUG | ✅ | ✅ | 🟡 | **SLOW** | ✅ | `NO` is accepted; `YES`/`SYNC` are refused: there is no Lua debugger |
+| FUNCTION LOAD | ✅ | ✅ | ✅ | **SLOW** | ✅ | `#!lua name=<lib>`, `REPLACE`, `register_function` with `flags` and `description`; WAL-logged and replicated |
+| FUNCTION LIST | ✅ | ✅ | ✅ | **SLOW** | ✅ | `LIBRARYNAME`, `WITHCODE`, flags and descriptions |
+| FUNCTION DELETE | ✅ | ✅ | ✅ | **SLOW** | ✅ | WAL-logged and replicated |
+| FUNCTION DUMP | ✅ | ✅ | ✅ | **SLOW** | ✅ | The payload is Pion's own format, as DUMP's is: it restores here, not into Redis |
+| FUNCTION RESTORE | ✅ | ✅ | ✅ | **SLOW** | ✅ | `APPEND` / `REPLACE` / `FLUSH`, all or nothing |
+| FUNCTION FLUSH | ✅ | ✅ | ✅ | **SLOW** | ✅ | `ASYNC` / `SYNC`; WAL-logged and replicated |
+| FUNCTION STATS | ✅ | ✅ | ✅ | **SLOW** | ✅ | `running_script` is always nil (see SCRIPT KILL) |
+| FUNCTION KILL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Always `NOTBUSY` |
+| FCALL | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
+| FCALL_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | Only a function flagged `no-writes` |
 
 ### Lua Scripting Details
 
-**Engine:** Lua 5.1.5 (PUC-Rio reference implementation), statically linked. One VM per worker (shared-nothing). Coroutine-based: `redis.call()` yields to host for dispatch — no callbacks.
+**Engine:** Lua 5.1.5, statically linked, with Redis's read-only-table patch. Each worker has two states, as Redis has: one for EVAL scripts and one for FUNCTION libraries.
 
-**Sandbox:** Only `base`, `table`, `string`, `math`, `cjson` libraries loaded. No `io`, `os`, `debug`, `package`. Functions removed: `dofile`, `loadfile`, `loadstring`, `print` (use `redis.log` instead). Memory limit: 1 MB per execution. Instruction limit: 1M instructions per execution.
+**`redis.call()` runs the server's own commands.** Each call goes through the slow-path dispatcher re-entrantly (`SlowPathHandler.script_dispatch`). Every command and option is therefore available, with the same replies. Every write is logged to the WAL and replicated by the command itself. The checks Redis makes come first:
+- an unknown command;
+- the arity;
+- the `noscript` commands (MULTI, EVAL, SUBSCRIBE, CLIENT, CONFIG, SAVE, …);
+- a write from a read-only script.
 
-**Lua globals available:** `redis.call()`, `redis.pcall()`, `redis.log()`, `redis.error_reply()`, `redis.status_reply()`, `redis.sha1hex()`, `cjson.encode()`, `cjson.decode()`, `KEYS[]`, `ARGV[]`.
+WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 
-**Commands available inside `redis.call()` / `redis.pcall()`:**
+**What a script sees, checked against redis-server 8.10:**
+- Errors carry Redis's suffix: `<error> script: <sha>, on @user_script:<line>.` (`@user_function` for FCALL).
+- `pcall(redis.call, …)` catches a command's error and returns its message.
+- Lua ↔ RESP conversions follow Redis in both protocols, `redis.setresp(3)` and its `map`/`set`/`double`/`big_number`/`verbatim_string` tables included.
+- The globals are Redis's: base minus `print`, `dofile`, `loadfile`, `getfenv`, `setfenv`; `table`, `string`, `math`, `coroutine`; `os` with `clock` only; `cjson`, `cmsgpack`, `struct` and `bit`; and `redis`.
+- Everything is read-only, and reading an undefined global is an error.
+- Shebang flags (`#!lua flags=no-writes,allow-oom`) are honoured.
+- `redis.REDIS_VERSION` is `7.0.0`, the version INFO reports.
 
-| Category | Commands |
-|---|---|
-| String | GET, SET, DEL, EXISTS, INCR, DECR, INCRBY, DECRBY, APPEND, STRLEN, SETNX, MGET, MSET |
-| Hash | HSET, HGET, HDEL, HEXISTS, HLEN |
-| List | LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE |
-| Set | SADD, SREM, SISMEMBER, SCARD |
-| TTL | EXPIRE, TTL, PERSIST |
-| Key | TYPE, RENAME |
-| Server | PING |
+**Limits:**
+- `--lua-time-limit MS` (default 5000) stops a script that has run that long *without writing*, with `ERR Script killed: it ran longer than lua-time-limit (… ms) without writing`. A worker runs one thing at a time, so it cannot answer the `SCRIPT KILL` or `BUSY` that Redis uses here. A script that has written keeps running, as an unkillable script does in Redis. `0` turns the limit off.
+- `--lua-memory-limit SIZE` (default 1gb, `0` = none) caps each Lua state's heap. Redis has no such cap.
 
-**Commands NOT yet available inside `redis.call()`:**
-
-| Category | Missing commands |
-|---|---|
-| Hash | HGETALL, HMGET, HKEYS, HVALS, HSETNX, HINCRBY, HINCRBYFLOAT |
-| List | LINDEX, LINSERT, LREM, LTRIM |
-| Set | SMEMBERS, SRANDMEMBER, SPOP, SINTER, SUNION, SDIFF |
-| Sorted Set | ZADD, ZREM, ZSCORE, ZRANK, ZRANGE, ZCARD, ZINCRBY, ZPOPMIN |
-| String | GETSET, GETDEL, SETEX, PSETEX, INCRBYFLOAT |
-| TTL | PEXPIRE, PTTL, EXPIREAT, PEXPIREAT |
-| Key | KEYS, SCAN, RANDOMKEY, COPY, SORT |
-| Pub/Sub | SUBSCRIBE, PUBLISH |
-| Transactions | MULTI, EXEC |
-| Vector/AI | FT.*, AI.*, ATTEND.* |
-| Streams | XADD, XREAD, XLEN |
-
-Unsupported commands return `-ERR unknown command '<name>'` when called from Lua.
-
-**Not implemented (Lua features):** `EVAL_RO`/`EVALSHA_RO`, `FCALL_RO`, `FUNCTION DUMP`/`RESTORE` (stubs), `cmsgpack` library, `redis.replicate_commands()`, `redis.set_repl()`, `redis.breakpoint()`/`redis.debug()`, script replication across replicas.
+**Persistence:** FUNCTION libraries are written to the WAL (records 35 LOAD, 36 DELETE, 37 FLUSH) and into snapshots, and replicated. The EVAL script cache is not persisted, as in Redis.
 
 ---
 
@@ -660,7 +650,7 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 | Multi-worker + AI | When `--flare` / `--emb-enabled` is set, Pion auto-caps to `-w 1`. SemanticCache is per-worker and cannot share state across workers. |
 | SCAN cursor semantics | SCAN is implemented but returns all keys in a single sweep (cursor always returns 0 on second call). Applications that rely on incremental cursor-based iteration may need adjustment. |
 | Blocking commands | BLPOP/BRPOP pop correctly but **do not block**: an all-empty key set answers nil at once. The other blocking forms are not implemented. Poll with LPOP/RPOP/ZPOPMIN instead. |
-| Lua scripting | EVAL/EVALSHA/SCRIPT + FUNCTION LOAD/LIST/DELETE/FLUSH/STATS + FCALL fully implemented with Lua 5.1.5 VM (sandboxed, cjson). `redis.call()` supports 30 commands (see table above). FUNCTION DUMP/RESTORE are stubs. |
+| Lua scripting | `redis.call()` runs every command. A script that runs past `--lua-time-limit` without writing is stopped, because a worker cannot answer SCRIPT KILL mid-script (see §12). |
 
 ---
 

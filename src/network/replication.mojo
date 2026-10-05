@@ -212,6 +212,9 @@ def apply_wal_entries(
             keyspace[].reset()           # aggregates go to the graveyard (gh #394)
             if is_not_null(ttl_map):
                 ttl_map[].reset()
+        elif cmd_id >= 35 and cmd_id <= 37:   # #36 FUNCTION LOAD / DELETE / FLUSH
+            _ = external_call["pion_lua_wal_apply", Int64](
+                Int64(cmd_id), key_ptr, Int64(key_len), buf.unsafe_offset(val_off), Int64(val_len))
         elif cmd_id == 25 or cmd_id == 26:   # gh #174 TTL records (EXPIREAT / PERSIST)
             _ = wal_apply_ttl(UInt8(cmd_id), key_ptr, key_len,
                               buf.unsafe_offset(val_off), val_len, ttl_map)

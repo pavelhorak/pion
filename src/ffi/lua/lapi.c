@@ -674,6 +674,8 @@ LUA_API void lua_rawset (lua_State *L, int idx) {
   api_checknelems(L, 2);
   t = index2adr(L, idx);
   api_check(L, ttistable(t));
+  if (hvalue(t)->readonly)
+    luaG_readonly_error(L);
   setobj2t(L, luaH_set(L, hvalue(t), L->top-2), L->top-1);
   luaC_barriert(L, hvalue(t), L->top-1);
   L->top -= 2;
@@ -687,6 +689,8 @@ LUA_API void lua_rawseti (lua_State *L, int idx, int n) {
   api_checknelems(L, 1);
   o = index2adr(L, idx);
   api_check(L, ttistable(o));
+  if (hvalue(o)->readonly)
+    luaG_readonly_error(L);
   setobj2t(L, luaH_setnum(L, hvalue(o), n), L->top-1);
   luaC_barriert(L, hvalue(o), L->top-1);
   L->top--;
@@ -709,6 +713,8 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
   }
   switch (ttype(obj)) {
     case LUA_TTABLE: {
+      if (hvalue(obj)->readonly)
+        luaG_readonly_error(L);
       hvalue(obj)->metatable = mt;
       if (mt)
         luaC_objbarriert(L, hvalue(obj), mt);
@@ -1085,3 +1091,19 @@ LUA_API const char *lua_setupvalue (lua_State *L, int funcindex, int n) {
   return name;
 }
 
+
+
+/* Pion: the script sandbox's readonly tables, as Redis's patched Lua. A write
+ * to such a table (luaV_settable, lua_rawset, lua_rawseti, lua_setmetatable)
+ * raises "Attempt to modify a readonly table". */
+LUA_API void lua_enablereadonlytable (lua_State *L, int objindex, int enabled) {
+  const TValue* o = index2adr(L, objindex);
+  api_check(L, ttistable(o));
+  hvalue(o)->readonly = enabled ? 1 : 0;
+}
+
+LUA_API int lua_isreadonlytable (lua_State *L, int objindex) {
+  const TValue* o = index2adr(L, objindex);
+  api_check(L, ttistable(o));
+  return hvalue(o)->readonly;
+}

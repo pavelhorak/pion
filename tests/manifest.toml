@@ -1256,6 +1256,13 @@ server = "none"
 tier = "gate"
 timeout = 120
 
+# gh #225: every dispatch arm pins its whole command name; canaried.
+[[test]]
+file = "tests/test_audit_loose_matchers.py"
+server = "none"
+tier = "gate"
+timeout = 60
+
 [[test]]
 file = "tests/test_split_frames.py"
 server = "self"
@@ -1344,6 +1351,12 @@ timeout = 300
 
 [[test]]
 file = "tests/test_flush_durability.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_scripting.py"
 server = "self"
 tier = "gate"
 timeout = 300

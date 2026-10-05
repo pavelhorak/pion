@@ -16,6 +16,8 @@ from pathlib import Path
 # into one developer's home directory makes the tool unrunnable for anyone
 # else, and leaks that path into any public export.
 SRC = Path(__file__).resolve().parents[1] / "src" / "network"
+if len(__import__("sys").argv) > 1:          # a directory holding the two files (the test's canary)
+    SRC = Path(__import__("sys").argv[1])
 TL = re.compile(r"\btl\s*==\s*(\d+)")
 CL = re.compile(r"\bcmd_len\s*==\s*(\d+)")
 FOLDED = re.compile(r"\(\s*(?:tp|buffer)\[\s*(?:cmd_start \+ )?(\d+)\s*\]\s*\|\s*0x20\s*\)\s*==\s*(\d+)")
@@ -59,6 +61,8 @@ def body_pins_the_name(lines, idx):
 
 
 for fname in ("fast_path.mojo", "slow_path.mojo"):
+    if not (SRC / fname).exists():
+        continue
     src_lines = (SRC / fname).read_text().splitlines()
     for ln, line in enumerate(src_lines, 1):
         s = line.strip()

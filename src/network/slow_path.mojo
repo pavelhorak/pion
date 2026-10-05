@@ -48,7 +48,7 @@ from src.common.hll import hll_add, hll_count, hll_merge, HLL_REGISTERS
 
 # Command modules (Phase 1 extraction)
 from src.commands.transaction import TransactionState, QueuedCommand, handle_multi, handle_exec_start, handle_discard, handle_watch, handle_unwatch, tx_queue_has_denyoom
-from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, PION_COMMAND_COUNT
+from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, command_is_noscript, PION_COMMAND_COUNT
 from src.commands.tenant import TenantTable, tenant_keyspec, apply_tenant_rewrite, TENANT_SCRATCH_CAP, MAX_TENANT_NAME
 from src.commands.stream import handle_xadd, handle_xlen, handle_xack, handle_xdel, handle_xread, handle_xtrim, handle_xinfo, handle_xrange, handle_xgroup, handle_xclaim, handle_xpending, handle_xrevrange, handle_xautoclaim, handle_xreadgroup, BlockedReaderRegistry, write_xread_reply
 from src.commands.pubsub import PubSubRegistry, PubSubBroadcast, handle_pubsub, handle_publish, handle_subscribe, handle_unsubscribe, handle_psubscribe, handle_punsubscribe, handle_ssubscribe, handle_sunsubscribe, handle_spublish
@@ -278,6 +278,25 @@ struct SlowPathHandler:
     # sends through the packet engine and cannot reply to a parked fd later.
     var parked_waits: ParkedWaits
     var can_park_wait: Bool
+    # #36: a script's redis.call() re-enters process_slow_path (script_dispatch).
+    # The nested call parses into its own token tables, so the EVAL and any
+    # command pipelined behind it keep theirs, and writes its reply into
+    # script_writer, a capture-only writer (flush keeps the bytes). The
+    # script_* context is the outer call's, set by _script_context before a run.
+    var script_depth: Int
+    var script_tokens_buf: UnsafePointer[RESP3Token, MutUntrackedOrigin]
+    var script_cmd_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
+    var script_cmd_byte_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
+    var script_writer: UnsafePointer[ResponseWriter, MutUntrackedOrigin]
+    var script_frame: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var script_frame_cap: Int
+    var script_fd: Int32
+    var script_server: UnsafePointer[TCPServer, MutUntrackedOrigin]
+    var script_kq: Int32
+    var script_hnsw: UnsafePointer[HNSWGraph, MutUntrackedOrigin]
+    var script_db_size: UnsafePointer[Int, MutUntrackedOrigin]
+    var script_config: UnsafePointer[PionConfig, MutUntrackedOrigin]
+    var script_allow_oom: Bool
 
     def __init__(
         out self,
@@ -329,6 +348,22 @@ struct SlowPathHandler:
         self.over_maxmemory = False
         self.parked_waits = ParkedWaits()
         self.can_park_wait = not config.server.use_xdp
+        self.script_depth = 0
+        self.script_tokens_buf = alloc[RESP3Token](MAX_CMD_TOKENS)
+        self.script_cmd_ends_buf = alloc[Int](MAX_CMD_ENDS)
+        self.script_cmd_byte_ends_buf = alloc[Int](MAX_CMD_ENDS)
+        unsafe_memset(self.script_cmd_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        unsafe_memset(self.script_cmd_byte_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        self.script_writer = null_ptr[ResponseWriter, MutUntrackedOrigin]()
+        self.script_frame = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.script_frame_cap = 0
+        self.script_fd = -1
+        self.script_server = null_ptr[TCPServer, MutUntrackedOrigin]()
+        self.script_kq = -1
+        self.script_hnsw = null_ptr[HNSWGraph, MutUntrackedOrigin]()
+        self.script_db_size = null_ptr[Int, MutUntrackedOrigin]()
+        self.script_config = null_ptr[PionConfig, MutUntrackedOrigin]()
+        self.script_allow_oom = False
         self.cluster = cluster
         self.shard_query_seq = alloc[UInt64](1)
         self.shard_query_seq[0] = 1
@@ -834,17 +869,17 @@ struct SlowPathHandler:
         # would be a 16 KB memset on every slow-path frame; parse_stream writes
         # each entry before the dispatch loop reads it, and reads are bounded by
         # num_cmds, so the one-time zeroing at construction is sufficient.
-        var cmd_byte_ends = self.cmd_byte_ends_buf
+        var cmd_byte_ends = self.cmd_byte_ends_buf if self.script_depth == 0 else self.script_cmd_byte_ends_buf
         var i = 0
         var cmd_idx = 0
         var num_cmds = 0
         var on_primary = True
         var cmd_write_start = 0
         try:
-            var tokens = self.tokens_buf
+            var tokens = self.tokens_buf if self.script_depth == 0 else self.script_tokens_buf
             var num_tokens = 0
             var consumed_bytes = 0
-            var cmd_ends = self.cmd_ends_buf
+            var cmd_ends = self.cmd_ends_buf if self.script_depth == 0 else self.script_cmd_ends_buf
             self.parser.parse_stream(buffer, n, tokens, num_tokens, consumed_bytes, cmd_ends, cmd_byte_ends, num_cmds)
             if num_tokens == TOKENS_OVERFLOW:
                 # gh #153: a single complete command with more than
@@ -888,7 +923,9 @@ struct SlowPathHandler:
                     var cmd_end_tok = cmd_ends[cmd_idx] if cmd_idx < num_cmds else num_tokens
 
                     # ── MULTI mode interception: queue commands instead of executing ──
-                    if self.tx_state.is_multi(fd):
+                    # (never for a script's redis.call: it runs inside an EXEC or
+                    # on its own, and MULTI is refused inside scripts)
+                    if self.script_depth == 0 and self.tx_state.is_multi(fd):
                         # Allow EXEC, DISCARD, MULTI (error), WATCH, UNWATCH through
                         var is_tx_cmd = False
                         if tl == 4 and cmd_matches_4(tp, 101, 120, 101, 99): is_tx_cmd = True   # exec
@@ -1027,6 +1064,7 @@ struct SlowPathHandler:
                     # Redis's exact error; reads, DEL and the POP family still
                     # run, so a client can free memory under the limit.
                     if self.over_maxmemory and command_is_denyoom(tp, tl) \
+                       and not (self.script_depth > 0 and self.script_allow_oom) \
                        and external_call["pion_maxmemory_check", Int32]() != 0:
                         writer.append_error_response("OOM command not allowed when used memory > 'maxmemory'.")
                         i = cmd_end_tok
@@ -3421,52 +3459,27 @@ struct SlowPathHandler:
                             else:
                                 writer.append_error_response("ERR wrong number of arguments for 'brpop' command")
                         i = cmd_end_tok - 1
-                    # ── EVAL ── (4 bytes: e=101,v=118,a=97,l=108)
+                    # ── EVAL / EVALSHA / FCALL and their _RO forms, SCRIPT, FUNCTION (#36) ──
+                    # A script's redis.call() runs through this dispatcher
+                    # (script_dispatch), so every command it calls logs its own
+                    # WAL record; the old images of the KEYS[] keys are gone.
                     elif tl == 4 and cmd_matches_4(tp, 101, 118, 97, 108):
-                        _ = handle_eval(tokens, i, cmd_end_tok, writer, self.lua_engine, self.keyspace, self.ttl_map, self.dispatcher.hash_map_pool, self.dispatcher.list_pool)
-                        # Lua's redis.call runs the engine's own command copies, which log
-                        # nothing: a script's writes vanished on restart and never reached a
-                        # replica. Scripts must declare the keys they touch (KEYS[]), so log
-                        # each declared key's resulting value.
-                        if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:
-                            var _nk = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-                            if _nk.ok and _nk.value > 0:
-                                for _lk in range(i + 3, min(i + 3 + Int(_nk.value), cmd_end_tok)):
-                                    self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=_lk].ptr, tokens[unsafe_offset=_lk].length)
+                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        _ = handle_eval(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
-                    # ── EVALSHA ── (7 bytes: e=101,v=118,a=97,l=108,s=115,h=104,a=97)
                     elif tl == 7 and cmd_matches_7(tp, 101, 118, 97, 108, 115, 104, 97):
-                        _ = handle_evalsha(tokens, i, cmd_end_tok, writer, self.lua_engine, self.keyspace, self.ttl_map, self.dispatcher.hash_map_pool, self.dispatcher.list_pool)
-                        # Lua's redis.call runs the engine's own command copies, which log
-                        # nothing: a script's writes vanished on restart and never reached a
-                        # replica. Scripts must declare the keys they touch (KEYS[]), so log
-                        # each declared key's resulting value.
-                        if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:
-                            var _nk = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-                            if _nk.ok and _nk.value > 0:
-                                for _lk in range(i + 3, min(i + 3 + Int(_nk.value), cmd_end_tok)):
-                                    self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=_lk].ptr, tokens[unsafe_offset=_lk].length)
+                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        _ = handle_evalsha(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
-                    # ── SCRIPT ── (6 bytes: s=115,c=99,r=114,i=105,p=112,t=116)
                     elif tl == 6 and cmd_matches_6(tp, 115, 99, 114, 105, 112, 116):
                         _ = handle_script(tokens, i, cmd_end_tok, writer, self.lua_engine)
                         i = cmd_end_tok - 1
-                    # ── FCALL ── (5 bytes: f=102,c=99,a=97,l=108,l=108)
                     elif tl == 5 and cmd_matches_5(tp, 102, 99, 97, 108, 108):
-                        _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self.keyspace, self.ttl_map, self.dispatcher.hash_map_pool, self.dispatcher.list_pool)
-                        # Lua's redis.call runs the engine's own command copies, which log
-                        # nothing: a script's writes vanished on restart and never reached a
-                        # replica. Scripts must declare the keys they touch (KEYS[]), so log
-                        # each declared key's resulting value.
-                        if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:
-                            var _nk = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-                            if _nk.ok and _nk.value > 0:
-                                for _lk in range(i + 3, min(i + 3 + Int(_nk.value), cmd_end_tok)):
-                                    self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=_lk].ptr, tokens[unsafe_offset=_lk].length)
+                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
-                    # ── FUNCTION ── (8 bytes: f=102,u=117,n=110,c=99,t=116,i=105,o=111,n=110)
                     elif tl == 8 and cmd_matches_8(tp, 102, 117, 110, 99, 116, 105, 111, 110):
-                        _ = handle_function(tokens, i, cmd_end_tok, writer, self.lua_engine)
+                        _ = handle_function(tokens, i, cmd_end_tok, writer, self.lua_engine, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── VSET commands ── (v=118)
                     # gh #156: the handler return value is NOT the token skip.
@@ -3594,6 +3607,19 @@ struct SlowPathHandler:
                         else:
                             handle_time(writer)
                         i = cmd_end_tok - 1
+                    # ── EVAL_RO / EVALSHA_RO / FCALL_RO (#36) ── at the tail
+                    elif cmd_eq(tp, tl, "eval_ro"):
+                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        _ = handle_eval(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "evalsha_ro"):
+                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        _ = handle_evalsha(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "fcall_ro"):
+                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
+                        i = cmd_end_tok - 1
                     else:
                         writer.append_error_response("ERR unknown command '" + token.value() + "'")
                         # Skip remaining tokens of this command
@@ -3696,6 +3722,102 @@ struct SlowPathHandler:
                 if skip_to > 0 and skip_to <= n:
                     return skip_to
             return n
+
+    @always_inline
+    def _host(mut self) -> UnsafePointer[NoneType, MutUntrackedOrigin]:
+        """This handler's address: the context pion_script_dispatch is given back."""
+        return UnsafePointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(UnsafePointer(to=self)))
+
+    def _script_context(mut self, fd: Int32, server: TCPServer, kq: Int32, mut hnsw: HNSWGraph,
+                        mut db_size: Int, config: PionConfig):
+        """Remember the outer call's context for script_dispatch. Valid for this
+        command only: the script runs synchronously inside it."""
+        self.script_fd = fd
+        self.script_server = UnsafePointer[TCPServer, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=server)))
+        self.script_kq = kq
+        self.script_hnsw = UnsafePointer[HNSWGraph, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=hnsw)))
+        self.script_db_size = UnsafePointer[Int, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=db_size)))
+        self.script_config = UnsafePointer[PionConfig, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=config)))
+
+    def script_dispatch(mut self, argc: Int,
+                        argv: UnsafePointer[UnsafePointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                        lens: UnsafePointer[Int64, MutUntrackedOrigin], flags: Int, resp: Int,
+                        reply: UnsafePointer[UnsafePointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                        wrote: UnsafePointer[Int64, MutUntrackedOrigin]) -> Int:
+        """One redis.call() from a running script (#36): argv runs as a command
+        through process_slow_path, and its reply comes back (reply[0], length)
+        from the capture-only script writer. Redis's script checks come first:
+        an unknown command, the arity, `noscript`, a write from a read-only
+        script. flags: 1 read-only, 2 existence check only, 4 allow-oom."""
+        var np = argv[0]
+        var nl = Int(lens[0])
+        if flags & 2 != 0:
+            return 1 if command_exists(np, nl) else 0
+        if is_null(self.script_writer):
+            self.script_writer = alloc[ResponseWriter](1)
+            self.script_writer.unsafe_write(ResponseWriter())
+            self.script_writer[].capture = True
+        var w = self.script_writer
+        w[].offset = 0
+        w[].overflow_emitted = False
+        w[].proto = UInt8(resp)
+        reply[0] = w[].buffer
+        var ar = command_arity(np, nl)
+        var sp = argv[1] if argc > 1 else np
+        var sl = Int(lens[1]) if argc > 1 else 0
+        if not command_exists(np, nl):
+            w[].append_error_response("ERR Unknown Redis command called from script")
+        elif (ar > 0 and argc != ar) or (ar < 0 and argc < -ar):
+            w[].append_error_response("ERR Wrong number of args calling Redis command from script")
+        elif command_is_noscript(np, nl, sp, sl):
+            w[].append_error_response("ERR This Redis command is not allowed from script")
+        elif flags & 1 != 0 and command_is_write(np, nl):
+            w[].append_error_response("ERR Write commands are not allowed from read-only scripts.")
+        else:
+            var need = 16
+            for k in range(argc):
+                need += Int(lens[k]) + 24
+            if need > self.script_frame_cap:
+                if is_not_null(self.script_frame):
+                    self.script_frame.free()
+                self.script_frame = alloc[UInt8](need)
+                self.script_frame_cap = need
+            var f = self.script_frame
+            var o = 0
+            f[o] = 42
+            o += 1
+            o += format_int_to_buf(f + o, 0, Int64(argc))
+            f[o] = 13
+            f[o + 1] = 10
+            o += 2
+            for k in range(argc):
+                f[o] = 36
+                o += 1
+                o += format_int_to_buf(f + o, 0, lens[k])
+                f[o] = 13
+                f[o + 1] = 10
+                o += 2
+                unsafe_memcpy(dest=f + o, src=argv[k], count=Int(lens[k]))
+                o += Int(lens[k])
+                f[o] = 13
+                f[o + 1] = 10
+                o += 2
+            var park = self.can_park_wait
+            self.can_park_wait = False        # WAIT and XREAD BLOCK answer at once
+            self.script_allow_oom = flags & 4 != 0
+            self.script_depth += 1
+            _ = self.process_slow_path(f, o, self.script_fd, w[], self.script_server[], self.script_kq,
+                                       self.script_hnsw[], self.script_db_size[], self.script_config[])
+            self.script_depth -= 1
+            self.script_allow_oom = False
+            self.can_park_wait = park
+            if command_is_write(np, nl):
+                wrote[0] = 1
+        return w[].offset
 
     def drain_pubsub_broadcast(mut self, server: TCPServer):
         """Drain cross-worker pub/sub broadcast ring. Called per event loop tick."""

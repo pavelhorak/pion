@@ -236,6 +236,9 @@ struct SnapshotEngine(Movable):
                     continue
                 if not keyspace[].get(ttl_map[].keys[unsafe_offset=i]).is_none():
                     kv_count += 1
+        # #36: a FUNCTION FLUSH record, then one FUNCTION LOAD per library
+        var n_libs = Int(external_call["pion_lua_tls_library_count", Int64]())
+        kv_count += UInt64(1 + n_libs)
 
         var ts = external_call["pion_get_unix_time", Int64]()
 
@@ -467,6 +470,21 @@ struct SnapshotEngine(Movable):
                 scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = deadline
                 _snap_write_all(fd, scored, 8)
 
+        # #36: the FUNCTION libraries. FLUSH first, so a replica loading this
+        # image (a FULLRESYNC) also drops libraries the primary has deleted.
+        self._write_record(fd, ehdr, UInt8(37), sso_buf, 0, sso_buf, 0)
+        var clen = alloc[Int64](1)
+        for li in range(n_libs):
+            clen[unsafe_offset=0] = 0
+            var code = external_call["pion_lua_tls_library_code", Pointer[UInt8, MutUntrackedOrigin]](
+                Int64(li), clen)
+            var lname = external_call["pion_lua_tls_library_name", Pointer[UInt8, MutUntrackedOrigin]](Int64(li))
+            var lnl = 0
+            while lname[unsafe_offset=lnl] != 0:
+                lnl += 1
+            self._write_record(fd, ehdr, UInt8(35), lname, lnl, code, Int(clen[unsafe_offset=0]))
+        clen.unsafe_free()
+
         ehdr.unsafe_free()
         sso_buf.unsafe_free()
         vbuf.unsafe_free()
@@ -569,6 +587,11 @@ struct SnapshotEngine(Movable):
                 if is_not_null(bp):
                     var key_gv = GenericValue.from_ptr(key_buf, kl)
                     keyspace[].set(key_gv, GenericValue.from_blob_ptr(bp, Int(q[unsafe_offset=2])))
+                    replayed += 1
+            elif cmd_id >= 35 and cmd_id <= 37:
+                # #36: the FUNCTION libraries (a 37 FLUSH, then one 35 per library)
+                if external_call["pion_lua_wal_apply", Int64](
+                        Int64(cmd_id), key_buf, Int64(kl), val_buf, Int64(vl)) == 1:
                     replayed += 1
             elif cmd_id == 25 or cmd_id == 26:
                 # gh #174: TTL record targets the ttl_map, not the keyspace.

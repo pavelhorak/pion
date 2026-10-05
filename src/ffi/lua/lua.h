@@ -192,6 +192,10 @@ LUA_API void  (lua_setfield) (lua_State *L, int idx, const char *k);
 LUA_API void  (lua_rawset) (lua_State *L, int idx);
 LUA_API void  (lua_rawseti) (lua_State *L, int idx, int n);
 LUA_API int   (lua_setmetatable) (lua_State *L, int objindex);
+
+/* Pion: readonly tables for the script sandbox (as Redis's patched Lua) */
+LUA_API void  (lua_enablereadonlytable) (lua_State *L, int objindex, int enabled);
+LUA_API int   (lua_isreadonlytable) (lua_State *L, int objindex);
 LUA_API int   (lua_setfenv) (lua_State *L, int idx);
 
 

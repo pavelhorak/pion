@@ -1178,7 +1178,6 @@ struct FastPathHandler(Movable):
                 elif b0_lower == 102 and cmd_len == 5: # 'f' - FCALL → slow path (Lua engine)
                     return consumed
                 elif b0_lower == 102 and cmd_len == 8: # 'f' - FUNCTION or FLUSHALL
-                    var b1_lower = buffer[cmd_start + 1] | 0x20
                     # FLUSHALL and FUNCTION both go to the slow path: FLUSHALL is
                     # logged there and parses its ASYNC|SYNC argument.
                     return consumed

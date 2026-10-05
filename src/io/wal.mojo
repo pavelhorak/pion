@@ -1763,6 +1763,12 @@ struct WAL(Movable):
                 if is_not_null(ttl_map):
                     ttl_map[].reset()
                 replayed += 1
+            elif cmd_id >= 35 and cmd_id <= 37:
+                # #36: FUNCTION LOAD / DELETE / FLUSH, into this worker's Lua state
+                if external_call["pion_lua_wal_apply", Int64](
+                        Int64(cmd_id), data.unsafe_offset(key_off), Int64(kl),
+                        data.unsafe_offset(val_off), Int64(vl)) == 1:
+                    replayed += 1
             elif cmd_id == 4 and vl == 24 and is_not_null(blobs):
                 # gh #163: pointer record into the blob arena. ptr_at bounds-checks
                 # against the mapped segment, so a stale or truncated record drops

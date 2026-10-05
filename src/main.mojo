@@ -17,6 +17,7 @@ from src.vector.hnsw import SharedHNSWView, HNSWGraph
 from src.network.server import create_listen_socket
 from src.common.lock_free import ShardQueryBus
 from src.network.cluster import ClusterState
+from src.network.slow_path import SlowPathHandler
 from src.network.v_store import VStoreDirectory
 from src.commands.pubsub import PubSubBroadcast
 from src.commands.tenant import tenant_arg_error
@@ -219,6 +220,7 @@ def _known_flags() -> List[String]:
         "--iouring", "--epoll", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
         "--tenant", "--moe-cache", "--moe-cache-mib", "--dim", "--max-elements", "--crash-log",
         "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory",
+        "--lua-time-limit", "--lua-memory-limit",
         "--help", "-h", "--version", "-v",
     ]
 
@@ -233,7 +235,7 @@ def _value_flags() -> List[String]:
         "--wal-size", "--wal-max-segments", "--wal-full-policy", "--blob-threshold", "--ns-prefix",
         "--requirepass", "--requirepass-file", "--bind", "--tenant", "--moe-cache",
         "--moe-cache-mib", "--dim", "--max-elements", "--crash-log", "--status-file",
-        "--rss-warn-pct", "--maxmemory",
+        "--rss-warn-pct", "--maxmemory", "--lua-time-limit", "--lua-memory-limit",
     ]
 
 
@@ -334,6 +336,9 @@ def _print_help():
     print("      --rss-warn-pct N      warn once when RSS crosses N% of physical RAM (default 70; >100 off)")
     print("      --maxmemory SIZE      refuse memory-growing writes (-OOM) above this RSS; bytes,")
     print("                            k/kb/m/mb/g/gb or N% of RAM (default 0 = off; no eviction)")
+    print("      --lua-time-limit MS   stop a script that runs longer without writing (default 5000;")
+    print("                            0 = never). A worker cannot answer SCRIPT KILL mid-script.")
+    print("      --lua-memory-limit SIZE  Lua heap cap per worker state (default 1gb; 0 = none)")
     print("      (supervised serving with auto-restart: scripts/pion-supervise.sh -- <server args>)")
     print("")
     print("I/O backend")
@@ -420,6 +425,8 @@ def main():
         external_call["exit", NoneType](Int32(1))
 
     var config = PionConfig()
+    var lua_time_limit_ms = 5000         # #36: --lua-time-limit
+    var lua_memory_limit = 1 << 30       # #36: --lua-memory-limit
 
     var auto_detect = True   # auto-probe Ollama unless --no-auto-detect is passed
     var auto_embed = True    # A3: auto-launch embedding sidecar when no external server available
@@ -784,6 +791,32 @@ def main():
                 config.server.rss_warn_pct = atol(args[i + 1])
             except:
                 _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]))   # gh #372
+            i += 2
+        elif args[i] == "--lua-time-limit" and i + 1 < len(args):
+            # #36: milliseconds; 0 = never stop a script
+            try:
+                var _ltl = atol(args[i + 1])
+                if _ltl < 0:
+                    raise Error("negative")
+                lua_time_limit_ms = _ltl
+            except:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]) + " (milliseconds, 0 = never):")
+            i += 2
+        elif args[i] == "--lua-memory-limit" and i + 1 < len(args):
+            # #36: Redis units, as --maxmemory; 0 = no cap. Parsed from a heap
+            # copy for the reason --maxmemory's comment gives (gh #349).
+            var _lm = String(args[i + 1])
+            var _lm_n = _lm.byte_length()
+            var _lm_h = alloc[UInt8](_lm_n + 1)
+            for _k in range(_lm_n):
+                _lm_h[unsafe_offset=_k] = _lm.as_bytes()[_k]
+            var _lm_v = parse_memory_value(_lm_h, _lm_n,
+                Int64(external_call["pion_physical_ram_bytes", UInt64]()))
+            _lm_h.unsafe_free()
+            if not _lm_v.ok:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i])
+                            + " (bytes, or with k/kb/m/mb/g/gb, or 1-100%):")
+            lua_memory_limit = Int(_lm_v.value)
             i += 2
         else:
             # gh #372: nothing matched. A known value flag here means its value
@@ -1160,6 +1193,8 @@ def main():
         external_call["pion_set_maxmemory", NoneType](UInt64(config.server.maxmemory))
         print("Maxmemory: " + String(config.server.maxmemory >> 20)
               + " MB (noeviction: above it, memory-growing writes get -OOM)")
+    # #36: every worker's Lua states take these when they are created.
+    external_call["pion_lua_set_defaults", NoneType](Int64(lua_memory_limit), Int64(lua_time_limit_ms))
 
     # Sharding: DISABLED on all platforms (2026-04-27).
     #
@@ -1425,6 +1460,23 @@ def main():
     _ = external_call["pion_spawn_workers", Int32](
         Int32(config.server.workers), _boot_ctx)
 
+
+
+# ── #36: redis.call() from a running script ──────────────────────────────────
+# lua_wrap.c resolves this with dlsym and calls it, synchronously, for each
+# redis.call() / redis.pcall(): the command runs through the worker's own slow
+# path (SlowPathHandler.script_dispatch), re-entrantly. `ctx` is the
+# SlowPathHandler the running EVAL/FCALL set as the Lua state's host. Lives in
+# main.mojo for the reason the next export gives (root-module exports only);
+# the -u link flags keep it. Must not raise at the ABI boundary.
+@export
+def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64,
+                         argv: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                         lens: Pointer[Int64, MutUntrackedOrigin], flags: Int64, resp: Int64,
+                         reply: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                         wrote: Pointer[Int64, MutUntrackedOrigin]) -> Int64:
+    var sp = Pointer[SlowPathHandler, MutUntrackedOrigin](unsafe_from_address=Int(ctx))
+    return Int64(sp[].script_dispatch(Int(argc), argv, lens, Int(flags), Int(resp), reply, wrote))
 
 
 # ── Mojo 1.0 migration: worker spawn ─────────────────────────────────────────

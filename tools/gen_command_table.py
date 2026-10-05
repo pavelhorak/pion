@@ -340,12 +340,11 @@ def refresh_arity():
 WRITE_FILE = ROOT / "tools" / "redis_write.txt"
 
 # EVAL/EVALSHA/FCALL are NOT flagged `write` by Redis — it decides per script,
-# at runtime, from the commands the script actually calls. Pion has no such
-# introspection, so they are forced to write here. The direction is deliberate:
-# refusing a read-only script while the log is full is an inconvenience;
-# letting a writing script through is the silent data loss this table exists
-# to stop. FCALL_RO / EVAL_RO are read-only by definition and stay out.
-FORCE_WRITE = {"eval", "evalsha", "fcall"}
+# at runtime, from the commands the script actually calls. Pion does the same
+# since #36: a script's redis.call() goes through the slow-path dispatcher, so
+# each command it calls meets the WAL-full and maxmemory gates itself. (They
+# were forced `write` here while scripts ran a private command copy.)
+FORCE_WRITE = set()
 
 
 def redis_write_flags():
@@ -433,6 +432,57 @@ def refresh_flag(flag):
         if flag in flags:
             got.add(name.lower())
     return got
+
+
+NOSCRIPT_FILE = ROOT / "tools" / "redis_noscript.txt"
+
+
+def redis_noscript_flags():
+    """Commands (`name`) and subcommands (`container|sub`, or `container|*` for
+    every subcommand but HELP) real Redis flags `noscript`: refused when a
+    script's redis.call() names them (#36). Committed data like the write
+    flags; refresh with --refresh-noscript-flags."""
+    out = set()
+    if NOSCRIPT_FILE.exists():
+        out = {l.strip() for l in NOSCRIPT_FILE.read_text().splitlines() if l.strip()}
+    return out
+
+
+def refresh_noscript():
+    """Re-query a live redis-server for `noscript`, subcommands included."""
+    got = set()
+    for c in _command_rows():
+        if not isinstance(c, list) or len(c) < 3:
+            continue
+        name = (c[0].decode() if isinstance(c[0], bytes) else str(c[0])).lower()
+        flags = [x.decode() if isinstance(x, bytes) else str(x) for x in (c[2] or [])]
+        subs = c[9] if len(c) > 9 and isinstance(c[9], list) else []
+        if not subs:
+            if "noscript" in flags:
+                got.add(name)
+            continue
+        ns, others = [], []
+        for sc in subs:
+            sn = (sc[0].decode() if isinstance(sc[0], bytes) else str(sc[0])).lower()
+            sf = [x.decode() if isinstance(x, bytes) else str(x) for x in (sc[2] or [])]
+            (ns if "noscript" in sf else others).append(sn)
+        if ns and others == [name + "|help"]:
+            got.add(name + "|*")
+        else:
+            got.update(ns)
+    return got
+
+
+NOSCRIPT_HEADER = """
+
+def command_is_noscript(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
+                        sp: Pointer[UInt8, MutUntrackedOrigin], sl: Int) -> Bool:
+    \"\"\"True when a script's redis.call() may not run this command (#36): real
+    Redis's `noscript` flag. `sp`/`sl` is the first argument, for the container
+    commands Redis flags per subcommand; `container|*` means every subcommand
+    but HELP. {known} entries.
+    \"\"\"
+"""
 
 
 DENYOOM_HEADER = """
@@ -543,6 +593,38 @@ def emit(names):
         body += "        )\n"
     body += "    return False\n"
 
+    # ---- noscript table (#36) ------------------------------------------
+    nsf = redis_noscript_flags()
+    top = sorted(n for n in names if n in nsf)
+    subs = {}
+    for e in sorted(nsf):
+        if "|" in e:
+            cont, sub = e.split("|", 1)
+            if cont in names:
+                subs.setdefault(cont, []).append(sub)
+    body += NOSCRIPT_HEADER.format(known=len(top) + sum(len(v) for v in subs.values()))
+    ns_by_len = {}
+    for n in top:
+        ns_by_len.setdefault(len(n), []).append(n)
+    first = True
+    for ln in sorted(ns_by_len):
+        kw = "if" if first else "elif"
+        first = False
+        body += f"    {kw} tl == {ln}:\n        if (\n"
+        entries = ns_by_len[ln]
+        for k, n in enumerate(entries):
+            tail = "" if k == len(entries) - 1 else " or"
+            body += f'            _cmd_eq_ci(tp, tl, "{n}"){tail}\n'
+        body += "        ):\n            return True\n"
+    for cont in sorted(subs):
+        body += f'    if _cmd_eq_ci(tp, tl, "{cont}"):\n'
+        if subs[cont] == ["*"]:
+            body += '        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")\n'
+        else:
+            conds = " or ".join(f'_cmd_eq_ci(sp, sl, "{x}")' for x in subs[cont])
+            body += f"        return {conds}\n"
+    body += "    return False\n"
+
     # ---- denyoom table (gh #261) ----------------------------------------
     dn = redis_denyoom_flags() | PION_DENYOOM
     missing = sorted(PION_DENYOOM - set(names))
@@ -575,6 +657,8 @@ def main():
                     help="re-query a live redis-server and rewrite tools/redis_arity.txt")
     ap.add_argument("--refresh-write-flags", action="store_true",
                     help="re-query a live redis-server and rewrite tools/redis_write.txt")
+    ap.add_argument("--refresh-noscript-flags", action="store_true",
+                    help="re-query a live redis-server and rewrite tools/redis_noscript.txt")
     ap.add_argument("--refresh-denyoom-flags", action="store_true",
                     help="re-query a live redis-server and rewrite tools/redis_denyoom.txt")
     args = ap.parse_args()
@@ -592,6 +676,13 @@ def main():
         keep = sorted(n for n in names_only if n in got)
         WRITE_FILE.write_text("\n".join(keep) + "\n")
         print(f"wrote {WRITE_FILE.relative_to(ROOT)} — {len(keep)} write commands")
+
+    if args.refresh_noscript_flags:
+        got = refresh_noscript()
+        names_only, _ = collect()
+        keep = sorted(e for e in got if e.split("|", 1)[0] in names_only)
+        NOSCRIPT_FILE.write_text("\n".join(keep) + "\n")
+        print(f"wrote {NOSCRIPT_FILE.relative_to(ROOT)} — {len(keep)} noscript entries")
 
     if args.refresh_denyoom_flags:
         got = refresh_flag("denyoom")

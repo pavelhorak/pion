@@ -10,7 +10,7 @@ to queue anything with +QUEUED and only fail at replay, by which point the
 other commands in the transaction had already been applied — one typo silently
 turned an atomic transaction into a partially applied one.
 
-Case folding here is A-Z only, NOT the usual `| 0x20`: 15 of these
+Case folding here is A-Z only, NOT the usual `| 0x20`: 18 of these
 names contain '_' (AI.KNN_LM.QUERY), and '_' | 0x20 is 0x7F, so the cheap fold
 would fail to match every substrate command.
 """
@@ -18,7 +18,7 @@ would fail to match every substrate command.
 from src.common.ptr import null_ptr, is_null, is_not_null
 
 
-comptime PION_COMMAND_COUNT = 331
+comptime PION_COMMAND_COUNT = 334
 
 
 @always_inline
@@ -200,6 +200,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "cluster") or
             _cmd_eq_ci(tp, tl, "command") or
             _cmd_eq_ci(tp, tl, "discard") or
+            _cmd_eq_ci(tp, tl, "eval_ro") or
             _cmd_eq_ci(tp, tl, "evalsha") or
             _cmd_eq_ci(tp, tl, "flushdb") or
             _cmd_eq_ci(tp, tl, "ft.info") or
@@ -238,6 +239,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "bitcount") or
             _cmd_eq_ci(tp, tl, "bitfield") or
             _cmd_eq_ci(tp, tl, "expireat") or
+            _cmd_eq_ci(tp, tl, "fcall_ro") or
             _cmd_eq_ci(tp, tl, "flushall") or
             _cmd_eq_ci(tp, tl, "function") or
             _cmd_eq_ci(tp, tl, "getrange") or
@@ -284,6 +286,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         )
     elif tl == 10:
         return (
+            _cmd_eq_ci(tp, tl, "evalsha_ro") or
             _cmd_eq_ci(tp, tl, "expiretime") or
             _cmd_eq_ci(tp, tl, "ft.addtext") or
             _cmd_eq_ci(tp, tl, "hpexpireat") or
@@ -444,7 +447,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
     """Redis's arity for this command, or 0 when Pion does not know one.
 
-    241 of 331 commands have an entry; the rest are Pion-specific
+    244 of 334 commands have an entry; the rest are Pion-specific
     (FT.*, KV.PREFIX.*, AI.*, ATTEND.*) and are deliberately NOT validated.
 
     Encoding is Redis's own, kept verbatim so it can be checked against
@@ -602,6 +605,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "cluster"): return -2
         if _cmd_eq_ci(tp, tl, "command"): return -1
         if _cmd_eq_ci(tp, tl, "discard"): return 1
+        if _cmd_eq_ci(tp, tl, "eval_ro"): return -3
         if _cmd_eq_ci(tp, tl, "evalsha"): return -3
         if _cmd_eq_ci(tp, tl, "flushdb"): return -1
         if _cmd_eq_ci(tp, tl, "geodist"): return -4
@@ -632,6 +636,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "bitcount"): return -2
         if _cmd_eq_ci(tp, tl, "bitfield"): return -2
         if _cmd_eq_ci(tp, tl, "expireat"): return -3
+        if _cmd_eq_ci(tp, tl, "fcall_ro"): return -3
         if _cmd_eq_ci(tp, tl, "flushall"): return -1
         if _cmd_eq_ci(tp, tl, "function"): return -2
         if _cmd_eq_ci(tp, tl, "getrange"): return 4
@@ -663,6 +668,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "zlexcount"): return 4
         if _cmd_eq_ci(tp, tl, "zrevrange"): return -4
     elif tl == 10:
+        if _cmd_eq_ci(tp, tl, "evalsha_ro"): return -3
         if _cmd_eq_ci(tp, tl, "expiretime"): return 2
         if _cmd_eq_ci(tp, tl, "hpexpireat"): return -6
         if _cmd_eq_ci(tp, tl, "hrandfield"): return -2
@@ -719,7 +725,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
 def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command mutates the keyspace, per real Redis's `write` flag.
 
-    101 of 331 commands are writes. Used by gh #260 to refuse mutations
+    98 of 334 commands are writes. Used by gh #260 to refuse mutations
     once the WAL can no longer persist them, instead of acknowledging writes
     that will not survive a restart.
 
@@ -740,7 +746,6 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         return (
             _cmd_eq_ci(tp, tl, "copy") or
             _cmd_eq_ci(tp, tl, "decr") or
-            _cmd_eq_ci(tp, tl, "eval") or
             _cmd_eq_ci(tp, tl, "hdel") or
             _cmd_eq_ci(tp, tl, "hset") or
             _cmd_eq_ci(tp, tl, "incr") or
@@ -766,7 +771,6 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "bitop") or
             _cmd_eq_ci(tp, tl, "blpop") or
             _cmd_eq_ci(tp, tl, "brpop") or
-            _cmd_eq_ci(tp, tl, "fcall") or
             _cmd_eq_ci(tp, tl, "getex") or
             _cmd_eq_ci(tp, tl, "hmset") or
             _cmd_eq_ci(tp, tl, "lmove") or
@@ -804,7 +808,6 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         )
     elif tl == 7:
         return (
-            _cmd_eq_ci(tp, tl, "evalsha") or
             _cmd_eq_ci(tp, tl, "flushdb") or
             _cmd_eq_ci(tp, tl, "hexpire") or
             _cmd_eq_ci(tp, tl, "hincrby") or
@@ -877,11 +880,101 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     return False
 
 
+def command_is_noscript(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
+                        sp: Pointer[UInt8, MutUntrackedOrigin], sl: Int) -> Bool:
+    """True when a script's redis.call() may not run this command (#36): real
+    Redis's `noscript` flag. `sp`/`sl` is the first argument, for the container
+    commands Redis flags per subcommand; `container|*` means every subcommand
+    but HELP. 36 entries.
+    """
+    if tl == 4:
+        if (
+            _cmd_eq_ci(tp, tl, "auth") or
+            _cmd_eq_ci(tp, tl, "eval") or
+            _cmd_eq_ci(tp, tl, "exec") or
+            _cmd_eq_ci(tp, tl, "quit") or
+            _cmd_eq_ci(tp, tl, "save")
+        ):
+            return True
+    elif tl == 5:
+        if (
+            _cmd_eq_ci(tp, tl, "debug") or
+            _cmd_eq_ci(tp, tl, "fcall") or
+            _cmd_eq_ci(tp, tl, "hello") or
+            _cmd_eq_ci(tp, tl, "multi") or
+            _cmd_eq_ci(tp, tl, "psync") or
+            _cmd_eq_ci(tp, tl, "reset") or
+            _cmd_eq_ci(tp, tl, "watch")
+        ):
+            return True
+    elif tl == 6:
+        if (
+            _cmd_eq_ci(tp, tl, "bgsave")
+        ):
+            return True
+    elif tl == 7:
+        if (
+            _cmd_eq_ci(tp, tl, "discard") or
+            _cmd_eq_ci(tp, tl, "eval_ro") or
+            _cmd_eq_ci(tp, tl, "evalsha") or
+            _cmd_eq_ci(tp, tl, "unwatch")
+        ):
+            return True
+    elif tl == 8:
+        if (
+            _cmd_eq_ci(tp, tl, "fcall_ro") or
+            _cmd_eq_ci(tp, tl, "replconf") or
+            _cmd_eq_ci(tp, tl, "shutdown")
+        ):
+            return True
+    elif tl == 9:
+        if (
+            _cmd_eq_ci(tp, tl, "subscribe")
+        ):
+            return True
+    elif tl == 10:
+        if (
+            _cmd_eq_ci(tp, tl, "evalsha_ro") or
+            _cmd_eq_ci(tp, tl, "psubscribe") or
+            _cmd_eq_ci(tp, tl, "ssubscribe")
+        ):
+            return True
+    elif tl == 11:
+        if (
+            _cmd_eq_ci(tp, tl, "unsubscribe")
+        ):
+            return True
+    elif tl == 12:
+        if (
+            _cmd_eq_ci(tp, tl, "bgrewriteaof") or
+            _cmd_eq_ci(tp, tl, "punsubscribe") or
+            _cmd_eq_ci(tp, tl, "sunsubscribe")
+        ):
+            return True
+    if _cmd_eq_ci(tp, tl, "acl"):
+        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")
+    if _cmd_eq_ci(tp, tl, "client"):
+        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")
+    if _cmd_eq_ci(tp, tl, "cluster"):
+        return _cmd_eq_ci(sp, sl, "reset")
+    if _cmd_eq_ci(tp, tl, "config"):
+        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")
+    if _cmd_eq_ci(tp, tl, "function"):
+        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")
+    if _cmd_eq_ci(tp, tl, "latency"):
+        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")
+    if _cmd_eq_ci(tp, tl, "module"):
+        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")
+    if _cmd_eq_ci(tp, tl, "script"):
+        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")
+    return False
+
+
 @always_inline
 def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command is refused while memory is over --maxmemory (gh #261).
 
-    78 of 331 commands: real Redis's `denyoom` flag plus Pion's
+    78 of 334 commands: real Redis's `denyoom` flag plus Pion's
     substrate ingest commands (PION_DENYOOM in tools/gen_command_table.py).
     Reads, DEL and the POP family stay served under the limit, as in Redis.
     """

@@ -27,7 +27,7 @@ files disagree, the files win.
 | **`pion-autogen`** — AutoGen memory store | Apache-2.0 | [`pion-autogen/LICENSE`](../pion-autogen/LICENSE) |
 | **`pion-llamaindex`** — LlamaIndex vector store | Apache-2.0 | [`pion-llamaindex/LICENSE`](../pion-llamaindex/LICENSE) |
 | **`pion-exo`** — exo attention hook | Apache-2.0 | [`pion-exo/LICENSE`](../pion-exo/LICENSE) |
-| Vendored third-party code: **Lua 5.1.5** and the **lua-cjson** sources (`fpconv.c`, `strbuf.c`, `lua_cjson.c`) under `src/ffi/lua/` | MIT, their own | headers in those files; [`NOTICE`](../NOTICE) |
+| Vendored third-party code under `src/ffi/lua/`: **Lua 5.1.5** (patched for read-only tables, as Redis does), the **lua-cjson** sources (`fpconv.c`, `strbuf.c`, `lua_cjson.c`), **lua-cmsgpack** (`lua_cmsgpack.c`), the Lua **struct** library (`lua_struct.c`) and **LuaBitOp** (`lua_bit.c`) | MIT, their own | headers in those files; [`NOTICE`](../NOTICE) |
 
 Each client package carries the full Apache-2.0 text inside its own
 directory, and therefore inside its sdist and wheel — a build from that

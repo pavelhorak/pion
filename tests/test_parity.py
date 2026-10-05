@@ -1634,10 +1634,11 @@ def test_pion_parity():
     res = send_cmd_bytes(sock, ["EVAL", 'return cjson.decode(ARGV[1]).name', "0", '{"name":"test"}'])
     assert_contains(res, "test", "cjson.decode returns field")
 
-    # Safety: instruction limit
-    print("Testing EVAL instruction limit...")
+    # Safety: a script that never writes is stopped at --lua-time-limit
+    # (5000 ms by default): a worker cannot answer SCRIPT KILL mid-script (#36).
+    print("Testing EVAL time limit...")
     res = send_cmd_bytes(sock, ["EVAL", "while true do end", "0"])
-    assert_contains(res, "instruction limit", "Infinite loop caught")
+    assert_contains(res, "lua-time-limit", "Infinite loop stopped")
 
     # Safety: sandbox (no os)
     print("Testing EVAL sandbox...")

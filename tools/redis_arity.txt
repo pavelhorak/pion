@@ -25,13 +25,16 @@ discard 1
 dump 2
 echo 2
 eval -3
+eval_ro -3
 evalsha -3
+evalsha_ro -3
 exec 1
 exists -2
 expire -3
 expireat -3
 expiretime 2
 fcall -3
+fcall_ro -3
 flushall -1
 flushdb -1
 function -2
