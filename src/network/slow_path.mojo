@@ -48,25 +48,28 @@ from src.common.hll import hll_add, hll_count, hll_merge, HLL_REGISTERS
 
 # Command modules (Phase 1 extraction)
 from src.commands.transaction import TransactionState, QueuedCommand, handle_multi, handle_exec_start, handle_discard, handle_watch, handle_unwatch, tx_queue_has_denyoom
-from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, command_is_noscript, PION_COMMAND_COUNT
+from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, command_is_noscript, command_hidden_from_monitor, command_touches_keyspace, command_monitor_first, PION_COMMAND_COUNT
 from src.commands.tenant import TenantTable, tenant_keyspec, apply_tenant_rewrite, TENANT_SCRATCH_CAP, MAX_TENANT_NAME
 from src.commands.stream import handle_xadd, handle_xlen, handle_xack, handle_xdel, handle_xread, handle_xtrim, handle_xinfo, handle_xrange, handle_xgroup, handle_xclaim, handle_xpending, handle_xrevrange, handle_xautoclaim, handle_xreadgroup, BlockedReaderRegistry, write_xread_reply
-from src.commands.pubsub import PubSubRegistry, PubSubBroadcast, handle_pubsub, handle_publish, handle_subscribe, handle_unsubscribe, handle_psubscribe, handle_punsubscribe, handle_ssubscribe, handle_sunsubscribe, handle_spublish
+from src.commands.pubsub import PubSubRegistry, handle_pubsub, handle_publish_kind, handle_subscribe_kind, handle_unsubscribe_kind, pubsub_drain, KIND_CHANNEL, KIND_PATTERN, KIND_SHARD
 from src.commands.ttl import handle_expire, handle_pexpire, handle_expireat, handle_pexpireat, handle_ttl, handle_pttl, handle_persist
 # Command modules (Phase 2 extraction)
 from src.commands.list import handle_lindex, handle_lset, handle_linsert, handle_lrem, handle_ltrim, handle_lpos, handle_lmove
 from src.commands.mpop import parse_mpop
 from src.commands.blocking import BlockedClientRegistry, parse_block_timeout, new_blocked_client
-from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro
+from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro, handle_pfselftest, handle_pfdebug
+from src.commands.monitor import MonitorRegistry, monitor_line
+from src.network.vector_ingest import ingest_hash_vector
+from src.commands.replication_cmds import handle_role, handle_replicaof, handle_failover, handle_sync, handle_replconf
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
 from src.commands.geo import handle_geoadd, handle_geopos, handle_geodist, handle_geohash, handle_georadius, handle_geosearch, handle_geosearchstore, handle_georadiusbymember
 from src.commands.hash import handle_hmget, handle_hgetall, handle_hkeys, handle_hvals, handle_hlen, handle_hdel, handle_hexists, handle_hincrby, handle_hincrbyfloat, handle_hrandfield, handle_hscan, handle_hsetnx, handle_hexpire, handle_hpexpire, handle_hexpireat, handle_hpexpireat, handle_httl, handle_hpttl, handle_hpersist, handle_hexpiretime, handle_hpexpiretime
-from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_move, handle_bgrewriteaof, handle_command, handle_debug, handle_slowlog, handle_latency, handle_memory, handle_module, handle_acl, handle_reset, handle_client, handle_time
+from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_move, handle_bgrewriteaof, handle_command, handle_debug, handle_slowlog, handle_latency, handle_memory, handle_module, handle_acl, handle_reset, handle_client, handle_time, handle_lolwut
 from src.commands.lua_engine import LuaEngine, handle_eval, handle_evalsha, handle_script, handle_function, handle_fcall
 from src.commands.cluster import handle_cluster
 from src.commands.migrate import handle_dump, handle_restore, handle_migrate
-from src.commands.string_kv import handle_incrby, handle_decrby, handle_incrbyfloat, handle_append, handle_strlen, handle_getset, handle_getdel, handle_getex, handle_setnx, handle_setex, handle_psetex, handle_msetnx, handle_msetex, handle_getrange, handle_substr, handle_setrange, handle_expiretime, handle_pexpiretime, handle_unlink
+from src.commands.string_kv import handle_incrby, handle_decrby, handle_incrbyfloat, handle_append, handle_strlen, handle_getset, handle_getdel, handle_getex, handle_setnx, handle_setex, handle_psetex, handle_msetnx, handle_msetex, handle_getrange, handle_substr, handle_setrange, handle_expiretime, handle_pexpiretime, handle_unlink, handle_lcs
 from src.commands.ai import handle_ai_chat, handle_ai_flare, handle_ai_complete, handle_ai_semantic_cache, handle_ai_embed, handle_ai_generate, handle_ai_loadmodel, handle_ai_memory
 from src.commands.sorted_set import zmpop_pop, handle_zrem, handle_zcard, handle_zrank, handle_zrevrank, handle_zscore, handle_zcount, handle_zincrby, handle_zrange, handle_zrevrange, handle_zrangebyscore, handle_zrevrangebyscore, handle_zunion, handle_zinter, handle_zunionstore, handle_zinterstore, handle_zlexcount, handle_zrangebylex, handle_zrevrangebylex, handle_zpopmax, handle_zmpop, handle_zrandmember, handle_zmscore, handle_zscan, handle_zrangestore, handle_zintercard, handle_zdiff, handle_zdiffstore, handle_zremrangebylex, handle_zremrangebyrank, handle_zremrangebyscore
 from src.commands.vector import handle_ft_info, handle_ft_dropindex, handle_ft_optimize, handle_ft_create, handle_ft_addtext, handle_ft_searchtext, handle_ft_search, handle_ft_hybrid, write_ft_search_response
@@ -205,8 +208,6 @@ struct SlowPathHandler:
     var blocked_readers: BlockedReaderRegistry
     # Pub/Sub registry (per-worker) + cross-worker broadcast ring
     var pubsub: PubSubRegistry
-    var pubsub_broadcast: UnsafePointer[PubSubBroadcast, MutUntrackedOrigin]
-    var pubsub_tail: UInt64  # per-worker cursor into broadcast ring
     # Transaction state (per-fd MULTI/EXEC queuing)
     var tx_state: TransactionState
     # Phase 4: LLM client for AI.CHAT (HTTP proxy to MAX Serve / OpenAI-compatible)
@@ -301,6 +302,23 @@ struct SlowPathHandler:
     # #38: BLPOP & co. parked until a key they wait on has data or they time
     # out; the engine wakes them (NetworkEngine._service_blocked_clients).
     var blocked_clients: BlockedClientRegistry
+    # #39 MONITOR (src/commands/monitor.mojo). `fast_path_off` is read by the
+    # engine's three process_data_plane call sites (update_dispatch_gate):
+    # true while memory is over --maxmemory (gh #261), a client monitors
+    # (commands are fed from here) or one is subscribed (#42: a RESP2
+    # subscriber may run only the pub/sub commands); then fast_path_ok(fd)
+    # decides per connection. `monitor_skip` is set while the engine re-runs a woken
+    # blocking command, which monitors saw when it first ran.
+    # `monitor_exec_line` holds EXEC's line until the commands it ran are out.
+    var monitors: MonitorRegistry
+    var fast_path_off: Bool
+    var monitor_skip: Bool
+    var monitor_exec_line: List[UInt8]
+    # The engine's per-fd affinity bytes (3 = READONLY), which RESET clears.
+    var local_affinity: UnsafePointer[UInt8, MutUntrackedOrigin]
+    # The engine's writer while a script runs: a script's PUBLISH reaches
+    # subscribers through it (the script's own writer only captures replies).
+    var script_main_writer: UnsafePointer[ResponseWriter, MutUntrackedOrigin]
 
     def __init__(
         out self,
@@ -369,6 +387,12 @@ struct SlowPathHandler:
         self.script_config = null_ptr[PionConfig, MutUntrackedOrigin]()
         self.script_allow_oom = False
         self.blocked_clients = BlockedClientRegistry()
+        self.monitors = MonitorRegistry()
+        self.fast_path_off = False
+        self.monitor_skip = False
+        self.monitor_exec_line = List[UInt8]()
+        self.local_affinity = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.script_main_writer = null_ptr[ResponseWriter, MutUntrackedOrigin]()
         self.cluster = cluster
         self.shard_query_seq = alloc[UInt64](1)
         self.shard_query_seq[0] = 1
@@ -425,8 +449,6 @@ struct SlowPathHandler:
         self.spec_rag = SpeculativeRAG(config.embedding.dimensions, config.server.kvcache_enabled)
         self.blocked_readers = BlockedReaderRegistry()
         self.pubsub = PubSubRegistry()
-        self.pubsub_broadcast = null_ptr[PubSubBroadcast, MutUntrackedOrigin]()
-        self.pubsub_tail = UInt64(0)
         self.tx_state = TransactionState()
         # Phase 4: LLM client for AI.CHAT (disabled by default; opt-in via --llm-host/port)
         self.llm_client = LLMClient(
@@ -815,6 +837,80 @@ struct SlowPathHandler:
         s += "vector_queries:" + String(self.ledger.vector_queries) + "\r\n"
         return s
 
+    def update_dispatch_gate(mut self):
+        """Recompute `fast_path_off` after anything it depends on changed."""
+        self.fast_path_off = (self.over_maxmemory or self.monitors.count() > 0
+                              or self.pubsub.subscribed_fds > 0)
+
+    def fast_path_ok(self, ci: Int) -> Bool:
+        """Under the gate: may this connection's commands take the fast path?
+        Not while memory is over the limit or a client monitors, nor for a
+        subscribed connection, whose commands the slow path checks."""
+        return (not self.over_maxmemory and self.monitors.count() == 0
+                and not self.pubsub.subscribed(Int32(ci)))
+
+    def _reset_connection(mut self, fd: Int32, mut writer: ResponseWriter):
+        """RESET, as Redis's clearClientConnectionState (#39): out of MONITOR,
+        MULTI discarded and WATCH dropped, every subscription gone, back to
+        RESP2 and the default user (unauthenticated when a password is set,
+        and no longer bound to a tenant), no name, READONLY off. It answered
+        +RESET and reset none of it."""
+        _ = self.monitors.remove(fd)
+        self.tx_state.cleanup_fd(fd)
+        self.pubsub.cleanup_fd(fd)
+        self.update_dispatch_gate()
+        if is_not_null(self.local_affinity) and self.local_affinity[Int(fd)] == 3:
+            self.local_affinity[Int(fd)] = 0
+        writer.proto = 2
+        writer.append_status_response("RESET")
+
+    def _monitor_line_for(self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int,
+                          fd: Int32) -> List[UInt8]:
+        """#39: the MONITOR line for tokens[i:end], or nothing when Redis
+        would not show the command: unknown, a wrong argument count (refused
+        before it ran), or `admin`."""
+        var tp = tokens[i].ptr
+        var tl = tokens[i].length
+        if not command_exists(tp, tl):
+            return List[UInt8]()
+        var argc = end - i
+        var ar = command_arity(tp, tl)
+        if (ar > 0 and argc != ar) or (ar < 0 and argc < -ar):
+            return List[UInt8]()
+        var sp = tokens[i + 1].ptr if argc > 1 else tp
+        var sl = tokens[i + 1].length if argc > 1 else 0
+        if command_hidden_from_monitor(tp, tl, sp, sl):
+            return List[UInt8]()
+        return monitor_line(tokens, i, end, Int32(-1) if self.script_depth > 0 else fd)
+
+    def _monitor_feed(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int,
+                      fd: Int32, mut writer: ResponseWriter, server: TCPServer, kq: Int32):
+        """#39: show a command to the monitors. A script's commands wait in
+        `monitors.pending` until the script's own line is out."""
+        var line = self._monitor_line_for(tokens, i, end, fd)
+        if len(line) == 0:
+            return
+        if self.script_depth > 0:
+            for b in range(len(line)):
+                self.monitors.pending.append(line[b])
+            return
+        self._monitor_send(line, fd, writer, server, kq)
+
+    def _monitor_send(mut self, line: List[UInt8], fd: Int32, mut writer: ResponseWriter,
+                      server: TCPServer, kq: Int32):
+        """#39: lines to every monitor. A connection that monitors gets them
+        after its own reply; the others through their output buffers."""
+        var n = len(line)
+        if n == 0:
+            return
+        var lp = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(line.unsafe_ptr()))
+        for k in range(self.monitors.count()):
+            var m = self.monitors.fds[k]
+            if m == fd:
+                writer.append_to_response(lp, n)
+            else:
+                writer.deliver_to(m, lp, n, server, kq)
+
     def _rpoplpush(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
                    mut writer: ResponseWriter) raises:
         """RPOPLPUSH tokens[i+1] tokens[i+2] (BRPOPLPUSH runs it once its source
@@ -1069,6 +1165,47 @@ struct SlowPathHandler:
                     # degenerate no-command parse.
                     var cmd_end_tok = cmd_ends[cmd_idx] if cmd_idx < num_cmds else num_tokens
 
+                    # #39: a connection in MONITOR mode may not touch the
+                    # keyspace, as in Redis (where a monitor is a kind of replica).
+                    if self.script_depth == 0 and self.monitors.count() > 0 and self.monitors.contains(fd):
+                        var _msp = tokens[i + 1].ptr if cmd_end_tok - i > 1 else tp
+                        var _msl = tokens[i + 1].length if cmd_end_tok - i > 1 else 0
+                        if command_touches_keyspace(tp, tl, _msp, _msl):
+                            writer.append_error_response("ERR Replica can't interact with the keyspace")
+                            i = cmd_end_tok
+                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                                cmd_idx += 1
+                            continue
+
+                    # #42: a RESP2 connection with subscriptions may run only the
+                    # pub/sub commands, PING (answered [pong, msg]), QUIT and
+                    # RESET, as in Redis. RESP3 has no such limit.
+                    if self.script_depth == 0 and writer.proto == 2 and self.pubsub.subscribed(fd):
+                        if cmd_eq(tp, tl, "ping"):
+                            if cmd_end_tok - i > 2:
+                                writer.append_error_response("ERR wrong number of arguments for 'ping' command")
+                            else:
+                                writer.append_array_header(2)
+                                writer.append_bulk_string_response("pong".unsafe_ptr(), 4)
+                                if cmd_end_tok - i == 2:
+                                    writer.append_bulk_string_response(tokens[i + 1].ptr, tokens[i + 1].length)
+                                else:
+                                    writer.append_bulk_string_response("".unsafe_ptr(), 0)
+                            i = cmd_end_tok
+                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                                cmd_idx += 1
+                            continue
+                        if not (cmd_eq(tp, tl, "subscribe") or cmd_eq(tp, tl, "unsubscribe")
+                                or cmd_eq(tp, tl, "psubscribe") or cmd_eq(tp, tl, "punsubscribe")
+                                or cmd_eq(tp, tl, "ssubscribe") or cmd_eq(tp, tl, "sunsubscribe")
+                                or cmd_eq(tp, tl, "quit") or cmd_eq(tp, tl, "reset")):
+                            writer.append_error_response("ERR Can't execute '" + token.value().lower()
+                                                         + "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context")
+                            i = cmd_end_tok
+                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                                cmd_idx += 1
+                            continue
+
                     # ── MULTI mode interception: queue commands instead of executing ──
                     # (never for a script's redis.call: it runs inside an EXEC or
                     # on its own, and MULTI is refused inside scripts)
@@ -1078,6 +1215,10 @@ struct SlowPathHandler:
                         if tl == 4 and cmd_matches_4(tp, 101, 120, 101, 99): is_tx_cmd = True   # exec
                         elif tl == 5 and cmd_matches_5(tp, 109, 117, 108, 116, 105): is_tx_cmd = True  # multi
                         elif tl == 7 and cmd_matches_7(tp, 100, 105, 115, 99, 97, 114, 100): is_tx_cmd = True  # discard
+                        # Redis runs these at once inside MULTI too (#39): WATCH
+                        # to refuse itself, QUIT and RESET to end the transaction.
+                        elif cmd_eq(tp, tl, "watch") or cmd_eq(tp, tl, "quit") or cmd_eq(tp, tl, "reset"):
+                            is_tx_cmd = True
                         if not is_tx_cmd:
                             # gh #219: queue THIS command's frame only. This used to
                             # enqueue (buffer, n) — the whole recv buffer — and then
@@ -1252,6 +1393,15 @@ struct SlowPathHandler:
                                 while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
                                     cmd_idx += 1
                                 continue
+
+                    # #39 MONITOR: a command is shown once it has run (the loop
+                    # tail), except a script command, shown before it runs so
+                    # that what the script calls follows it.
+                    var _mon_i = i
+                    var _mon_done = self.monitors.count() == 0 or self.monitor_skip
+                    if not _mon_done and command_monitor_first(tp, tl):
+                        self._monitor_feed(tokens, i, cmd_end_tok, fd, writer, server, kq)
+                        _mon_done = True
 
                     # ── XGPU ──
                     if tl == 4 and cmd_matches_4(tp, 120, 103, 112, 117): # XGPU (x=120, g=103, p=112, u=117)
@@ -1824,6 +1974,10 @@ struct SlowPathHandler:
                                     hs_ok = False
                                     break
                                 hs_added += res.value
+                                # #43: the index's vector field is indexed here too
+                                _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal,
+                                                       tokens[i+1].ptr, tokens[i+1].length, tokens[j_hs].ptr,
+                                                       tokens[j_hs].length, tokens[j_hs+1].ptr, tokens[j_hs+1].length)
                                 j_hs += 2
                             if hs_ok: writer.append_int_response(hs_added)
                             else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -1862,6 +2016,9 @@ struct SlowPathHandler:
                                 if not hmset_res.is_valid:
                                     hmset_wrong = True
                                     break
+                                _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #43
+                                                       tokens[i+1].ptr, tokens[i+1].length, tokens[j_hmset].ptr,
+                                                       tokens[j_hmset].length, tokens[j_hmset+1].ptr, tokens[j_hmset+1].length)
                                 j_hmset += 2
                             if hmset_wrong: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             else: writer.append_ok_response()
@@ -2213,26 +2370,31 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── REPLCONF ──
                     elif cmd_eq(tp, tl, "replconf"):
-                        # REPLCONF ACK <offset> — handled transparently, just consume args
-                        var _rc_extra = cmd_end_tok - i - 1 if i + 1 < cmd_end_tok else 0
-                        i += _rc_extra
-                        writer.append_ok_response()
+                        # #39: Redis's answers for a client that is not a replica
+                        # (ACK/GETACK answer nothing). It answered +OK to all.
+                        handle_replconf(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
                     # ── PSYNC ──
-                    elif tl == 5 and (tp[0]|0x20)==112 and (tp[1]|0x20)==115 and (tp[2]|0x20)==121 and (tp[3]|0x20)==110 and (tp[4]|0x20)==99:
-                        # PSYNC repl_id offset — stub for RESP-based PSYNC (real PSYNC uses replication port)
-                        if i + 2 < cmd_end_tok: i += 2
-                        writer.append_ok_response()
+                    elif cmd_eq(tp, tl, "psync"):
+                        # #39: refused. It answered +OK, and a Redis replica
+                        # then waited forever for an RDB that never came.
+                        handle_sync(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
                     # ── DUMP ──
                     elif tl == 4 and cmd_matches_4(tp, 100, 117, 109, 112):
-                        _ = handle_dump(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        _ = handle_dump(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     # ── RESTORE ──
                     elif tl == 7 and cmd_matches_7(tp, 114, 101, 115, 116, 111, 114, 101):
-                        _ = handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        if handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal):
+                            self.tx_state.bump_key_version(tokens[i + 1].ptr, tokens[i + 1].length)
                         i = cmd_end_tok - 1
                     # ── MIGRATE ──
                     elif tl == 7 and cmd_matches_7(tp, 109, 105, 103, 114, 97, 116, 101):
-                        _ = handle_migrate(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        var _moved = handle_migrate(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map,
+                                                    self.dispatcher.wal, is_not_null(self.cluster) and self.cluster[].enabled)
+                        for _mk in range(len(_moved)):
+                            self.tx_state.bump_key_version(tokens[_moved[_mk]].ptr, tokens[_moved[_mk]].length)
                         i = cmd_end_tok - 1
                     # ── FT.* command family ──
                     # gh #156/#162 family: every handler gets `cmd_end_tok` as its
@@ -2822,7 +2984,7 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── HSETNX ──
                     elif tl == 6 and cmd_matches_6(tp, 104, 115, 101, 116, 110, 120):
-                        _ = handle_hsetnx(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher)
+                        _ = handle_hsetnx(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher, self.shared_hnsw)
                         i = cmd_end_tok - 1
                     # ── R3: HEXPIRE (7 bytes: h=104,e=101,x=120,p=112,i=105,r=114,e=101) ──
                     elif tl == 7 and (tp[0]|0x20)==104 and (tp[1]|0x20)==101 and (tp[2]|0x20)==120 and (tp[3]|0x20)==112 and (tp[4]|0x20)==105 and (tp[5]|0x20)==114 and (tp[6]|0x20)==101:
@@ -3330,29 +3492,45 @@ struct SlowPathHandler:
                     elif cmd_eq(tp, tl, "pubsub"):
                         _ = handle_pubsub(tokens, i, cmd_end_tok, writer, self.pubsub)
                         i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "publish"):
-                        _ = handle_publish(tokens, i, cmd_end_tok, writer, self.pubsub, server, self.pubsub_broadcast, self.worker_id, self.tx_state.resp_proto)
+                    elif cmd_eq(tp, tl, "publish") or cmd_eq(tp, tl, "spublish"):
+                        # Deliveries go through the engine's writer, also from a
+                        # script (whose own writer only captures the reply).
+                        # Outside a script that is `writer` itself, passed as
+                        # null: a second pointer to a `mut` argument breaks
+                        # its exclusivity, and at -O3 the reply then lands on
+                        # a stale offset, over the message delivered to self.
+                        var _dw = null_ptr[ResponseWriter, MutUntrackedOrigin]()
+                        var _dkq = kq
+                        if self.script_depth > 0:
+                            _dw = self.script_main_writer
+                            _dkq = self.script_kq
+                        _ = handle_publish_kind(tokens, i, cmd_end_tok, writer, _dw, _dkq, fd, self.pubsub, server,
+                                                self.tx_state.resp_proto, self.worker_id, self.num_workers,
+                                                cmd_eq(tp, tl, "spublish"))
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "subscribe"):
-                        _ = handle_subscribe(tokens, i, cmd_end_tok, writer, fd, self.pubsub)
+                        _ = handle_subscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_CHANNEL)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "unsubscribe"):
-                        _ = handle_unsubscribe(tokens, i, cmd_end_tok, writer, fd, self.pubsub)
+                        _ = handle_unsubscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_CHANNEL)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "psubscribe"):
-                        _ = handle_psubscribe(tokens, i, cmd_end_tok, writer, fd, self.pubsub)
+                        _ = handle_subscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_PATTERN)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "punsubscribe"):
-                        _ = handle_punsubscribe(tokens, i, cmd_end_tok, writer, fd, self.pubsub)
+                        _ = handle_unsubscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_PATTERN)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "ssubscribe"):
-                        _ = handle_ssubscribe(tokens, i, cmd_end_tok, writer)
+                        _ = handle_subscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_SHARD)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "sunsubscribe"):
-                        _ = handle_sunsubscribe(tokens, i, cmd_end_tok, writer)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "spublish"):
-                        _ = handle_spublish(tokens, i, cmd_end_tok, writer)
+                        _ = handle_unsubscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_SHARD)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     # ── Transaction Commands (src/commands/transaction.mojo) ──
                     elif tl == 5 and cmd_matches_5(tp, 109, 117, 108, 116, 105):
@@ -3471,7 +3649,10 @@ struct SlowPathHandler:
                         _ = handle_acl(tokens, i, cmd_end_tok, writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "reset"):
-                        _ = handle_reset(writer)
+                        if cmd_end_tok - i != 1:
+                            writer.append_error_response("ERR wrong number of arguments for 'reset' command")
+                        else:
+                            self._reset_connection(fd, writer)
                         i = cmd_end_tok - 1
                     # ── CLIENT ── (6 bytes: c=99,l=108,i=105,e=101,n=110,t=116)
                     elif tl == 6 and cmd_matches_6(tp, 99, 108, 105, 101, 110, 116):
@@ -3501,18 +3682,18 @@ struct SlowPathHandler:
                     # (script_dispatch), so every command it calls logs its own
                     # WAL record; the old images of the KEYS[] keys are gone.
                     elif tl == 4 and cmd_matches_4(tp, 101, 118, 97, 108):
-                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
                         _ = handle_eval(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
                     elif tl == 7 and cmd_matches_7(tp, 101, 118, 97, 108, 115, 104, 97):
-                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
                         _ = handle_evalsha(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
                     elif tl == 6 and cmd_matches_6(tp, 115, 99, 114, 105, 112, 116):
                         _ = handle_script(tokens, i, cmd_end_tok, writer, self.lua_engine)
                         i = cmd_end_tok - 1
                     elif tl == 5 and cmd_matches_5(tp, 102, 99, 97, 108, 108):
-                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
                         _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
                     elif tl == 8 and cmd_matches_8(tp, 102, 117, 110, 99, 116, 105, 111, 110):
@@ -3646,15 +3827,15 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── EVAL_RO / EVALSHA_RO / FCALL_RO (#36) ── at the tail
                     elif cmd_eq(tp, tl, "eval_ro"):
-                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
                         _ = handle_eval(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "evalsha_ro"):
-                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
                         _ = handle_evalsha(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "fcall_ro"):
-                        self._script_context(fd, server, kq, hnsw, db_size, config)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
                         _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
                         i = cmd_end_tok - 1
                     # ── BRPOPLPUSH / BLMOVE / BLMPOP / BZPOPMIN / BZPOPMAX / BZMPOP (#38) ──
@@ -3739,6 +3920,49 @@ struct SlowPathHandler:
                                     writer.append_null_array_response()
                         if i < num_tokens:
                             i = cmd_end_tok - 1
+                    # ── #39: commands Redis 7 has that Pion lacked ──
+                    elif cmd_eq(tp, tl, "lcs"):
+                        _ = handle_lcs(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "role"):
+                        var _role_tail = Int(self.dispatcher.wal[].tail_offset) if is_not_null(self.dispatcher.wal) else 0
+                        handle_role(tokens, i, cmd_end_tok, writer, self.cluster, _role_tail)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "lolwut"):
+                        handle_lolwut(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "monitor"):
+                        if cmd_end_tok - i != 1:
+                            writer.append_error_response("ERR wrong number of arguments for 'monitor' command")
+                        elif not on_primary:
+                            # queued by MULTI: Redis refuses it at EXEC
+                            writer.append_error_response("ERR MONITOR isn't allowed for DENY BLOCKING client")
+                        elif not self.monitors.contains(fd):
+                            self.monitors.add(fd)
+                            self.update_dispatch_gate()
+                            writer.append_ok_response()
+                        # already monitoring: Redis ignores it, with no reply
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "pfselftest"):
+                        _ = handle_pfselftest(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "pfdebug"):
+                        _ = handle_pfdebug(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "replicaof") or cmd_eq(tp, tl, "slaveof"):
+                        handle_replicaof(tokens, i, cmd_end_tok, writer, self.cluster)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "failover"):
+                        handle_failover(tokens, i, cmd_end_tok, writer, self.cluster)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "sync"):
+                        handle_sync(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "restore-asking"):
+                        # RESTORE, as a cluster's MIGRATE sends it mid-resharding
+                        if handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal):
+                            self.tx_state.bump_key_version(tokens[i + 1].ptr, tokens[i + 1].length)
+                        i = cmd_end_tok - 1
                     else:
                         writer.append_error_response("ERR unknown command '" + token.value() + "'")
                         # Skip remaining tokens of this command
@@ -3759,6 +3983,17 @@ struct SlowPathHandler:
                     # untouched, because the guard only fires when i fell SHORT.
                     if i < cmd_end_tok - 1:
                         i = cmd_end_tok - 1
+                    # #39 MONITOR: show the command that just ran. EXEC waits
+                    # until the commands it runs (the replay below) are out.
+                    if not _mon_done:
+                        if exec_replay_count > 0 and tl == 4 and cmd_matches_4(tp, 101, 120, 101, 99):
+                            self.monitor_exec_line = self._monitor_line_for(tokens, _mon_i, cmd_end_tok, fd)
+                        else:
+                            self._monitor_feed(tokens, _mon_i, cmd_end_tok, fd, writer, server, kq)
+                    if self.script_depth == 0 and len(self.monitors.pending) > 0:
+                        var _mpend = self.monitors.pending.copy()
+                        self.monitors.pending.clear()
+                        self._monitor_send(_mpend, fd, writer, server, kq)
                     i += 1
                     # Advance command index
                     while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
@@ -3801,6 +4036,10 @@ struct SlowPathHandler:
                 # No more replay frames. If we replayed anything, free the queue.
                 if exec_replay_count > 0:
                     self.tx_state.discard(fd)
+                    if len(self.monitor_exec_line) > 0:      # #39: EXEC after what it ran
+                        var _mexec = self.monitor_exec_line.copy()
+                        self.monitor_exec_line.clear()
+                        self._monitor_send(_mexec, fd, writer, server, kq)
                 break
             writer.flush_response(fd, server, kq)
             return primary_consumed
@@ -3848,10 +4087,12 @@ struct SlowPathHandler:
         return UnsafePointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(UnsafePointer(to=self)))
 
     def _script_context(mut self, fd: Int32, server: TCPServer, kq: Int32, mut hnsw: HNSWGraph,
-                        mut db_size: Int, config: PionConfig):
+                        mut db_size: Int, config: PionConfig, mut writer: ResponseWriter):
         """Remember the outer call's context for script_dispatch. Valid for this
         command only: the script runs synchronously inside it."""
         self.script_fd = fd
+        self.script_main_writer = UnsafePointer[ResponseWriter, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=writer)))
         self.script_server = UnsafePointer[TCPServer, MutUntrackedOrigin](
             unsafe_from_address=Int(UnsafePointer(to=server)))
         self.script_kq = kq
@@ -3878,8 +4119,7 @@ struct SlowPathHandler:
             return 1 if command_exists(np, nl) else 0
         if is_null(self.script_writer):
             self.script_writer = alloc[ResponseWriter](1)
-            self.script_writer.unsafe_write(ResponseWriter())
-            self.script_writer[].capture = True
+            self.script_writer.unsafe_write(ResponseWriter(capture_only=True))
         var w = self.script_writer
         w[].offset = 0
         w[].overflow_emitted = False
@@ -3929,7 +4169,9 @@ struct SlowPathHandler:
             self.can_park_wait = False        # WAIT and XREAD BLOCK answer at once
             self.script_allow_oom = flags & 4 != 0
             self.script_depth += 1
-            _ = self.process_slow_path(f, o, self.script_fd, w[], self.script_server[], self.script_kq,
+            # kq = -1: the capture writer's flushes are no-ops (the XDP-lane
+            # flush), so the reply stays in its buffer for the script.
+            _ = self.process_slow_path(f, o, self.script_fd, w[], self.script_server[], Int32(-1),
                                        self.script_hnsw[], self.script_db_size[], self.script_config[])
             self.script_depth -= 1
             self.script_allow_oom = False
@@ -3938,11 +4180,10 @@ struct SlowPathHandler:
                 wrote[0] = 1
         return w[].offset
 
-    def drain_pubsub_broadcast(mut self, server: TCPServer):
-        """Drain cross-worker pub/sub broadcast ring. Called per event loop tick."""
-        if is_null(self.pubsub_broadcast): return
-        if not self.pubsub_broadcast[].ready: return
-        self.pubsub_broadcast[].drain(self.worker_id, self.pubsub_tail, self.pubsub, server, self.tx_state.resp_proto)
+    def drain_pubsub(mut self, mut writer: ResponseWriter, server: TCPServer, kq: Int32):
+        """#42: deliver what other workers published since the last tick.
+        Called per event-loop tick when there is more than one worker."""
+        pubsub_drain(self.pubsub, self.worker_id, writer, server, kq, self.tx_state.resp_proto)
 
     def drain_deferred_shard_responses(mut self, mut hnsw: HNSWGraph, mut writer: ResponseWriter,
                                        server: TCPServer, kq: Int32) raises:

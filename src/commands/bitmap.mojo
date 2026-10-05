@@ -17,10 +17,12 @@ from src.network.resp3 import RESP3Token
 from src.network.response_writer import ResponseWriter
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
-from src.common.hll import hll_merge, HLL_REGISTERS
+from src.common.hll import hll_merge, hll_add, hll_count, HLL_REGISTERS
 from src.common.container_free import remove_and_free
 from src.io.wal import WAL
 from src.common.utils import arg_eq, parse_int64_strict
+from std.math import sqrt, log, ceil
+from std.ffi import external_call
 
 
 comptime _E_NOT_INT = "ERR value is not an integer or out of range"
@@ -689,3 +691,111 @@ def handle_pfmerge(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     else:
         writer.append_error_response("ERR wrong number of arguments for 'pfmerge' command")
         return 0
+
+
+def handle_pfselftest(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                      mut writer: ResponseWriter) -> Int:
+    """PFSELFTEST (#39): Redis's self-test of its HyperLogLog, run against
+    Pion's. Test 1: the count over random registers matches the textbook
+    harmonic mean computed one register at a time (the counting kernel is
+    SIMD, src/common/hll.mojo). Test 2: add 10M distinct elements and check
+    the estimate at every power of ten against Redis's bound, 6x the standard
+    error (1.04/sqrt(m)), with an error of at most 1 at 10."""
+    if num_tokens - i != 1:
+        writer.append_error_response("ERR wrong number of arguments for 'pfselftest' command")
+        return 0
+    var regs = alloc[UInt8](HLL_REGISTERS)
+    # Redis's seed: two rand() calls.
+    var seed = UInt64(Int(external_call["rand", Int32]())) | (UInt64(Int(external_call["rand", Int32]())) << 32)
+    # Test 1: random registers (0..51, the most a 64-bit hash with p=14 sets).
+    var x = seed | 1
+    for _ in range(1000):
+        for r in range(HLL_REGISTERS):
+            x ^= x << 13
+            x ^= x >> 7
+            x ^= x << 17
+            regs.store(r, UInt8(Int(x % 52)))
+        var E = Float64(0.0)
+        var zeros = 0
+        for r in range(HLL_REGISTERS):
+            var v = Int(regs.load(r))
+            if v == 0:
+                zeros += 1
+            else:
+                E += 1.0 / Float64(1 << v)
+        var m = Float64(HLL_REGISTERS)
+        var est = (0.7213 / (1.0 + 1.079 / m)) * m * m / (E + Float64(zeros))
+        if est <= 2.5 * m and zeros != 0:
+            est = m * log(m / Float64(zeros))
+        var got = hll_count(regs)
+        if Int(est) != got:
+            writer.append_error_response("ERR TESTFAILED count kernel " + String(got)
+                                         + " != reference " + String(Int(est)))
+            regs.unsafe_free()
+            return 0
+    # Test 2: approximation error.
+    unsafe_memset(regs, 0, HLL_REGISTERS)
+    var relerr = 1.04 / sqrt(Float64(HLL_REGISTERS))
+    var checkpoint = 1
+    var ele = alloc[UInt8](8)
+    for j in range(1, 10_000_001):
+        var e = UInt64(j) ^ seed
+        ele.unsafe_bitcast[UInt64]().store(0, e)
+        _ = hll_add(regs, GenericValue.borrow(ele, 8))
+        if j == checkpoint:
+            var abserr = checkpoint - hll_count(regs)
+            var maxerr = Int(ceil(relerr * 6.0 * Float64(checkpoint)))
+            if j == 10:
+                maxerr = 1
+            if abserr < 0:
+                abserr = -abserr
+            if abserr > maxerr:
+                writer.append_error_response("ERR TESTFAILED Too big error. card:" + String(checkpoint)
+                                             + " abserr:" + String(abserr))
+                ele.unsafe_free()
+                regs.unsafe_free()
+                return 0
+            checkpoint *= 10
+    ele.unsafe_free()
+    regs.unsafe_free()
+    writer.append_ok_response()
+    return 0
+
+
+def handle_pfdebug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                   mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Int:
+    """PFDEBUG GETREG|DECODE|ENCODING|TODENSE key (#39), Redis's HyperLogLog
+    debugging command. Pion keeps every HyperLogLog dense, one byte per
+    register: ENCODING is always dense, TODENSE has nothing to convert (0), and
+    DECODE, which prints the sparse form, answers Redis's error for a dense
+    one. GETREG returns Pion's registers, which differ from Redis's for the same
+    elements (a different hash; the documented HyperLogLog fence)."""
+    if num_tokens - i != 3:
+        writer.append_error_response("ERR wrong number of arguments for 'pfdebug' command")
+        return 0
+    var sub = tokens[unsafe_offset=i + 1]
+    var kt = tokens[unsafe_offset=i + 2]
+    var v = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
+    if v.is_none():
+        writer.append_error_response("ERR The specified key does not exist")
+        return 0
+    if v.type.value != ValueType.HLL:
+        if v.is_string_like() or v.type.value == ValueType.INT:
+            writer.append_error_response("WRONGTYPE Key is not a valid HyperLogLog string value.")
+        else:
+            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+        return 0
+    if arg_eq(sub.ptr, sub.length, "getreg"):
+        var regs = v.as_hll()
+        writer.append_array_header(HLL_REGISTERS)
+        for r in range(HLL_REGISTERS):
+            writer.append_int_response(Int64(Int(regs.load(r))))
+    elif arg_eq(sub.ptr, sub.length, "decode"):
+        writer.append_error_response("ERR HLL encoding is not sparse")
+    elif arg_eq(sub.ptr, sub.length, "encoding"):
+        writer.append_status_response("dense")
+    elif arg_eq(sub.ptr, sub.length, "todense"):
+        writer.append_int_response(0)
+    else:
+        writer.append_error_response("ERR Unknown PFDEBUG subcommand '" + sub.value() + "'")
+    return 0

@@ -16,6 +16,8 @@ from src.commands.scan_opts import parse_scan_opts, scan_no_opts
 from src.common.utils import rand_count, strict_atol, bytes_to_string, _glob_match, _glob_all,  format_int_to_buf, format_float_to_buf, parse_filter_float, parse_float64, parse_int64_strict, is_valid_float_arg, parse_redis_double, DOUBLE_LONG, scan_cursor, scan_count, arg_eq
 from src.memory.object_pool import ObjectPool
 from src.io.wal import WAL
+from src.vector.hnsw import SharedHNSWView
+from src.network.vector_ingest import ingest_hash_vector
 
 
 @always_inline
@@ -550,8 +552,13 @@ def handle_hscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 
 
 @always_inline
-def handle_hsetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut dispatcher: CommandDispatcher) raises -> Int:
-    """HSETNX key field value — returns number of extra tokens consumed."""
+def handle_hsetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut dispatcher: CommandDispatcher,
+                  shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin]()) raises -> Int:
+    """HSETNX key field value — returns number of extra tokens consumed. A
+    field it sets that is the index's vector field is indexed (#43)."""
+    var kt = tokens[unsafe_offset=i+1]
+    var ft = tokens[unsafe_offset=i+2] if i + 2 < num_tokens else kt
+    var vt = tokens[unsafe_offset=i+3] if i + 3 < num_tokens else kt
     if i + 3 < num_tokens:
         var key_str = tokens[unsafe_offset=i+1].value()
         var field_str = tokens[unsafe_offset=i+2].value()
@@ -568,6 +575,7 @@ def handle_hsetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         elif val.is_none() or val.type.value != ValueType.HASH:
             # Create hash via dispatcher; field is new so always sets
             _ = dispatcher.execute_hset(key_str, field_str, val_str3)
+            _ = ingest_hash_vector(shared_hnsw, keyspace, dispatcher.wal, kt.ptr, kt.length, ft.ptr, ft.length, vt.ptr, vt.length)
             writer.append_int_response(Int64(1))
         else:
             var hash_ptr2 = val.as_hash().unsafe_bitcast[SlabHashMap]()
@@ -578,6 +586,7 @@ def handle_hsetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                 _ = dispatcher.wal[].append_field_kv(5, key_str.unsafe_ptr(), key_str.byte_length(),
                                                      field_str.unsafe_ptr(), field_str.byte_length(),
                                                      val_str3.unsafe_ptr(), val_str3.byte_length())
+                _ = ingest_hash_vector(shared_hnsw, keyspace, dispatcher.wal, kt.ptr, kt.length, ft.ptr, ft.length, vt.ptr, vt.length)
                 writer.append_int_response(Int64(1))
             else: writer.append_int_response(Int64(0))
         return 3

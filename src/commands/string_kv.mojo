@@ -754,3 +754,87 @@ def handle_unlink(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         j_ul += 1
     writer.append_int_response(Int64(del_count))
     return num_tokens - i - 1
+
+
+def _string_bytes(val: GenericValue, scratch: Pointer[UInt8, MutUntrackedOrigin],
+                  mut out_len: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+    """A read-only view of a string value's bytes: a heap STRING or BITMAP in
+    place, a short string or an integer written into `scratch` (>= 32 bytes)."""
+    if val.type.value == ValueType.INT:
+        out_len = format_int_to_buf(scratch, 0, val.as_int())
+        return scratch
+    return val.bitmap_view(scratch, out_len)
+
+
+def handle_lcs(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+               mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Int:
+    """LCS key1 key2 [LEN] [IDX] [MINMATCHLEN len] [WITHMATCHLEN] (#39).
+
+    Redis's lcsCommand: both keys must hold strings (a missing key is the
+    empty string), then the options, then the work (src/ffi/redis_ports.c).
+    `num_tokens` is the command's end."""
+    if num_tokens - i < 3:
+        writer.append_error_response("ERR wrong number of arguments for 'lcs' command")
+        return 0
+    var ka = tokens[unsafe_offset=i + 1]
+    var kb = tokens[unsafe_offset=i + 2]
+    var va = keyspace[].get(GenericValue.borrow(ka.ptr, ka.length))
+    var vb = keyspace[].get(GenericValue.borrow(kb.ptr, kb.length))
+    var a_ok = va.is_none() or va.is_string_like() or va.type.value == ValueType.INT
+    var b_ok = vb.is_none() or vb.is_string_like() or vb.type.value == ValueType.INT
+    if not a_ok or not b_ok:
+        writer.append_error_response("ERR The specified keys must contain string values")
+        return 0
+    var getidx = False
+    var getlen = False
+    var withmatchlen = False
+    var minmatchlen = Int64(0)
+    var j = i + 3
+    while j < num_tokens:
+        var o = tokens[unsafe_offset=j]
+        var more = num_tokens - 1 - j
+        if arg_eq(o.ptr, o.length, "idx"):
+            getidx = True
+        elif arg_eq(o.ptr, o.length, "len"):
+            getlen = True
+        elif arg_eq(o.ptr, o.length, "withmatchlen"):
+            withmatchlen = True
+        elif arg_eq(o.ptr, o.length, "minmatchlen") and more > 0:
+            var m = tokens[unsafe_offset=j + 1]
+            var r = parse_int64_strict(m.ptr, m.length)
+            if not r.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return 0
+            minmatchlen = r.value if r.value > 0 else Int64(0)
+            j += 1
+        else:
+            writer.append_error_response("ERR syntax error")
+            return 0
+        j += 1
+    if getidx and getlen:
+        writer.append_error_response("ERR If you want both the length and indexes, please just use IDX.")
+        return 0
+    var sa = alloc[UInt8](32)
+    var sb = alloc[UInt8](32)
+    var alen = 0
+    var blen = 0
+    var pa = sa
+    var pb = sb
+    if not va.is_none():
+        pa = _string_bytes(va, sa, alen)
+    if not vb.is_none():
+        pb = _string_bytes(vb, sb, blen)
+    var out = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+    var mode = Int64(2) if getidx else (Int64(1) if getlen else Int64(0))
+    var n = external_call["pion_lcs", Int64](pa, Int64(alen), pb, Int64(blen), mode, minmatchlen,
+                                             Int64(1) if withmatchlen else Int64(0), Int64(Int(writer.proto)), out)
+    var reply = out[unsafe_offset=0]
+    if n < 0:
+        writer.append_error_response("ERR Insufficient memory, failed allocating transient memory for LCS")
+    else:
+        writer.append_to_response(reply, Int(n))
+    external_call["pion_lcs_free", NoneType](reply)
+    out.unsafe_free()
+    sa.unsafe_free()
+    sb.unsafe_free()
+    return 0

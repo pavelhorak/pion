@@ -271,7 +271,7 @@ struct Pion:
                 # Replica mode: connect to primary's replication port
                 var repl_port = config.cluster.primary_port + REPL_PORT_OFFSET
                 cluster[].repl_drain_buf = alloc[UInt8](4194304)  # 4MB drain buffer
-                var recv_ok = self.replica_recv.setup(config.cluster.primary_host, repl_port)
+                var recv_ok = self.replica_recv.setup(config.cluster.primary_host, repl_port, config.server.port)
                 if recv_ok:
                     cluster[].repl_replica_handle = self.replica_recv.handle
                     # The receiver THREAD started; it connects (and retries)

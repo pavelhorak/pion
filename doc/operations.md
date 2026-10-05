@@ -190,9 +190,10 @@ Deploy `-w N > 1` only when:
 
 Otherwise run N single-worker Pions on N ports and shard client-side.
 
-Three related splits follow the same line and are not fixed by the flag:
-cross-worker `PUBLISH` delivers to zero subscribers, `FLUSHALL` clears one
-worker's slice, and replication covers worker 0 only.
+Two related splits follow the same line and are not fixed by the flag:
+`FLUSHALL` clears one worker's slice, and replication covers worker 0 only.
+Pub/sub crosses workers: a message reaches subscribers on every worker, and
+PUBLISH counts those of its own worker (#42).
 
 **Diagnostic note.** Connections opened *serially* all land on one worker and
 mask the split completely — a serial probe reports zero nils on a `-w 16` server.

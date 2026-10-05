@@ -35,6 +35,7 @@
 | SETEX | ✅ | ✅ | ✅ | **SLOW** | ✅ | Use `SET key val EX secs` instead |
 | PSETEX | ✅ | ✅ | ✅ | **SLOW** | ✅ | Use `SET key val PX ms` instead |
 | GETRANGE / SUBSTR | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
+| LCS | ✅ | ✅ | ✅ | **SLOW** | ✅ | `LEN`, `IDX`, `MINMATCHLEN`, `WITHMATCHLEN`; Redis's algorithm and errors, including the 512 MB limit on its table (#39) |
 | SETRANGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | ECHO | ✅ | ✅ | ✅ | **FAST** | ✅ | Required by redis-benchmark 8.x at startup |
 | MSETEX | ❌ | ❌ | ✅ | **SLOW** | ❌ | Pion extension: `MSETEX k v ttl [k v ttl ...]`, MSET with a per-pair TTL
@@ -72,8 +73,8 @@
 | KEYS | ✅ | ✅ | ✅ | **SLOW** | ✅ | O(N), not safe for production use |
 | RANDOMKEY | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | TOUCH | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| DUMP | ✅ | ✅ | ✅ | **SLOW** | ❌ | The payload is Pion's own format, not Redis RDB — a DUMP here restores here |
-| RESTORE | ✅ | ✅ | ✅ | **SLOW** | ❌ | Accepts a Pion DUMP payload; `REPLACE` supported, `-BUSYKEY` otherwise |
+| DUMP | ✅ | ✅ | ✅ | **SLOW** | ❌ | Every type, any size (#41). The payload is Pion's records with Redis's footer (format version + CRC-64): Redis refuses it, and Pion refuses Redis's, each with `DUMP payload version or checksum are wrong` |
+| RESTORE | ✅ | ✅ | ✅ | **SLOW** | ❌ | As Redis: `REPLACE`, `ABSTTL`, `IDLETIME`/`FREQ` (checked; Pion keeps no LRU/LFU data), the TTL argument, and Redis's errors in Redis's order. Logged, so a restored key survives a restart (#41) |
 | WAIT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Counts replicas that reached the offset; parks the client. 0 on a single node |
 | WAITAOF | ✅ | ✅ | ✅ | **SLOW** | ✅ | `[0, 0]` on a single node |
 
@@ -227,6 +228,8 @@
 | PFADD | ✅ | ✅ | ✅ | **FAST** | ✅ | |
 | PFCOUNT | ✅ | ✅ | 🟡 | **FAST/SLOW** | ✅ | Single-key: FAST. Multi-key: SLOW |
 | PFMERGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Merges multiple HLL keys into destination |
+| PFSELFTEST | ✅ | ✅ | ✅ | **SLOW** | ❌ | Redis's checks against Pion's implementation: the counting kernel against a scalar reference, then the error bound at every power of ten up to 10M elements (#39) |
+| PFDEBUG | ✅ | ✅ | ✅ | **SLOW** | ❌ | `GETREG` returns Pion's 16,384 registers. Pion keeps every HyperLogLog dense: `ENCODING` is `dense`, `TODENSE` is 0, `DECODE` answers Redis's error for a dense one. The register values differ from Redis's for the same elements (another hash: the HyperLogLog fence) (#39) |
 
 ---
 
@@ -274,22 +277,27 @@ every `X*GROUP`/pending/claim command refuses explicitly rather than faking stat
 
 ## 11. Pub/Sub Commands
 
-Message delivery works (RESP2 and RESP3 push). The one limitation is cross-worker:
-with `-w N > 1` a publisher and subscriber on different workers do not see each
-other (shared-nothing keyspace), so pub/sub is coherent at `-w 1` (the default)
-or when both connections land on the same worker — see operations.md §2b.
+Delivery goes through each subscriber's output buffer, in RESP2 or as RESP3
+pushes, with no cap on channels, patterns or subscribers (#42). A subscriber
+that is slow to read keeps what it has not read yet; one more than 4 MB behind
+is disconnected, as Redis disconnects one past its output-buffer limit, so it
+never receives half a message. A RESP2 connection with subscriptions may run
+only the pub/sub commands, PING (`[pong, <message>]`), QUIT and RESET, as in
+Redis. With `-w N > 1` (`--independent-workers`) a message reaches subscribers
+on every worker; PUBLISH counts those of its own worker, as a Redis Cluster
+node counts its own, and PUBSUB reports its own worker's subscriptions.
 
 | Command | Redis 8 | Valkey 8 | Pion | Pion path | GLIDE | Notes |
 |---|:---:|:---:|:---:|:---:|:---:|---|
-| SUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Confirmation + live message delivery |
-| UNSUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| PUBLISH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the subscriber count; delivers within a worker |
-| PSUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Pattern subscribe + delivery |
+| SUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
+| UNSUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Without arguments, from every channel |
+| PUBLISH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Any size; the publisher gets its own message (RESP3) before the reply. Works from a script |
+| PSUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Redis's glob, as KEYS |
 | PUNSUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| PUBSUB | ✅ | ✅ | 🟡 | **SLOW** | ✅ | CHANNELS/NUMSUB/NUMPAT (per-worker view) |
-| SSUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Shard subscribe + delivery |
+| PUBSUB | ✅ | ✅ | ✅ | **SLOW** | ✅ | CHANNELS, NUMSUB, NUMPAT, SHARDCHANNELS, SHARDNUMSUB, HELP |
+| SSUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Shard channels are their own namespace, delivered as `smessage`, with their own counts |
 | SUNSUBSCRIBE | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| SPUBLISH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the subscriber count |
+| SPUBLISH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Reaches shard subscribers only |
 
 ---
 
@@ -380,7 +388,7 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | CONFIG REWRITE | ✅ | ✅ | ✅ | **SLOW** | ✅ | `ERR The server is running without a config file`, as Redis without one |
 | CONFIG RESETSTAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Resets the counters INFO reports (PION.STATS) |
 | COMMAND | ✅ | ✅ | 🟡 | **FAST** | ✅ | Bare COMMAND returns `*0` (no per-command specs) |
-| COMMAND COUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the generated command count (326) |
+| COMMAND COUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the generated command count (351) |
 | COMMAND DOCS | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns *0 (no docs stored) |
 | COMMAND INFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns *0 |
 | DEBUG | ✅ | ✅ | 🟡 | **SLOW** | ❌ | Returns +OK (stub; no debug state) |
@@ -390,7 +398,13 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | MEMORY DOCTOR | ✅ | ✅ | 🟡 | **SLOW** | ❌ | Returns fixed health message |
 | MODULE | ✅ | ✅ | 🟡 | **SLOW** | ❌ | LIST→*0, others→+OK |
 | ACL | ✅ | ✅ | 🟡 | **SLOW** | ✅ | WHOAMI→default, LIST→one entry, USERS→*1, CAT/LOG→*0, others→+OK |
-| RESET | ✅ | ✅ | 🟡 | **FAST** | ✅ | Returns +OK |
+| RESET | ✅ | ✅ | ✅ | **SLOW** | ✅ | As Redis: leaves MONITOR, discards MULTI and WATCH, drops every subscription, back to RESP2, the default user (unauthenticated when a password is set) and no name; READONLY off. Runs at once inside MULTI, as do QUIT and WATCH (#44) |
+| MONITOR | ✅ | ✅ | ✅ | **SLOW** | ❌ | Redis's lines: shown after it runs, scripts before what they call, EXEC after its commands, `admin` commands never, AUTH/HELLO credentials redacted. A monitor may not touch the keyspace. With `--independent-workers` a monitor sees its own worker's commands. While a client monitors, every command takes the slow path (#39) |
+| LOLWUT | ✅ | ✅ | ✅ | **SLOW** | ✅ | `VERSION 5` (Schotter) and `VERSION 6` (the skyline), ported from Valkey; otherwise `Pion ver. <version>` (#39) |
+| ROLE | ✅ | ✅ | ✅ | **SLOW** | ✅ | A standalone server is a primary with offset 0 and no replicas. Under `--cluster`, a primary lists its replicas `[ip, port, acked offset]`, and a replica reports its primary and its link state (#39) |
+| REPLICAOF / SLAVEOF | ✅ | ✅ | 🟡 | **SLOW** | ✅ | `NO ONE` is OK on a primary. Refused in cluster mode, as Redis refuses it. Pointing a standalone server at a primary is refused with an error naming the startup flags: Pion replicates in cluster mode, over its own stream (#39) |
+| FAILOVER | ✅ | ✅ | ✅ | **SLOW** | ✅ | As a Redis primary with no connected replicas, which a standalone Pion always is (arguments parsed and checked, then `ERR FAILOVER requires connected replicas.`). Refused in cluster mode, as Redis does: Pion's failover there is CLUSTER FAILOVER (#39) |
+| SYNC | ✅ | ✅ | 🟡 | **SLOW** | n/a | Refused: a Redis primary streams an RDB file and then commands, which Pion does not produce. Pion replicas follow their primary over its replication port (#39) |
 | QUIT | ✅ | ✅ | 🟡 | **FAST** | ✅ | Returns +OK |
 | AUTH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Real auth: with `--requirepass`/`--tenant`, `AUTH <pw>` gates every command (`-NOAUTH` before, `-WRONGPASS` on a bad password); with no password set, `AUTH` replies the Redis error, not +OK |
 | HELLO | ✅ | ✅ | ✅ | **SLOW** | ✅ | `HELLO 3` switches the connection to RESP3 (map/push replies); `HELLO`/`HELLO 2` stay RESP2 |
@@ -420,9 +434,10 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | ASKING | ✅ | ✅ | ✅ | **FAST** | ✅ | One-shot redirect acknowledgement during slot migration |
 | READONLY | ✅ | ✅ | ✅ | **FAST** | ✅ | Accepted; Pion has no replica-read split, so it is a no-op that keeps cluster clients happy |
 | READWRITE | ✅ | ✅ | ✅ | **FAST** | ✅ | Inverse of READONLY; also a no-op |
-| MIGRATE | ✅ | ✅ | ✅ | **SLOW** | ✅ | DUMP + RESTORE over a socket, then DEL. `COPY` / `REPLACE` / `KEYS` supported |
-| PSYNC | ✅ | ✅ | 🟡 | **SLOW** | n/a | Replication handshake; worker-0 only |
-| REPLCONF | ✅ | ✅ | 🟡 | **SLOW** | n/a | Replication handshake sub-negotiation |
+| MIGRATE | ✅ | ✅ | ✅ | **SLOW** | ✅ | As Redis: `COPY`, `REPLACE`, `AUTH`, `AUTH2`, `KEYS`, `NOKEY`, the target's own errors, each key's remaining TTL, a host name or IPv6 address. To a Pion target (Redis refuses Pion's payload). The deletions are logged (#41) |
+| PSYNC | ✅ | ✅ | 🟡 | **SLOW** | n/a | Refused, as SYNC. It answered +OK, and a Redis replica then waited for an RDB file that never came (#39) |
+| REPLCONF | ✅ | ✅ | ✅ | **SLOW** | n/a | Redis's answers for a client that is not a replica: options checked, `ACK`/`GETACK` answer nothing (#39) |
+| RESTORE-ASKING | ✅ | ✅ | ✅ | **SLOW** | n/a | RESTORE, as a cluster's MIGRATE sends it (#39, #41) |
 
 ---
 
@@ -611,14 +626,14 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 
 | Product | Commands FAST | Commands SLOW | Total supported (fast+slow) | Total Redis 8 commands |
 |---|:---:|:---:|:---:|:---:|
-| **Pion** | 33 | ~183 | ~216 (+36 Pion-native) | ~280 |
+| **Pion** | 32 | ~195 | ~227 (+36 Pion-native) | ~280 |
 | **Redis 8** | — | — | ~280 | 280 |
 | **Valkey 8** | — | — | ~275 | — |
 
 *Note: "Total supported" counts all commands with ✅ or 🟡 status. Pion-native AI commands (sections 16-19) have no Redis equivalent and are counted separately.*
 
 ### Pion Fast Path (33 commands, zero-alloc dispatch)
-`GET` `SET` `MGET` `MSET` `INCR` `DECR` `HSET` `HGET` `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` `LLEN` `DEL` `EXISTS` `SADD` `SPOP` `ZADD` `ZPOPMIN` `PING` `FUNCTION LOAD` `FCALL` `GETBIT` `SETBIT` `BITCOUNT`(no-arg) `PFADD` `PFCOUNT`(single-key) `ECHO` `TYPE` `SELECT` `CLIENT`(ID/NO-EVICT/NO-TOUCH) `COMMAND` `DBSIZE` `QUIT` `RESET` (33 commands total)
+`GET` `SET` `MGET` `MSET` `INCR` `DECR` `HSET` `HGET` `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` `LLEN` `DEL` `EXISTS` `SADD` `SPOP` `ZADD` `ZPOPMIN` `PING` `FUNCTION LOAD` `FCALL` `GETBIT` `SETBIT` `BITCOUNT`(no-arg) `PFADD` `PFCOUNT`(single-key) `ECHO` `TYPE` `SELECT` `CLIENT`(ID/NO-EVICT/NO-TOUCH) `COMMAND` `DBSIZE` `QUIT` (32 commands total; RESET goes to the slow path, which resets the connection)
 
 ### Pion Coverage by Category
 

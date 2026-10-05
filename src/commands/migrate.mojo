@@ -1,519 +1,519 @@
-"""DUMP, RESTORE, MIGRATE commands for cluster slot migration (C1.1).
+"""DUMP, RESTORE, RESTORE-ASKING and MIGRATE (#41).
 
-DUMP serializes a key's value to a binary format.
-RESTORE deserializes and stores a key from DUMP/MIGRATE payload.
-MIGRATE sends a key to another node (DUMP + RESTORE + DEL).
+A DUMP payload is the key's value as the snapshot writes it: WAL-format records
+(src/io/snapshot.mojo, write_key_records), so every type round-trips, followed
+by a footer laid out as Redis's: a 2-byte format version and an 8-byte
+CRC-64/Jones of everything before it, both little-endian. The version is Pion's
+own (PION_DUMP_VERSION), above every RDB version, so a payload Pion wrote is
+refused by Redis and one Redis wrote is refused by Pion, each with
+"DUMP payload version or checksum are wrong". The TTL is not in the payload:
+RESTORE's argument sets it, as in Redis.
 
-Binary format (Pion-native, V1):
-  [type:1B][key_len:4B LE][key][val_len:4B LE][value_bytes][ttl_ns:8B LE]
-
-Value encoding by type:
-  STRING/STRING_SSO: raw bytes
-  INT: 8B LE int64
-  LIST: [count:4B LE][entry_len:4B LE][entry_bytes]...
-  SET: [count:4B LE][elem_len:4B LE][elem_bytes]...
-  HASH: [count:4B LE][field_len:4B LE][field][val_len:4B LE][val]...
-  ZSET: [count:4B LE][member_len:4B LE][member][score:8B LE float64]...
-  BITMAP: raw bytes (same as STRING)
-  HLL: raw 12-register bytes
+This replaced a format that serialized sorted sets, geo keys, streams,
+HyperLogLogs, vector sets and long lists as empty, carried the source key's
+absolute deadline in place of RESTORE's TTL argument, had no checksum, and was
+built in a fixed 1 MB buffer with no bound. RESTORE also logged nothing, so a
+restored key was gone after a restart, and MIGRATE did not log the deletion of
+the keys it moved, so they came back on the source.
 """
 
-from src.common.ptr import is_not_null, null_ptr
+from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import remove_and_free
 from std.memory.unsafe_pointer import Pointer
-from std.memory import alloc, unsafe_memcpy, unsafe_memset
+from std.collections import Span
+from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
 from src.common.value import GenericValue, ValueType
 from src.common.hash_map import SlabHashMap, StripedHashMap
-from src.common.list import SlabList
-from src.common.skip_list import SlabSkipList
 from src.network.response_writer import ResponseWriter
-from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
-from src.common.utils import format_int_to_buf
+from src.network.resp3 import RESP3Token
+from src.network.fast_path import _get_now_ns
+from src.common.utils import format_int_to_buf, parse_int64_strict, arg_eq, ms_to_deadline_ns
+from src.io.wal import WAL, wal_apply_aggregate
+from src.io.snapshot import RecordSink, write_key_records
+from src.io.blob_store import BlobStore
+
+comptime PION_DUMP_VERSION = 0x5001
 
 
-@always_inline
-def _write_u32_le(buf: Pointer[UInt8, MutUntrackedOrigin], offset: Int, val: UInt32) -> Int:
-    buf[unsafe_offset=offset] = UInt8(val & 0xFF)
-    buf[unsafe_offset=offset + 1] = UInt8((val >> 8) & 0xFF)
-    buf[unsafe_offset=offset + 2] = UInt8((val >> 16) & 0xFF)
-    buf[unsafe_offset=offset + 3] = UInt8((val >> 24) & 0xFF)
-    return offset + 4
-
-@always_inline
-def _read_u32_le(buf: Pointer[UInt8, MutUntrackedOrigin], offset: Int) -> UInt32:
-    return UInt32(buf[unsafe_offset=offset]) | (UInt32(buf[unsafe_offset=offset+1]) << 8) | (UInt32(buf[unsafe_offset=offset+2]) << 16) | (UInt32(buf[unsafe_offset=offset+3]) << 24)
-
-@always_inline
-def _write_i64_le(buf: Pointer[UInt8, MutUntrackedOrigin], offset: Int, val: Int64) -> Int:
-    var u = UInt64(val)
-    for bi in range(8):
-        buf[unsafe_offset=offset + bi] = UInt8((u >> (UInt64(bi) * 8)) & 0xFF)
-    return offset + 8
-
-@always_inline
-def _read_i64_le(buf: Pointer[UInt8, MutUntrackedOrigin], offset: Int) -> Int64:
-    var u: UInt64 = 0
-    for bi in range(8):
-        u |= UInt64(buf[unsafe_offset=offset + bi]) << (UInt64(bi) * 8)
-    return Int64(u)
+def _u32(p: Pointer[UInt8, MutUntrackedOrigin], at: Int) -> Int:
+    return Int(p[at]) | (Int(p[at + 1]) << 8) | (Int(p[at + 2]) << 16) | (Int(p[at + 3]) << 24)
 
 
-def dump_key(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
-             ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
-             key_ptr: Pointer[UInt8, MutUntrackedOrigin], key_len: Int,
-             out_buf: Pointer[UInt8, MutUntrackedOrigin], max_len: Int) -> Int:
-    """Serialize a key+value into out_buf. Returns bytes written, or -1 if key not found."""
-    var key_v = GenericValue.borrow(key_ptr, key_len)
-    var val = keyspace[].get(key_v)
-    if val.is_none():
-        return -1
+def dump_payload(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                 kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int) -> List[UInt8]:
+    """The DUMP payload of a key, or an empty list when it does not exist."""
+    var v = keyspace[].get(GenericValue.borrow(kp, kl))
+    if v.is_none():
+        return List[UInt8]()
+    var sink = RecordSink(Int32(-1))
+    var ehdr = alloc[UInt8](16)
+    var vbuf = alloc[UInt8](64)
+    var fbuf = alloc[UInt8](64)
+    var scored = alloc[UInt8](8)
+    write_key_records(sink, kp, kl, v, null_ptr[BlobStore, MutUntrackedOrigin](), True, ehdr, vbuf, fbuf, scored)
+    ehdr.unsafe_free()
+    vbuf.unsafe_free()
+    fbuf.unsafe_free()
+    scored.unsafe_free()
+    var out = sink^.take_buf()
+    out.append(UInt8(PION_DUMP_VERSION & 0xFF))
+    out.append(UInt8(PION_DUMP_VERSION >> 8))
+    var crc = external_call["pion_crc64", UInt64](UInt64(0), out.unsafe_ptr(), Int64(len(out)))
+    for k in range(8):
+        out.append(UInt8((crc >> UInt64(8 * k)) & 0xFF))
+    return out^
 
-    var off = 0
-    var vt = val.type.value
 
-    # Type byte
-    out_buf[unsafe_offset=off] = UInt8(vt); off += 1
-
-    # Key
-    off = _write_u32_le(out_buf, off, UInt32(key_len))
-    unsafe_memcpy(dest=out_buf.unsafe_offset(off), src=key_ptr, count=key_len); off += key_len
-
-    # Value — type-specific encoding
-    if vt == ValueType.STRING or vt == ValueType.STRING_SSO:
-        var sso_buf = alloc[UInt8](24)
-        var sp = val.as_string_safe(sso_buf)
-        var sl = val.string_len()
-        off = _write_u32_le(out_buf, off, UInt32(sl))
-        unsafe_memcpy(dest=out_buf.unsafe_offset(off), src=sp, count=sl); off += sl
-        sso_buf.unsafe_free()
-    elif vt == ValueType.INT:
-        off = _write_u32_le(out_buf, off, UInt32(8))
-        off = _write_i64_le(out_buf, off, val.as_int())
-    elif vt == ValueType.BITMAP:
-        var bp = val.as_bitmap()
-        var bl = val.bitmap_len()
-        off = _write_u32_le(out_buf, off, UInt32(bl))
-        unsafe_memcpy(dest=out_buf.unsafe_offset(off), src=bp, count=bl); off += bl
-    elif vt == ValueType.LIST:
-        var list_ptr = val.as_list().unsafe_bitcast[SlabList]()
-        var lsz = list_ptr[].size
-        off = _write_u32_le(out_buf, off, UInt32(lsz))
-        # Serialize list entries (simplified: use zip_buf if available)
-        if is_not_null(list_ptr[].zip_buf):
-            var zoff = 0
-            for _ in range(lsz):
-                var vlen = Int((list_ptr[].zip_buf.unsafe_offset(zoff)).unsafe_bitcast[UInt16]()[])
-                off = _write_u32_le(out_buf, off, UInt32(vlen))
-                unsafe_memcpy(dest=out_buf.unsafe_offset(off), src=list_ptr[].zip_buf.unsafe_offset(zoff).unsafe_offset(2), count=vlen)
-                off += vlen
-                zoff += 2 + vlen
-        else:
-            # Quicklist mode — skip for V1, write count=0
-            out_buf[unsafe_offset=off - 4] = 0; out_buf[unsafe_offset=off - 3] = 0; out_buf[unsafe_offset=off - 2] = 0; out_buf[unsafe_offset=off - 1] = 0
-    elif vt == ValueType.SET:
-        var set_ptr = val.as_set().unsafe_bitcast[SlabHashMap]()
-        var set_size = set_ptr[].size
-        off = _write_u32_le(out_buf, off, UInt32(set_size))
-        # Iterate set entries
-        var written = 0
-        for si in range(set_ptr[].capacity):
-            if written >= set_size: break
-            var m = set_ptr[].metadata[unsafe_offset=si]
-            if m != 0x80 and m != 0xFF:
-                var elem = set_ptr[].keys[unsafe_offset=si]
-                if not elem.is_none():
-                    var sb = alloc[UInt8](24)
-                    var ep = elem.as_string_safe(sb)
-                    var el = elem.string_len()
-                    off = _write_u32_le(out_buf, off, UInt32(el))
-                    unsafe_memcpy(dest=out_buf.unsafe_offset(off), src=ep, count=el); off += el
-                    sb.unsafe_free()
-                    written += 1
-    elif vt == ValueType.HASH:
-        var hash_ptr = val.as_hash().unsafe_bitcast[SlabHashMap]()
-        var hash_size = hash_ptr[].size
-        off = _write_u32_le(out_buf, off, UInt32(hash_size))
-        var written = 0
-        for si in range(hash_ptr[].capacity):
-            if written >= hash_size: break
-            var m = hash_ptr[].metadata[unsafe_offset=si]
-            if m != 0x80 and m != 0xFF:
-                var field = hash_ptr[].keys[unsafe_offset=si]
-                var fval = hash_ptr[].values[unsafe_offset=si]
-                if not field.is_none():
-                    var fb = alloc[UInt8](24)
-                    var fp = field.as_string_safe(fb)
-                    var fl = field.string_len()
-                    off = _write_u32_le(out_buf, off, UInt32(fl))
-                    unsafe_memcpy(dest=out_buf.unsafe_offset(off), src=fp, count=fl); off += fl
-                    fb.unsafe_free()
-                    var vb = alloc[UInt8](24)
-                    var vp = fval.as_string_safe(vb)
-                    var vl = fval.string_len()
-                    off = _write_u32_le(out_buf, off, UInt32(vl))
-                    unsafe_memcpy(dest=out_buf.unsafe_offset(off), src=vp, count=vl); off += vl
-                    vb.unsafe_free()
-                    written += 1
+def handle_dump(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Int:
+    """DUMP key → the payload, or nil for a missing key."""
+    if num_tokens - i != 2:
+        writer.append_error_response("ERR wrong number of arguments for 'dump' command")
+        return 0
+    var payload = dump_payload(keyspace, tokens[i + 1].ptr, tokens[i + 1].length)
+    if len(payload) == 0:
+        writer.append_null_response()
     else:
-        # ZSET, GEO, STREAM, HLL — serialize as empty for V1
-        off = _write_u32_le(out_buf, off, UInt32(0))
-
-    # TTL (0 = no expiry)
-    var ttl_ns: Int64 = 0
-    if is_not_null(ttl_map):
-        var exp_v = ttl_map[].get(key_v)
-        if not exp_v.is_none():
-            ttl_ns = exp_v.as_int()
-    off = _write_i64_le(out_buf, off, ttl_ns)
-
-    return off
+        writer.append_bulk_string_response(Pointer[UInt8, MutUntrackedOrigin](
+            unsafe_from_address=Int(payload.unsafe_ptr())), len(payload))
+    _ = payload^
+    return 1
 
 
-def restore_key(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
-                ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
-                data: Pointer[UInt8, MutUntrackedOrigin], data_len: Int,
-                replace: Bool = False,
-                override_key_ptr: Pointer[UInt8, MutUntrackedOrigin] = null_ptr[UInt8, MutUntrackedOrigin](),
-                override_key_len: Int = 0) -> Bool:
-    """Deserialize a DUMP payload and store in keyspace. Returns True on success.
-    If override_key is provided, use that as the key instead of the one in the payload."""
-    if data_len < 6:  # minimum: type(1) + key_len(4) + at least 1 more byte
+def _payload_ok(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    """The footer: Pion's version, then the CRC of everything before the CRC
+    (the version included, as Redis's verifyDumpPayload)."""
+    if n < 10:
         return False
+    var ver = Int(p[n - 10]) | (Int(p[n - 9]) << 8)
+    if ver != PION_DUMP_VERSION:
+        return False
+    var want = UInt64(0)
+    for k in range(8):
+        want |= UInt64(Int(p[n - 8 + k])) << UInt64(8 * k)
+    return external_call["pion_crc64", UInt64](UInt64(0), p, Int64(n - 8)) == want
 
+
+def _record_family(cmd: Int) -> Int:
+    """The value type a DUMP record belongs to (0 = not a DUMP record)."""
+    if cmd == 1:
+        return 1                    # string
+    if cmd == 5 or cmd == 32:
+        return 2                    # hash, its field TTLs
+    if cmd == 7:
+        return 3                    # list
+    if cmd == 8:
+        return 4                    # set
+    if cmd == 9:
+        return 5                    # sorted set
+    if cmd == 15:
+        return 6                    # geo
+    if cmd == 16:
+        return 7                    # bitmap
+    if cmd == 17:
+        return 8                    # HyperLogLog
+    if cmd == 34:
+        return 9                    # stream
+    if cmd == 28 or cmd == 30:
+        return 10                   # vector set
+    return 0
+
+
+def _u64(p: Pointer[UInt8, MutUntrackedOrigin], at: Int) -> UInt64:
+    var v = UInt64(0)
+    for k in range(8):
+        v |= UInt64(Int(p[at + k])) << UInt64(8 * k)
+    return v
+
+
+def _records_ok(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    """Every record is whole, has the layout its kind expects, and they all
+    belong to one value type; a stream's IDs increase and a sorted set's scores
+    are numbers. A payload with a valid CRC is not trusted further than that:
+    anyone can compute a CRC, and these records reach the replay code that
+    otherwise reads only this server's own log."""
     var off = 0
-    var vt = Int(data[unsafe_offset=off]); off += 1
+    var family = -1
+    var last_ms = UInt64(0)
+    var last_seq = UInt64(0)
+    var first_entry = True
+    while off < n:
+        if off + 13 > n:
+            return False
+        var elen = _u32(p, off)
+        var cmd = Int(p[off + 4])
+        var kl = _u32(p, off + 5)
+        if off + 9 + kl + 4 > n:
+            return False
+        var vl = _u32(p, off + 9 + kl)
+        if elen != 13 + kl + vl or off + 13 + kl + vl > n:
+            return False
+        var f = _record_family(cmd)
+        if f == 0 or (family >= 0 and f != family):
+            return False
+        family = f
+        var v = p + (off + 13 + kl)
+        if cmd == 5:                                  # [4B fl][field][4B vl][value]
+            if vl < 8:
+                return False
+            var fl = _u32(v, 0)
+            if 8 + fl > vl or 8 + fl + _u32(v, 4 + fl) != vl:
+                return False
+        elif cmd == 32:                               # [4B fl][field][4B 8][8B deadline]
+            if vl < 16:
+                return False
+            var fl = _u32(v, 0)
+            if 16 + fl != vl or _u32(v, 4 + fl) != 8:
+                return False
+        elif cmd == 9 or cmd == 15:                   # [8B score][member]
+            if vl < 8:
+                return False
+            var score = v.unsafe_bitcast[Float64]().load[volatile=True]()
+            if score != score:                        # NaN
+                return False
+        elif cmd == 16:
+            if vl <= 0:
+                return False
+        elif cmd == 17:
+            if vl != 16384:
+                return False
+        elif cmd == 34:                               # [8B ms][8B seq][pairs]
+            if vl < 16:
+                return False
+            var ms = _u64(v, 0)
+            var seq = _u64(v, 8)
+            if not first_entry and (ms < last_ms or (ms == last_ms and seq <= last_seq)):
+                return False
+            first_entry = False
+            last_ms = ms
+            last_seq = seq
+        off += 13 + kl + vl
+    return family >= 0
 
-    # Key from payload (skip over it, use override if provided)
-    var key_len = Int(_read_u32_le(data, off)); off += 4
-    if off + key_len > data_len: return False
-    var key_v: GenericValue
-    if override_key_len > 0 and is_not_null(override_key_ptr):
-        key_v = GenericValue.from_ptr(override_key_ptr, override_key_len)
-    else:
-        key_v = GenericValue.from_ptr(data.unsafe_offset(off), key_len)
-    off += key_len
 
-    # Check if key exists
-    if not replace:
-        var existing = keyspace[].get(key_v)
-        if not existing.is_none():
-            return False  # BUSYKEY
+def restore_name(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int) -> String:
+    return tokens[i].text_value().lower()
 
-    # Value length
-    if off + 4 > data_len: return False
-    var val_len = Int(_read_u32_le(data, off)); off += 4
 
-    # Deserialize value by type
-    if vt == ValueType.STRING or vt == ValueType.STRING_SSO:
-        if off + val_len > data_len: return False
-        var new_val = GenericValue.from_ptr(data.unsafe_offset(off), val_len)
-        keyspace[].set(key_v, new_val)
-        off += val_len
-    elif vt == ValueType.INT:
-        if off + 8 > data_len: return False
-        var int_val = _read_i64_le(data, off)
-        keyspace[].set(key_v, GenericValue.from_int(int_val))
-        off += 8
-    elif vt == ValueType.BITMAP:
-        if off + val_len > data_len: return False
-        var bm = alloc[UInt8](val_len)
-        unsafe_memcpy(dest=bm, src=data.unsafe_offset(off), count=val_len)
-        var bm_val = GenericValue()
-        bm_val.type = ValueType(ValueType.BITMAP)
-        bm_val._data0 = UInt64(Int(bm))
-        bm_val._data1 = UInt64(val_len)
-        keyspace[].set(key_v, bm_val)
-        off += val_len
-    elif vt == ValueType.SET:
-        # val_len here is count of elements
-        var count = val_len
-        var set_ptr = alloc[SlabHashMap](1)
-        set_ptr.unsafe_write(SlabHashMap(max(16, count * 2)))
-        for _ in range(count):
-            if off + 4 > data_len: break
-            var el = Int(_read_u32_le(data, off)); off += 4
-            if off + el > data_len: break
-            var elem_v = GenericValue.from_ptr(data.unsafe_offset(off), el)
-            set_ptr[].set(elem_v, GenericValue.from_int(1))
-            off += el
-        var set_val = GenericValue()
-        set_val.type = ValueType(ValueType.SET)
-        set_val.set_ptr(set_ptr.unsafe_bitcast[NoneType]())
-        keyspace[].set(key_v, set_val)
-    elif vt == ValueType.HASH:
-        var count = val_len
-        var hash_ptr = alloc[SlabHashMap](1)
-        hash_ptr.unsafe_write(SlabHashMap(max(16, count * 2)))
-        for _ in range(count):
-            if off + 4 > data_len: break
-            var fl = Int(_read_u32_le(data, off)); off += 4
-            if off + fl > data_len: break
-            var field_v = GenericValue.from_ptr(data.unsafe_offset(off), fl)
-            off += fl
-            if off + 4 > data_len: break
-            var vl = Int(_read_u32_le(data, off)); off += 4
-            if off + vl > data_len: break
-            var fval_v = GenericValue.from_ptr(data.unsafe_offset(off), vl)
-            hash_ptr[].set(field_v, fval_v)
-            off += vl
-        var hash_val = GenericValue()
-        hash_val.type = ValueType(ValueType.HASH)
-        hash_val.set_ptr(hash_ptr.unsafe_bitcast[NoneType]())
-        keyspace[].set(key_v, hash_val)
-    elif vt == ValueType.LIST:
-        var count = val_len
-        var list_ptr = alloc[SlabList](1)
-        list_ptr.unsafe_write(SlabList())
-        for _ in range(count):
-            if off + 4 > data_len: break
-            var el = Int(_read_u32_le(data, off)); off += 4
-            if off + el > data_len: break
-            var elem_v = GenericValue.from_ptr(data.unsafe_offset(off), el)
-            list_ptr[].rpush(elem_v)
-            off += el
-        var list_val = GenericValue()
-        list_val.type = ValueType(ValueType.LIST)
-        list_val.set_ptr(list_ptr.unsafe_bitcast[NoneType]())
-        keyspace[].set(key_v, list_val)
-    else:
-        # Unknown type — store as raw string
-        if off + val_len > data_len: return False
-        var new_val = GenericValue.from_ptr(data.unsafe_offset(off), val_len)
-        keyspace[].set(key_v, new_val)
-        off += val_len
+def _atoi(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Int:
+    """C's atoi, as Redis reads MIGRATE's port: leading spaces, a sign, then
+    digits up to the first other byte; 0 when there are none."""
+    var k = 0
+    while k < n and (p[k] == 32 or (p[k] >= 9 and p[k] <= 13)):
+        k += 1
+    var neg = False
+    if k < n and (p[k] == 43 or p[k] == 45):
+        neg = p[k] == 45
+        k += 1
+    var v = 0
+    while k < n and p[k] >= 48 and p[k] <= 57 and v < 1_000_000_000:
+        v = v * 10 + Int(p[k] - 48)
+        k += 1
+    return -v if neg else v
 
-    # TTL
-    if off + 8 <= data_len:
-        var ttl_ns = _read_i64_le(data, off)
-        if ttl_ns > 0 and is_not_null(ttl_map):
-            ttl_map[].set(key_v, GenericValue.from_int(ttl_ns))
 
+def handle_restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                   mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                   ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
+                   wal: Pointer[WAL, MutUntrackedOrigin]) -> Bool:
+    """RESTORE key ttl payload [REPLACE] [ABSTTL] [IDLETIME s] [FREQ f], as
+    Redis's restoreCommand: the options, then BUSYKEY, then the TTL, then the
+    payload; an expired TTL restores nothing. IDLETIME and FREQ are checked and
+    have nothing to set (Pion keeps no LRU or LFU data). True when the key
+    changed (the caller bumps WATCH)."""
+    var argc = num_tokens - i
+    if argc < 4:
+        writer.append_error_response("ERR wrong number of arguments for '" + restore_name(tokens, i) + "' command")
+        return False
+    var replace = False
+    var absttl = False
+    var idle = Int64(-1)
+    var freq = Int64(-1)
+    var j = i + 4
+    while j < num_tokens:
+        var o = tokens[j]
+        var more = num_tokens - j - 1
+        if arg_eq(o.ptr, o.length, "replace"):
+            replace = True
+        elif arg_eq(o.ptr, o.length, "absttl"):
+            absttl = True
+        elif arg_eq(o.ptr, o.length, "idletime") and more >= 1 and freq == -1:
+            var r = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            if not r.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return False
+            if r.value < 0:
+                writer.append_error_response("ERR Invalid IDLETIME value, must be >= 0")
+                return False
+            idle = r.value
+            j += 1
+        elif arg_eq(o.ptr, o.length, "freq") and more >= 1 and idle == -1:
+            var r = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            if not r.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return False
+            if r.value < 0 or r.value > 255:
+                writer.append_error_response("ERR Invalid FREQ value, must be >= 0 and <= 255")
+                return False
+            freq = r.value
+            j += 1
+        else:
+            writer.append_error_response("ERR syntax error")
+            return False
+        j += 1
+    var kt = tokens[i + 1]
+    var key = GenericValue.borrow(kt.ptr, kt.length)
+    var exists = not keyspace[].get(key).is_none()
+    if exists and not replace:
+        writer.append_error_response("BUSYKEY Target key name already exists.")
+        return False
+    var ttl = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+    if not ttl.ok:
+        writer.append_error_response("ERR value is not an integer or out of range")
+        return False
+    if ttl.value < 0:
+        writer.append_error_response("ERR Invalid TTL value, must be >= 0")
+        return False
+    var pt = tokens[i + 3]
+    if not _payload_ok(pt.ptr, pt.length):
+        writer.append_error_response("ERR DUMP payload version or checksum are wrong")
+        return False
+    var body = pt.length - 10
+    if not _records_ok(pt.ptr, body):
+        writer.append_error_response("ERR Bad data format")
+        return False
+    if exists:
+        _ = remove_and_free(keyspace, key)
+        if is_not_null(ttl_map):
+            _ = ttl_map[].remove_generic(key)
+        if is_not_null(wal):
+            _ = wal[].append(2, kt.ptr, kt.length)
+    var deadline_ns = Int64(0)
+    if ttl.value > 0:
+        var when_ms = ttl.value if absttl else Int64(_get_now_ns() // 1_000_000) + ttl.value
+        if when_ms <= Int64(_get_now_ns() // 1_000_000):
+            writer.append_ok_response()          # already expired: nothing to create
+            return exists
+        deadline_ns = ms_to_deadline_ns(when_ms)
+    var off = 0
+    while off < body:
+        var cmd = UInt8(pt.ptr[off + 4])
+        var rkl = _u32(pt.ptr, off + 5)
+        var vl = _u32(pt.ptr, off + 9 + rkl)
+        var vp = pt.ptr + (off + 13 + rkl)
+        if cmd == 1:
+            keyspace[].set(key, GenericValue.borrow(vp, vl))
+        else:
+            _ = wal_apply_aggregate(cmd, kt.ptr, kt.length, vp, vl, keyspace)
+        if is_not_null(wal):
+            _ = wal[].append_kv(cmd, kt.ptr, kt.length, vp, vl)
+        off += 13 + rkl + vl
+    if deadline_ns > 0 and is_not_null(ttl_map):
+        ttl_map[].set(key, GenericValue.from_int(deadline_ns))
+        if is_not_null(wal):
+            _ = wal[].append_u64_val(25, kt.ptr, kt.length, UInt64(deadline_ns),
+                                     null_ptr[UInt8, MutUntrackedOrigin](), 0)
+    writer.append_ok_response()
     return True
 
 
-@always_inline
-def handle_dump(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
-                mut writer: ResponseWriter,
-                keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
-                ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
-    """DUMP key → serialized value as bulk string."""
-    if i + 1 < num_tokens:
-        var key_str = tokens[unsafe_offset=i + 1].value()
-        var key_v = GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
-        var val = keyspace[].get(key_v)
-        if val.is_none():
-            writer.append_null_response()
-        else:
-            # 1MB buffer for serialization
-            var buf = alloc[UInt8](1048576)
-            var buf_ptr = buf
-            var kbuf = alloc[UInt8](key_str.byte_length())
-            unsafe_memcpy(dest=kbuf, src=key_str.unsafe_ptr().unsafe_bitcast[UInt8](), count=key_str.byte_length())
-            var n = dump_key(keyspace, ttl_map, kbuf, key_str.byte_length(), buf_ptr, 1048576)
-            kbuf.unsafe_free()
-            if n > 0:
-                writer.append_bulk_string_response(buf_ptr, n)
-            else:
-                writer.append_null_response()
-            buf.unsafe_free()
-        return 1
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'dump' command")
-        return 0
+def _put_bulk(mut out: List[UInt8], p: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+    var tmp = alloc[UInt8](24)
+    out.append(36)
+    var e = format_int_to_buf(tmp, 0, Int64(n))
+    for k in range(e):
+        out.append(tmp[k])
+    out.append(13)
+    out.append(10)
+    for k in range(n):
+        out.append(p[k])
+    out.append(13)
+    out.append(10)
+    tmp.unsafe_free()
 
 
-@always_inline
-def handle_restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
-                   mut writer: ResponseWriter,
-                   keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
-                   ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
-    """RESTORE key ttl serialized-value [REPLACE] → +OK or -BUSYKEY."""
-    if i + 3 < num_tokens:
-        var key_str = tokens[unsafe_offset=i + 1].value()
-        _ = tokens[unsafe_offset=i + 2].value()  # ttl (handled inside serialized data)
-        var data_tok = tokens[unsafe_offset=i + 3]
-        var data_ptr = data_tok.ptr
-        var data_len = data_tok.length
-
-        # Check REPLACE flag
-        var replace = False
-        var extra = 3
-        if i + 4 < num_tokens:
-            var flag = tokens[unsafe_offset=i + 4]
-            if flag.length == 7 and (flag.ptr[unsafe_offset=0]|0x20) == 114:  # 'r' = REPLACE
-                replace = True
-                extra = 4
-
-        # Copy key to allocated buffer for MutUntrackedOrigin
-        var rk_buf = alloc[UInt8](key_str.byte_length())
-        unsafe_memcpy(dest=rk_buf, src=key_str.unsafe_ptr().unsafe_bitcast[UInt8](), count=key_str.byte_length())
-        var ok = restore_key(keyspace, ttl_map, data_ptr, data_len, replace,
-                             rk_buf, key_str.byte_length())
-        rk_buf.unsafe_free()
-        if ok:
-            writer.append_ok_response()
-        else:
-            writer.append_error_response("BUSYKEY Target key name already exists")
-        return extra
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'restore' command")
-        return 0
+def _put_str(mut out: List[UInt8], s: String):
+    _put_bulk(out, Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(s.unsafe_ptr())), s.byte_length())
 
 
-@always_inline
+def _put_header(mut out: List[UInt8], n: Int):
+    var tmp = alloc[UInt8](24)
+    out.append(42)
+    var e = format_int_to_buf(tmp, 0, Int64(n))
+    for k in range(e):
+        out.append(tmp[k])
+    out.append(13)
+    out.append(10)
+    tmp.unsafe_free()
+
+
 def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
-                   mut writer: ResponseWriter,
-                   keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
-                   ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
-    """MIGRATE host port key|"" db timeout [COPY] [REPLACE] [KEYS key ...]
-    Sends DUMP payload to target node via TCP, then DELetes local key on success."""
-    if i + 5 < num_tokens:
-        var host = tokens[unsafe_offset=i + 1].value()
-        var port_str = tokens[unsafe_offset=i + 2].value()
-        var port = atol(port_str)
-        var key_str = tokens[unsafe_offset=i + 3].value()
-        _ = tokens[unsafe_offset=i + 4].value()  # db (ignored, Pion is single-db)
-        var timeout_str = tokens[unsafe_offset=i + 5].value()
-        var timeout_ms = atol(timeout_str)
-        var consumed = 5
-
-        # Parse optional flags
-        var copy_flag = False
-        var replace_flag = False
-        var multi_keys = List[String]()
-        var ji = i + 6
-        while ji < num_tokens and tokens[unsafe_offset=ji].marker != 0:
-            var flag = tokens[unsafe_offset=ji]
-            var fp = flag.ptr; var fl = flag.length
-            if fl == 4 and (fp[unsafe_offset=0]|0x20) == 99 and (fp[unsafe_offset=1]|0x20) == 111:  # COPY
-                copy_flag = True
-            elif fl == 7 and (fp[unsafe_offset=0]|0x20) == 114 and (fp[unsafe_offset=1]|0x20) == 101:  # REPLACE
-                replace_flag = True
-            elif fl == 4 and (fp[unsafe_offset=0]|0x20) == 107 and (fp[unsafe_offset=1]|0x20) == 101:  # KEYS
-                # Remaining tokens are key names
-                ji += 1
-                while ji < num_tokens and tokens[unsafe_offset=ji].marker != 0:
-                    multi_keys.append(tokens[unsafe_offset=ji].value())
-                    ji += 1
-                    consumed += 1
-                break
-            ji += 1
-            consumed += 1
-
-        # Build key list
-        var keys = List[String]()
-        if key_str.byte_length() > 0 and key_str != "":
-            keys.append(key_str)
-        for ki in range(len(multi_keys)):
-            keys.append(multi_keys[ki])
-
-        if len(keys) == 0:
-            writer.append_error_response("ERR no keys to migrate")
-            return consumed
-
-        # Serialize all keys
-        var buf = alloc[UInt8](4194304)  # 4MB buffer
-        var buf_ptr = buf
-        var total_serialized = 0
-        var key_offsets = List[Int]()  # offset into buf for each key's RESTORE payload
-        var key_lens = List[Int]()
-
-        for ki in range(len(keys)):
-            var k = keys[ki]
-            var kl = k.byte_length()
-            var kp_buf = alloc[UInt8](kl)
-            unsafe_memcpy(dest=kp_buf, src=k.unsafe_ptr().unsafe_bitcast[UInt8](), count=kl)
-            var n = dump_key(keyspace, ttl_map, kp_buf, kl, buf_ptr.unsafe_offset(total_serialized), 4194304 - total_serialized)
-            kp_buf.unsafe_free()
-            if n > 0:
-                key_offsets.append(total_serialized)
-                key_lens.append(n)
-                total_serialized += n
-            else:
-                key_offsets.append(-1)
-                key_lens.append(0)
-
-        # Connect to target node
-        var host_cstr = host + "\0"
-        var target_fd = external_call["pion_tcp_connect", Int32](
-            host_cstr.unsafe_ptr().unsafe_bitcast[UInt8](), Int32(port), Int32(timeout_ms)
-        )
-        if target_fd < 0:
-            buf.unsafe_free()
-            writer.append_error_response("IOERR error connecting to target node")
-            return consumed
-
-        # For each key: send RESTORE command via RESP
-        var migrated = 0
-        for ki in range(len(keys)):
-            if key_offsets[ki] < 0:
-                continue  # key didn't exist
-            var k = keys[ki]
-            var payload_ptr = buf_ptr.unsafe_offset(key_offsets[ki])
-            var payload_len = key_lens[ki]
-
-            # Build RESP: *4\r\n$7\r\nRESTORE\r\n$<keylen>\r\n<key>\r\n$1\r\n0\r\n$<payloadlen>\r\n<payload>\r\n
-            var resp_buf = alloc[UInt8](payload_len + 256)
-            var rp = resp_buf
-            var ro = 0
-            # *4 or *5 (with REPLACE)
-            var nargs = 4 if not replace_flag else 5
-            rp[unsafe_offset=ro] = 42; ro += 1  # '*'
-            ro += format_int_to_buf(rp.unsafe_offset(ro), 0, Int64(nargs))
-            rp[unsafe_offset=ro] = 13; rp[unsafe_offset=ro+1] = 10; ro += 2
-            # $7\r\nRESTORE\r\n
-            rp[unsafe_offset=ro] = 36; ro += 1; rp[unsafe_offset=ro] = 55; ro += 1; rp[unsafe_offset=ro] = 13; ro += 1; rp[unsafe_offset=ro] = 10; ro += 1
-            rp[unsafe_offset=ro] = 82; rp[unsafe_offset=ro+1] = 69; rp[unsafe_offset=ro+2] = 83; rp[unsafe_offset=ro+3] = 84; rp[unsafe_offset=ro+4] = 79; rp[unsafe_offset=ro+5] = 82; rp[unsafe_offset=ro+6] = 69
-            ro += 7; rp[unsafe_offset=ro] = 13; rp[unsafe_offset=ro+1] = 10; ro += 2
-            # $<keylen>\r\n<key>\r\n
-            rp[unsafe_offset=ro] = 36; ro += 1
-            ro += format_int_to_buf(rp.unsafe_offset(ro), 0, Int64(k.byte_length()))
-            rp[unsafe_offset=ro] = 13; rp[unsafe_offset=ro+1] = 10; ro += 2
-            unsafe_memcpy(dest=rp.unsafe_offset(ro), src=k.unsafe_ptr().unsafe_bitcast[UInt8](), count=k.byte_length()); ro += k.byte_length()
-            rp[unsafe_offset=ro] = 13; rp[unsafe_offset=ro+1] = 10; ro += 2
-            # $1\r\n0\r\n (ttl=0, actual TTL is inside the payload)
-            rp[unsafe_offset=ro] = 36; rp[unsafe_offset=ro+1] = 49; rp[unsafe_offset=ro+2] = 13; rp[unsafe_offset=ro+3] = 10
-            rp[unsafe_offset=ro+4] = 48; rp[unsafe_offset=ro+5] = 13; rp[unsafe_offset=ro+6] = 10; ro += 7
-            # $<payloadlen>\r\n<payload>\r\n
-            rp[unsafe_offset=ro] = 36; ro += 1
-            ro += format_int_to_buf(rp.unsafe_offset(ro), 0, Int64(payload_len))
-            rp[unsafe_offset=ro] = 13; rp[unsafe_offset=ro+1] = 10; ro += 2
-            unsafe_memcpy(dest=rp.unsafe_offset(ro), src=payload_ptr, count=payload_len); ro += payload_len
-            rp[unsafe_offset=ro] = 13; rp[unsafe_offset=ro+1] = 10; ro += 2
-            # REPLACE flag
-            if replace_flag:
-                rp[unsafe_offset=ro] = 36; rp[unsafe_offset=ro+1] = 55; rp[unsafe_offset=ro+2] = 13; rp[unsafe_offset=ro+3] = 10; ro += 4
-                rp[unsafe_offset=ro] = 82; rp[unsafe_offset=ro+1] = 69; rp[unsafe_offset=ro+2] = 80; rp[unsafe_offset=ro+3] = 76; rp[unsafe_offset=ro+4] = 65; rp[unsafe_offset=ro+5] = 67; rp[unsafe_offset=ro+6] = 69
-                ro += 7; rp[unsafe_offset=ro] = 13; rp[unsafe_offset=ro+1] = 10; ro += 2
-
-            # Send to target
-            var sent = Int(external_call["send", Int64](target_fd, rp, Int(ro), Int32(0)))
-            resp_buf.unsafe_free()
-
-            if sent > 0:
-                # Read response (expect +OK\r\n)
-                var recv_buf = alloc[UInt8](256)
-                var nr = Int(external_call["recv", Int64](target_fd, recv_buf, 256, Int32(0)))
-                if nr > 0 and recv_buf[unsafe_offset=0] == 43:  # '+' = success
-                    migrated += 1
-                    # Delete local key unless COPY
-                    if not copy_flag:
-                        var kv = GenericValue.from_string(k)
-                        _ = remove_and_free(keyspace, kv)   # gh #394: container too
-                        if is_not_null(ttl_map):
-                            _ = ttl_map[].remove_generic(kv)
-                        kv.free_str_payload()               # our lookup copy
-                recv_buf.unsafe_free()
-
-        _ = external_call["close", Int32](target_fd)
-        buf.unsafe_free()
-
-        if migrated > 0:
-            writer.append_ok_response()
-        else:
-            writer.append_error_response("ERR no keys migrated")
-        return consumed
-    else:
+                   mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                   ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
+                   wal: Pointer[WAL, MutUntrackedOrigin], cluster_mode: Bool) -> List[Int]:
+    """MIGRATE host port key|"" destination-db timeout [COPY] [REPLACE]
+    [AUTH password | AUTH2 username password] [KEYS key ...], as Redis's
+    migrateCommand: each key's DUMP payload goes to the target as RESTORE (or
+    RESTORE-ASKING in cluster mode) with its remaining TTL, after AUTH and
+    SELECT when given, in one pipeline; then, unless COPY, the moved keys are
+    deleted here and the deletions logged. Blocking, with the timeout bounding
+    each wait, as in Redis. Returns the token indexes of the keys it deleted
+    (the caller bumps WATCH)."""
+    var deleted = List[Int]()
+    var argc = num_tokens - i
+    if argc < 6:
         writer.append_error_response("ERR wrong number of arguments for 'migrate' command")
-        return 0
+        return deleted^
+    var copy_flag = False
+    var replace_flag = False
+    var auth_user = -1
+    var auth_pass = -1
+    var first_key = i + 3
+    var num_keys = 1
+    var j = i + 6
+    while j < num_tokens:
+        var o = tokens[j]
+        var more = num_tokens - j - 1
+        if arg_eq(o.ptr, o.length, "copy"):
+            copy_flag = True
+        elif arg_eq(o.ptr, o.length, "replace"):
+            replace_flag = True
+        elif arg_eq(o.ptr, o.length, "auth"):
+            if more < 1:
+                writer.append_error_response("ERR syntax error")
+                return deleted^
+            auth_pass = j + 1
+            j += 1
+        elif arg_eq(o.ptr, o.length, "auth2"):
+            if more < 2:
+                writer.append_error_response("ERR syntax error")
+                return deleted^
+            auth_user = j + 1
+            auth_pass = j + 2
+            j += 2
+        elif arg_eq(o.ptr, o.length, "keys"):
+            if tokens[i + 3].length != 0:
+                writer.append_error_response("ERR When using MIGRATE KEYS option, the key argument must be set to the empty string")
+                return deleted^
+            first_key = j + 1
+            num_keys = num_tokens - j - 1
+            j = num_tokens
+            break
+        else:
+            writer.append_error_response("ERR syntax error")
+            return deleted^
+        j += 1
+    # Redis checks the timeout and the db; the port is read with atoi, so a
+    # bad one fails to connect
+    var timeout = parse_int64_strict(tokens[i + 5].ptr, tokens[i + 5].length)
+    var db = parse_int64_strict(tokens[i + 4].ptr, tokens[i + 4].length)
+    if not timeout.ok or not db.ok:
+        writer.append_error_response("ERR value is not an integer or out of range")
+        return deleted^
+    var port = _atoi(tokens[i + 2].ptr, tokens[i + 2].length)
+    var timeout_ms = Int(timeout.value) if timeout.value > 0 and timeout.value < 1 << 31 else 1000
+    # the keys that exist, with their payloads and remaining TTLs
+    var present = List[Int]()
+    var payloads = List[List[UInt8]]()
+    var ttls = List[Int64]()
+    var now_ms = Int64(_get_now_ns() // 1_000_000)
+    for k in range(first_key, first_key + num_keys):
+        var t = tokens[k]
+        var p = dump_payload(keyspace, t.ptr, t.length)
+        if len(p) == 0:
+            continue
+        var ttl = Int64(0)
+        if is_not_null(ttl_map):
+            var d = ttl_map[].get(GenericValue.borrow(t.ptr, t.length))
+            if not d.is_none():
+                ttl = d.as_int() // 1_000_000 - now_ms
+                if ttl < 0:
+                    continue                 # expired: not sent, as in Redis
+                if ttl < 1:
+                    ttl = 1
+        present.append(k)
+        payloads.append(p^)
+        ttls.append(ttl)
+    if len(present) == 0:
+        writer.append_status_response("NOKEY")
+        return deleted^
+    var host = tokens[i + 1].value() + "\0"
+    var fd = external_call["pion_tcp_connect_host", Int32](host.unsafe_ptr(), Int32(port), Int32(timeout_ms))
+    _ = host^                                  # alive through the call (ASAP destruction)
+    if fd < 0:
+        writer.append_error_response("IOERR error or timeout connecting to the client")
+        return deleted^
+    # one pipeline: [AUTH], [SELECT], then a RESTORE per key
+    var out = List[UInt8]()
+    var expected = 0
+    if auth_pass >= 0:
+        _put_header(out, 3 if auth_user >= 0 else 2)
+        _put_str(out, "AUTH")
+        if auth_user >= 0:
+            _put_bulk(out, tokens[auth_user].ptr, tokens[auth_user].length)
+        _put_bulk(out, tokens[auth_pass].ptr, tokens[auth_pass].length)
+        expected += 1
+    if db.value != 0:
+        _put_header(out, 2)
+        _put_str(out, "SELECT")
+        _put_str(out, String(db.value))
+        expected += 1
+    var first_restore = expected
+    for k in range(len(present)):
+        var t = tokens[present[k]]
+        _put_header(out, 5 if replace_flag else 4)
+        _put_str(out, "RESTORE-ASKING" if cluster_mode else "RESTORE")
+        _put_bulk(out, t.ptr, t.length)
+        _put_str(out, String(ttls[k]))
+        _put_bulk(out, Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(payloads[k].unsafe_ptr())),
+                  len(payloads[k]))
+        if replace_flag:
+            _put_str(out, "REPLACE")
+        expected += 1
+    var wrote = external_call["pion_sync_write", Int32](fd, out.unsafe_ptr(), Int64(len(out)),
+                                                        Int32(timeout_ms)) == 0
+    _ = out^                                   # alive through the call (ASAP destruction)
+    var ok = wrote
+    var error = String("")
+    var line = alloc[UInt8](1024)
+    var moved = List[Bool]()
+    var setup_failed = False       # AUTH or SELECT refused: Redis deletes no key
+    for r in range(expected):
+        if not ok:
+            break
+        var n = Int(external_call["pion_sync_readline", Int64](fd, line, Int64(1024), Int32(timeout_ms)))
+        if n < 0:
+            ok = False
+            break
+        var is_err = n > 0 and line[0] == 45      # '-'
+        if is_err and error.byte_length() == 0 and n > 1:
+            error = String(StringSpan[MutUntrackedOrigin](
+                unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=line + 1, length=n - 1)))
+        if r < first_restore:
+            if is_err:
+                setup_failed = True
+        else:
+            moved.append(not is_err and not setup_failed)
+    line.unsafe_free()
+    _ = external_call["close", Int32](fd)
+    if not ok:
+        writer.append_error_response("IOERR error or timeout " + String("reading" if wrote else "writing")
+                                     + " to target instance")
+        return deleted^
+    if not copy_flag:
+        for k in range(len(moved)):
+            if moved[k]:
+                var t = tokens[present[k]]
+                var kv = GenericValue.borrow(t.ptr, t.length)
+                _ = remove_and_free(keyspace, kv)
+                if is_not_null(ttl_map):
+                    _ = ttl_map[].remove_generic(kv)
+                if is_not_null(wal):
+                    _ = wal[].append(2, t.ptr, t.length)
+                deleted.append(present[k])
+    if error.byte_length() > 0:
+        writer.append_error_response("ERR Target instance replied with error: " + error)
+    else:
+        writer.append_ok_response()
+    return deleted^

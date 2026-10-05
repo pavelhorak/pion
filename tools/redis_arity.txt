@@ -39,6 +39,7 @@ exists -2
 expire -3
 expireat -3
 expiretime 2
+failover -1
 fcall -3
 fcall_ro -3
 flushall -1
@@ -93,11 +94,13 @@ info -1
 keys 2
 lastsave 1
 latency -2
+lcs -3
 lindex 3
 linsert 5
 llen 2
 lmove 5
 lmpop -4
+lolwut -1
 lpop -2
 lpos -3
 lpush -3
@@ -110,6 +113,7 @@ memory -2
 mget -2
 migrate -6
 module -2
+monitor 1
 move 3
 mset -3
 msetex -4
@@ -122,7 +126,9 @@ pexpireat -3
 pexpiretime 2
 pfadd -2
 pfcount -2
+pfdebug 3
 pfmerge -2
+pfselftest 1
 ping -1
 psetex 4
 psubscribe -2
@@ -138,8 +144,11 @@ readwrite 1
 rename 3
 renamenx 3
 replconf -1
+replicaof 3
 reset 1
 restore -4
+restore-asking -4
+role 1
 rpop -2
 rpoplpush 3
 rpush -3
@@ -157,10 +166,12 @@ setbit 4
 setex 4
 setnx 3
 setrange 4
+shutdown -1
 sinter -2
 sintercard -3
 sinterstore -3
 sismember 3
+slaveof 3
 slowlog -2
 smembers 2
 smismember -3
@@ -180,6 +191,7 @@ sunion -2
 sunionstore -3
 sunsubscribe -1
 swapdb 3
+sync 1
 time 1
 touch -2
 ttl 2
@@ -227,6 +239,7 @@ zinter -3
 zintercard -3
 zinterstore -4
 zlexcount 4
+zmpop -4
 zmscore -3
 zpopmax -2
 zpopmin -2

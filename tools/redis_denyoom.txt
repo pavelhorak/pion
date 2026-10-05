@@ -28,10 +28,12 @@ mset
 msetex
 msetnx
 pfadd
+pfdebug
 pfmerge
 psetex
 psubscribe
 restore
+restore-asking
 rpoplpush
 rpush
 rpushx

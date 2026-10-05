@@ -312,6 +312,54 @@ def handle_time(mut writer: ResponseWriter):
     writer.append_bulk_int_response(usec)
 
 
+def handle_lolwut(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                  mut writer: ResponseWriter):
+    """LOLWUT [VERSION v] [arguments] (#39), as Redis 7: VERSION 5 draws
+    Georg Nees's Schotter ([cols] [squares per row] [squares per column]),
+    VERSION 6 a skyline ([cols] [rows]), and anything else, the default
+    included, prints the version: Pion's own, since the art is Redis's and the
+    server is not. The art comes from src/ffi/redis_ports.c. A verbatim string
+    in RESP3."""
+    from src.common.version import PION_VERSION
+    var argc = num_tokens - i
+    var version = 0
+    var first = i + 1
+    if argc >= 3 and arg_eq(tokens[i + 1].ptr, tokens[i + 1].length, "version"):
+        var v = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+        if not v.ok:
+            writer.append_error_response("ERR value is not an integer or out of range")
+            return
+        # Redis formats the version as "%u.0.0" from an unsigned int.
+        var u = Int(UInt64(v.value) & 0xFFFFFFFF)
+        version = u if u == 5 or u == 6 else 0
+        first = i + 3
+    var want = 3 if version == 5 else (2 if version == 6 else 0)
+    var args = alloc[Int64](3)
+    var nargs = 0
+    while nargs < want and first + nargs < num_tokens:
+        var t = tokens[first + nargs]
+        var a = parse_int64_strict(t.ptr, t.length)
+        if not a.ok:
+            args.unsafe_free()
+            writer.append_error_response("ERR value is not an integer or out of range")
+            return
+        args[nargs] = a.value
+        nargs += 1
+    var label = String("Pion ver. ") + PION_VERSION
+    var out = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+    var n = external_call["pion_lolwut", Int64](Int64(version), Int64(nargs), args,
+                                               label.unsafe_ptr(), Int64(label.byte_length()), out)
+    var text = out[0]
+    if n >= 0:
+        writer.append_verbatim_response(text, Int(n))
+    else:
+        writer.append_error_response("ERR out of memory")
+    external_call["pion_lcs_free", NoneType](text)
+    out.unsafe_free()
+    args.unsafe_free()
+    _ = label^
+
+
 @always_inline
 def handle_lastsave(last_save_time: Int64, mut writer: ResponseWriter) -> Int:
     """LASTSAVE — return Unix timestamp of last successful snapshot (0 = none)."""

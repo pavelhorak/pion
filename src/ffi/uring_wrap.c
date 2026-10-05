@@ -607,6 +607,8 @@ typedef struct {
     volatile int    running;
     pthread_t       tid;
     pthread_mutex_t mu;
+    /* the port each replica serves clients on, from its PSYNC (ROLE, #39) */
+    int      listen_ports[PION_REPL_MAX_REPLICAS];
 } PionReplPrimary;
 
 static uint64_t _repl_now_ms(void) {
@@ -636,6 +638,7 @@ static void _repl_drop(PionReplPrimary* blk, int i) {
     blk->ack_offsets[i]  = blk->ack_offsets[last];
     memcpy(blk->ack_buf[i], blk->ack_buf[last], sizeof(blk->ack_buf[i]));
     blk->ack_len[i]      = blk->ack_len[last];
+    blk->listen_ports[i] = blk->listen_ports[last];
 }
 
 /* Read whatever the replica sent: "REPLCONF ACK <offset>\r\n" lines. */
@@ -664,7 +667,7 @@ static int _repl_read_acks(PionReplPrimary* blk, int i) {
    to drop the connection. Runs on this thread; blocks for a FULLRESYNC while
    the worker serializes its keyspace (the trade-off: with one worker that
    pause is the snapshot's cost). */
-static int64_t _repl_handshake(PionReplPrimary* blk, int cfd) {
+static int64_t _repl_handshake(PionReplPrimary* blk, int cfd, int* listen_port) {
     struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
     setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     char hs[128];
@@ -683,7 +686,12 @@ static int64_t _repl_handshake(PionReplPrimary* blk, int cfd) {
     char* sp = hs + 6;
     int ri = 0;
     while (*sp && *sp != ' ' && *sp != '\r' && ri < 40) rid[ri++] = *sp++;
-    if (*sp == ' ') roff = (uint64_t)strtoull(sp + 1, NULL, 10);
+    if (*sp == ' ') {
+        char* end = NULL;
+        roff = (uint64_t)strtoull(sp + 1, &end, 10);
+        /* an optional third field: the port the replica serves clients on */
+        if (end && *end == ' ') *listen_port = (int)strtol(end + 1, NULL, 10);
+    }
 
     pthread_mutex_lock(&blk->mu);
     int attached = blk->wal_attached;
@@ -744,7 +752,8 @@ static void* _pion_repl_primary_thread(void* arg) {
         if (select(blk->listen_fd + 1, &rset, NULL, NULL, &tv) > 0) {
             int cfd = (int)accept(blk->listen_fd, NULL, NULL);
             if (cfd >= 0) {
-                int64_t start = _repl_handshake(blk, cfd);
+                int lport = 0;
+                int64_t start = _repl_handshake(blk, cfd, &lport);
                 pthread_mutex_lock(&blk->mu);
                 if (start >= 0 && blk->wal_attached && blk->conn_count < PION_REPL_MAX_REPLICAS) {
                     int idx = blk->conn_count++;
@@ -752,6 +761,7 @@ static void* _pion_repl_primary_thread(void* arg) {
                     blk->sent_offsets[idx] = (uint64_t)start;
                     blk->ack_offsets[idx]  = 0;      /* counted once it ACKs */
                     blk->ack_len[idx]      = 0;
+                    blk->listen_ports[idx] = lport;
                 } else {
                     close(cfd);
                 }
@@ -937,7 +947,18 @@ typedef struct {
     volatile int    running;
     pthread_t       tid;
     pthread_mutex_t mu;
+    /* ROLE (#39): the link's state as Redis names it (PION_REPL_LINK_*), and
+       the port this server serves clients on, sent with PSYNC so the
+       primary's ROLE can list it */
+    int      link_state;
+    int      listening_port;
 } PionReplReplicaBlock;
+
+#define PION_REPL_LINK_CONNECT    1   /* "connect": not connected, will retry */
+#define PION_REPL_LINK_CONNECTING 2   /* "connecting" */
+#define PION_REPL_LINK_HANDSHAKE  3   /* "handshake": PSYNC sent */
+#define PION_REPL_LINK_SYNC       4   /* "sync": receiving the snapshot */
+#define PION_REPL_LINK_CONNECTED  5   /* "connected" */
 
 /* Push into the ring, WAITING for room. It used to drop bytes when full
    ("ring full — drop"), so a snapshot or a burst larger than 4 MB lost data
@@ -1019,20 +1040,25 @@ static void* _pion_repl_replica_thread(void* arg) {
     while (blk->running) {
         if (blk->fd < 0) {
             struct timespec backoff = { .tv_sec = 0, .tv_nsec = 200000000L };
+            blk->link_state = PION_REPL_LINK_CONNECTING;
             int fd = pion_connect_tcp(blk->primary_host, blk->primary_repl_port);
-            if (fd < 0) { nanosleep(&backoff, NULL); continue; }
+            if (fd < 0) { blk->link_state = PION_REPL_LINK_CONNECT; nanosleep(&backoff, NULL); continue; }
             struct timeval tv_so = { .tv_sec = 60, .tv_usec = 0 };
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv_so, sizeof(tv_so));
 
             char psync[128];
             const char* rid = (blk->repl_id[0] != '\0') ? blk->repl_id : "?";
-            int pl = snprintf(psync, sizeof(psync), "PSYNC %s %llu\r\n",
-                              rid, (unsigned long long)blk->repl_offset);
+            int pl = blk->listening_port > 0
+                ? snprintf(psync, sizeof(psync), "PSYNC %s %llu %d\r\n",
+                           rid, (unsigned long long)blk->repl_offset, blk->listening_port)
+                : snprintf(psync, sizeof(psync), "PSYNC %s %llu\r\n",
+                           rid, (unsigned long long)blk->repl_offset);
             send(fd, psync, (size_t)pl, MSG_NOSIGNAL);
+            blk->link_state = PION_REPL_LINK_HANDSHAKE;
 
             char line[160];
             if (_repl_read_line(fd, line, sizeof(line)) < 0) {
-                close(fd); nanosleep(&backoff, NULL); continue;
+                close(fd); blk->link_state = PION_REPL_LINK_CONNECT; nanosleep(&backoff, NULL); continue;
             }
             if (strncmp(line, "+FULLRESYNC ", 12) == 0) {
                 char newid[41] = {0};
@@ -1042,9 +1068,10 @@ static void* _pion_repl_replica_thread(void* arg) {
                 uint64_t off = (*sp == ' ') ? (uint64_t)strtoull(sp + 1, NULL, 10) : 0;
                 char lenline[64];
                 if (_repl_read_line(fd, lenline, sizeof(lenline)) < 0 || lenline[0] != '$') {
-                    close(fd); nanosleep(&backoff, NULL); continue;
+                    close(fd); blk->link_state = PION_REPL_LINK_CONNECT; nanosleep(&backoff, NULL); continue;
                 }
                 uint64_t snap_len = (uint64_t)strtoull(lenline + 1, NULL, 10);
+                blk->link_state = PION_REPL_LINK_SYNC;
                 /* Everything already in the ring belongs to a generation this
                    snapshot replaces; a FLUSH marker goes ahead of the snapshot.
                    None of it is a WAL offset of the new stream. */
@@ -1054,10 +1081,10 @@ static void* _pion_repl_replica_thread(void* arg) {
                 pthread_mutex_unlock(&blk->mu);
                 if (_repl_ring_push(blk, marker, sizeof(marker)) < 0 ||
                     _repl_recv_exact_into_ring(blk, fd, snap_len, NULL, 0) < 0) {
-                    close(fd); nanosleep(&backoff, NULL); continue;
+                    close(fd); blk->link_state = PION_REPL_LINK_CONNECT; nanosleep(&backoff, NULL); continue;
                 }
                 char crlf[2];
-                if (recv(fd, crlf, 2, MSG_WAITALL) != 2) { close(fd); nanosleep(&backoff, NULL); continue; }
+                if (recv(fd, crlf, 2, MSG_WAITALL) != 2) { close(fd); blk->link_state = PION_REPL_LINK_CONNECT; nanosleep(&backoff, NULL); continue; }
                 pthread_mutex_lock(&blk->mu);
                 memcpy(blk->repl_id, newid, sizeof(newid));
                 blk->repl_offset = off;
@@ -1070,11 +1097,12 @@ static void* _pion_repl_replica_thread(void* arg) {
                 blk->fd = fd;   /* partial resync (or legacy +OK): same stream */
                 pthread_mutex_unlock(&blk->mu);
             } else {
-                close(fd); nanosleep(&backoff, NULL); continue;
+                close(fd); blk->link_state = PION_REPL_LINK_CONNECT; nanosleep(&backoff, NULL); continue;
             }
             pthread_mutex_lock(&blk->mu);
             _repl_send_ack(blk);
             pthread_mutex_unlock(&blk->mu);
+            blk->link_state = PION_REPL_LINK_CONNECTED;
         }
 
         ssize_t n = recv(blk->fd, tmp, sizeof(tmp), 0);
@@ -1083,6 +1111,7 @@ static void* _pion_repl_replica_thread(void* arg) {
             pthread_mutex_lock(&blk->mu);
             close(blk->fd); blk->fd = -1;
             pthread_mutex_unlock(&blk->mu);
+            blk->link_state = PION_REPL_LINK_CONNECT;
             struct timespec ts = { .tv_sec = 0, .tv_nsec = 200000000L };
             nanosleep(&ts, NULL);
             continue;
@@ -2035,4 +2064,47 @@ void pion_wal_agg_stop(void* block) {
         free(agg->rings[i].ring);
     }
     free(agg);
+}
+
+/* ── ROLE (#39) ── */
+
+/* Replica i of a primary: its address (the peer of its replication link),
+   the port it serves clients on (0 when its PSYNC did not say) and the
+   offset it has ACKed. Returns 1, or 0 when there is no replica i. */
+int pion_repl_primary_replica_info(void* block, int idx, char* ip_out, int ip_cap,
+                                   int* port_out, uint64_t* ack_out) {
+    PionReplPrimary* blk = (PionReplPrimary*)block;
+    if (!blk) return 0;
+    pthread_mutex_lock(&blk->mu);
+    int ok = idx >= 0 && idx < blk->conn_count;
+    if (ok) {
+        struct sockaddr_storage sa;
+        socklen_t salen = sizeof(sa);
+        ip_out[0] = '\0';
+        if (getpeername(blk->conn_fds[idx], (struct sockaddr*)&sa, &salen) == 0) {
+            if (sa.ss_family == AF_INET)
+                inet_ntop(AF_INET, &((struct sockaddr_in*)&sa)->sin_addr, ip_out, (socklen_t)ip_cap);
+            else if (sa.ss_family == AF_INET6)
+                inet_ntop(AF_INET6, &((struct sockaddr_in6*)&sa)->sin6_addr, ip_out, (socklen_t)ip_cap);
+        }
+        *port_out = blk->listen_ports[idx];
+        *ack_out = blk->ack_offsets[idx];
+    }
+    pthread_mutex_unlock(&blk->mu);
+    return ok;
+}
+
+/* The replica link's state (PION_REPL_LINK_*); 1 ("connect") before the
+   thread has tried. */
+int pion_repl_replica_link_state(void* block) {
+    PionReplReplicaBlock* blk = (PionReplReplicaBlock*)block;
+    if (!blk) return PION_REPL_LINK_CONNECT;
+    int s = blk->link_state;
+    return s == 0 ? PION_REPL_LINK_CONNECT : s;
+}
+
+/* The port this replica serves clients on, sent with its PSYNC. */
+void pion_repl_replica_set_listening_port(void* block, int port) {
+    PionReplReplicaBlock* blk = (PionReplReplicaBlock*)block;
+    if (blk) blk->listening_port = port;
 }

@@ -48,6 +48,7 @@ lrem
 lset
 ltrim
 migrate
+move
 mset
 msetex
 msetnx
@@ -55,11 +56,13 @@ persist
 pexpire
 pexpireat
 pfadd
+pfdebug
 pfmerge
 psetex
 rename
 renamenx
 restore
+restore-asking
 rpop
 rpoplpush
 rpush

@@ -1629,6 +1629,70 @@ SEMANTIC_SCRIPTS = [
         ["BZMPOP", "0.001", "1", "%K", "MIN"],
         ["BLPOP", "%K", "0.001"], ["BRPOP", "%K", "%K2", "0.001"], ["BRPOPLPUSH", "%K", "%K2", "0.001"],
         ["BZPOPMIN", "%K", "0.001"], ["BLPOP", "%K", "%K3", "0.001"], ["DEL", "%K3"]]),
+
+    # #39: LCS, as Redis's lcsCommand (src/ffi/redis_ports.c). Option values
+    # are lower case so that --mutate leaves them alone.
+    ("missing commands: LCS", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["LCS", "%K", "%K2"], ["LCS", "%K", "%K2", "LEN"], ["LCS", "%K", "%K2", "IDX"],
+        ["SET", "%K", "ohmytext"], ["SET", "%K2", "mynewtext"],
+        ["LCS", "%K", "%K2"], ["LCS", "%K", "%K2", "LEN"], ["LCS", "%K", "%K2", "IDX"],
+        ["LCS", "%K", "%K2", "IDX", "MINMATCHLEN", "4"],
+        ["LCS", "%K", "%K2", "IDX", "MINMATCHLEN", "4", "WITHMATCHLEN"],
+        ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"], ["LCS", "%K", "%K2", "WITHMATCHLEN"],
+        ["LCS", "%K", "%K2", "IDX", "MINMATCHLEN", "-5"], ["LCS", "%K", "%K2", "MINMATCHLEN", "2", "LEN"],
+        ["LCS", "%K", "%K2", "LEN", "IDX"], ["LCS", "%K", "%K2", "idx", "len"],
+        ["LCS", "%K", "%K2", "MINMATCHLEN"], ["LCS", "%K", "%K2", "MINMATCHLEN", "x"],
+        ["LCS", "%K", "%K2", "MINMATCHLEN", "1.5"], ["LCS", "%K", "%K2", "NOPE"],
+        ["LCS", "%K", "%K2", "LEN", "LEN"], ["LCS", "%K"], ["LCS"],
+        ["LCS", "%K", "nosuchkey"], ["LCS", "nosuchkey", "%K", "IDX"],
+        ["RPUSH", "%K3", "a"], ["LCS", "%K", "%K3"], ["LCS", "%K3", "%K", "NOPE"],
+        ["LCS", "%K3", "%K3", "LEN", "IDX"], ["DEL", "%K3"],
+        ["SET", "%K", "12345"], ["SET", "%K2", "1x3y5"], ["LCS", "%K", "%K2"], ["LCS", "%K", "%K2", "IDX"],
+        ["INCR", "%K"], ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SET", "%K", "aaaa"], ["SET", "%K2", "aa"], ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SET", "%K", "abcdefghij"], ["SET", "%K2", "abcdefghij"], ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SET", "%K", "abc"], ["SET", "%K2", "xyz"], ["LCS", "%K", "%K2", "IDX"], ["LCS", "%K", "%K2"],
+        ["SET", "%K", ""], ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SET", "%K", "a\x00b\xffc"], ["SET", "%K2", "\x00\xffc"], ["LCS", "%K", "%K2"],
+        ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SETBIT", "%K3", "1", "1"], ["SET", "%K", "@ab"], ["LCS", "%K3", "%K", "IDX"],
+        ["SET", "%K", "the quick brown fox jumps over the lazy dog"],
+        ["SET", "%K2", "a quick brown dog jumps over the fox, lazily"],
+        ["LCS", "%K", "%K2"], ["LCS", "%K", "%K2", "IDX", "MINMATCHLEN", "3", "WITHMATCHLEN"],
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"]]),
+
+    # #39: the rest of the commands Redis 7 has that Pion lacked. What cannot
+    # be compared is elsewhere: LOLWUT's art (random) and default text (the
+    # server's own name and version), PFDEBUG on a HyperLogLog (Pion's
+    # registers differ: the documented HyperLogLog fence), REPLCONF ACK (no
+    # reply), REPLICAOF host port and SYNC/PSYNC (Redis would start
+    # replicating). tests/test_missing_commands.py covers those.
+    ("missing commands: ROLE, PF*, LOLWUT, the replication commands", [
+        ["DEL", "%K"], ["DEL", "%K2"],
+        ["ROLE"], ["ROLE", "x"],
+        ["LOLWUT", "VERSION", "x"], ["LOLWUT", "VERSION", "5", "x"], ["LOLWUT", "VERSION", "6", "1", "y"],
+        ["PFSELFTEST"], ["PFSELFTEST", "x"],
+        ["PFDEBUG", "GETREG", "%K"], ["PFDEBUG", "NOPE", "%K"], ["PFDEBUG", "x"], ["PFDEBUG"],
+        ["SET", "%K", "str"], ["PFDEBUG", "GETREG", "%K"], ["PFDEBUG", "ENCODING", "%K"],
+        ["RPUSH", "%K2", "a"], ["PFDEBUG", "TODENSE", "%K2"], ["PFDEBUG", "GETREG", "%K2", "x"],
+        ["PFADD", "%K3", "a"], ["PFDEBUG", "NOPE", "%K3"], ["DEL", "%K3"],
+        ["REPLICAOF", "NO", "ONE"], ["REPLICAOF", "no", "one"], ["SLAVEOF", "NO", "ONE"],
+        ["REPLICAOF", "localhost", "x"], ["REPLICAOF", "localhost", "70000"], ["REPLICAOF", "localhost", "-1"],
+        ["REPLICAOF", "localhost"], ["SLAVEOF"],
+        ["FAILOVER"], ["FAILOVER", "ABORT"], ["FAILOVER", "ABORT", "x"], ["FAILOVER", "TIMEOUT", "0"],
+        ["FAILOVER", "TIMEOUT", "x"], ["FAILOVER", "TIMEOUT", "5"], ["FAILOVER", "TIMEOUT", "5", "TIMEOUT", "5"],
+        ["FAILOVER", "TO", "localhost", "x"], ["FAILOVER", "TO", "localhost", "6379"], ["FAILOVER", "TO", "localhost"],
+        ["FAILOVER", "FORCE"], ["FAILOVER", "FORCE", "FORCE"], ["FAILOVER", "NOPE"],
+        ["FAILOVER", "TO", "localhost", "1", "FORCE", "TIMEOUT", "10"],
+        ["REPLCONF"], ["REPLCONF", "x"], ["REPLCONF", "listening-port", "6380"],
+        ["REPLCONF", "listening-port", "x"], ["REPLCONF", "capa", "eof", "capa", "psync2"],
+        ["REPLCONF", "nope", "1"], ["REPLCONF", "ip-address", "10.0.0.1"],
+        ["REPLCONF", "rdb-only", "1"], ["REPLCONF", "rdb-only", "2"], ["REPLCONF", "rdb-only", "x"],
+        ["REPLCONF", "rdb-filter-only", "functions"], ["REPLCONF", "rdb-filter-only", "nope"],
+        ["REPLCONF", "rdb-filter-only", ""], ["REPLCONF", "capa", "eof", "nope", "1"],
+        ["RESTORE-ASKING", "%K", "0", "x"], ["RESTORE-ASKING", "%K"],
+        ["DEL", "%K"], ["DEL", "%K2"]]),
 ]
 
 
@@ -1639,7 +1703,7 @@ def run_semantics(pion, redis):
     global FULL_ERRORS
     diffs, same, n = [], 0, 0
     for name, script in SEMANTIC_SCRIPTS:
-        FULL_ERRORS = name.startswith("scripting:")
+        FULL_ERRORS = name.startswith(("scripting:", "missing commands:"))
         for step, cmd in enumerate(script):
             c = [{"%K": "dfs:k", "%K2": "dfs:k2", "%K3": "dfs:k3"}.get(p, p)
                  for p in cmd]
@@ -1677,6 +1741,12 @@ def _mangled(tok):
     return [tok[:-1] + last, tok + "Q"]
 
 
+# Commands whose answer to an unknown keyword cannot be compared: LOLWUT
+# ignores arguments it does not know and prints the server's own art (Redis 8:
+# a random poem). Its keyword matching is checked in test_missing_commands.py.
+NO_MUTATE = {"LOLWUT"}
+
+
 def run_mutations(pion, redis):
     """Every keyword argument of every semantic-script step, mangled. Each
     variant runs on a fresh replay of the script up to that step, so a variant
@@ -1688,6 +1758,8 @@ def run_mutations(pion, redis):
     for name, script in SEMANTIC_SCRIPTS:
         steps = [[subst.get(p, p) for p in cmd] for cmd in script]
         for si, cmd in enumerate(steps):
+            if cmd[0].upper() in NO_MUTATE:
+                continue
             for pos in range(1, len(cmd)):
                 if not _is_keyword(script[si][pos]):
                     continue

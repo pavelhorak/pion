@@ -276,3 +276,286 @@ int64_t pion_fmt_fixed(double v, int decimals, char* out, int64_t cap) {
     int l = snprintf(out, (size_t)cap, "%.*f", decimals, v);
     return (l < 0 || (int64_t)l + 1 > cap) ? -1 : l;
 }
+
+/* LCS and LOLWUT are ports of Valkey's (BSD-3-Clause); they live in their own
+   file under that licence, compiled as part of this one so that every build
+   line that links fcntl_wrap.o links them too. */
+#include "redis_ports.c"
+
+/* ── MONITOR (#39) ──
+   pion_peer_id: the connection's peer as Redis prints it ("ip:port", or
+   "[ip]:port" for IPv6), the client address in a MONITOR line and in CLIENT
+   LIST. Returns its length, or 0 when the fd has no peer.
+
+   pion_monitor_line: one MONITOR line, as Redis's replicationFeedMonitors
+   builds it: "+<sec>.<usec> [<db> <peer>] "arg" "arg"...\r\n", each argument
+   quoted and escaped as sdscatrepr does. fd < 0 means a script's command
+   ("[0 lua]"). Returns the length and the malloc'd line in *out
+   (pion_lcs_free). */
+#include <sys/time.h>
+#include <netdb.h>
+
+int64_t pion_peer_id(int fd, char *buf, int64_t cap) {
+    struct sockaddr_storage sa;
+    socklen_t salen = sizeof(sa);
+    if (getpeername(fd, (struct sockaddr *)&sa, &salen) != 0) return 0;
+    char ip[INET6_ADDRSTRLEN];
+    int port = 0;
+    int v6 = 0;
+    if (sa.ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in *)&sa;
+        if (!inet_ntop(AF_INET, &s->sin_addr, ip, sizeof(ip))) return 0;
+        port = ntohs(s->sin_port);
+    } else if (sa.ss_family == AF_INET6) {
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *)&sa;
+        if (!inet_ntop(AF_INET6, &s->sin6_addr, ip, sizeof(ip))) return 0;
+        port = ntohs(s->sin6_port);
+        v6 = 1;
+    } else {
+        return 0;
+    }
+    int l = snprintf(buf, (size_t)cap, v6 ? "[%s]:%d" : "%s:%d", ip, port);
+    return (l < 0 || l >= cap) ? 0 : l;
+}
+
+static void mon_add(LcsBuf *b, const char *s, size_t n) { lcs_add(b, s, n); }
+
+static void mon_repr(LcsBuf *b, const unsigned char *p, int64_t len) {
+    mon_add(b, "\"", 1);
+    for (int64_t k = 0; k < len; k++) {
+        unsigned char c = p[k];
+        char esc[8];
+        switch (c) {
+        case '\\': mon_add(b, "\\\\", 2); break;
+        case '"': mon_add(b, "\\\"", 2); break;
+        case '\n': mon_add(b, "\\n", 2); break;
+        case '\r': mon_add(b, "\\r", 2); break;
+        case '\t': mon_add(b, "\\t", 2); break;
+        case '\a': mon_add(b, "\\a", 2); break;
+        case '\b': mon_add(b, "\\b", 2); break;
+        default:
+            if (isprint(c)) {
+                mon_add(b, (const char *)&c, 1);
+            } else {
+                snprintf(esc, sizeof(esc), "\\x%02x", c);
+                mon_add(b, esc, 4);
+            }
+        }
+    }
+    mon_add(b, "\"", 1);
+}
+
+int64_t pion_monitor_line(int fd, int64_t argc, const char **argv, const int64_t *lens, char **out) {
+    LcsBuf b = {NULL, 0, 0, 0};
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    char head[128];
+    int hl = snprintf(head, sizeof(head), "+%ld.%06ld ", (long)tv.tv_sec, (long)tv.tv_usec);
+    mon_add(&b, head, (size_t)hl);
+    if (fd < 0) {
+        mon_add(&b, "[0 lua] ", 8);
+    } else {
+        char peer[80];
+        int64_t pl = pion_peer_id(fd, peer, sizeof(peer));
+        mon_add(&b, "[0 ", 3);
+        mon_add(&b, peer, (size_t)pl);
+        mon_add(&b, "] ", 2);
+    }
+    for (int64_t j = 0; j < argc; j++) {
+        mon_repr(&b, (const unsigned char *)argv[j], lens[j]);
+        if (j != argc - 1) mon_add(&b, " ", 1);
+    }
+    mon_add(&b, "\r\n", 2);
+    *out = b.p;
+    return b.oom ? -1 : (int64_t)b.n;
+}
+
+/* ── Pub/sub between workers (#42) ──
+   Each worker has an inbox. PUBLISH and SPUBLISH on one worker append the
+   whole message to every other worker's inbox, and each worker takes its
+   inbox on its tick and delivers to its own subscribers. A record is
+   [u8 kind][u32 channel length][u32 message length][channel][message].
+   This replaced a ring of fixed 2 KB slots, which dropped longer messages
+   and published a slot's index before writing the slot. */
+#include <pthread.h>
+
+typedef struct {
+    pthread_mutex_t mu;
+    uint8_t *buf;
+    size_t len, cap;
+    int has;                 /* nonzero while buf holds records; read without the lock */
+} PionPubsubInbox;
+
+static PionPubsubInbox *g_pubsub_inbox = NULL;
+static int g_pubsub_workers = 0;
+
+void pion_pubsub_init(int nworkers) {
+    if (g_pubsub_inbox || nworkers <= 1) return;
+    g_pubsub_inbox = (PionPubsubInbox *)calloc((size_t)nworkers, sizeof(PionPubsubInbox));
+    if (!g_pubsub_inbox) return;
+    for (int w = 0; w < nworkers; w++) pthread_mutex_init(&g_pubsub_inbox[w].mu, NULL);
+    g_pubsub_workers = nworkers;
+}
+
+/* Post to every worker but `from`. Returns 0, or -1 when a copy could not be
+   allocated (that worker misses the message). */
+int pion_pubsub_post(int from, int kind, const uint8_t *ch, int64_t cl, const uint8_t *msg, int64_t ml) {
+    int rc = 0;
+    for (int w = 0; w < g_pubsub_workers; w++) {
+        if (w == from) continue;
+        PionPubsubInbox *in = &g_pubsub_inbox[w];
+        size_t need = 9 + (size_t)cl + (size_t)ml;
+        pthread_mutex_lock(&in->mu);
+        if (in->len + need > in->cap) {
+            size_t c = in->cap ? in->cap : 4096;
+            while (c < in->len + need) c *= 2;
+            uint8_t *nb = (uint8_t *)realloc(in->buf, c);
+            if (!nb) { pthread_mutex_unlock(&in->mu); rc = -1; continue; }
+            in->buf = nb;
+            in->cap = c;
+        }
+        uint8_t *p = in->buf + in->len;
+        uint32_t c32 = (uint32_t)cl, m32 = (uint32_t)ml;
+        p[0] = (uint8_t)kind;
+        memcpy(p + 1, &c32, 4);
+        memcpy(p + 5, &m32, 4);
+        memcpy(p + 9, ch, (size_t)cl);
+        memcpy(p + 9 + cl, msg, (size_t)ml);
+        in->len += need;
+        __atomic_store_n(&in->has, 1, __ATOMIC_RELEASE);
+        pthread_mutex_unlock(&in->mu);
+    }
+    return rc;
+}
+
+/* Take this worker's inbox: returns its length and the buffer in *out (the
+   caller frees it with pion_lcs_free), or 0. The check before the lock is a
+   hint only: a record that lands just after it is taken on the next tick. */
+int64_t pion_pubsub_take(int worker, uint8_t **out) {
+    *out = NULL;
+    if (!g_pubsub_inbox || worker < 0 || worker >= g_pubsub_workers) return 0;
+    PionPubsubInbox *in = &g_pubsub_inbox[worker];
+    if (!__atomic_load_n(&in->has, __ATOMIC_ACQUIRE)) return 0;
+    pthread_mutex_lock(&in->mu);
+    int64_t n = (int64_t)in->len;
+    *out = in->buf;
+    in->buf = NULL;
+    in->len = in->cap = 0;
+    __atomic_store_n(&in->has, 0, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&in->mu);
+    return n;
+}
+
+/* ── DUMP payloads (#41) ──
+   CRC-64/Jones (reflected polynomial 0x95AC9329AC4BC9B5, init 0, no final
+   xor): the checksum Redis puts in a DUMP payload's footer. Pion's payload
+   carries its own format version, so a payload either server did not write
+   is refused by the other with "DUMP payload version or checksum are wrong". */
+static uint64_t g_crc64_table[256];
+static int g_crc64_ready = 0;
+
+static void crc64_init(void) {
+    for (int i = 0; i < 256; i++) {
+        uint64_t c = (uint64_t)i;
+        for (int k = 0; k < 8; k++)
+            c = (c & 1) ? (c >> 1) ^ 0x95AC9329AC4BC9B5ULL : (c >> 1);
+        g_crc64_table[i] = c;
+    }
+    g_crc64_ready = 1;
+}
+
+uint64_t pion_crc64(uint64_t crc, const uint8_t *p, int64_t n) {
+    if (!g_crc64_ready) crc64_init();
+    for (int64_t i = 0; i < n; i++)
+        crc = g_crc64_table[(uint8_t)(crc ^ p[i])] ^ (crc >> 8);
+    return crc;
+}
+
+/* ── MIGRATE's connection (#41), as Redis's syncio.c ──
+   pion_tcp_connect_host resolves the host (a name, IPv4 or IPv6), connects
+   within the timeout and returns a blocking socket with TCP_NODELAY.
+   pion_sync_write writes everything or fails; pion_sync_readline reads one
+   CRLF-terminated line. Each waits at most `timeout_ms` for progress. */
+#include <netdb.h>
+
+int pion_tcp_connect_host(const char *host, int port, int timeout_ms) {
+    char ports[16];
+    snprintf(ports, sizeof(ports), "%d", port);
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, ports, &hints, &res) != 0) return -1;
+    int fd = -1;
+    for (ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (rc < 0 && errno == EINPROGRESS) {
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            rc = poll(&pfd, 1, timeout_ms > 0 ? timeout_ms : 1000) > 0 ? 0 : -1;
+            if (rc == 0) {
+                int err = 0;
+                socklen_t len = sizeof(err);
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                if (err != 0) rc = -1;
+            }
+        }
+        if (rc == 0) {
+            fcntl(fd, F_SETFL, flags);
+            int one = 1;
+            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+#ifdef SO_NOSIGPIPE
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+            break;
+        }
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+int pion_sync_write(int fd, const uint8_t *p, int64_t n, int timeout_ms) {
+    int64_t done = 0;
+    while (done < n) {
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+        if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+#ifdef MSG_NOSIGNAL
+        ssize_t w = send(fd, p + done, (size_t)(n - done), MSG_NOSIGNAL);
+#else
+        ssize_t w = send(fd, p + done, (size_t)(n - done), 0);
+#endif
+        if (w <= 0) {
+            if (w < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+            return -1;
+        }
+        done += w;
+    }
+    return 0;
+}
+
+int64_t pion_sync_readline(int fd, uint8_t *buf, int64_t cap, int timeout_ms) {
+    int64_t len = 0;
+    for (;;) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+        char c;
+        ssize_t r = recv(fd, &c, 1, 0);
+        if (r <= 0) {
+            if (r < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+            return -1;
+        }
+        if (c == '\n') {
+            if (len > 0 && len <= cap && buf[len - 1] == '\r') len--;
+            return len > cap ? cap : len;
+        }
+        /* a line longer than the buffer keeps its first `cap` bytes and is
+           read to its end, so the next read starts at the next reply */
+        if (len < cap) buf[len] = (uint8_t)c;
+        len++;
+    }
+}

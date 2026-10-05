@@ -102,6 +102,9 @@ struct NetworkEngine:
     # HERE, at the call sites, and not inside process_data_plane: a single
     # branch there measurably cost MSET ~7% (interleaved A/B, 16 runs), the
     # same code-layout sensitivity gh #149 measured for one struct field.
+    # The call sites read slow_path.fast_path_off, which is set while memory is
+    # over the limit, a client monitors (#39) or one is subscribed (#42); then
+    # slow_path.fast_path_ok(fd) decides per connection.
     var over_maxmemory: Bool
 
 
@@ -166,7 +169,8 @@ struct NetworkEngine:
                                          local_affinity=self.local_affinity,
                                          cluster=cluster,
                                          ttl_map=ttl_map)
-        self.slow_path = SlowPathHandler(keyspace, hash_map_pool, skip_list_pool, list_pool, ai_queue, wal, raft, shared_hnsw, config=config, worker_id=worker_id, cluster=cluster, ttl_map=ttl_map)
+        self.slow_path = SlowPathHandler(keyspace, hash_map_pool, skip_list_pool, list_pool, ai_queue, wal, raft, shared_hnsw, config=config, worker_id=worker_id, num_workers=num_workers, cluster=cluster, ttl_map=ttl_map)
+        self.slow_path.local_affinity = self.local_affinity   # RESET clears READONLY (#39)
         # Wire fast_path's transaction pointers to slow_path's transaction state
         self.fast_path.tx_in_multi = self.slow_path.tx_state.in_multi
         self.fast_path.key_versions = self.slow_path.tx_state.key_versions
@@ -222,6 +226,8 @@ struct NetworkEngine:
         self.slow_path.tx_state.cleanup_fd(fd)
         self.slow_path.blocked_readers.remove_fd(fd)
         self.slow_path.blocked_clients.remove_fd(fd)   # #38
+        _ = self.slow_path.monitors.remove(fd)        # #39
+        self.slow_path.update_dispatch_gate()          # #39, #42
         self.slow_path.parked_waits.remove_fd(fd)   # gh #390
         self.server.close_client(fd)
         self.client_buffer_lens[unsafe_offset=ci] = 0
@@ -333,7 +339,7 @@ struct NetworkEngine:
             if self.slow_path.parked_waits.any() and self.slow_path.parked_waits.is_parked(client_idx):
                 break
             var consumed = 0
-            if not self.over_maxmemory:   # gh #261 — see the field
+            if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(client_idx):   # gh #261, #39, #42
                 consumed = self.fast_path.process_data_plane(
                     fd, self.client_buffers[unsafe_offset=client_idx], cur_len,
                     self.writer, self.server, kq,
@@ -492,8 +498,12 @@ struct NetworkEngine:
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
             var park = self.slow_path.can_park_wait
             self.slow_path.can_park_wait = False
+            # MONITOR showed the command when it first ran (and blocked), as
+            # Redis does; running it again is not a new command.
+            self.slow_path.monitor_skip = True
             _ = self.slow_path.process_slow_path(frame, flen, fd, self.writer, self.server, kq,
                                                  hnsw, db_size, self.config)
+            self.slow_path.monitor_skip = False
             frame.free()
             self.slow_path.can_park_wait = park
             var stored = self.client_buffer_lens[unsafe_offset=ci]
@@ -627,6 +637,7 @@ struct NetworkEngine:
         var _oom = external_call["pion_maxmemory_check", Int32]() != 0
         self.over_maxmemory = _oom
         self.slow_path.over_maxmemory = _oom
+        self.slow_path.update_dispatch_gate()
 
         # gh #259: graceful shutdown. SIGTERM/SIGINT no longer kill us where
         # they land — they latch, and the drain happens HERE, on the event loop,
@@ -901,7 +912,7 @@ struct NetworkEngine:
                         var cur_len = total_len
                         while cur_len > 0:
                             var consumed = 0
-                            if not self.over_maxmemory:   # gh #261 — see the field
+                            if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(vci):   # gh #261, #39, #42
                                 consumed = self.fast_path.process_data_plane(
                                     virtual_fd, self.client_buffers[unsafe_offset=vci], cur_len,
                                     self.writer, self.server, kq,
@@ -979,7 +990,7 @@ struct NetworkEngine:
                         var cur_len = stored + n_read
                         while cur_len > 0:
                             var consumed = 0
-                            if not self.over_maxmemory:   # gh #261 — see the field
+                            if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(ci):   # gh #261, #39, #42
                                 consumed = self.fast_path.process_data_plane(
                                     tfd, self.client_buffers[unsafe_offset=ci], cur_len,
                                     self.writer, self.server, kq, hnsw, db_size,
@@ -1024,7 +1035,7 @@ struct NetworkEngine:
 
             # Cross-worker pub/sub broadcast drain (every tick for responsive delivery)
             if self.num_workers > 1:
-                self.slow_path.drain_pubsub_broadcast(self.server)
+                self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # TTL sweep
             self.ttl_sweep_counter += 1
@@ -1294,7 +1305,7 @@ struct NetworkEngine:
 
             # Cross-worker pub/sub broadcast drain
             if self.num_workers > 1:
-                self.slow_path.drain_pubsub_broadcast(self.server)
+                self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # Active TTL sweep + housekeeping counter.
             self.ttl_sweep_counter += 1
@@ -1608,7 +1619,7 @@ struct NetworkEngine:
             # Multi-worker housekeeping
             # gh #85b: KV_BUS routing was removed here (shared-nothing, gh #48).
             if self.num_workers > 1:
-                self.slow_path.drain_pubsub_broadcast(self.server)
+                self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # Deferred shard responses: drain every tick when queries are pending
             if self.slow_path.deferred_count > 0:
@@ -1801,7 +1812,7 @@ struct NetworkEngine:
 
             # Cross-worker pub/sub broadcast drain
             if self.num_workers > 1:
-                self.slow_path.drain_pubsub_broadcast(self.server)
+                self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # Deferred shard responses: drain every tick when queries are pending
             if self.slow_path.deferred_count > 0:

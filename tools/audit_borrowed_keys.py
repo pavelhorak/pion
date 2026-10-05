@@ -79,6 +79,7 @@ SAFE_FUNCS = {
     # wal.mojo replay lookups: keyspace get, and set on create
     "_replay_hash": {1}, "_replay_list": {1}, "_replay_set": {1}, "_replay_zset": {1},
     "_replay_stream": {1}, "_replay_vset": {1},
+    "hll_add": {1},                  # hll.mojo: hashes the element, keeps nothing
     "key_slot_from_hash": set(),     # only ever sees X.__hash__()
     "UInt64": {0},                   # UInt64(X.__hash__()) — never X itself
 }

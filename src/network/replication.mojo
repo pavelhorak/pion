@@ -107,8 +107,10 @@ struct ReplicaReceiver(Movable):
         if is_not_null(self.handle):
             external_call["pion_repl_replica_stop", NoneType](self.handle)
 
-    def setup(mut self, primary_host: String, primary_repl_port: Int) -> Bool:
-        """Create + start the replica receiver thread."""
+    def setup(mut self, primary_host: String, primary_repl_port: Int, listening_port: Int = 0) -> Bool:
+        """Create + start the replica receiver thread. `listening_port` is the
+        port this server serves clients on: sent with PSYNC so the primary's
+        ROLE can list it (#39)."""
         var ph = primary_host
         var blk = external_call["pion_repl_replica_create",
                                  Pointer[NoneType, MutUntrackedOrigin]](
@@ -118,6 +120,7 @@ struct ReplicaReceiver(Movable):
         if is_null(blk):
             return False
         self.handle = blk
+        external_call["pion_repl_replica_set_listening_port", NoneType](blk, Int32(listening_port))
         var rc = external_call["pion_repl_replica_start", Int32](blk)
         return rc == 0
 

@@ -6,5 +6,5 @@ SHA is the short git commit hash at build time.
 """
 
 comptime PION_VERSION = "0.9.4"
-comptime PION_BUILD_SHA = "ec3821f"
+comptime PION_BUILD_SHA = "68b1339"
 comptime PION_BUILD_DATE = "2026-10-05"

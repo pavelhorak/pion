@@ -473,6 +473,97 @@ def refresh_noscript():
     return got
 
 
+def refresh_sub_flags(pred):
+    """Like refresh_noscript, for any flag predicate: `name`, `container|sub`,
+    or `container|*` (every subcommand but HELP) whose flags satisfy pred."""
+    got = set()
+    for c in _command_rows():
+        if not isinstance(c, list) or len(c) < 3:
+            continue
+        name = (c[0].decode() if isinstance(c[0], bytes) else str(c[0])).lower()
+        flags = [x.decode() if isinstance(x, bytes) else str(x) for x in (c[2] or [])]
+        subs = c[9] if len(c) > 9 and isinstance(c[9], list) else []
+        if not subs:
+            if pred(flags):
+                got.add(name)
+            continue
+        yes, others = [], []
+        for sc in subs:
+            sn = (sc[0].decode() if isinstance(sc[0], bytes) else str(sc[0])).lower()
+            sf = [x.decode() if isinstance(x, bytes) else str(x) for x in (sc[2] or [])]
+            (yes if pred(sf) else others).append(sn)
+        if yes and others == [name + "|help"]:
+            got.add(name + "|*")
+        else:
+            got.update(yes)
+    return got
+
+
+# #39 MONITOR. Committed data like the other flag files; refresh with
+# --refresh-monitor-flags against a live redis-server on $REDIS_PORT.
+#   redis_admin.txt          `admin`: never shown to a monitor
+#   redis_keyspace.txt       `readonly`, `write` or `may_replicate`: refused
+#                            from a monitoring connection
+#   redis_skip_monitor.txt   `skip_monitor` (the script commands): shown
+#                            before they run, so their calls follow them
+ADMIN_FILE = ROOT / "tools" / "redis_admin.txt"
+KEYSPACE_FILE = ROOT / "tools" / "redis_keyspace.txt"
+SKIP_MONITOR_FILE = ROOT / "tools" / "redis_skip_monitor.txt"
+
+
+def _flag_file(path):
+    if path.exists():
+        return {l.strip() for l in path.read_text().splitlines() if l.strip()}
+    return set()
+
+
+SUBFLAG_HEADER = """
+
+def {fn}(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
+         {pad}sp: Pointer[UInt8, MutUntrackedOrigin], sl: Int) -> Bool:
+    \"\"\"{doc}
+    `sp`/`sl` is the first argument, for the container commands Redis flags per
+    subcommand; `container|*` means every subcommand but HELP. {known} entries
+    (tools/{file}).
+    \"\"\"
+"""
+
+
+def emit_sub_flag_table(names, entries, fn, doc, file):
+    """A subcommand-aware predicate over `entries` (as redis_noscript.txt)."""
+    top = sorted(n for n in names if n in entries)
+    subs = {}
+    for e in sorted(entries):
+        if "|" in e:
+            cont, sub = e.split("|", 1)
+            if cont in names:
+                subs.setdefault(cont, []).append(sub)
+    body = SUBFLAG_HEADER.format(fn=fn, pad=" " * (len(fn) - 4), doc=doc, file=file,
+                                 known=len(top) + sum(len(v) for v in subs.values()))
+    by_len = {}
+    for n in top:
+        by_len.setdefault(len(n), []).append(n)
+    first = True
+    for ln in sorted(by_len):
+        kw = "if" if first else "elif"
+        first = False
+        body += f"    {kw} tl == {ln}:\n        if (\n"
+        entries_ = by_len[ln]
+        for k, n in enumerate(entries_):
+            tail = "" if k == len(entries_) - 1 else " or"
+            body += f'            _cmd_eq_ci(tp, tl, "{n}"){tail}\n'
+        body += "        ):\n            return True\n"
+    for cont in sorted(subs):
+        body += f'    if _cmd_eq_ci(tp, tl, "{cont}"):\n'
+        if subs[cont] == ["*"]:
+            body += '        return sl > 0 and not _cmd_eq_ci(sp, sl, "help")\n'
+        else:
+            conds = " or ".join(f'_cmd_eq_ci(sp, sl, "{x}")' for x in subs[cont])
+            body += f"        return {conds}\n"
+    body += "    return False\n"
+    return body
+
+
 NOSCRIPT_HEADER = """
 
 def command_is_noscript(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
@@ -646,6 +737,30 @@ def emit(names):
             body += f'            _cmd_eq_ci(tp, tl, "{n}"){tail}\n'
         body += "        )\n"
     body += "    return False\n"
+
+    # ---- MONITOR tables (#39) -------------------------------------------
+    body += emit_sub_flag_table(
+        names, _flag_file(ADMIN_FILE), "command_hidden_from_monitor",
+        "True when MONITOR never shows this command (#39): Redis's `admin` flag.",
+        ADMIN_FILE.name)
+    body += emit_sub_flag_table(
+        names, _flag_file(KEYSPACE_FILE), "command_touches_keyspace",
+        "True when a monitoring connection may not run this command (#39):\n"
+        "    Redis's `readonly`, `write` or `may_replicate` flag (\"Replica can't interact\n"
+        "    with the keyspace\").",
+        KEYSPACE_FILE.name)
+    sm = sorted(n for n in names if n in _flag_file(SKIP_MONITOR_FILE))
+    body += """
+
+def command_monitor_first(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
+    \"\"\"True when MONITOR shows this command BEFORE it runs (#39): Redis's
+    `skip_monitor` flag, the script commands, so that what a script calls
+    follows the script's own line. {n} entries (tools/{f}).
+    \"\"\"
+""".format(n=len(sm), f=SKIP_MONITOR_FILE.name)
+    for n in sm:
+        body += f'    if _cmd_eq_ci(tp, tl, "{n}"):\n        return True\n'
+    body += "    return False\n"
     return body
 
 
@@ -661,6 +776,9 @@ def main():
                     help="re-query a live redis-server and rewrite tools/redis_noscript.txt")
     ap.add_argument("--refresh-denyoom-flags", action="store_true",
                     help="re-query a live redis-server and rewrite tools/redis_denyoom.txt")
+    ap.add_argument("--refresh-monitor-flags", action="store_true",
+                    help="re-query a live redis-server and rewrite tools/redis_admin.txt, "
+                         "redis_keyspace.txt and redis_skip_monitor.txt (#39)")
     args = ap.parse_args()
 
     if args.refresh_arity:
@@ -690,6 +808,18 @@ def main():
         keep = sorted(n for n in names_only if n in got)
         DENYOOM_FILE.write_text("\n".join(keep) + "\n")
         print(f"wrote {DENYOOM_FILE.relative_to(ROOT)} — {len(keep)} denyoom commands")
+
+    if args.refresh_monitor_flags:
+        names_only, _ = collect()
+        for path, pred in (
+            (ADMIN_FILE, lambda f: "admin" in f),
+            (KEYSPACE_FILE, lambda f: "readonly" in f or "write" in f or "may_replicate" in f),
+            (SKIP_MONITOR_FILE, lambda f: "skip_monitor" in f),
+        ):
+            got = refresh_sub_flags(pred)
+            keep = sorted(e for e in got if e.split("|", 1)[0] in names_only)
+            path.write_text("\n".join(keep) + "\n")
+            print(f"wrote {path.relative_to(ROOT)} — {len(keep)} entries")
 
     names, problems = collect()
     if problems:

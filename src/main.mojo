@@ -19,7 +19,6 @@ from src.common.lock_free import ShardQueryBus
 from src.network.cluster import ClusterState
 from src.network.slow_path import SlowPathHandler
 from src.network.v_store import VStoreDirectory
-from src.commands.pubsub import PubSubBroadcast
 from src.commands.tenant import tenant_arg_error
 from std.memory import unsafe_memset
 
@@ -1441,9 +1440,8 @@ def main():
     xdp_shared_fds[unsafe_offset=0] = xdp_shared_xskmap_fd
     xdp_shared_fds[unsafe_offset=1] = xdp_shared_bpf_fd
 
-    # Pub/Sub broadcast ring — shared across all workers for cross-worker PUBLISH.
-    var pubsub_broadcast_ptr = alloc[PubSubBroadcast](1)
-    pubsub_broadcast_ptr.unsafe_write(PubSubBroadcast())
+    # #42: the workers' pub/sub inboxes, for PUBLISH across workers (no-op at -w 1).
+    external_call["pion_pubsub_init", NoneType](Int32(n_workers))
 
     # Mojo 1.0: spawn workers via pthreads (see pion_worker_entry above the
     # heap import below). Blocks forever — workers never exit in normal
@@ -1451,7 +1449,7 @@ def main():
     var _boot_ctx = alloc[Int64](8)
     _boot_ctx[unsafe_offset=0] = Int64(Int(shared_hnsw_ptr))
     _boot_ctx[unsafe_offset=1] = Int64(Int(cluster_ptr))
-    _boot_ctx[unsafe_offset=2] = Int64(Int(pubsub_broadcast_ptr))
+    _boot_ctx[unsafe_offset=2] = Int64(0)    # was the pub/sub ring (#42: per-worker inboxes in C)
     _boot_ctx[unsafe_offset=3] = Int64(Int(secondary_listen_fds))
     _boot_ctx[unsafe_offset=4] = Int64(Int(xdp_shared_fds))
     _boot_ctx[unsafe_offset=5] = Int64(Int(shared_listen_fd))
@@ -1487,7 +1485,7 @@ def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64
 # and the -u link flag makes a regression a loud link error.
 # ctx layout (Int64 slots, packed in main(), outlives workers — main() blocks
 # in pion_spawn_workers): [0]=SharedHNSWView* [1]=ClusterState*
-# [2]=PubSubBroadcast* [3]=secondary_listen_fds(Int32*) [4]=xdp_shared_fds
+# [2]=unused (was the pub/sub ring) [3]=secondary_listen_fds(Int32*) [4]=xdp_shared_fds
 # (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers.
 @export
 def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64):
@@ -1495,7 +1493,6 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
     # worker_task body, unchanged.
     var shared_hnsw_ptr = Pointer[SharedHNSWView, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=0]))
     var cluster_ptr = Pointer[ClusterState, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=1]))
-    var pubsub_broadcast_ptr = Pointer[PubSubBroadcast, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=2]))
     var secondary_listen_fds = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=3]))
     var xdp_shared_fds = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=4]))
     var shared_listen_fd = Int32(ctx[unsafe_offset=5])
@@ -1782,9 +1779,6 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                       secondary_listen_fd=secondary_listen_fds[unsafe_offset=i],
                       binary_listen_fd=binary_listen_fd,
                       cluster=cluster_ptr)
-        # Wire cross-worker pub/sub broadcast ring
-        if n_workers > 1:
-            db.engine.slow_path.pubsub_broadcast = pubsub_broadcast_ptr
         db.run_server()
     except e:
         # stderr + explicit message: worker deaths were invisible when this

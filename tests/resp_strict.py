@@ -234,7 +234,8 @@ def wait_ready(port: int, timeout: float = 30.0, host: str = "127.0.0.1", proc=N
     raise RuntimeError(f"server on :{port} did not answer PING within {timeout} s ({last})")
 
 
-def wait_ready_pid(port: int, proc, timeout: float = 60.0, host: str = "127.0.0.1") -> None:
+def wait_ready_pid(port: int, proc, timeout: float = 60.0, host: str = "127.0.0.1",
+                   password: str | None = None) -> None:
     """Block until THIS process answers PING on `port` (#27).
 
     After a stop, a dead server's listening socket can outlive it for a moment
@@ -242,7 +243,8 @@ def wait_ready_pid(port: int, proc, timeout: float = 60.0, host: str = "127.0.0.
     connect then succeeds against nothing. Restart harnesses that took a
     successful connect, or any PONG, as "ready" sometimes talked to the old
     server. INFO's process_id must be the new pid; a binary that predates the
-    field is accepted on PONG alone."""
+    field is accepted on PONG alone. A server started with --requirepass
+    answers PING with NOAUTH: pass its `password`."""
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -250,7 +252,12 @@ def wait_ready_pid(port: int, proc, timeout: float = 60.0, host: str = "127.0.0.
             raise RuntimeError(f"server exited with code {proc.returncode} before answering PING")
         try:
             with Conn(port, host, timeout=5.0, connect_timeout=0.5) as c:
-                if c.cmd("PING") == "PONG":
+                if password is not None:
+                    c.cmd("AUTH", password)
+                pong = c.cmd("PING")
+                if pong != "PONG":
+                    last = f"PING answered {pong!r}"
+                else:
                     info = c.cmd("INFO", "server")
                     text = info.decode(errors="replace") if isinstance(info, bytes) else ""
                     pid = next((int(l.split(":", 1)[1]) for l in text.splitlines()

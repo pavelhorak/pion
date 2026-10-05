@@ -1,4 +1,4 @@
-from src.common.ptr import null_ptr
+from src.common.ptr import null_ptr, is_null, is_not_null
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
@@ -12,6 +12,22 @@ from src.io.io_uring import IOUring
 # Response buffer size. Kept at 4MB for cache-friendly vector search performance.
 # LMCache large-value GET uses writev to bypass this buffer entirely.
 comptime RESP_BUF_SIZE = 4 * 1024 * 1024  # 4 MB
+
+
+@always_inline
+def _send_errno() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return external_call["__errno_location", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
+    else:
+        return external_call["__error", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
+
+
+@always_inline
+def _EAGAIN() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return 11
+    else:
+        return 35
 
 
 def _write_overflow_error_bytes(dst: Pointer[UInt8, MutUntrackedOrigin]):
@@ -68,11 +84,6 @@ struct ResponseWriter(Movable):
     # so plain increments are lockless. Exposed as INFO send_eagain_stalls —
     # the kill-test/observability signal for the substrate large-send path.
     var send_stalls: UInt64
-    # #36: a script's redis.call() writes its reply here and the engine reads
-    # it back. A capture writer never sends: flush keeps the bytes and the
-    # large-value paths append instead of writing to the client's fd. Last
-    # field (gh #149).
-    var capture: Bool
 
     def __init__(out self):
         self.buffer = alloc[UInt8](RESP_BUF_SIZE)
@@ -85,11 +96,29 @@ struct ResponseWriter(Movable):
         self.overflow_emitted = False
         self.proto = 2
         self.send_stalls = 0
-        self.capture = False
         for i in range(65536):
             self.pending_offsets[unsafe_offset=i] = 0
             self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
             self.uring_inflight[unsafe_offset=i] = 0
+
+    def __init__(out self, *, capture_only: Bool):
+        """#36: a writer that never sends, for a script's redis.call(): its
+        reply stays in `buffer` for the engine to read. It has no per-connection
+        output state, which is how the paths that would write to a connection
+        recognise it (`is_null(pending_offsets)`), and its flushes are given
+        kq = -1, the no-op flush the XDP lane uses. (A `capture` field on every
+        writer cost the MSET and GET helpers, which take the writer, about 1%
+        more instructions.)"""
+        self.buffer = alloc[UInt8](RESP_BUF_SIZE)
+        self.offset = 0
+        self.pending_offsets = null_ptr[Int, MutUntrackedOrigin]()
+        self.pending_buffers = null_ptr[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]()
+        self.use_uring = False
+        self.ring = null_ptr[IOUring, MutUntrackedOrigin]()
+        self.uring_inflight = null_ptr[Int, MutUntrackedOrigin]()
+        self.overflow_emitted = False
+        self.proto = 2
+        self.send_stalls = 0
 
     @always_inline
     def bind_ring(mut self, ring_ptr: Pointer[IOUring, MutUntrackedOrigin]):
@@ -135,8 +164,6 @@ struct ResponseWriter(Movable):
 
     @always_inline
     def flush_response(mut self, fd: Int32, server: TCPServer, kq: Int32):
-        if self.capture:
-            return          # a script's reply stays for the engine to read
         if self.use_uring:
             self._flush_uring(fd)
         elif kq == -1:
@@ -150,6 +177,54 @@ struct ResponseWriter(Movable):
         # The next pre-flush batch starts with a clean slate.
         if self.offset == 0:
             self.overflow_emitted = False
+
+    def deliver_to(mut self, fd: Int32, data: Pointer[UInt8, MutUntrackedOrigin], length: Int,
+                   server: TCPServer, kq: Int32):
+        """Send a whole frame to ANOTHER connection: a published message, a
+        MONITOR line (#39, #42). The bytes queued for the current connection
+        are not touched. Always the engine's writer, never a script's.
+
+        What the socket cannot take now waits in that connection's pending
+        buffer, behind what is already there, and goes out on its write event.
+        A frame that fits neither is never cut: the connection is shut down
+        instead, as Redis disconnects a client past its output-buffer limit,
+        because a subscriber that received half a frame is out of sync for
+        good. (Delivery used to send() once and drop the rest at EAGAIN.)
+        Not on the XDP lane (kq == -1), which sends nothing over TCP."""
+        if length <= 0 or (kq == -1 and not self.use_uring):
+            return
+        var ci = Int(fd)
+        var limit = RESP_BUF_SIZE - 194304
+        var p = data
+        var left = length
+        if not self.use_uring and self.pending_offsets[unsafe_offset=ci] == 0:
+            while left > 0:
+                var n = server.send(fd, p, left)
+                if n <= 0:
+                    break
+                p = p.unsafe_offset(n)
+                left -= n
+            if left == 0:
+                return
+            var err = _send_errno()
+            if left == length and err != _EAGAIN():
+                return                  # a dead connection: its close is the engine's
+        var cur = self.pending_offsets[unsafe_offset=ci]
+        if self.use_uring and self.ring[].fd_closing[unsafe_offset=ci] != 0:
+            return
+        if cur + left > limit:
+            _ = external_call["shutdown", Int32](fd, Int32(2))   # SHUT_RDWR: the engine sees EOF
+            return
+        if self.pending_buffers[unsafe_offset=ci] == null_ptr[UInt8, MutUntrackedOrigin]():
+            self.pending_buffers[unsafe_offset=ci] = alloc[UInt8](RESP_BUF_SIZE)
+        unsafe_memcpy(dest=self.pending_buffers[unsafe_offset=ci].unsafe_offset(cur), src=p, count=left)
+        self.pending_offsets[unsafe_offset=ci] = cur + left
+        if self.use_uring:
+            if self.uring_inflight[unsafe_offset=ci] == 0:
+                self.uring_inflight[unsafe_offset=ci] = self.pending_offsets[unsafe_offset=ci]
+                self.ring[].submit_send(fd, self.pending_buffers[unsafe_offset=ci], self.uring_inflight[unsafe_offset=ci])
+        else:
+            server.kevent_add_write(kq, fd)
 
     @always_inline
     def _flush_uring(mut self, fd: Int32):
@@ -717,7 +792,7 @@ struct ResponseWriter(Movable):
         # Fits in buffer (with the same safety margin used elsewhere) → fast path.
         # A capture writer (a script's redis.call) never writes to the fd: a
         # reply too large for it becomes the overflow error.
-        if self.capture or self.offset + length + 32 <= RESP_BUF_SIZE - 194304:
+        if is_null(self.pending_offsets) or self.offset + length + 32 <= RESP_BUF_SIZE - 194304:
             self.append_bulk_string_response(data, length)
             return
         # Build RESP header `$<len>\r\n` in self.buffer.
@@ -765,7 +840,7 @@ struct ResponseWriter(Movable):
         Used by GET fast path for LMCache-size blobs (1-16MB)."""
         # Only use writev for values > 3MB that won't fit in the 4MB response buffer.
         # Smaller values go through the normal buffer path (faster, handles pipelining).
-        if not self.capture and val.type.value == ValueType.STRING and val.string_len() > 3 * 1024 * 1024 and val.type.value != ValueType.STRING_SSO:
+        if is_not_null(self.pending_offsets) and val.type.value == ValueType.STRING and val.string_len() > 3 * 1024 * 1024 and val.type.value != ValueType.STRING_SSO:
             # Build RESP header in response buffer: $<len>\r\n
             self.buffer[unsafe_offset=self.offset] = 36 # '$'
             self.offset += 1
