@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,11 +29,18 @@ import time
 HOST = "127.0.0.1"
 
 
+RESP3 = False   # set from --resp3: every connection, reconnects too, says HELLO 3
+
+
 class Conn:
     def __init__(self, port, timeout=6):
         self.s = socket.create_connection((HOST, port), timeout=timeout)
         self.s.settimeout(timeout)
         self.f = self.s.makefile("rb")
+        if RESP3:
+            kind, _ = self.cmd("HELLO", "3")
+            if kind != "map":
+                raise OSError(f"HELLO 3 on port {port} did not answer a map ({kind})")
 
     def cmd(self, *args):
         buf = f"*{len(args)}\r\n".encode()
@@ -65,8 +73,26 @@ class Conn:
             return ("array", [self._read() for _ in range(n)])
         if t == b"_":
             return ("nil", None)
-        if t in (b"#", b",", b"("):
-            return ("scalar", body.decode())
+        # RESP3 (`--resp3`). Each type keeps its own kind, so a reply sent as
+        # an array where Redis sends a map, a set or a double is a divergence:
+        # the TYPE is what a RESP3 client decodes it into (#23).
+        if t == b"%":
+            n = int(body)
+            items = [self._read() for _ in range(2 * n)]
+            return ("map", list(zip(items[0::2], items[1::2])))
+        if t == b"~":
+            return ("set", [self._read() for _ in range(int(body))])
+        if t == b">":
+            return ("push", [self._read() for _ in range(int(body))])
+        if t == b"=":
+            n = int(body)
+            return ("verbatim", self.f.read(n + 2)[:-2])
+        if t == b",":
+            return ("double", body.decode())
+        if t == b"#":
+            return ("bool", body.decode())
+        if t == b"(":
+            return ("bignum", body.decode())
         return ("raw", body.decode(errors="replace"))
 
     def close(self):
@@ -215,6 +241,9 @@ def normalize(kind_val, cmd):
             else:
                 out.append(normalize(e, cmd))
         return ("xrange", out)
+    if kind in ("map", "set"):
+        # RESP3 map / set: order is unspecified, the type is not.
+        return (kind, sorted(repr(normalize(x, cmd)) for x in val))
     if kind == "array":
         # Order is unspecified for set-like replies. The RANDMEMBER family is
         # here for the same reason and is only ever probed in shapes whose
@@ -255,13 +284,22 @@ def main():
     ap.add_argument("--redis-port", type=int, default=6399)
     ap.add_argument("--start-redis", action="store_true")
     ap.add_argument("--show-agreements", action="store_true")
+    ap.add_argument("--resp3", action="store_true",
+                    help="speak RESP3 (HELLO 3) to both servers and compare reply TYPES too")
     args = ap.parse_args()
+    global RESP3
+    RESP3 = args.resp3
 
     rproc = None
     if args.start_redis:
+        # #27: was /opt/homebrew/bin/redis-server — a Homebrew path, so the
+        # oracle never started on Linux.
+        exe = shutil.which("redis-server")
+        if exe is None:
+            print("FATAL: --start-redis needs redis-server on PATH")
+            return 2
         rproc = subprocess.Popen(
-            ["/opt/homebrew/bin/redis-server", "--port", str(args.redis_port),
-             "--save", "", "--appendonly", "no"],
+            [exe, "--port", str(args.redis_port), "--save", "", "--appendonly", "no"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
 
