@@ -1187,6 +1187,21 @@ def main():
     ready_atomic_buf[unsafe_offset=0] = 0
     shared_hnsw_ptr[].ready_atomic = ready_atomic_buf
 
+    # #19: count the persisted indexes the workers are about to load. Each is
+    # pion.hnsw.<worker that built it>, loaded by that worker alone; the others
+    # wait for it before serving (see Pion.__init__ phase 6).
+    # [0] = loaders still loading; [1 + w] = 1 when worker w is one. Decided
+    # here, once, so a worker never re-derives it from the filesystem.
+    var warm_pending_buf = alloc[UInt64](1 + n_workers)
+    warm_pending_buf[unsafe_offset=0] = 0
+    for _wl in range(n_workers):
+        var _wl_path = "pion.hnsw." + String(_wl) + "\0"
+        var _loads = external_call["access", Int32](_wl_path.unsafe_ptr(), Int32(4)) == 0   # R_OK
+        warm_pending_buf[unsafe_offset=1 + _wl] = 1 if _loads else 0
+        if _loads:
+            warm_pending_buf[unsafe_offset=0] += 1
+    shared_hnsw_ptr[].warm_load_pending = warm_pending_buf
+
     # gh #14: phase-2 epoch RCU state. `reclaim_epoch` is bumped by
     # FT.DROPINDEX; `worker_epoch` holds one 64-byte-strided slot per worker so
     # the per-batch relaxed store on the dispatch path never shares a cache

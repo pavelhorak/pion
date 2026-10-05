@@ -220,6 +220,13 @@ struct SharedHNSWView(Movable):
     # worker can see; FT.OPTIMIZE adopts it, because the builder is usually NOT
     # the worker that handled FT.CREATE and used to build with its defaults.
     var pre_ef_construction: Int
+    # #19: how many workers have a persisted index (pion.hnsw.<worker>) still
+    # to load at startup. main() counts them before spawning the workers; each
+    # loader decrements it once its load has finished (published or refused),
+    # and every worker waits for zero before it serves. Without the wait the
+    # workers that load nothing answered FT.SEARCH with "no such index" until
+    # the loader had published, on a multi-worker warm restart.
+    var warm_load_pending: Pointer[UInt64, MutUntrackedOrigin]
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -255,6 +262,7 @@ struct SharedHNSWView(Movable):
         self.compact_is_2bit = False
         self.gpu_rerank_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.pre_ef_construction = 0
+        self.warm_load_pending = null_ptr[UInt64, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -373,6 +381,7 @@ struct SharedHNSWView(Movable):
         self.compact_is_2bit = take.compact_is_2bit
         self.gpu_rerank_fp32 = take.gpu_rerank_fp32
         self.pre_ef_construction = take.pre_ef_construction
+        self.warm_load_pending = take.warm_load_pending
 
     def add_ingest_vector(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) -> Int:
         """Buffer a FP32 vector during load phase. Called from any worker's HSET handler.

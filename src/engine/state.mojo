@@ -226,6 +226,27 @@ struct Pion:
         if self.hnsw.load_from_disk(hnsw_path, _hk_buf, _hk_max):
             if is_not_null(self.shared_hnsw):
                 self.hnsw.publish_to_shared(self.shared_hnsw)
+        # #19: this worker's share of the startup load is done (published, or
+        # refused as stale). Then wait for every other loader: a worker that
+        # loads nothing used to serve at once and answer FT.SEARCH with "no
+        # such index" until the loader had published. Clients that connect
+        # meanwhile wait in the listen backlog, as they do during WAL replay.
+        if is_not_null(self.shared_hnsw) and is_not_null(self.shared_hnsw[].warm_load_pending):
+            var _wp = self.shared_hnsw[].warm_load_pending
+            if _wp[unsafe_offset=1 + worker_id] == 1:
+                # + (2^64 - 1) is - 1: the loader is done.
+                _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELEASE](_wp, UInt64.MAX)
+            var _waited_ms = 0
+            while Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](_wp, UInt64(0)) > 0:
+                _ = external_call["usleep", Int32](Int32(1000))
+                _waited_ms += 1
+                if _waited_ms == 2000:
+                    print("Worker " + String(worker_id) + ": waiting for the persisted vector index to load")
+                if _waited_ms >= 600_000:
+                    # A loader that died never decrements; serving without
+                    # the index beats never serving.
+                    print("Worker " + String(worker_id) + ": gave up waiting for the vector index load after 600 s")
+                    break
 
         # === Phase 7: Gossip + Replication (worker 0 only) ===
         # Only worker 0 starts background threads; other workers read shared ClusterState.
