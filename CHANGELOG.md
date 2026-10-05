@@ -6,8 +6,29 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Changed
+
+- **Linux x86-64 runs the closed vector library's AVX-512 VNNI build by
+  default on CPUs that have it.** `PION_VECTOR_VNNI=0` forces the x86-64-v2
+  build, which was the default until now. The VNNI build has passed the
+  differential on a Zen 5 and a Zen 4c CPU. On an EPYC 8124P (Zen 4c) it cut
+  server CPU per query by 32% and raised QPS by 20–22%, winning all six
+  rounds, with identical recall. Intel CPUs with AVX-512 VNNI have not been
+  measured. `pixi run test-vector-differential` now pins the x86-64-v2 build,
+  and `test-vector-differential-vnni` checks the VNNI build on VNNI hardware.
+
 ### Fixed
 
+- **FT.SEARCH on the Linux x86-64 release binaries spent more than half its
+  time in libm `fmaf`.** The reply rescoring, which reports the index
+  metric's distance for the k rows a reply returns, used `fma()` on 8-wide
+  vectors. The release targets x86-64-v2, which has no FMA instruction, so
+  every lane became a call into libm: about 300,000 calls per query, more
+  server time than the search itself. Those targets now multiply and add.
+  macOS, Linux arm64 and builds for a CPU with FMA compile exactly as before.
+  On an EPYC 8124P, with the build otherwise unchanged, server CPU per query
+  went from 2,180 to 1,012 µs and peak QPS from 2,188 to 3,687 (+70%), in all
+  four rounds, with identical recall.
 - **A source build finds its Metal library from any directory.**
   `pixi run build` puts `./pion-server` at the repo root and the shader
   library in `src/ffi/`. The search covered that layout only relative to the
