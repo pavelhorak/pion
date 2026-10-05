@@ -72,13 +72,13 @@ def handle_hgetall(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         if not val.is_none() and val.type.value != ValueType.HASH:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         elif val.is_none() or val.type.value != ValueType.HASH:
-            writer.append_empty_array_response()
+            writer.append_map_header(0)    # RESP3 `%0`, RESP2 `*0`
         else:
             # Expired fields were purged by hash_get_live above (gh #392), so
-            # every field left is live: size is exact.
+            # every field left is live: size is exact. A RESP3 map, as Redis
+            # sends after HELLO 3 (#23); RESP2 gets the flat array as before.
             var hash_ptr = val.as_hash().unsafe_bitcast[SlabHashMap]()
-            var hga_hdr = String("*") + String(hash_ptr[].size * 2) + String("\r\n")
-            writer.append_to_response(hga_hdr.unsafe_ptr(), hga_hdr.byte_length())
+            writer.append_map_header(hash_ptr[].size)
             for slot in range(hash_ptr[].capacity):
                 var m = hash_ptr[].metadata[unsafe_offset=slot]
                 if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
