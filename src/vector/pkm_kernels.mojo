@@ -48,7 +48,8 @@ serves both storages. Zero padding contributes 0 to every dot product.
 """
 
 from std.collections import Array
-from std.math import exp, fma
+from std.math import exp
+from src.vector.fma_mad import fma_mad
 from std.memory import unsafe_memset
 from std.memory.unsafe_pointer import Pointer
 
@@ -308,7 +309,7 @@ def pkm_accumulate_f32(
         while i + PKM_PREFILTER_W <= vdim:
             dst.store[width=PKM_PREFILTER_W](
                 i,
-                fma(
+                fma_mad[PKM_PREFILTER_W](
                     vp.load[width=PKM_PREFILTER_W](i),
                     wv,
                     dst.load[width=PKM_PREFILTER_W](i),
@@ -316,7 +317,7 @@ def pkm_accumulate_f32(
             )
             i += PKM_PREFILTER_W
         while i < vdim:
-            dst[unsafe_offset=i] = fma(vp[unsafe_offset=i], w[unsafe_offset=t], dst[unsafe_offset=i])
+            dst[unsafe_offset=i] = fma_mad[1](vp[unsafe_offset=i], w[unsafe_offset=t], dst[unsafe_offset=i])
             i += 1
 
 
@@ -343,7 +344,7 @@ def pkm_accumulate_f16(
         while i + PKM_PREFILTER_W <= vdim:
             dst.store[width=PKM_PREFILTER_W](
                 i,
-                fma(
+                fma_mad[PKM_PREFILTER_W](
                     vp.load[width=PKM_PREFILTER_W](i).cast[DType.float32](),
                     wv,
                     dst.load[width=PKM_PREFILTER_W](i),
@@ -351,5 +352,5 @@ def pkm_accumulate_f16(
             )
             i += PKM_PREFILTER_W
         while i < vdim:
-            dst[unsafe_offset=i] = fma(vp[unsafe_offset=i].cast[DType.float32](), w[unsafe_offset=t], dst[unsafe_offset=i])
+            dst[unsafe_offset=i] = fma_mad[1](vp[unsafe_offset=i].cast[DType.float32](), w[unsafe_offset=t], dst[unsafe_offset=i])
             i += 1

@@ -63,7 +63,8 @@ from .kernels import (
     l2_int8_sabd_udot_batch8,
 )
 from std.random import random_float64
-from std.math import log, min, fma
+from std.math import log, min
+from src.vector.fma_mad import fma_mad
 from std.collections import List, Array
 from std.sys.intrinsics import prefetch
 from std.ffi import external_call
@@ -79,27 +80,16 @@ comptime CALIBRATION_SAMPLE_MAX = 65536
 def fma_or_muladd(a: SIMD[DType.float32, 8], b: SIMD[DType.float32, 8],
                   c: SIMD[DType.float32, 8]) -> SIMD[DType.float32, 8]:
     """`fma(a, b, c)` where the target has a fused multiply-add, `a * b + c`
-    where it does not. An x86 target without FMA, the release's x86-64-v2
-    build among them, has no instruction for an exactly rounded fma, so LLVM
-    lowers each lane of a vector `fma` to a libm `fmaf` call. In metric_scores
-    that came to about 300K calls and 1.3 ms per FT.SEARCH on an EPYC 8124P,
-    more than the search itself (profiled 2026-10-05). `has_fma()` names an
-    x86 feature and reads False on AArch64, so the test is x86-only and every
-    other target compiles exactly as before. Two overloads, not one generic
-    function: Mojo 1.1 does not infer a SIMD width parameter from an argument."""
-    comptime if CompilationTarget.is_x86() and not CompilationTarget.has_fma():
-        return a * b + c
-    else:
-        return fma(a, b, c)
+    where it does not (src/vector/fma_mad.mojo, #15): the x86-64-v2 build
+    has no FMA, and LLVM lowers a vector `fma` there to a libm `fmaf` call
+    per lane. Width-8 and scalar spellings of fma_mad for this file's
+    many call sites."""
+    return fma_mad[8](a, b, c)
 
 
 @always_inline
 def fma_or_muladd(a: Float32, b: Float32, c: Float32) -> Float32:
-    comptime if CompilationTarget.is_x86() and not CompilationTarget.has_fma():
-        return a * b + c
-    else:
-        return fma(a, b, c)
-
+    return fma_mad[1](a, b, c)
 
 
 struct HNSWGraph(Movable):

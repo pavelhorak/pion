@@ -1497,3 +1497,11 @@ file = "tests/test_audit_erased_origin.py"
 server = "none"
 tier = "gate"
 timeout = 120
+
+# #25: no `fma(` in src/ outside fma_mad.mojo (each lane is a libm call on the
+# x86-64-v2 release build), and no vendored MANIFEST naming `fmaf`
+[[test]]
+file = "tests/test_audit_raw_fma.py"
+server = "none"
+tier = "gate"
+timeout = 60
