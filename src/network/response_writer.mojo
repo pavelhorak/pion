@@ -152,6 +152,12 @@ struct ResponseWriter(Movable):
             self.overflow_emitted = False
             return
         var ci = Int(fd)
+        if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+            # The engine is closing this connection and waits for its last
+            # SEND to complete before freeing the buffer a new one would read.
+            self.offset = 0
+            self.overflow_emitted = False
+            return
         if self.pending_buffers[unsafe_offset=ci] == null_ptr[UInt8, MutUntrackedOrigin]():
             self.pending_buffers[unsafe_offset=ci] = alloc[UInt8](RESP_BUF_SIZE)
         var cur = self.pending_offsets[unsafe_offset=ci]

@@ -3,6 +3,7 @@ from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
 from std.memory import unsafe_memset
+from std.atomic import Atomic, Ordering
 
 # Linux io_uring syscall numbers (ARM64 and x86_64)
 comptime SYS_IO_URING_SETUP  = 425
@@ -18,13 +19,15 @@ comptime IORING_OFF_SQES     = 0x10000000
 comptime IORING_OP_NOP       = 0
 comptime IORING_OP_TIMEOUT   = 11
 comptime IORING_OP_ACCEPT    = 13
+comptime IORING_OP_ASYNC_CANCEL = 14
 comptime IORING_OP_SEND      = 26
 comptime IORING_OP_RECV      = 27
 comptime IORING_OP_PROVIDE_BUFFERS = 31
 
 # io_uring_enter flags
 comptime IORING_ENTER_GETEVENTS = 1
-comptime IORING_ENTER_SQ_WAKEUP = 4
+comptime IORING_ENTER_SQ_WAKEUP = 2
+comptime IORING_ENTER_SQ_WAIT   = 4
 
 # io_uring_setup flags
 comptime IORING_SETUP_SQPOLL    = 2
@@ -47,14 +50,29 @@ comptime IORING_RECV_MULTISHOT  = UInt32(1 << 1)   # multishot recv (kernel 6.0+
 comptime PBUF_RING_ENTRIES = 256     # number of buffers per group
 comptime PBUF_SIZE         = 16384   # 16KB per buffer (matches Redis querybuf)
 
-# User-data tag bits to distinguish accept/recv/send completions.
-# Accept: high 32 bits = 0xFFFFFFFF, low 32 bits = listen_fd.
-# Send:   bit 32 set (UDATA_SEND_FLAG), low 32 bits = client_fd.
-# Recv:   low 32 bits = client_fd, high 32 bits = 0.
-comptime UDATA_SERVER_ACCEPT = UInt64(0xFFFFFFFF00000000)
-# gh #173: tick-timeout sentinel (high 32 bits; 0xFFFFFFFE = provide_buffers).
-comptime UDATA_TIMEOUT       = UInt64(0xFFFFFFFD00000000)
-comptime UDATA_SEND_FLAG     = UInt64(0x0000000100000000)
+# Per-fd tables are indexed by fd, like the engine's (client_buffers etc.).
+comptime URING_MAX_FDS = 65536
+
+# User data. Every SQE says WHAT it is and, for a client connection, WHICH
+# connection it belongs to:
+#
+#   bits  0-31  fd (the listening fd for an ACCEPT)
+#   bits 32-39  kind (UD_*)
+#   bits 40-63  the fd's generation when the SQE was made
+#
+# The generation is bumped when the engine really closes the fd. A completion
+# whose generation is not the fd's current one belongs to a connection that is
+# gone: it is dropped, and any provided buffer it carries goes back to the
+# kernel. The kind is a field of its own; the old tags overlapped (the timeout
+# tag shared bit 32 with the send flag) and were told apart only by the order
+# of the checks.
+comptime UD_RECV    = UInt64(1)
+comptime UD_SEND    = UInt64(2)
+comptime UD_ACCEPT  = UInt64(3)
+comptime UD_PBUF    = UInt64(4)
+comptime UD_TIMEOUT = UInt64(5)
+comptime UD_CANCEL  = UInt64(6)
+comptime UD_GEN_MASK = UInt32(0xFFFFFF)
 
 # Submission Queue Entry (64 bytes, matches Linux kernel layout)
 struct SQE(Copyable, Movable, ImplicitlyCopyable):
@@ -136,8 +154,12 @@ struct IOUring(Movable):
     var sq_ring:      Pointer[UInt8, MutUntrackedOrigin]
     var cq_ring:      Pointer[UInt8, MutUntrackedOrigin]
     var sqes:         Pointer[SQE, MutUntrackedOrigin]
+    # Shared with the kernel: it advances the head, we publish the tail.
     var sq_head:      Pointer[UInt32, MutUntrackedOrigin]
     var sq_tail:      Pointer[UInt32, MutUntrackedOrigin]
+    # Our tail: SQEs handed out by _get_sqe. Published to `sq_tail` only once
+    # they are fully written (see `publish`), never as each one is handed out.
+    var sq_tail_local: UInt32
     var sq_ring_mask: UInt32
     var sq_entries:   UInt32
     var cq_head:      Pointer[UInt32, MutUntrackedOrigin]
@@ -151,9 +173,14 @@ struct IOUring(Movable):
     var sq_flags_ptr: Pointer[UInt32, MutUntrackedOrigin]
     # True when the ring was created with IORING_SETUP_SQPOLL
     var sqpoll_active: Bool
-    # gh #173: persistent __kernel_timespec for IORING_OP_TIMEOUT (must outlive
-    # the SQE — the kernel reads it at completion time). [0]=sec, [1]=nsec.
+    # gh #173: persistent __kernel_timespec for IORING_OP_TIMEOUT. [0]=sec, [1]=nsec.
     var timeout_ts: Pointer[Int64, MutUntrackedOrigin]
+    # Per-fd generation, embedded in every RECV/SEND user_data (see UD_*).
+    var fd_gen:       Pointer[UInt32, MutUntrackedOrigin]
+    # Per-fd: 1 once the engine has decided to close the connection and is
+    # waiting for its RECV/SEND completions to drain (two-phase close). Shared
+    # with the ResponseWriter, which must not submit a SEND for such an fd.
+    var fd_closing:   Pointer[UInt8, MutUntrackedOrigin]
 
     def __init__(out self):
         self.ring_fd      = -1
@@ -162,6 +189,7 @@ struct IOUring(Movable):
         self.sqes         = null_ptr[SQE, MutUntrackedOrigin]()
         self.sq_head      = null_ptr[UInt32, MutUntrackedOrigin]()
         self.sq_tail      = null_ptr[UInt32, MutUntrackedOrigin]()
+        self.sq_tail_local = 0
         self.sq_ring_mask = 0
         self.sq_entries   = 0
         self.cq_head      = null_ptr[UInt32, MutUntrackedOrigin]()
@@ -176,6 +204,8 @@ struct IOUring(Movable):
         var _ts = alloc[Int64](2)
         _ts[unsafe_offset=0] = 0; _ts[unsafe_offset=1] = 0
         self.timeout_ts = Pointer[Int64, MutUntrackedOrigin](unsafe_from_address=Int(_ts))
+        self.fd_gen = null_ptr[UInt32, MutUntrackedOrigin]()
+        self.fd_closing = null_ptr[UInt8, MutUntrackedOrigin]()
 
     def __moveinit__(out self, deinit take: Self):
         self.ring_fd      = take.ring_fd
@@ -184,6 +214,7 @@ struct IOUring(Movable):
         self.sqes         = take.sqes
         self.sq_head      = take.sq_head
         self.sq_tail      = take.sq_tail
+        self.sq_tail_local = take.sq_tail_local
         self.sq_ring_mask = take.sq_ring_mask
         self.sq_entries   = take.sq_entries
         self.cq_head      = take.cq_head
@@ -196,6 +227,8 @@ struct IOUring(Movable):
         self.sq_flags_ptr = take.sq_flags_ptr
         self.sqpoll_active = take.sqpoll_active
         self.timeout_ts   = take.timeout_ts
+        self.fd_gen       = take.fd_gen
+        self.fd_closing   = take.fd_closing
 
     def setup(mut self, entries: UInt32, sqpoll: Bool = False) -> Bool:
         # Allocate a 128-byte buffer for io_uring_params (kernel layout = 120 bytes).
@@ -262,6 +295,7 @@ struct IOUring(Movable):
             self.ring_fd, Int64(IORING_OFF_SQ_RING)
         )
         if Int(sq_ring_ptr) == -1:
+            self._abandon()
             return False
         self.sq_ring = sq_ring_ptr.unsafe_bitcast[UInt8]()
 
@@ -272,6 +306,7 @@ struct IOUring(Movable):
             3, 1, self.ring_fd, Int64(IORING_OFF_SQES)
         )
         if Int(sqes_ptr) == -1:
+            self._abandon()
             return False
         self.sqes = sqes_ptr.unsafe_bitcast[SQE]()
 
@@ -282,6 +317,7 @@ struct IOUring(Movable):
             3, 1, self.ring_fd, Int64(IORING_OFF_CQ_RING)
         )
         if Int(cq_ring_ptr) == -1:
+            self._abandon()
             return False
         self.cq_ring = cq_ring_ptr.unsafe_bitcast[UInt8]()
 
@@ -296,6 +332,12 @@ struct IOUring(Movable):
         # IORING_SQ_NEED_WAKEUP here when the SQ polling thread goes idle.
         self.sq_flags_ptr = (sq_base.unsafe_offset(Int(self.sq_off.flags))).unsafe_bitcast[UInt32]()
         self.sqpoll_active = sqpoll
+        self.sq_tail_local = self.sq_tail[]
+        # SQE slot i is always submitted through array index i, so the
+        # indirection array is the identity map, written once here (as
+        # liburing does) instead of on every submission.
+        for i in range(Int(sq_entries)):
+            self.sq_array[unsafe_offset=i] = UInt32(i)
 
         var cq_base = self.cq_ring
         self.cq_head      = (cq_base.unsafe_offset(Int(self.cq_off.head))).unsafe_bitcast[UInt32]()
@@ -303,18 +345,78 @@ struct IOUring(Movable):
         self.cq_ring_mask = (cq_base.unsafe_offset(Int(self.cq_off.ring_mask))).unsafe_bitcast[UInt32]()[]
         self.cqes         = (cq_base.unsafe_offset(Int(self.cq_off.cqes))).unsafe_bitcast[CQE]()
 
+        self.fd_gen = alloc[UInt32](URING_MAX_FDS)
+        unsafe_memset(self.fd_gen.unsafe_bitcast[UInt8](), 0, URING_MAX_FDS * 4)
+        self.fd_closing = alloc[UInt8](URING_MAX_FDS)
+        unsafe_memset(self.fd_closing, 0, URING_MAX_FDS)
+
         if sqpoll:
             print("io_uring SQPOLL active — kernel SQ polling thread spawned (idle_timeout=1000ms)")
 
         return True
 
+    def _abandon(mut self):
+        """setup() failed after the ring fd existed: close it, so a retry (or
+        the epoll fallback) does not leak it."""
+        _ = external_call["close", Int32](self.ring_fd)
+        self.ring_fd = -1
+
+    # ── submission ──────────────────────────────────────────────────────────
+
     @always_inline
     def _get_sqe(mut self) -> Pointer[SQE, MutUntrackedOrigin]:
-        var tail = self.sq_tail[]
-        var idx = tail & self.sq_ring_mask
-        self.sq_array[unsafe_offset=Int(idx)] = idx
-        self.sq_tail[] = tail + 1
-        return self.sqes.unsafe_offset(Int(idx))
+        """The next free SQE. The caller fills it, and `publish` hands it to the
+        kernel only then, so the kernel never sees a half-written entry. A full
+        ring is first flushed to the kernel (`_make_sq_room`): one drain pass
+        can queue more SQEs than the ring holds."""
+        var tail = self.sq_tail_local
+        var head = Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](self.sq_head)
+        if tail - head >= self.sq_entries:
+            self._make_sq_room()
+        self.sq_tail_local = tail + 1
+        return self.sqes.unsafe_offset(Int(tail & self.sq_ring_mask))
+
+    @no_inline
+    def _make_sq_room(mut self):
+        """The ring is full: hand everything queued to the kernel now. Without
+        SQPOLL, io_uring_enter consumes the SQEs before it returns; with it,
+        IORING_ENTER_SQ_WAIT waits until the polling thread has made room."""
+        while True:
+            self.publish()
+            var head = Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](self.sq_head)
+            if self.sq_tail_local - head < self.sq_entries:
+                return
+            var r: Int32
+            if self.sqpoll_active:
+                var flags = UInt32(IORING_ENTER_SQ_WAIT)
+                if self.needs_wakeup():
+                    flags = flags | UInt32(IORING_ENTER_SQ_WAKEUP)
+                r = external_call["pion_io_uring_enter", Int32](self.ring_fd, UInt32(0), UInt32(0), flags)
+            else:
+                r = external_call["pion_io_uring_enter", Int32](
+                    self.ring_fd, self.sq_tail_local - head, UInt32(0), UInt32(0))
+            if r < 0:
+                # EINTR: retry. EBUSY / EAGAIN: the kernel is out of completion
+                # space; yield and retry while it flushes its overflow list
+                # into the room this drain pass has already made.
+                _ = external_call["sched_yield", Int32]()
+
+    @always_inline
+    def publish(mut self):
+        """Make every SQE handed out so far visible to the kernel. A RELEASE
+        store: the kernel reads the tail and then the entries, so every write
+        to them must be ordered before it."""
+        Atomic[Scalar[DType.uint32]].store[ordering=Ordering.RELEASE](self.sq_tail, self.sq_tail_local)
+
+    @always_inline
+    def pending(self) -> UInt32:
+        """SQEs written and not yet consumed by the kernel."""
+        return self.sq_tail_local - Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](self.sq_head)
+
+    @always_inline
+    def make_ud(self, kind: UInt64, fd: Int32) -> UInt64:
+        var g = UInt64(self.fd_gen[unsafe_offset=Int(fd)])
+        return (g << 40) | (kind << 32) | UInt64(UInt32(fd))
 
     @always_inline
     def submit_accept(mut self, server_fd: Int32):
@@ -332,14 +434,13 @@ struct IOUring(Movable):
         sqe[].splice_fd_in = 0
         sqe[].addr3        = 0
         sqe[].pad          = 0
-        # Embed listen fd in low 32 bits; high 32 bits = 0xFFFFFFFF marks accept.
-        sqe[].user_data = UDATA_SERVER_ACCEPT | UInt64(server_fd)
+        sqe[].user_data    = (UD_ACCEPT << 32) | UInt64(UInt32(server_fd))
 
     @always_inline
     def submit_timeout(mut self, ms: Int):
-        """gh #173: relative OP_TIMEOUT so enter() can't sleep unboundedly while
-        a blocked XREAD needs time-driven expiry. Completion res is -ETIME by
-        design; recognized (and swallowed) via UDATA_TIMEOUT."""
+        """A relative OP_TIMEOUT: its only job is to make enter() return, so the
+        loop ticks even when no client sends anything. Completion res is -ETIME
+        by design."""
         self.timeout_ts[unsafe_offset=0] = Int64(ms // 1000)
         self.timeout_ts[unsafe_offset=1] = Int64((ms % 1000) * 1_000_000)
         var sqe = self._get_sqe()
@@ -356,11 +457,28 @@ struct IOUring(Movable):
         sqe[].splice_fd_in = 0
         sqe[].addr3        = 0
         sqe[].pad          = 0
-        sqe[].user_data    = UDATA_TIMEOUT
+        sqe[].user_data    = UD_TIMEOUT << 32
 
     @always_inline
-    def is_timeout_completion(self, user_data: UInt64) -> Bool:
-        return (user_data >> 32) == UInt64(0xFFFFFFFD)
+    def submit_cancel(mut self, target_user_data: UInt64):
+        """IORING_OP_ASYNC_CANCEL of the request whose user_data matches
+        exactly. Its own completion (0, -ENOENT or -EALREADY) is ignored; the
+        cancelled request completes with -ECANCELED."""
+        var sqe = self._get_sqe()
+        sqe[].opcode       = UInt8(IORING_OP_ASYNC_CANCEL)
+        sqe[].flags        = 0
+        sqe[].ioprio       = 0
+        sqe[].fd           = -1
+        sqe[].off          = 0
+        sqe[].addr         = target_user_data
+        sqe[].len          = 0
+        sqe[].op_flags     = 0
+        sqe[].buf_index    = 0
+        sqe[].personality  = 0
+        sqe[].splice_fd_in = 0
+        sqe[].addr3        = 0
+        sqe[].pad          = 0
+        sqe[].user_data    = UD_CANCEL << 32
 
     @always_inline
     def submit_recv(mut self, fd: Int32, buf: Pointer[UInt8, MutUntrackedOrigin], length: Int):
@@ -378,7 +496,7 @@ struct IOUring(Movable):
         sqe[].splice_fd_in = 0
         sqe[].addr3        = 0
         sqe[].pad          = 0
-        sqe[].user_data    = UInt64(fd)  # recv: user_data = fd (no high bits set)
+        sqe[].user_data    = self.make_ud(UD_RECV, fd)
 
     @always_inline
     def submit_recv_multishot(mut self, fd: Int32, buf_group: UInt16):
@@ -399,7 +517,7 @@ struct IOUring(Movable):
         sqe[].splice_fd_in = 0
         sqe[].addr3        = 0
         sqe[].pad          = 0
-        sqe[].user_data    = UInt64(fd)
+        sqe[].user_data    = self.make_ud(UD_RECV, fd)
 
     @always_inline
     def submit_provide_buffers(mut self, buf: Pointer[UInt8, MutUntrackedOrigin],
@@ -420,11 +538,7 @@ struct IOUring(Movable):
         sqe[].splice_fd_in = 0
         sqe[].addr3        = 0
         sqe[].pad          = 0
-        sqe[].user_data    = UInt64(0xFFFFFFFE00000000)  # special: provide_buffers completion
-
-    @always_inline
-    def is_provide_buffers_completion(self, user_data: UInt64) -> Bool:
-        return (user_data >> 32) == UInt64(0xFFFFFFFE)
+        sqe[].user_data    = UD_PBUF << 32
 
     @always_inline
     def submit_send(mut self, fd: Int32, buf: Pointer[UInt8, MutUntrackedOrigin], length: Int):
@@ -442,7 +556,7 @@ struct IOUring(Movable):
         sqe[].splice_fd_in = 0
         sqe[].addr3        = 0
         sqe[].pad          = 0
-        sqe[].user_data    = UInt64(fd) | UDATA_SEND_FLAG  # bit 32 marks send
+        sqe[].user_data    = self.make_ud(UD_SEND, fd)
 
     @always_inline
     def needs_wakeup(self) -> Bool:
@@ -450,18 +564,23 @@ struct IOUring(Movable):
         Only meaningful when sqpoll_active=True. When the kernel thread is idle,
         it sets IORING_SQ_NEED_WAKEUP in sq_flags; we must call enter() with
         IORING_ENTER_SQ_WAKEUP to wake it."""
-        return (self.sq_flags_ptr[] & UInt32(IORING_SQ_NEED_WAKEUP)) != 0
+        var f = Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](self.sq_flags_ptr)
+        return (f & UInt32(IORING_SQ_NEED_WAKEUP)) != 0
 
     @always_inline
-    def enter(mut self, to_submit: Int32, min_complete: Int32):
+    def enter(mut self, min_complete: Int32):
+        """Submit every SQE written so far and wait for `min_complete`
+        completions. The submit count is what the kernel has not consumed yet,
+        read from the ring, not a count the caller kept: when an enter returned
+        early (EINTR) the old caller-side count lost the remainder, and those
+        SQEs waited for unrelated later traffic."""
+        self.publish()
         # SQPOLL mode: the kernel SQ polling thread handles submission automatically.
         # We only need to call io_uring_enter when:
         #   1. The kernel thread is idle (NEED_WAKEUP set) — wake it with SQ_WAKEUP flag
         #   2. We need to wait for completions (min_complete > 0) — GETEVENTS flag
-        # This eliminates io_uring_enter on the hot path when the kernel thread is active.
         if self.sqpoll_active:
             if min_complete > 0:
-                # Need CQEs — must enter with GETEVENTS (also wakes SQ thread if needed)
                 var flags = UInt32(IORING_ENTER_GETEVENTS)
                 if self.needs_wakeup():
                     flags = flags | UInt32(IORING_ENTER_SQ_WAKEUP)
@@ -469,23 +588,27 @@ struct IOUring(Movable):
                     self.ring_fd, UInt32(0), UInt32(min_complete), flags
                 )
             elif self.needs_wakeup():
-                # No CQEs needed but kernel thread is idle — wake it to consume our SQEs
                 _ = external_call["pion_io_uring_enter", Int32](
                     self.ring_fd, UInt32(0), UInt32(0), UInt32(IORING_ENTER_SQ_WAKEUP)
                 )
-            # else: kernel SQ thread is active, it will consume SQEs automatically — no syscall
             return
 
-        # Standard mode: explicit submission + optional wait for completions
+        # Standard mode: explicit submission + optional wait for completions.
+        # A failure (-EINTR, -EBUSY with the CQ overflowing) submits nothing or
+        # part; whatever is left stays counted by `pending` for the next call.
         _ = external_call["pion_io_uring_enter", Int32](
-            self.ring_fd, UInt32(to_submit), UInt32(min_complete),
+            self.ring_fd, self.pending(), UInt32(min_complete),
             UInt32(IORING_ENTER_GETEVENTS)
         )
+
+    # ── completion ──────────────────────────────────────────────────────────
 
     @always_inline
     def peek_cqe(self) -> CQEPeek:
         var head = self.cq_head[]
-        var tail = self.cq_tail[]
+        # ACQUIRE: the kernel writes the entry, then the tail; reading the entry
+        # after the tail must see it (ARM64 reorders the plain loads).
+        var tail = Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](self.cq_tail)
         if head == tail:
             return CQEPeek(False, CQE(UInt64(0), Int32(0), UInt32(0)))
         var cqe = self.cqes[unsafe_offset=Int(head & self.cq_ring_mask)]
@@ -493,20 +616,31 @@ struct IOUring(Movable):
 
     @always_inline
     def advance_cq(mut self):
-        self.cq_head[] = self.cq_head[] + 1
+        # RELEASE: the entry has been read before the kernel may reuse its slot.
+        Atomic[Scalar[DType.uint32]].store[ordering=Ordering.RELEASE](self.cq_head, self.cq_head[] + 1)
+
+    @staticmethod
+    @always_inline
+    def ud_kind(user_data: UInt64) -> UInt64:
+        return (user_data >> 32) & 0xFF
+
+    @staticmethod
+    @always_inline
+    def fd_from_user_data(user_data: UInt64) -> Int32:
+        return Int32(UInt32(user_data & UInt64(0xFFFFFFFF)))
 
     @always_inline
-    def is_accept_completion(self, user_data: UInt64) -> Bool:
-        # High 32 bits = 0xFFFFFFFF means accept; low 32 bits = listen fd.
-        return (user_data >> 32) == UInt64(0xFFFFFFFF)
+    def is_stale(self, user_data: UInt64) -> Bool:
+        """A RECV/SEND completion for a connection this fd no longer holds."""
+        var fd = Int(user_data & UInt64(0xFFFFFFFF))
+        return UInt32(user_data >> 40) != self.fd_gen[unsafe_offset=fd]
 
     @always_inline
-    def is_send_completion(self, user_data: UInt64) -> Bool:
-        return (user_data & UDATA_SEND_FLAG) != 0
-
-    @always_inline
-    def fd_from_user_data(self, user_data: UInt64) -> Int32:
-        return Int32(user_data & UInt64(0xFFFFFFFF))
+    def retire_fd(mut self, fd: Int32):
+        """The connection on `fd` is closed for good: completions still in the
+        ring for it are stale from now on."""
+        var ci = Int(fd)
+        self.fd_gen[unsafe_offset=ci] = (self.fd_gen[unsafe_offset=ci] + 1) & UD_GEN_MASK
 
     @staticmethod
     @always_inline

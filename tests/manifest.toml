@@ -1294,6 +1294,43 @@ server = "self"
 tier = "gate"
 timeout = 300
 
+[[test]]
+file = "tests/test_client_buffer_overflow.py"
+server = "-w 1"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_conn_churn_isolation.py"
+server = "-w 1"
+tier = "gate"
+timeout = 180
+
+[[test]]
+file = "tests/test_connection_burst.py"
+server = "-w 1"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_iouring_unavailable.py"
+server = "self"
+tier = "gate"
+timeout = 180
+requires = ["linux"]
+
+[[test]]
+file = "tests/test_restart_rebind.py"
+server = "self"
+tier = "gate"
+timeout = 240
+
+[[test]]
+file = "tests/test_vector_isa_info.py"
+server = "self"
+tier = "gate"
+timeout = 240
+
 [not_tests]
 # benchmarks, profilers, one-off repros and helpers — run by hand, never gated
 files = [

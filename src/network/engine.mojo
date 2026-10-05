@@ -26,7 +26,7 @@ from src.network.response_writer import ResponseWriter
 from src.network.fast_path import FastPathHandler
 from src.network.slow_path import SlowPathHandler
 from src.network.fast_path import _get_now_ns
-from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE
+from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE, URING_MAX_FDS, UD_RECV, UD_SEND, UD_ACCEPT, UD_TIMEOUT
 from src.io.xdp import XDPEngine, XDPFrameInfo, TCP_SYN, TCP_ACK, TCP_FIN, TCP_RST, TCP_PSH
 from src.network.cluster import ClusterState, REPL_PORT_OFFSET
 
@@ -210,9 +210,8 @@ struct NetworkEngine:
         the caller's responsibility — those vary across loops. Everything else
         is identical: pubsub / tx / blocked-reader fd cleanup, close the
         socket, free the per-fd RECV + writer buffers, zero pending_offsets.
-        Used by epoll + kqueue inline close paths and as the base of
-        `_uring_close_fd` (which adds uring's recv-armed + inflight resets on
-        top).
+        Used by the epoll + kqueue inline close paths, and by io_uring's
+        `_uring_finish_close` once nothing is in flight for the fd.
 
         Extracted from 3 near-identical copies — adding a new per-fd reset
         without updating every loop was the drift bug class the issue called
@@ -230,14 +229,6 @@ struct NetworkEngine:
             self.writer.pending_buffers[unsafe_offset=ci].unsafe_free()
             self.writer.pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
         self.writer.pending_offsets[unsafe_offset=ci] = 0
-
-    @always_inline
-    def _uring_close_fd(mut self, fd: Int32, ci: Int):
-        """Clean up all per-fd state when a connection closes on the io_uring
-        path: common close + uring's recv-armed / writer.uring_inflight resets."""
-        self._close_fd_common(fd, ci)
-        self.uring_recv_armed[unsafe_offset=ci] = 0
-        self.writer.uring_inflight[unsafe_offset=ci] = 0
 
     @always_inline
     def _dispatch_recv_buffer(
@@ -423,13 +414,7 @@ struct NetworkEngine:
             if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
                and not pw[].is_parked(ci) \
                and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
-                var cur_len = self.client_buffer_lens[unsafe_offset=ci]
-                if self.multishot_active:
-                    self.ring[].submit_recv_multishot(fd, UInt16(uring_group))
-                    self.uring_recv_armed[unsafe_offset=ci] = 2
-                else:
-                    self.ring[].submit_recv(fd, self.client_buffers[unsafe_offset=ci].unsafe_offset(cur_len), CLIENT_BUF_SIZE - cur_len)
-                    self.uring_recv_armed[unsafe_offset=ci] = 1
+                self._uring_arm_recv(fd, ci, UInt16(uring_group))
 
     def _replica_drain(mut self, cl: Pointer[ClusterState, MutUntrackedOrigin]):
         """gh #390: drain the replica ring, apply every whole record, carry a
@@ -984,17 +969,20 @@ struct NetworkEngine:
     def run_server_uring(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
         from src.network.replication import apply_wal_entries
         var use_sqpoll = self.config.server.use_sqpoll
-        if not self.ring[].setup(UInt32(1024), sqpoll=use_sqpoll):
-            if use_sqpoll:
-                print("io_uring SQPOLL setup failed (requires root or CAP_SYS_NICE), trying without SQPOLL...")
-                if not self.ring[].setup(UInt32(1024), sqpoll=False):
-                    print("io_uring setup failed, falling back to kqueue")
-                    self.run_server_kqueue(hnsw, db_size)
-                    return
-            else:
-                print("io_uring setup failed (errno check: run with --security-opt seccomp=unconfined), falling back to kqueue")
-                self.run_server_kqueue(hnsw, db_size)
-                return
+        var ring_ok = self.ring[].setup(UInt32(1024), sqpoll=use_sqpoll)
+        if not ring_ok and use_sqpoll:
+            print("io_uring SQPOLL setup failed (it needs root or CAP_SYS_NICE); trying without SQPOLL")
+            ring_ok = self.ring[].setup(UInt32(1024), sqpoll=False)
+        if not ring_ok:
+            # #21: this fell back to run_server_kqueue, which returns at once on
+            # Linux, so the worker thread ended while the listening socket stayed
+            # open: a port that accepted connections and never answered them.
+            # io_uring is missing under Docker's default seccomp profile, on old
+            # kernels and in sandboxes; epoll is always there.
+            print("io_uring unavailable (blocked by seccomp, or an old kernel): worker "
+                  + String(self.worker_id) + " uses epoll")
+            self.run_server_epoll(hnsw, db_size)
+            return
 
         if self.server.fd < 0 and not self.server.listen():
             return
@@ -1011,7 +999,7 @@ struct NetworkEngine:
         self.ring[].submit_provide_buffers(
             self.multishot_bufs, PBUF_SIZE, PBUF_RING_ENTRIES,
             buf_group_id, UInt16(0))
-        self.ring[].enter(Int32(1), Int32(1))
+        self.ring[].enter(Int32(1))
         var pbuf_peek = self.ring[].peek_cqe()
         if pbuf_peek.found and pbuf_peek.cqe.res >= 0:
             self.multishot_active = True
@@ -1027,51 +1015,40 @@ struct NetworkEngine:
 
         # Submit initial ACCEPT(s).
         self.ring[].submit_accept(self.server.fd)
-        var sqes_to_submit = Int32(1)
         if self.secondary_listen_fd >= 0:
             self.ring[].submit_accept(self.secondary_listen_fd)
-            sqes_to_submit += 1
         if self.binary_listen_fd >= 0:
             self.ring[].submit_accept(self.binary_listen_fd)
-            sqes_to_submit += 1
 
         var my_tid = external_call["pthread_self", UInt64]()
         print("--- Pion IO_URING Engine Active --- worker=" + String(self.worker_id) + " tid=" + String(my_tid))
 
-        # gh #173: at most one OP_TIMEOUT in flight; armed only while a blocked
-        # XREAD exists so the idle path keeps its zero-wakeup profile.
+        # #17: one 1 ms OP_TIMEOUT is ALWAYS in flight, so enter() returns at
+        # least every millisecond and the loop ticks with no client traffic, as
+        # the kqueue (1 ms) and epoll (1 ms) loops do. It used to be armed only
+        # while a blocked XREAD or a parked WAIT existed (gh #173), so an idle
+        # worker slept in enter() for good: the shutdown drain, the replica's
+        # apply-and-ACK, the TTL and field-expiry sweeps, a primary's FULLRESYNC
+        # service and the status heartbeat all stopped until a client sent bytes.
         var uring_timeout_armed = False
 
         while True:
-            # Adaptive min_complete: 0 (non-blocking) when P2 bus needs polling, else 1 (wait).
-            var _sh2 = self.slow_path.shared_hnsw
             # shard_active: always non-blocking when num_shards>1.
             # Non-coordinator workers have index_ready=False before shard build; if we wait for
             # trigger_pending they are ALREADY blocked in enter() when the trigger fires → poll=0.
             # Solution: any worker in a sharded config must never sleep in enter().
+            var _sh2 = self.slow_path.shared_hnsw
             var shard_active = (is_not_null(_sh2) and _sh2[].num_shards > 1)
             var min_complete = Int32(1)
             if self.num_workers > 1 and shard_active:
                 min_complete = Int32(0)
 
-            # gh #173: a blocked XREAD needs time-driven expiry, but with
-            # min_complete=1 and a silent client, enter() would sleep forever
-            # and drain_blocked_readers below would never run. Arm ONE 8 ms
-            # timeout SQE while any reader is blocked.
-            if (not uring_timeout_armed) and (self.slow_path.blocked_readers._count() > 0
-                                              or self.slow_path.parked_waits.count() > 0):
-                self.ring[].submit_timeout(8)
-                sqes_to_submit += 1
+            if not uring_timeout_armed:
+                self.ring[].submit_timeout(1)
                 uring_timeout_armed = True
 
-            # Submit all pending SQEs; wait for min_complete CQEs.
-            if sqes_to_submit > 0 or min_complete > 0:
-                self.ring[].enter(sqes_to_submit, min_complete)
-                sqes_to_submit = 0
-
-            # Track sq_tail before draining CQEs so we can count SQEs submitted inside
-            # CQE handlers (accept resubmit, submit_recv, submit_send via _flush_uring).
-            var sq_before = self.ring[].sq_tail[]
+            # Submit every SQE written since the last enter; wait for one CQE.
+            self.ring[].enter(min_complete)
 
             # Drain all available CQEs without blocking.
             while True:
@@ -1079,30 +1056,124 @@ struct NetworkEngine:
                 if not peek.found: break
                 var cqe = peek.cqe
                 self.ring[].advance_cq()
+                var kind = IOUring.ud_kind(cqe.user_data)
 
-                if self.ring[].is_timeout_completion(cqe.user_data):
-                    # gh #173: tick timeout fired (res=-ETIME expected) — its only
-                    # job was to wake the loop so the blocked-reader drain runs.
-                    uring_timeout_armed = False
-                    continue
+                if kind == UD_RECV:
+                    var fd = IOUring.fd_from_user_data(cqe.user_data)
+                    var ci = Int(fd)
+                    var n = Int(cqe.res)
+                    var has_buf = IOUring.cqe_has_buffer(cqe.flags)
+                    if self.ring[].is_stale(cqe.user_data):
+                        # The connection this RECV belonged to is gone.
+                        if has_buf:
+                            self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+                        continue
+                    # Multishot: while F_MORE is set the request stays armed.
+                    var is_multishot = self.uring_recv_armed[unsafe_offset=ci] == 2
+                    if not (is_multishot and IOUring.cqe_has_more(cqe.flags)):
+                        self.uring_recv_armed[unsafe_offset=ci] = 0
+                    if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+                        if has_buf:
+                            self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+                        self._uring_finish_close(fd, ci)
+                        continue
 
-                if self.ring[].is_accept_completion(cqe.user_data):
-                    # ---- ACCEPT completion ----
-                    var listen_fd = Int32(self.ring[].fd_from_user_data(cqe.user_data))
+                    if n <= 0:
+                        if is_multishot and n == -105 and self.uring_recv_armed[unsafe_offset=ci] == 0:
+                            # -ENOBUFS: the provided-buffer pool ran dry. The
+                            # connection is fine; re-arm (the buffers recycled
+                            # in this pass go to the kernel ahead of it).
+                            self.ring[].submit_recv_multishot(fd, buf_group_id)
+                            self.uring_recv_armed[unsafe_offset=ci] = 2
+                        else:
+                            # EOF, or a socket error. Re-arming on any error
+                            # (as before) spun forever on a reset connection.
+                            self._uring_close_fd(fd, ci)
+                        continue
+
+                    var stored = self.client_buffer_lens[unsafe_offset=ci]
+                    if is_multishot:
+                        if not has_buf:
+                            self._uring_close_fd(fd, ci)
+                            continue
+                        var bid = Int(IOUring.cqe_buffer_id(cqe.flags))
+                        var src_buf = self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE)
+                        if stored + n > CLIENT_BUF_SIZE:
+                            # An unfinished request larger than the client
+                            # buffer: close the connection, as the other loops
+                            # do when the buffer is full. Nothing is dispatched.
+                            self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+                            self._uring_close_fd(fd, ci)
+                            continue
+                        unsafe_memcpy(dest=self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), src=src_buf, count=n)
+                        # Recycle: re-provide this single buffer to the kernel
+                        self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+
+                    # The buffer holds stored + n bytes (multishot copied them
+                    # above; a plain RECV wrote at client_buffers[ci] + stored).
+                    # gh #85: dispatch + drain is the shared body.
+                    self._dispatch_recv_buffer(
+                        fd, ci, stored, n, kq, hnsw, db_size,
+                    )
+                    # Arm next RECV immediately — overlap with in-flight SEND.
+                    # For multishot: re-arm only if exhausted (uring_recv_armed==0).
+                    # For regular: always re-arm (saves one io_uring_enter round-trip).
+                    # gh #390: a parked fd is re-armed by _service_parked_waits.
+                    if self.uring_recv_armed[unsafe_offset=ci] == 0 and not self.slow_path.parked_waits.is_parked(ci):
+                        self._uring_arm_recv(fd, ci, buf_group_id)
+
+                elif kind == UD_SEND:
+                    var fd = IOUring.fd_from_user_data(cqe.user_data)
+                    var ci = Int(fd)
+                    if self.ring[].is_stale(cqe.user_data):
+                        continue
+                    var sent = Int(cqe.res)
+                    self.writer.uring_inflight[unsafe_offset=ci] = 0   # this SEND is over
+                    if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+                        self._uring_finish_close(fd, ci)
+                        continue
+                    if sent <= 0:
+                        self._uring_close_fd(fd, ci)
+                        continue
+                    # Bytes still owed: what this SEND did not take, plus what
+                    # was appended while it was in flight.
+                    var remaining = self.writer.pending_offsets[unsafe_offset=ci] - sent
+                    if remaining > 0:
+                        _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
+                            self.writer.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
+                            (self.writer.pending_buffers[unsafe_offset=ci].unsafe_offset(sent)).unsafe_bitcast[NoneType](),
+                            remaining,
+                        )
+                        self.writer.pending_offsets[unsafe_offset=ci] = remaining
+                        self.writer.uring_inflight[unsafe_offset=ci] = remaining
+                        self.ring[].submit_send(fd, self.writer.pending_buffers[unsafe_offset=ci], remaining)
+                    else:
+                        self.writer.pending_offsets[unsafe_offset=ci] = 0
+                        # All sent — arm the next RECV if none is armed.
+                        # gh #390: not while a WAIT is parked — _service_parked_waits
+                        # moves this buffer's bytes and re-arms itself.
+                        if self.uring_recv_armed[unsafe_offset=ci] == 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]() \
+                           and not self.slow_path.parked_waits.is_parked(ci):
+                            self._uring_arm_recv(fd, ci, buf_group_id)
+
+                elif kind == UD_ACCEPT:
+                    var listen_fd = IOUring.fd_from_user_data(cqe.user_data)
                     var new_fd = cqe.res
                     # Resubmit ACCEPT immediately so the next connection isn't missed.
                     self.ring[].submit_accept(listen_fd)
                     if new_fd >= 0:
+                        var ci = Int(new_fd)
+                        if ci >= URING_MAX_FDS:
+                            # Every per-fd table holds URING_MAX_FDS entries.
+                            _ = external_call["close", Int32](new_fd)
+                            continue
                         self.server.set_nonblocking(new_fd)
                         self.server.set_tcp_nodelay(new_fd)
-                        var ci = Int(new_fd)
                         self.client_buffer_lens[unsafe_offset=ci] = 0
                         self.uring_recv_armed[unsafe_offset=ci] = 0
-                        var _is_secondary = (self.secondary_listen_fd >= 0 and listen_fd == self.secondary_listen_fd)
+                        self.ring[].fd_closing[unsafe_offset=ci] = 0
                         var is_binary = (self.binary_listen_fd >= 0 and listen_fd == self.binary_listen_fd)
                         # All connections are local-affinity (shared-nothing model).
-                        # Cross-worker P2 routing is disabled — each worker handles its own
-                        # connections independently, like Dragonfly's per-thread sharding.
                         var affinity_val = UInt8(1)
                         if is_binary:
                             affinity_val = UInt8(2)
@@ -1116,129 +1187,14 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=ci] = 0
                         self.writer.uring_inflight[unsafe_offset=ci] = 0
-                        # Arm first RECV for new connection.
-                        if self.multishot_active:
-                            self.ring[].submit_recv_multishot(new_fd, buf_group_id)
-                            self.uring_recv_armed[unsafe_offset=ci] = 2  # 2 = multishot (persistent)
-                        else:
-                            self.ring[].submit_recv(new_fd, self.client_buffers[unsafe_offset=ci], CLIENT_BUF_SIZE)
-                            self.uring_recv_armed[unsafe_offset=ci] = 1
+                        self._uring_arm_recv(new_fd, ci, buf_group_id)
 
-                elif self.ring[].is_send_completion(cqe.user_data):
-                    # ---- SEND completion ----
-                    var fd = self.ring[].fd_from_user_data(cqe.user_data)
-                    var ci = Int(fd)
-                    var sent = Int(cqe.res)
-                    if sent <= 0:
-                        self._uring_close_fd(fd, ci)
-                    else:
-                        var inflight = self.writer.uring_inflight[unsafe_offset=ci]
-                        var total_pending = self.writer.pending_offsets[unsafe_offset=ci]
-                        if sent >= inflight:
-                            var accumulated = total_pending - inflight
-                            if accumulated > 0:
-                                # More data was appended during the in-flight send.
-                                _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
-                                    self.writer.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
-                                    (self.writer.pending_buffers[unsafe_offset=ci].unsafe_offset(inflight)).unsafe_bitcast[NoneType](),
-                                    accumulated,
-                                )
-                                self.writer.pending_offsets[unsafe_offset=ci] = accumulated
-                                self.writer.uring_inflight[unsafe_offset=ci] = accumulated
-                                self.ring[].submit_send(fd, self.writer.pending_buffers[unsafe_offset=ci], accumulated)
-                            else:
-                                # All done — arm next RECV if not already armed.
-                                self.writer.pending_offsets[unsafe_offset=ci] = 0
-                                self.writer.uring_inflight[unsafe_offset=ci] = 0
-                                # gh #390: not while a WAIT is parked — _service_parked_waits
-                                # moves this buffer's bytes and re-arms itself.
-                                if self.uring_recv_armed[unsafe_offset=ci] == 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]() \
-                                   and not self.slow_path.parked_waits.is_parked(ci):
-                                    var stored = self.client_buffer_lens[unsafe_offset=ci]
-                                    if self.multishot_active:
-                                        self.ring[].submit_recv_multishot(fd, buf_group_id)
-                                        self.uring_recv_armed[unsafe_offset=ci] = 2
-                                    else:
-                                        self.ring[].submit_recv(fd, self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), CLIENT_BUF_SIZE - stored)
-                                        self.uring_recv_armed[unsafe_offset=ci] = 1
-                        else:
-                            # Partial send — memmove remainder to front and resubmit.
-                            var remaining_total = total_pending - sent
-                            _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
-                                self.writer.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
-                                (self.writer.pending_buffers[unsafe_offset=ci].unsafe_offset(sent)).unsafe_bitcast[NoneType](),
-                                remaining_total,
-                            )
-                            self.writer.pending_offsets[unsafe_offset=ci] = remaining_total
-                            self.writer.uring_inflight[unsafe_offset=ci] = remaining_total
-                            self.ring[].submit_send(fd, self.writer.pending_buffers[unsafe_offset=ci], remaining_total)
-
-                elif self.ring[].is_provide_buffers_completion(cqe.user_data):
-                    # ---- PROVIDE_BUFFERS completion (multishot buffer replenish) ----
-                    pass  # Nothing to do — buffers are now available to kernel
-
-                else:
-                    # ---- RECV completion ----
-                    var fd = self.ring[].fd_from_user_data(cqe.user_data)
-                    var ci = Int(fd)
-                    var n = Int(cqe.res)
-
-                    # Multishot: check F_MORE flag. If set, more CQEs will follow
-                    # without re-arming. If not set, multishot is exhausted — re-arm.
-                    var is_multishot = self.uring_recv_armed[unsafe_offset=ci] == 2
-                    if is_multishot:
-                        if IOUring.cqe_has_more(cqe.flags):
-                            pass  # multishot still active, don't touch uring_recv_armed
-                        else:
-                            self.uring_recv_armed[unsafe_offset=ci] = 0  # multishot exhausted
-                    else:
-                        self.uring_recv_armed[unsafe_offset=ci] = 0  # regular recv consumed
-
-                    # Multishot: copy data from provided buffer to per-fd client buffer
-                    if is_multishot and n > 0 and IOUring.cqe_has_buffer(cqe.flags):
-                        var bid = Int(IOUring.cqe_buffer_id(cqe.flags))
-                        var src_buf = self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE)
-                        var stored = self.client_buffer_lens[unsafe_offset=ci]
-                        if stored + n <= CLIENT_BUF_SIZE:
-                            unsafe_memcpy(dest=self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), src=src_buf, count=n)
-                        # Recycle: re-provide this single buffer to the kernel
-                        self.ring[].submit_provide_buffers(
-                            src_buf, PBUF_SIZE, 1, buf_group_id, UInt16(bid))
-
-                    if n <= 0:
-                        if is_multishot and n < 0:
-                            # Multishot error (e.g. -ENOBUFS when buffer pool exhausted).
-                            # Don't close — just re-arm. uring_recv_armed was already set to 0
-                            # above (F_MORE not set on error CQEs).
-                            if self.uring_recv_armed[unsafe_offset=ci] == 0:
-                                self.ring[].submit_recv_multishot(fd, buf_group_id)
-                                self.uring_recv_armed[unsafe_offset=ci] = 2
-                        else:
-                            self._uring_close_fd(fd, ci)
-                    else:
-                        # For both multishot (data copied above) and regular (kernel wrote
-                        # directly to client_buffers[ci] + stored), the buffer holds
-                        # stored + n bytes. gh #85: dispatch + drain is the shared body.
-                        var stored = self.client_buffer_lens[unsafe_offset=ci]
-                        self._dispatch_recv_buffer(
-                            fd, ci, stored, n, kq, hnsw, db_size,
-                        )
-                        # Arm next RECV immediately — overlap with in-flight SEND.
-                        # For multishot: re-arm only if exhausted (uring_recv_armed==0).
-                        # For regular: always re-arm (saves one io_uring_enter round-trip).
-                        # This is the genuinely poller-specific half; it stays here.
-                        # gh #390: a parked fd is re-armed by _service_parked_waits.
-                        if self.uring_recv_armed[unsafe_offset=ci] == 0 and not self.slow_path.parked_waits.is_parked(ci):
-                            var cur_len = self.client_buffer_lens[unsafe_offset=ci]
-                            if self.multishot_active:
-                                self.ring[].submit_recv_multishot(fd, buf_group_id)
-                                self.uring_recv_armed[unsafe_offset=ci] = 2
-                            else:
-                                self.ring[].submit_recv(fd, self.client_buffers[unsafe_offset=ci].unsafe_offset(cur_len), CLIENT_BUF_SIZE - cur_len)
-                                self.uring_recv_armed[unsafe_offset=ci] = 1
-
-            # Count all SQEs submitted during CQE processing (accept resubmit + recv + send via _flush_uring).
-            sqes_to_submit += Int32(self.ring[].sq_tail[] - sq_before)
+                elif kind == UD_TIMEOUT:
+                    # The tick timeout fired (res=-ETIME); its only job was to
+                    # wake the loop.
+                    uring_timeout_armed = False
+                # UD_PBUF (buffers are back with the kernel) and UD_CANCEL need
+                # nothing: a cancelled request reports through its own CQE.
 
             # gh #85b: KV_BUS routing was removed here — bus-drain and bus-serve
             # were gated by `comptime if KV_BUS_ENABLED` (False since gh #48).
@@ -1266,15 +1222,11 @@ struct NetworkEngine:
             # Deferred shard responses: drain every tick when queries are pending
             # (was gated to every 64 ticks — added 2×64-tick round-trip latency).
             if self.slow_path.deferred_count > 0:
-                var _sq_b3d = self.ring[].sq_tail[]
                 self.slow_path.drain_deferred_shard_responses(hnsw, self.writer, self.server, Int32(-1))
-                sqes_to_submit += Int32(self.ring[].sq_tail[] - _sq_b3d)
 
             # gh #390: answer parked WAITs (every tick while any is parked).
             if self.slow_path.parked_waits.count() > 0:
-                var _sq_pw = self.ring[].sq_tail[]
                 self._service_parked_waits(Int32(-1), hnsw, db_size, Int(buf_group_id))
-                sqes_to_submit += Int32(self.ring[].sq_tail[] - _sq_pw)
 
             # Periodic housekeeping: every 64 ticks (gh #85 — unified helper).
             if self.ttl_sweep_counter & 0x3F == 0:
@@ -1282,7 +1234,101 @@ struct NetworkEngine:
                 # gh #259: WAL is durably flushed; end the worker thread so
                 # main() can fall out of pthread_join and exit cleanly.
                 if self.shutting_down:
+                    self._uring_stop_accepting()
                     return
+
+    @always_inline
+    def _uring_arm_recv(mut self, fd: Int32, ci: Int, buf_group_id: UInt16):
+        """Arm the next RECV for a connection that has none armed. A plain RECV
+        reads straight into the client buffer after the bytes it already holds;
+        when an unfinished request has filled that buffer, the connection is
+        closed (a zero-length RECV used to stand in for that, by reading as EOF)."""
+        if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+            return
+        if self.multishot_active:
+            self.ring[].submit_recv_multishot(fd, buf_group_id)
+            self.uring_recv_armed[unsafe_offset=ci] = 2  # 2 = multishot (persistent)
+        else:
+            var stored = self.client_buffer_lens[unsafe_offset=ci]
+            if stored >= CLIENT_BUF_SIZE:
+                self._uring_close_fd(fd, ci)
+                return
+            self.ring[].submit_recv(fd, self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), CLIENT_BUF_SIZE - stored)
+            self.uring_recv_armed[unsafe_offset=ci] = 1
+
+    @always_inline
+    def _uring_recycle_pbuf(mut self, cqe_flags: UInt32, buf_group_id: UInt16):
+        """Hand a provided buffer a RECV completion carried back to the kernel."""
+        var bid = Int(IOUring.cqe_buffer_id(cqe_flags))
+        self.ring[].submit_provide_buffers(
+            self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE), PBUF_SIZE, 1, buf_group_id, UInt16(bid))
+
+    def _uring_stop_accepting(mut self):
+        """#22: on a graceful stop, cancel this worker's ACCEPTs and wait for
+        them to complete before the worker returns. An ACCEPT in flight holds a
+        reference to the listening socket, and the kernel tears a ring down
+        asynchronously after the process exits, so the port used to keep
+        listening (and accepting into its backlog) for a moment after the
+        server was gone. With no request left on it, the socket closes with the
+        process. Bounded at ~200 ms: shutdown must not hang on it."""
+        var want = 1
+        self.ring[].submit_cancel((UD_ACCEPT << 32) | UInt64(UInt32(self.server.fd)))
+        if self.secondary_listen_fd >= 0:
+            self.ring[].submit_cancel((UD_ACCEPT << 32) | UInt64(UInt32(self.secondary_listen_fd)))
+            want += 1
+        if self.binary_listen_fd >= 0:
+            self.ring[].submit_cancel((UD_ACCEPT << 32) | UInt64(UInt32(self.binary_listen_fd)))
+            want += 1
+        var done = 0
+        var timeout_armed = False
+        for _ in range(200):
+            if done >= want:
+                break
+            if not timeout_armed:
+                self.ring[].submit_timeout(1)
+                timeout_armed = True
+            self.ring[].enter(Int32(1))
+            while True:
+                var peek = self.ring[].peek_cqe()
+                if not peek.found: break
+                var cqe = peek.cqe
+                self.ring[].advance_cq()
+                var kind = IOUring.ud_kind(cqe.user_data)
+                if kind == UD_ACCEPT:
+                    if cqe.res >= 0:
+                        # A connection that arrived first: it is not going to be served.
+                        _ = external_call["close", Int32](cqe.res)
+                    else:
+                        done += 1
+                elif kind == UD_TIMEOUT:
+                    timeout_armed = False
+
+    @always_inline
+    def _uring_close_fd(mut self, fd: Int32, ci: Int):
+        """Close a connection on the io_uring path, in two phases. This, the
+        first, stops it: shutdown() shows the peer the close at once and ends
+        its in-flight RECV and SEND, which are also cancelled. The second,
+        `_uring_finish_close`, runs once no RECV or SEND is in flight for the
+        fd: only then are its buffers freed and its number released, because
+        until then the kernel still owns them. The generation stamped on every
+        completion backs this up (see UD_* in io_uring.mojo)."""
+        if self.ring[].fd_closing[unsafe_offset=ci] == 0:
+            self.ring[].fd_closing[unsafe_offset=ci] = 1
+            _ = external_call["shutdown", Int32](fd, Int32(2))   # SHUT_RDWR
+            if self.uring_recv_armed[unsafe_offset=ci] != 0:
+                self.ring[].submit_cancel(self.ring[].make_ud(UD_RECV, fd))
+            if self.writer.uring_inflight[unsafe_offset=ci] != 0:
+                self.ring[].submit_cancel(self.ring[].make_ud(UD_SEND, fd))
+        self._uring_finish_close(fd, ci)
+
+    @always_inline
+    def _uring_finish_close(mut self, fd: Int32, ci: Int):
+        """Second phase of `_uring_close_fd`: nothing is in flight any more."""
+        if self.uring_recv_armed[unsafe_offset=ci] != 0 or self.writer.uring_inflight[unsafe_offset=ci] != 0:
+            return
+        self.ring[].retire_fd(fd)
+        self.ring[].fd_closing[unsafe_offset=ci] = 0
+        self._close_fd_common(fd, ci)
 
     def run_server_epoll(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
         """epoll event loop — lowest overhead Linux path for P=1 workloads.
@@ -1384,6 +1430,12 @@ struct NetworkEngine:
                     while True:
                         var new_fd = self.server.accept_from(fd)
                         if new_fd < 0: break
+                        if Int(new_fd) >= URING_MAX_FDS:
+                            # Every per-fd table holds 65536 entries; a client
+                            # that opened that many connections would index
+                            # past them.
+                            _ = external_call["close", Int32](new_fd)
+                            continue
                         self.server.set_nonblocking(new_fd)
                         self.server.set_tcp_nodelay(new_fd)
                         self.client_buffer_lens[unsafe_offset=Int(new_fd)] = 0
@@ -1424,8 +1476,13 @@ struct NetworkEngine:
                     var stored_len = self.client_buffer_lens[unsafe_offset=client_idx]
                     var recv_size = CLIENT_BUF_SIZE - stored_len
                     if recv_size <= 0:
-                        # Buffer full — cannot recv. Process existing data first.
-                        # Do NOT call recv(size=0) which returns 0 and triggers false EOF close.
+                        # The buffer is full of one unfinished request (every
+                        # complete one was dispatched when it arrived), so it
+                        # can never complete. `continue` here spun the worker
+                        # forever: level-triggered epoll reports the fd again
+                        # at once. Close it, as kqueue and io_uring do.
+                        _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_DEL, fd, ev)
+                        self._close_fd_common(fd, client_idx)
                         continue
                     var n = self.server.recv(fd, client_buffer.unsafe_offset(stored_len), recv_size)
                     if n <= 0:
@@ -1579,7 +1636,9 @@ struct NetworkEngine:
                     var _is_secondary = (self.secondary_listen_fd >= 0 and fd == self.secondary_listen_fd)
                     var is_binary = (self.binary_listen_fd >= 0 and fd == self.binary_listen_fd)
                     var new_fd = self.server.accept_from(fd)
-                    if new_fd >= 0:
+                    if new_fd >= 0 and Int(new_fd) >= URING_MAX_FDS:
+                        _ = external_call["close", Int32](new_fd)   # past the per-fd tables
+                    elif new_fd >= 0:
                         self.server.set_nonblocking(new_fd)
                         self.server.set_tcp_nodelay(new_fd)
                         # Clear stale buffer from previous connection on this FD (handles RST cleanup)
