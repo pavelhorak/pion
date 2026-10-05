@@ -1361,6 +1361,12 @@ server = "self"
 tier = "gate"
 timeout = 300
 
+[[test]]
+file = "tests/test_blocking.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
 # Every keyword argument of the differential's scripts, mangled: a parser that
 # matches a keyword by its first letters, or ignores an unknown one, shows up
 # as a divergence from Redis (#32).

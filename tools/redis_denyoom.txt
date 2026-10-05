@@ -1,6 +1,8 @@
 append
 bitfield
 bitop
+blmove
+brpoplpush
 copy
 decr
 decrby

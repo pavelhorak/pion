@@ -163,6 +163,7 @@ int pion_read_secret_file(const char *path, char *out, int cap) {
             refusals as mode 0; the value is returned as a double.
    Returns 1 and stores *out on success, 0 on a refusal. */
 #include <stdlib.h>
+#include <limits.h>
 #include <ctype.h>
 #include <math.h>
 
@@ -223,6 +224,25 @@ static int pion_string2ld(const char* p, int64_t n, long double* out) {
     if (errno == EINVAL) return 0;
     *out = v;
     return 1;
+}
+
+/* A blocking command's timeout, as Redis's getTimeoutFromObjectOrReply reads
+   seconds (#38): string2ld, times 1000, ceil. 0 with *out = 0 (block forever)
+   or the absolute deadline in ms from now_ms; 1 "timeout is not a float or out
+   of range", 2 "timeout is out of range", 3 "timeout is negative". */
+int64_t pion_parse_block_timeout(const char* p, int64_t n, int64_t now_ms, int64_t* out) {
+    long double v;
+    if (!pion_string2ld(p, n, &v)) return 1;
+    v *= 1000.0L;
+    if (v > (long double)LLONG_MAX) return 2;
+    long long t = (long long)ceill(v);
+    if (t < 0) return 3;
+    if (t > 0) {
+        if (t > LLONG_MAX - now_ms) return 2;
+        t += now_ms;
+    }
+    *out = t;
+    return 0;
 }
 
 int pion_ld_kind(const char* p, int64_t n) {

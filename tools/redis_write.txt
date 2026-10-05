@@ -1,8 +1,14 @@
 append
 bitfield
 bitop
+blmove
+blmpop
 blpop
 brpop
+brpoplpush
+bzmpop
+bzpopmax
+bzpopmin
 copy
 decr
 decrby

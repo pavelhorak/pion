@@ -471,6 +471,14 @@ comptime _CONFIG_COUNT = 7
 
 
 @always_inline
+def _heap_bytes(s: String) -> Pointer[UInt8, MutUntrackedOrigin]:
+    """A heap copy of s's bytes, which the caller frees."""
+    var n = s.byte_length()
+    var h = alloc[UInt8](n + 1)
+    unsafe_memcpy(dest=h, src=s.unsafe_ptr(), count=n)
+    return h
+
+
 def _config_name(k: Int) -> StaticString:
     """The parameters CONFIG GET reports, the ones whose value Pion can state
     truthfully (see _config_known_value)."""
@@ -511,30 +519,32 @@ def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         # gh #172: RESP2 emits the flat array it always did; RESP3 a map.
         var hits = List[Int]()
         for k in range(_CONFIG_COUNT):
-            var name = _config_name(k)
+            # The name's bytes on the heap: a laundered pointer into a local
+            # String dangles once the String is destroyed after its last use.
+            var nh = _heap_bytes(_config_name(k))
+            var nl = _config_name(k).byte_length()
             for j in range(i + 2, num_tokens):
                 var pt = tokens[unsafe_offset=j]
                 var low = alloc[UInt8](max(pt.length, 1))
                 for b in range(pt.length):
                     var c = pt.ptr[unsafe_offset=b]
                     low[unsafe_offset=b] = c | 0x20 if c >= 65 and c <= 90 else c
-                var hit = _glob_match(low, pt.length, 0,
-                                      Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(name.unsafe_ptr())),
-                                      name.byte_length(), 0)
+                var hit = _glob_match(low, pt.length, 0, nh, nl, 0)
                 low.unsafe_free()
                 if hit:
                     hits.append(k)
                     break
+            nh.unsafe_free()
         # Redis replies an empty map to patterns that match nothing (`*0`
         # under RESP2): "no such parameter", not one that exists and is blank.
         writer.append_map_header(len(hits))
         for h in range(len(hits)):
-            var name = _config_name(hits[h])
+            var nh = _heap_bytes(_config_name(hits[h]))
+            var nl = _config_name(hits[h]).byte_length()
             var found = False
-            var val = _config_known_value(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(name.unsafe_ptr())),
-                                          name.byte_length(), config, found)
-            writer.append_bulk_string_response(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(name.unsafe_ptr())),
-                                               name.byte_length())
+            var val = _config_known_value(nh, nl, config, found)
+            writer.append_bulk_string_response(nh, nl)
+            nh.unsafe_free()
             writer.append_bulk_string_response(val.unsafe_ptr(), val.byte_length())
         return num_tokens - i - 1
     if arg_eq(sub.ptr, sub.length, "set"):

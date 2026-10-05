@@ -712,15 +712,15 @@ def test_pion_parity():
     res = send_cmd_bytes(sock, ["CLIENT", "NO-EVICT", "on"])
     assert_contains(res, "OK", "CLIENT NO-EVICT")
 
-    # BLPOP (should return null, not hang or error)
-    print("Testing BLPOP stub...")
-    res = send_cmd_bytes(sock, ["BLPOP", "nonexistent", "0"])
-    assert "$-1" in res or "*-1" in res, f"BLPOP should return null, got: {res!r}"
+    # BLPOP / BRPOP block (#38): on empty keys they wait out the timeout and
+    # answer a null array. (Waking on a push is tests/test_blocking.py.)
+    print("Testing BLPOP timeout...")
+    res = send_cmd_bytes(sock, ["BLPOP", "nonexistent", "0.05"])
+    assert "*-1" in res, f"BLPOP should time out with a null array, got: {res!r}"
 
-    # BRPOP (should return null, not hang or error)
-    print("Testing BRPOP stub...")
-    res = send_cmd_bytes(sock, ["BRPOP", "nonexistent", "0"])
-    assert "$-1" in res or "*-1" in res, f"BRPOP should return null, got: {res!r}"
+    print("Testing BRPOP timeout...")
+    res = send_cmd_bytes(sock, ["BRPOP", "nonexistent", "0.05"])
+    assert "*-1" in res, f"BRPOP should time out with a null array, got: {res!r}"
 
     # EVAL (now supported — Lua 5.1 engine)
     print("Testing EVAL basic...")

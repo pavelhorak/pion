@@ -129,13 +129,14 @@
 | LPOS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Added in Redis 6.0.6 |
 | LMOVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Works on ziplist and quicklist |
 | LMPOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | Added in Redis 7.0; Redis's argument rules (#32) |
-| BLPOP | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Pops correctly from the first non-empty key. **Does not block**: the TIMEOUT argument is parsed and ignored, so an all-empty key set answers nil immediately instead of waiting. `BLPOP k 0` will not wait for a producer |
-| BRPOP | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Right-hand form; same non-blocking caveat as BLPOP |
-| BLMOVE | ✅ | ✅ | ❌ | — | ✅ | Blocking |
-| BLMPOP | ✅ | ✅ | ❌ | — | ✅ | Blocking |
+| BLPOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | Blocks until a push or the timeout (seconds, 0 = forever); clients on a key are served in the order they blocked |
+| BRPOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | Right-hand form of BLPOP |
+| BLMOVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Blocks while the source is empty |
+| BLMPOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | Blocks while every key is empty |
 | LPUSHX | ✅ | ✅ | ✅ | **SLOW** | ✅ | Pushes only if the key exists; `0` otherwise
 | RPUSHX | ✅ | ✅ | ✅ | **SLOW** | ✅ | Right-hand form
 | RPOPLPUSH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deprecated in Redis 6.2 for LMOVE. Validates BOTH keys before moving anything
+| BRPOPLPUSH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deprecated in Redis 6.2 for BLMOVE; blocks while the source is empty |
 
 ---
 
@@ -198,9 +199,9 @@
 | ZDIFFSTORE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Stores diff into destination key |
 | ZRANDMEMBER | ✅ | ✅ | ✅ | **SLOW** | ✅ | Random member(s); positive/negative count; WITHSCORES |
 | ZMPOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | numkeys/MIN/MAX/COUNT; nested [member, score] pairs; nil when no key has elements |
-| BZPOPMIN | ✅ | ✅ | ❌ | — | ✅ | Blocking |
-| BZPOPMAX | ✅ | ✅ | ❌ | — | ✅ | Blocking |
-| BZMPOP | ✅ | ✅ | ❌ | — | ✅ | Blocking |
+| BZPOPMIN | ✅ | ✅ | ✅ | **SLOW** | ✅ | Blocks until a ZADD or the timeout |
+| BZPOPMAX | ✅ | ✅ | ✅ | **SLOW** | ✅ | Blocks until a ZADD or the timeout |
+| BZMPOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | Blocks while every key is empty |
 | ZSCAN | ✅ | ✅ | ✅ | **SLOW** | ✅ | Cursor ignored; returns all members with scores |
 
 ---
@@ -649,7 +650,7 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 | `r.incr(key)` → INCRBY | Python redis-py sends `INCRBY key 1`, not `INCR key`. Both work; `INCR` takes the fast path. |
 | Multi-worker + AI | When `--flare` / `--emb-enabled` is set, Pion auto-caps to `-w 1`. SemanticCache is per-worker and cannot share state across workers. |
 | SCAN cursor semantics | SCAN is implemented but returns all keys in a single sweep (cursor always returns 0 on second call). Applications that rely on incremental cursor-based iteration may need adjustment. |
-| Blocking commands | BLPOP/BRPOP pop correctly but **do not block**: an all-empty key set answers nil at once. The other blocking forms are not implemented. Poll with LPOP/RPOP/ZPOPMIN instead. |
+| Blocking commands | BLPOP, BRPOP, BRPOPLPUSH, BLMOVE, BLMPOP, BZPOPMIN, BZPOPMAX and BZMPOP block as in Redis. The wait is per worker: with `-w N > 1` a push on another worker's keyspace never reaches them (see `--independent-workers`). Inside MULTI/EXEC and inside a script they answer at once. |
 | Lua scripting | `redis.call()` runs every command. A script that runs past `--lua-time-limit` without writing is stopped, because a worker cannot answer SCRIPT KILL mid-script (see §12). |
 
 ---

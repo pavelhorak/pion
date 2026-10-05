@@ -1594,6 +1594,41 @@ SEMANTIC_SCRIPTS = [
         ["FUNCTION", "FLUSH", "NOPE"], ["FUNCTION", "NOPE"], ["FUNCTION", "KILL"], ["FUNCTION", "HELP"],
         ["FUNCTION", "DUMP", "x"], ["FUNCTION"], ["FUNCTION", "FLUSH", "SYNC"], ["FUNCTION", "LIST"],
         ["DEL", "%K"]]),
+
+    # #38: the blocking commands' immediate answers: served at once, the
+    # argument and timeout errors in Redis's order. (Blocking itself, and the
+    # wake, are tests/test_blocking.py.) Steps that wait out a timeout come
+    # last and carry no keyword: Redis resolves blocking timeouts on its 100 ms
+    # cron, and --mutate replays every step before a mangled keyword.
+    ("blocking commands: immediate replies and errors", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["BLPOP", "%K", "x"], ["BLPOP", "%K", "-1"], ["BLPOP", "%K", "1e100"], ["BLPOP", "%K", "inf"],
+        ["BLPOP", "%K", "nan"], ["BLPOP", "%K", " 0.01"], ["BLPOP", "%K", "0.01 "], ["BLPOP", "%K", ""],
+        ["BLPOP", "%K"],
+        ["BLMOVE", "%K", "%K2", "LEFT", "NOPE", "x"], ["BLMOVE", "%K", "%K2", "LEFT", "RIGHT", "x"],
+        ["BLMOVE", "%K", "%K2", "LEFT"], ["BRPOPLPUSH", "%K", "%K2", "-1"], ["BRPOPLPUSH", "%K", "%K2"],
+        ["BLMPOP", "x", "1", "%K", "LEFT"], ["BLMPOP", "0.01", "0", "%K", "LEFT"], ["BLMPOP", "x", "0", "%K", "LEFT"],
+        ["BLMPOP", "0.01", "1", "%K", "NOPE"], ["BLMPOP", "0.01", "1", "%K", "LEFT", "COUNT", "0"],
+        ["BLMPOP", "0.01", "2", "%K", "LEFT"], ["BLMPOP", "-1", "1", "%K", "LEFT"],
+        ["BZPOPMAX", "%K", "x"], ["BZPOPMIN", "%K"],
+        ["BZMPOP", "0.01", "1", "%K", "NOPE"], ["BZMPOP", "-1", "1", "%K", "MIN"],
+        ["RPUSH", "%K", "a", "b", "c"], ["BLPOP", "%K", "0"], ["BRPOP", "%K", "%K2", "0"],
+        ["BLMOVE", "%K", "%K2", "LEFT", "RIGHT", "0"], ["LRANGE", "%K2", "0", "-1"],
+        ["RPUSH", "%K", "x", "y"], ["BRPOPLPUSH", "%K", "%K2", "0"], ["LRANGE", "%K2", "0", "-1"],
+        ["BLMPOP", "0", "2", "%K3", "%K", "RIGHT", "COUNT", "5"],
+        ["SET", "%K3", "str"], ["BLPOP", "%K3", "0"],
+        ["RPUSH", "%K", "z"], ["BRPOPLPUSH", "%K", "%K3", "0"], ["LRANGE", "%K", "0", "-1"],
+        ["BLMOVE", "%K", "%K3", "LEFT", "LEFT", "0"], ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["ZADD", "%K", "1", "a", "2", "b", "3", "c"], ["BZPOPMIN", "%K", "0"], ["BZPOPMAX", "%K2", "%K", "0"],
+        ["BZMPOP", "0", "1", "%K", "MAX", "COUNT", "5"],
+        ["SET", "%K2", "str"], ["BZPOPMIN", "%K2", "0"], ["BZMPOP", "0.01", "1", "%K2", "MIN"],
+        ["DEL", "%K"], ["DEL", "%K2"]]),
+    ("blocking commands: a short timeout answers nil", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["SET", "%K3", "str"],
+        ["BLMOVE", "%K", "%K2", "LEFT", "RIGHT", "0.001"], ["BLMPOP", "0.001", "1", "%K", "LEFT"],
+        ["BZMPOP", "0.001", "1", "%K", "MIN"],
+        ["BLPOP", "%K", "0.001"], ["BRPOP", "%K", "%K2", "0.001"], ["BRPOPLPUSH", "%K", "%K2", "0.001"],
+        ["BZPOPMIN", "%K", "0.001"], ["BLPOP", "%K", "%K3", "0.001"], ["DEL", "%K3"]]),
 ]
 
 

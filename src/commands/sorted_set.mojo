@@ -1249,58 +1249,41 @@ def handle_zrevrangebylex(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
 
 
 @always_inline
-def handle_zmpop(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], wal: UnsafePointer[WAL, MutUntrackedOrigin]) raises -> Int:
-    """ZMPOP numkeys key [key ...] MIN|MAX [COUNT count] (gh #251).
-
-    Was unimplemented — it errored while its list twin LMPOP worked. Pops from
-    the FIRST key that holds a non-empty zset and replies
-    `[key, [[member, score], ...]]`; nil when no key has anything, which is why
-    a missing key is skipped rather than being an error.
+def zmpop_pop(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first_key: Int, numkeys: Int,
+              from_min: Bool, count: Int, mut writer: ResponseWriter,
+              keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+              wal: UnsafePointer[WAL, MutUntrackedOrigin]) raises -> Bool:
+    """ZMPOP's (and BZMPOP's, #38) pop: from the FIRST key that holds a
+    non-empty zset, up to `count` members, replied `[key, [[member, score], ...]]`.
+    A missing key is skipped, a wrong-type one is an error. True when it
+    replied; False when no key held anything (nothing written).
 
     Note the reply nests each member/score as its own 2-element array — unlike
     ZPOPMIN/ZPOPMAX, which flatten them. Emitting the flat shape here would
     parse as half as many pairs on the client."""
-    if i + 3 >= num_tokens:
-        writer.append_error_response("ERR wrong number of arguments for 'zmpop' command")
-        return 0
-    var _mp = parse_mpop(tokens, i + 1, num_tokens, True)
-    if _mp.error.byte_length() > 0:
-        writer.append_error_response(_mp.error)
-        return num_tokens - 1 - i
-    var _nk = _mp.numkeys
-    var _from_min = _mp.first
-    var _count = _mp.count
-    var _ci = num_tokens - 1
-
-    for _ki in range(_nk):
-        var _kt = i + 2 + _ki
-        var _kstr = tokens[_kt].value()
-        var _kv = keyspace[].get(_kstr)
+    for _ki in range(numkeys):
+        var _kt = first_key + _ki
+        var _kv = keyspace[].get(GenericValue.borrow(tokens[_kt].ptr, tokens[_kt].length))
         if _kv.is_none(): continue
         if _kv.type.value != ValueType.ZSET:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            return _ci - i
+            return True
         var _zp = _kv.as_zset().bitcast[SlabSkipList]()
         if _zp[].length == 0: continue
 
-        var _popc = _count if _count < _zp[].length else _zp[].length
+        var _popc = count if count < _zp[].length else _zp[].length
 
-        var _h = "*2\r\n"
-        writer.append_to_response(_h.unsafe_ptr(), _h.byte_length())
-        writer.append_bulk_string_response(_kstr.unsafe_ptr(), _kstr.byte_length())
-        var _ah = "*" + String(_popc) + "\r\n"
-        writer.append_to_response(_ah.unsafe_ptr(), _ah.byte_length())
-        # gh #394: pop from the requested end, O(log n) each. This copied every
-        # node out, reset() the set and re-inserted the survivors, leaked each
-        # popped member, and left an emptied zset's container allocated. MAX
-        # pops the highest first (the gh #238 ZPOPMAX lesson).
+        writer.append_array_header(2)
+        writer.append_bulk_string_response(tokens[_kt].ptr, tokens[_kt].length)
+        writer.append_array_header(_popc)
+        # gh #394: pop from the requested end, O(log n) each. MAX pops the
+        # highest first (the gh #238 ZPOPMAX lesson).
         var _wb = alloc[UInt8](64)
         for _ in range(_popc):
-            var _r = _zp[].pop_min() if _from_min else _zp[].pop_max()
+            var _r = _zp[].pop_min() if from_min else _zp[].pop_max()
             if not _r.valid:
                 break
-            var _pair = "*2\r\n"
-            writer.append_to_response(_pair.unsafe_ptr(), _pair.byte_length())
+            writer.append_array_header(2)
             writer.append_bulk_value_response(_r.obj)
             writer.append_score_response(_r.score)   # RESP3: a double, as Redis
             # gh #170: log the RESOLVED effect (a ZREM per popped member).
@@ -1316,10 +1299,23 @@ def handle_zmpop(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             _ = remove_and_free(keyspace, GenericValue.borrow(tokens[_kt].ptr, tokens[_kt].length))
             if is_not_null(wal):
                 _ = wal[].append(2, tokens[_kt].ptr, tokens[_kt].length)
-        return _ci - i
+        return True
+    return False
 
-    writer.append_null_array_response()   # Redis: a null ARRAY when nothing popped
-    return _ci - i
+
+def handle_zmpop(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], wal: UnsafePointer[WAL, MutUntrackedOrigin]) raises -> Int:
+    """ZMPOP numkeys key [key ...] MIN|MAX [COUNT count] (gh #251): zmpop_pop,
+    and a null array when no key has anything."""
+    if i + 3 >= num_tokens:
+        writer.append_error_response("ERR wrong number of arguments for 'zmpop' command")
+        return 0
+    var _mp = parse_mpop(tokens, i + 1, num_tokens, True)
+    if _mp.error.byte_length() > 0:
+        writer.append_error_response(_mp.error)
+        return num_tokens - 1 - i
+    if not zmpop_pop(tokens, i + 2, _mp.numkeys, _mp.first, _mp.count, writer, keyspace, wal):
+        writer.append_null_array_response()   # Redis: a null ARRAY when nothing popped
+    return num_tokens - 1 - i
 
 
 @always_inline

@@ -18,7 +18,7 @@ would fail to match every substrate command.
 from src.common.ptr import null_ptr, is_null, is_not_null
 
 
-comptime PION_COMMAND_COUNT = 334
+comptime PION_COMMAND_COUNT = 340
 
 
 @always_inline
@@ -148,6 +148,9 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "asking") or
             _cmd_eq_ci(tp, tl, "bgsave") or
             _cmd_eq_ci(tp, tl, "bitpos") or
+            _cmd_eq_ci(tp, tl, "blmove") or
+            _cmd_eq_ci(tp, tl, "blmpop") or
+            _cmd_eq_ci(tp, tl, "bzmpop") or
             _cmd_eq_ci(tp, tl, "client") or
             _cmd_eq_ci(tp, tl, "config") or
             _cmd_eq_ci(tp, tl, "dbsize") or
@@ -238,6 +241,8 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "ai.route") or
             _cmd_eq_ci(tp, tl, "bitcount") or
             _cmd_eq_ci(tp, tl, "bitfield") or
+            _cmd_eq_ci(tp, tl, "bzpopmax") or
+            _cmd_eq_ci(tp, tl, "bzpopmin") or
             _cmd_eq_ci(tp, tl, "expireat") or
             _cmd_eq_ci(tp, tl, "fcall_ro") or
             _cmd_eq_ci(tp, tl, "flushall") or
@@ -286,6 +291,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         )
     elif tl == 10:
         return (
+            _cmd_eq_ci(tp, tl, "brpoplpush") or
             _cmd_eq_ci(tp, tl, "evalsha_ro") or
             _cmd_eq_ci(tp, tl, "expiretime") or
             _cmd_eq_ci(tp, tl, "ft.addtext") or
@@ -447,7 +453,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
     """Redis's arity for this command, or 0 when Pion does not know one.
 
-    244 of 334 commands have an entry; the rest are Pion-specific
+    250 of 340 commands have an entry; the rest are Pion-specific
     (FT.*, KV.PREFIX.*, AI.*, ATTEND.*) and are deliberately NOT validated.
 
     Encoding is Redis's own, kept verbatim so it can be checked against
@@ -557,6 +563,9 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "asking"): return 1
         if _cmd_eq_ci(tp, tl, "bgsave"): return -1
         if _cmd_eq_ci(tp, tl, "bitpos"): return -3
+        if _cmd_eq_ci(tp, tl, "blmove"): return 6
+        if _cmd_eq_ci(tp, tl, "blmpop"): return -5
+        if _cmd_eq_ci(tp, tl, "bzmpop"): return -5
         if _cmd_eq_ci(tp, tl, "client"): return -2
         if _cmd_eq_ci(tp, tl, "config"): return -2
         if _cmd_eq_ci(tp, tl, "dbsize"): return 1
@@ -635,6 +644,8 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
     elif tl == 8:
         if _cmd_eq_ci(tp, tl, "bitcount"): return -2
         if _cmd_eq_ci(tp, tl, "bitfield"): return -2
+        if _cmd_eq_ci(tp, tl, "bzpopmax"): return -3
+        if _cmd_eq_ci(tp, tl, "bzpopmin"): return -3
         if _cmd_eq_ci(tp, tl, "expireat"): return -3
         if _cmd_eq_ci(tp, tl, "fcall_ro"): return -3
         if _cmd_eq_ci(tp, tl, "flushall"): return -1
@@ -668,6 +679,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "zlexcount"): return 4
         if _cmd_eq_ci(tp, tl, "zrevrange"): return -4
     elif tl == 10:
+        if _cmd_eq_ci(tp, tl, "brpoplpush"): return 4
         if _cmd_eq_ci(tp, tl, "evalsha_ro"): return -3
         if _cmd_eq_ci(tp, tl, "expiretime"): return 2
         if _cmd_eq_ci(tp, tl, "hpexpireat"): return -6
@@ -725,7 +737,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
 def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command mutates the keyspace, per real Redis's `write` flag.
 
-    98 of 334 commands are writes. Used by gh #260 to refuse mutations
+    104 of 340 commands are writes. Used by gh #260 to refuse mutations
     once the WAL can no longer persist them, instead of acknowledging writes
     that will not survive a restart.
 
@@ -788,6 +800,9 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     elif tl == 6:
         return (
             _cmd_eq_ci(tp, tl, "append") or
+            _cmd_eq_ci(tp, tl, "blmove") or
+            _cmd_eq_ci(tp, tl, "blmpop") or
+            _cmd_eq_ci(tp, tl, "bzmpop") or
             _cmd_eq_ci(tp, tl, "decrby") or
             _cmd_eq_ci(tp, tl, "expire") or
             _cmd_eq_ci(tp, tl, "geoadd") or
@@ -824,6 +839,8 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     elif tl == 8:
         return (
             _cmd_eq_ci(tp, tl, "bitfield") or
+            _cmd_eq_ci(tp, tl, "bzpopmax") or
+            _cmd_eq_ci(tp, tl, "bzpopmin") or
             _cmd_eq_ci(tp, tl, "expireat") or
             _cmd_eq_ci(tp, tl, "flushall") or
             _cmd_eq_ci(tp, tl, "hpersist") or
@@ -841,6 +858,7 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         )
     elif tl == 10:
         return (
+            _cmd_eq_ci(tp, tl, "brpoplpush") or
             _cmd_eq_ci(tp, tl, "hpexpireat") or
             _cmd_eq_ci(tp, tl, "sdiffstore") or
             _cmd_eq_ci(tp, tl, "xautoclaim") or
@@ -974,7 +992,7 @@ def command_is_noscript(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
 def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command is refused while memory is over --maxmemory (gh #261).
 
-    78 of 334 commands: real Redis's `denyoom` flag plus Pion's
+    80 of 340 commands: real Redis's `denyoom` flag plus Pion's
     substrate ingest commands (PION_DENYOOM in tools/gen_command_table.py).
     Reads, DEL and the POP family stay served under the limit, as in Redis.
     """
@@ -1010,6 +1028,7 @@ def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     elif tl == 6:
         return (
             _cmd_eq_ci(tp, tl, "append") or
+            _cmd_eq_ci(tp, tl, "blmove") or
             _cmd_eq_ci(tp, tl, "decrby") or
             _cmd_eq_ci(tp, tl, "geoadd") or
             _cmd_eq_ci(tp, tl, "getset") or
@@ -1048,6 +1067,7 @@ def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         )
     elif tl == 10:
         return (
+            _cmd_eq_ci(tp, tl, "brpoplpush") or
             _cmd_eq_ci(tp, tl, "ft.addtext") or
             _cmd_eq_ci(tp, tl, "psubscribe") or
             _cmd_eq_ci(tp, tl, "sdiffstore") or

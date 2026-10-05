@@ -56,6 +56,7 @@ from src.commands.ttl import handle_expire, handle_pexpire, handle_expireat, han
 # Command modules (Phase 2 extraction)
 from src.commands.list import handle_lindex, handle_lset, handle_linsert, handle_lrem, handle_ltrim, handle_lpos, handle_lmove
 from src.commands.mpop import parse_mpop
+from src.commands.blocking import BlockedClientRegistry, parse_block_timeout, new_blocked_client
 from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
@@ -67,7 +68,7 @@ from src.commands.cluster import handle_cluster
 from src.commands.migrate import handle_dump, handle_restore, handle_migrate
 from src.commands.string_kv import handle_incrby, handle_decrby, handle_incrbyfloat, handle_append, handle_strlen, handle_getset, handle_getdel, handle_getex, handle_setnx, handle_setex, handle_psetex, handle_msetnx, handle_msetex, handle_getrange, handle_substr, handle_setrange, handle_expiretime, handle_pexpiretime, handle_unlink
 from src.commands.ai import handle_ai_chat, handle_ai_flare, handle_ai_complete, handle_ai_semantic_cache, handle_ai_embed, handle_ai_generate, handle_ai_loadmodel, handle_ai_memory
-from src.commands.sorted_set import handle_zrem, handle_zcard, handle_zrank, handle_zrevrank, handle_zscore, handle_zcount, handle_zincrby, handle_zrange, handle_zrevrange, handle_zrangebyscore, handle_zrevrangebyscore, handle_zunion, handle_zinter, handle_zunionstore, handle_zinterstore, handle_zlexcount, handle_zrangebylex, handle_zrevrangebylex, handle_zpopmax, handle_zmpop, handle_zrandmember, handle_zmscore, handle_zscan, handle_zrangestore, handle_zintercard, handle_zdiff, handle_zdiffstore, handle_zremrangebylex, handle_zremrangebyrank, handle_zremrangebyscore
+from src.commands.sorted_set import zmpop_pop, handle_zrem, handle_zcard, handle_zrank, handle_zrevrank, handle_zscore, handle_zcount, handle_zincrby, handle_zrange, handle_zrevrange, handle_zrangebyscore, handle_zrevrangebyscore, handle_zunion, handle_zinter, handle_zunionstore, handle_zinterstore, handle_zlexcount, handle_zrangebylex, handle_zrevrangebylex, handle_zpopmax, handle_zmpop, handle_zrandmember, handle_zmscore, handle_zscan, handle_zrangestore, handle_zintercard, handle_zdiff, handle_zdiffstore, handle_zremrangebylex, handle_zremrangebyrank, handle_zremrangebyscore
 from src.commands.vector import handle_ft_info, handle_ft_dropindex, handle_ft_optimize, handle_ft_create, handle_ft_addtext, handle_ft_searchtext, handle_ft_search, handle_ft_hybrid, write_ft_search_response
 from src.commands.kv_cache import handle_kv_store, handle_kv_fetch, handle_kv_info
 from src.commands.attend import handle_attend_create, handle_attend_store, handle_attend_query, handle_attend_finalize, handle_attend_info, ATTEND_MAX_K
@@ -297,6 +298,9 @@ struct SlowPathHandler:
     var script_db_size: UnsafePointer[Int, MutUntrackedOrigin]
     var script_config: UnsafePointer[PionConfig, MutUntrackedOrigin]
     var script_allow_oom: Bool
+    # #38: BLPOP & co. parked until a key they wait on has data or they time
+    # out; the engine wakes them (NetworkEngine._service_blocked_clients).
+    var blocked_clients: BlockedClientRegistry
 
     def __init__(
         out self,
@@ -364,6 +368,7 @@ struct SlowPathHandler:
         self.script_db_size = null_ptr[Int, MutUntrackedOrigin]()
         self.script_config = null_ptr[PionConfig, MutUntrackedOrigin]()
         self.script_allow_oom = False
+        self.blocked_clients = BlockedClientRegistry()
         self.cluster = cluster
         self.shard_query_seq = alloc[UInt64](1)
         self.shard_query_seq[0] = 1
@@ -809,6 +814,148 @@ struct SlowPathHandler:
         s += "moe_misses:" + String(self.moe_tier.misses) + "\r\n"
         s += "vector_queries:" + String(self.ledger.vector_queries) + "\r\n"
         return s
+
+    def _rpoplpush(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
+                   mut writer: ResponseWriter) raises:
+        """RPOPLPUSH tokens[i+1] tokens[i+2] (BRPOPLPUSH runs it once its source
+        has an element)."""
+        var rpl_src = tokens[i+1].value()
+        var rpl_dst = tokens[i+2].value()
+        # gh #232: neither key was type-checked, and the pop
+        # happened first. With a wrong-type DESTINATION the
+        # element was popped, answered as a normal success,
+        # and then silently dropped — never pushed anywhere.
+        # RPOPLPUSH is THE reliable-queue primitive
+        # (`RPOPLPUSH work processing`), so that is a job
+        # vanishing with a reply that says it moved. Redis
+        # validates both keys before touching either.
+        var rpl_sv = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+        var rpl_dv = self.keyspace[].get(GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length))
+        # Redis's precedence, and it is observable: wrong-type
+        # SOURCE errors; a MISSING source is nil and the
+        # destination is never examined; only then does a
+        # wrong-type destination error.
+        var rpl_src_bad = (not rpl_sv.is_none()
+                           and rpl_sv.type.value != ValueType.LIST)
+        var rpl_dst_bad = (not rpl_sv.is_none() and not rpl_dv.is_none()
+                           and rpl_dv.type.value != ValueType.LIST)
+        # No `continue` here: the loop tail runs the gh #240
+        # forward clamp and `i += 1`, and skipping them is
+        # the very desync this arm is being fixed for.
+        if rpl_src_bad or rpl_dst_bad:
+            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+        else:
+            var rpl_val = self.dispatcher.execute_rpop(rpl_src)
+            if rpl_val.is_none():
+                writer.append_null_response()
+            else:
+                # Push the value directly; both String(gv) and
+                # gv.__str__() stringify the internal pointer for
+                # heap/SSO string values, corrupting the element.
+                writer.append_bulk_value_response(rpl_val)
+                _ = self.dispatcher.execute_lpush_value(rpl_dst, rpl_val)
+                # gh #234 remainder (found via gh #265):
+                # remove the source once its last element
+                # leaves, or `EXISTS` lies and the key
+                # cannot be reused as another type. gh #234
+                # fixed the LPOP/RPOP handlers; this arm
+                # reimplements the pop and so was missed.
+                #
+                # AFTER the push: `src == dst` is a legal
+                # rotation and is size 1 again by here.
+                var rpl_after = self.keyspace[].get(
+                    GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                if (not rpl_after.is_none()
+                        and rpl_after.type.value == ValueType.LIST
+                        and rpl_after.as_list()
+                            .unsafe_bitcast[SlabList]()[].size == 0):
+                    _ = remove_and_free(self.keyspace, 
+                        GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                    _ = self.dispatcher.wal[].append(
+                        2, tokens[i+1].ptr, tokens[i+1].length)
+
+    def _park_blocked(mut self, fd: Int32, buffer: UnsafePointer[UInt8, MutUntrackedOrigin],
+                      cmd_idx: Int, num_cmds: Int, cmd_byte_ends: UnsafePointer[Int, MutUntrackedOrigin],
+                      on_primary: Bool, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+                      key_first: Int, key_end: Int, deadline_ms: Int64, zset: Bool) -> Bool:
+        """#38: park a blocking command that found nothing: register it with a
+        copy of its frame and its keys, and stop the batch at its end (the
+        caller does that when this returns True). False where it cannot park
+        (MULTI/EXEC replay, a script, the XDP lane): the caller answers nil."""
+        if not (self.can_park_wait and on_primary and cmd_idx < num_cmds and fd >= 0):
+            return False
+        var start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
+        var end = cmd_byte_ends[cmd_idx]
+        self.blocked_clients.add(new_blocked_client(fd, deadline_ms, zset, buffer + start, end - start,
+                                                    tokens, key_first, key_end))
+        self.parked_waits.park_fd(fd)
+        return True
+
+    def _bpop_lists(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+                    left: Bool, mut writer: ResponseWriter) raises -> Bool:
+        """BLPOP/BRPOP's pop: the keys left to right, a missing one skipped, a
+        wrong-type one an error, from the first list an element, replied
+        [key, element]. True when it replied."""
+        for _bk in range(first, end):
+            var _bkey = tokens[_bk].value()
+            var _bval = self.keyspace[].get(GenericValue.borrow(tokens[_bk].ptr, tokens[_bk].length))
+            if _bval.is_none():
+                continue
+            if _bval.type.value != ValueType.LIST:
+                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                return True
+            var _blp = _bval.as_list().unsafe_bitcast[SlabList]()
+            if _blp[].size == 0:
+                continue
+            var _bpopped = self.dispatcher.execute_lpop(_bkey) if left else self.dispatcher.execute_rpop(_bkey)
+            if _bpopped.is_none():
+                continue
+            writer.append_array_header(2)
+            writer.append_bulk_string_response(tokens[_bk].ptr, tokens[_bk].length)
+            writer.append_bulk_value_response(_bpopped)
+            _bpopped.free_str_payload()   # owned by the caller once popped
+            # gh #234: drop an emptied list, and only AFTER the reply.
+            if self.dispatcher.execute_llen(_bkey) == 0:
+                _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[_bk].ptr, tokens[_bk].length))
+                if is_not_null(self.dispatcher.wal):
+                    _ = self.dispatcher.wal[].append(2, tokens[_bk].ptr, tokens[_bk].length)
+            return True
+        return False
+
+    def _bzpop(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+               from_min: Bool, mut writer: ResponseWriter) raises -> Bool:
+        """BZPOPMIN/BZPOPMAX's pop: from the first sorted set, one member,
+        replied [key, member, score]. True when it replied."""
+        for k in range(first, end):
+            var kv = self.keyspace[].get(GenericValue.borrow(tokens[k].ptr, tokens[k].length))
+            if kv.is_none():
+                continue
+            if kv.type.value != ValueType.ZSET:
+                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                return True
+            var zp = kv.as_zset().bitcast[SlabSkipList]()
+            if zp[].length == 0:
+                continue
+            var r = zp[].pop_min() if from_min else zp[].pop_max()
+            if not r.valid:
+                continue
+            writer.append_array_header(3)
+            writer.append_bulk_string_response(tokens[k].ptr, tokens[k].length)
+            writer.append_bulk_value_response(r.obj)
+            writer.append_score_response(r.score)
+            if is_not_null(self.dispatcher.wal):            # gh #170: the resolved effect, a ZREM
+                var wb = alloc[UInt8](64)
+                var wl = 0
+                var wp = gv_bytes(r.obj, wb, wl)
+                _ = self.dispatcher.wal[].append_kv(12, tokens[k].ptr, tokens[k].length, wp, wl)
+                wb.free()
+            r.obj.free_str_payload()
+            if zp[].length == 0:                             # gh #234
+                _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[k].ptr, tokens[k].length))
+                if is_not_null(self.dispatcher.wal):
+                    _ = self.dispatcher.wal[].append(2, tokens[k].ptr, tokens[k].length)
+            return True
+        return False
 
     def _mpop_lists(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first_key: Int,
                     numkeys: Int, left: Bool, count: Int, mut writer: ResponseWriter) -> Bool:
@@ -2744,60 +2891,7 @@ struct SlowPathHandler:
                     # ── RPOPLPUSH (≡ LMOVE src dst RIGHT LEFT; gh #101 slow-path coverage) ──
                     elif cmd_eq(tp, tl, "rpoplpush"):
                         if i + 2 < cmd_end_tok:
-                            var rpl_src = tokens[i+1].value()
-                            var rpl_dst = tokens[i+2].value()
-                            # gh #232: neither key was type-checked, and the pop
-                            # happened first. With a wrong-type DESTINATION the
-                            # element was popped, answered as a normal success,
-                            # and then silently dropped — never pushed anywhere.
-                            # RPOPLPUSH is THE reliable-queue primitive
-                            # (`RPOPLPUSH work processing`), so that is a job
-                            # vanishing with a reply that says it moved. Redis
-                            # validates both keys before touching either.
-                            var rpl_sv = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                            var rpl_dv = self.keyspace[].get(GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length))
-                            # Redis's precedence, and it is observable: wrong-type
-                            # SOURCE errors; a MISSING source is nil and the
-                            # destination is never examined; only then does a
-                            # wrong-type destination error.
-                            var rpl_src_bad = (not rpl_sv.is_none()
-                                               and rpl_sv.type.value != ValueType.LIST)
-                            var rpl_dst_bad = (not rpl_sv.is_none() and not rpl_dv.is_none()
-                                               and rpl_dv.type.value != ValueType.LIST)
-                            # No `continue` here: the loop tail runs the gh #240
-                            # forward clamp and `i += 1`, and skipping them is
-                            # the very desync this arm is being fixed for.
-                            if rpl_src_bad or rpl_dst_bad:
-                                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            else:
-                                var rpl_val = self.dispatcher.execute_rpop(rpl_src)
-                                if rpl_val.is_none():
-                                    writer.append_null_response()
-                                else:
-                                    # Push the value directly; both String(gv) and
-                                    # gv.__str__() stringify the internal pointer for
-                                    # heap/SSO string values, corrupting the element.
-                                    writer.append_bulk_value_response(rpl_val)
-                                    _ = self.dispatcher.execute_lpush_value(rpl_dst, rpl_val)
-                                    # gh #234 remainder (found via gh #265):
-                                    # remove the source once its last element
-                                    # leaves, or `EXISTS` lies and the key
-                                    # cannot be reused as another type. gh #234
-                                    # fixed the LPOP/RPOP handlers; this arm
-                                    # reimplements the pop and so was missed.
-                                    #
-                                    # AFTER the push: `src == dst` is a legal
-                                    # rotation and is size 1 again by here.
-                                    var rpl_after = self.keyspace[].get(
-                                        GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                    if (not rpl_after.is_none()
-                                            and rpl_after.type.value == ValueType.LIST
-                                            and rpl_after.as_list()
-                                                .unsafe_bitcast[SlabList]()[].size == 0):
-                                        _ = remove_and_free(self.keyspace, 
-                                            GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                        _ = self.dispatcher.wal[].append(
-                                            2, tokens[i+1].ptr, tokens[i+1].length)
+                            self._rpoplpush(tokens, i, writer)
                             i += 2
                         else:
                             writer.append_error_response("ERR wrong number of arguments for 'rpoplpush' command")
@@ -3383,82 +3477,25 @@ struct SlowPathHandler:
                     elif tl == 6 and cmd_matches_6(tp, 99, 108, 105, 101, 110, 116):
                         _ = handle_client(tokens, i, cmd_end_tok, fd, writer, self.tx_state.client_names)
                         i = cmd_end_tok - 1
-                    # ── BLPOP / BRPOP ── (gh #318)
-                    #
-                    # These used to be stubs in admin.mojo that replied nil
-                    # unconditionally, with a comment claiming blocking "would
-                    # deadlock Pion's non-blocking event loop". They did not
-                    # deadlock — they answered, wrongly, even against a list
-                    # that had elements. `BLPOP key 0` in a loop is THE
-                    # queue-consumer idiom, so a worker written that way
-                    # consumed nothing forever while producers filled the list,
-                    # with no error anywhere. A plausible reply that is wrong is
-                    # worse than -ERR unknown command, which at least raises in
-                    # the client.
-                    #
-                    # Now: scan the keys left to right, pop from the first
-                    # non-empty list, reply *2 <key> <element>. The TIMEOUT
-                    # argument is parsed and ignored — we never block, so an
-                    # empty set of keys answers nil immediately rather than
-                    # waiting. That is a real deviation from Redis and it is
-                    # documented in doc/command_matrix.md; it is not a silently
-                    # wrong answer.
+                    # ── BLPOP / BRPOP ── (gh #318, #38)
                     # gh #423: both name literals stay on the `elif` line so
-                    # gen_command_table.py sees BRPOP too — its regex skips
-                    # `or`-continuation lines, so a pattern moved off this line
-                    # drops that command from the table and it EXECABORTs inside
-                    # MULTI while working fine on its own.
+                    # gen_command_table.py sees BRPOP too.
                     elif tl == 5 and (cmd_matches_5(tp, 98, 108, 112, 111, 112) or cmd_matches_5(tp, 98, 114, 112, 111, 112)):
                         var _bpop_left = cmd_matches_5(tp, 98, 108, 112, 111, 112)
-                        # BLPOP key [key ...] timeout — at least one key and a
-                        # timeout, so the last token is never a key.
-                        if i + 2 < cmd_end_tok:
-                            var _bpop_done = False
-                            var _bpop_wrongtype = False
-                            for _bk in range(i + 1, cmd_end_tok - 1):
-                                var _bkey = tokens[_bk].value()
-                                var _bval = self.keyspace[].get(_bkey)
-                                if _bval.is_none():
-                                    continue
-                                if _bval.type.value != ValueType.LIST:
-                                    # Redis checks type per key and errors on the
-                                    # first wrong one rather than skipping to the
-                                    # next list (gh #232's precedence rule).
-                                    _bpop_wrongtype = True
-                                    break
-                                var _blp = _bval.as_list().unsafe_bitcast[SlabList]()
-                                if _blp[].size == 0:
-                                    continue
-                                var _bpopped: GenericValue
-                                if _bpop_left:
-                                    _bpopped = self.dispatcher.execute_lpop(_bkey)
-                                else:
-                                    _bpopped = self.dispatcher.execute_rpop(_bkey)
-                                if _bpopped.is_none():
-                                    continue
-                                var _bhdr = "*2\r\n"
-                                writer.append_to_response(_bhdr.unsafe_ptr(), _bhdr.byte_length())
-                                writer.append_bulk_string_response(_bkey.unsafe_ptr(), _bkey.byte_length())
-                                writer.append_bulk_value_response(_bpopped)
-                                _bpopped.free_str_payload()   # owned by the caller once popped
-                                # gh #234: drop an emptied list, and only AFTER
-                                # the reply — the popped value borrows into the
-                                # container being removed.
-                                if self.dispatcher.execute_llen(_bkey) == 0:
-                                    _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[_bk].ptr, tokens[_bk].length))
-                                    _ = self.dispatcher.wal[].append(2, tokens[_bk].ptr, tokens[_bk].length)
-                                _bpop_done = True
-                                break
-                            if _bpop_wrongtype:
-                                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            elif not _bpop_done:
-                                writer.append_null_response()
+                        if cmd_end_tok - i < 3:
+                            writer.append_error_response("ERR wrong number of arguments for '"
+                                                         + String("blpop" if _bpop_left else "brpop") + "' command")
                         else:
-                            if _bpop_left:
-                                writer.append_error_response("ERR wrong number of arguments for 'blpop' command")
-                            else:
-                                writer.append_error_response("ERR wrong number of arguments for 'brpop' command")
-                        i = cmd_end_tok - 1
+                            var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                            if _bdl >= 0 and not self._bpop_lists(tokens, i + 1, cmd_end_tok - 1, _bpop_left, writer):
+                                if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                      tokens, i + 1, cmd_end_tok - 1, _bdl, False):
+                                    primary_consumed = cmd_byte_ends[cmd_idx]
+                                    i = num_tokens
+                                else:
+                                    writer.append_null_array_response()
+                        if i < num_tokens:
+                            i = cmd_end_tok - 1
                     # ── EVAL / EVALSHA / FCALL and their _RO forms, SCRIPT, FUNCTION (#36) ──
                     # A script's redis.call() runs through this dispatcher
                     # (script_dispatch), so every command it calls logs its own
@@ -3620,6 +3657,88 @@ struct SlowPathHandler:
                         self._script_context(fd, server, kq, hnsw, db_size, config)
                         _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
                         i = cmd_end_tok - 1
+                    # ── BRPOPLPUSH / BLMOVE / BLMPOP / BZPOPMIN / BZPOPMAX / BZMPOP (#38) ──
+                    # A blocking command that finds nothing parks (_park_blocked)
+                    # and stops the batch at its end; the engine runs it again
+                    # once a key it waits on has data or its timeout passes.
+                    elif cmd_eq(tp, tl, "brpoplpush") or cmd_eq(tp, tl, "blmove"):
+                        var _blm = cmd_eq(tp, tl, "blmove")
+                        var _bn = 6 if _blm else 4
+                        if cmd_end_tok - i != _bn:
+                            writer.append_error_response("ERR wrong number of arguments for '"
+                                                         + String("blmove" if _blm else "brpoplpush") + "' command")
+                        else:
+                            var _bdir_ok = True
+                            if _blm:
+                                for _d in range(i + 3, i + 5):
+                                    if not arg_eq(tokens[_d].ptr, tokens[_d].length, "left") \
+                                       and not arg_eq(tokens[_d].ptr, tokens[_d].length, "right"):
+                                        _bdir_ok = False
+                            if not _bdir_ok:
+                                writer.append_error_response("ERR syntax error")
+                            else:
+                                var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                                if _bdl >= 0:
+                                    var _bsv = self.keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+                                    if not _bsv.is_none():
+                                        # the source exists: the move runs (or errors) now
+                                        if _blm:
+                                            _ = handle_lmove(tokens, i, i + 5, writer, self.keyspace, self.dispatcher)
+                                        else:
+                                            self._rpoplpush(tokens, i, writer)
+                                    elif self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                            tokens, i + 1, i + 2, _bdl, False):
+                                        primary_consumed = cmd_byte_ends[cmd_idx]
+                                        i = num_tokens
+                                    else:
+                                        writer.append_null_response()
+                        if i < num_tokens:
+                            i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "blmpop") or cmd_eq(tp, tl, "bzmpop"):
+                        # B?MPOP timeout numkeys key [key ...] LEFT|RIGHT / MIN|MAX [COUNT count]:
+                        # the arguments first, then the timeout, as Redis parses them.
+                        var _bz = cmd_eq(tp, tl, "bzmpop")
+                        if cmd_end_tok - i < 5:
+                            writer.append_error_response("ERR wrong number of arguments for '"
+                                                         + String("bzmpop" if _bz else "blmpop") + "' command")
+                        else:
+                            var _bmp = parse_mpop(tokens, i + 2, cmd_end_tok, _bz)
+                            if _bmp.error.byte_length() > 0:
+                                writer.append_error_response(_bmp.error)
+                            else:
+                                var _bdl = parse_block_timeout(tokens[i + 1], Int64(_get_now_ns() // 1_000_000), writer)
+                                if _bdl >= 0:
+                                    var _served: Bool
+                                    if _bz:
+                                        _served = zmpop_pop(tokens, i + 3, _bmp.numkeys, _bmp.first, _bmp.count,
+                                                            writer, self.keyspace, self.dispatcher.wal)
+                                    else:
+                                        _served = self._mpop_lists(tokens, i + 3, _bmp.numkeys, _bmp.first, _bmp.count, writer)
+                                    if not _served:
+                                        if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                              tokens, i + 3, i + 3 + _bmp.numkeys, _bdl, _bz):
+                                            primary_consumed = cmd_byte_ends[cmd_idx]
+                                            i = num_tokens
+                                        else:
+                                            writer.append_null_array_response()
+                        if i < num_tokens:
+                            i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "bzpopmin") or cmd_eq(tp, tl, "bzpopmax"):
+                        var _bmin = cmd_eq(tp, tl, "bzpopmin")
+                        if cmd_end_tok - i < 3:
+                            writer.append_error_response("ERR wrong number of arguments for '"
+                                                         + String("bzpopmin" if _bmin else "bzpopmax") + "' command")
+                        else:
+                            var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                            if _bdl >= 0 and not self._bzpop(tokens, i + 1, cmd_end_tok - 1, _bmin, writer):
+                                if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                      tokens, i + 1, cmd_end_tok - 1, _bdl, True):
+                                    primary_consumed = cmd_byte_ends[cmd_idx]
+                                    i = num_tokens
+                                else:
+                                    writer.append_null_array_response()
+                        if i < num_tokens:
+                            i = cmd_end_tok - 1
                     else:
                         writer.append_error_response("ERR unknown command '" + token.value() + "'")
                         # Skip remaining tokens of this command

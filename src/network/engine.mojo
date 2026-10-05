@@ -30,6 +30,7 @@ from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE, URING_MAX_FDS
 from src.io.xdp import XDPEngine, XDPFrameInfo, TCP_SYN, TCP_ACK, TCP_FIN, TCP_RST, TCP_PSH
 from src.network.cluster import ClusterState, REPL_PORT_OFFSET
 from src.commands.stream import write_xread_reply
+from src.commands.blocking import blocked_client_ready
 
 # Client receive buffer size. Supports LMCache KV cache blobs (typical 2-4 MB
 # per chunk, up to ~16 MB for 70B+ models) and shared-KV-cache tensor frames
@@ -220,6 +221,7 @@ struct NetworkEngine:
         self.slow_path.pubsub.cleanup_fd(fd)
         self.slow_path.tx_state.cleanup_fd(fd)
         self.slow_path.blocked_readers.remove_fd(fd)
+        self.slow_path.blocked_clients.remove_fd(fd)   # #38
         self.slow_path.parked_waits.remove_fd(fd)   # gh #390
         self.server.close_client(fd)
         self.client_buffer_lens[unsafe_offset=ci] = 0
@@ -450,6 +452,50 @@ struct NetworkEngine:
             reg[].remove_at(k)            # entry k is now a different one: no k += 1
             self.slow_path.parked_waits.unpark_fd(fd)
             self.writer.flush_response(fd, self.server, kq)
+            var stored = self.client_buffer_lens[unsafe_offset=ci]
+            if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+                self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
+            if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
+               and not self.slow_path.parked_waits.is_parked(ci) \
+               and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+                self._uring_arm_recv(fd, ci, UInt16(uring_group))
+
+    def _service_blocked_clients(mut self, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
+                                 uring_group: Int = -1) raises:
+        """#38: wake parked BLPOP & co., oldest first. A client whose key now
+        holds what it pops, or whose timeout has passed, has its command run
+        again through the slow path, unable to block: served now, or answered
+        with the timeout's nil (the command's own reply either way). Then
+        whatever it pipelined behind it runs, as for a woken XREAD."""
+        var reg = Pointer(to=self.slow_path.blocked_clients)
+        if reg[]._count() == 0:
+            return
+        var now_ms = Int64(_get_now_ns() // 1_000_000)
+        var k = 0
+        while k < reg[]._count():
+            var dl = reg[].clients[k].deadline_ms
+            var timed_out = dl > 0 and now_ms >= dl
+            if not timed_out and not blocked_client_ready(self.slow_path.keyspace, reg[].clients[k]):
+                k += 1
+                continue
+            var fd = reg[].clients[k].fd
+            # The frame goes to a heap buffer this function frees itself: a
+            # List's last use is `unsafe_ptr()`, and Mojo destroys a value
+            # right after its last use, so the parse below would read freed
+            # memory (it did: the allocator reused the first bytes).
+            var flen = len(reg[].clients[k].frame)
+            var frame = alloc[UInt8](flen + 1)
+            unsafe_memcpy(dest=frame, src=reg[].clients[k].frame.unsafe_ptr(), count=flen)
+            reg[].remove_at(k)                 # the next client is now at k
+            self.slow_path.parked_waits.unpark_fd(fd)
+            var ci = Int(fd)
+            self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
+            var park = self.slow_path.can_park_wait
+            self.slow_path.can_park_wait = False
+            _ = self.slow_path.process_slow_path(frame, flen, fd, self.writer, self.server, kq,
+                                                 hnsw, db_size, self.config)
+            frame.free()
+            self.slow_path.can_park_wait = park
             var stored = self.client_buffer_lens[unsafe_offset=ci]
             if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                 self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
@@ -990,6 +1036,9 @@ struct NetworkEngine:
             # check is one load): answered when an XADD reached them or on timeout.
             if self.slow_path.blocked_readers._count() > 0:
                 self._service_blocked_readers(Int32(-1), hnsw, db_size, -1)
+            # #38: parked BLPOP & co., the same way.
+            if self.slow_path.blocked_clients._count() > 0:
+                self._service_blocked_clients(Int32(-1), hnsw, db_size, -1)
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the
             # LRU cache. Cheap (atomic load, 0-N memcpy per tick); no-op
@@ -1257,6 +1306,9 @@ struct NetworkEngine:
             # check is one load): answered when an XADD reached them or on timeout.
             if self.slow_path.blocked_readers._count() > 0:
                 self._service_blocked_readers(Int32(-1), hnsw, db_size, Int(buf_group_id))
+            # #38: parked BLPOP & co., the same way.
+            if self.slow_path.blocked_clients._count() > 0:
+                self._service_blocked_clients(Int32(-1), hnsw, db_size, Int(buf_group_id))
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the LRU
             # cache. Cheap (atomic load, no-op when --moe-cache isn't on). gh #85:
@@ -1443,6 +1495,9 @@ struct NetworkEngine:
             # Parked XREAD BLOCK clients, every tick while any exist.
             if self.slow_path.blocked_readers._count() > 0:
                 self._service_blocked_readers(kq, hnsw, db_size)
+            # #38: parked BLPOP & co., the same way.
+            if self.slow_path.blocked_clients._count() > 0:
+                self._service_blocked_clients(kq, hnsw, db_size)
 
             # MOE.EXPERT.* Stage 4b warming-completion drain (no-op without
             # --moe-cache). gh #85: aligned across all four loops.
@@ -1662,6 +1717,9 @@ struct NetworkEngine:
             # check is one load): answered when an XADD reached them or on timeout.
             if self.slow_path.blocked_readers._count() > 0:
                 self._service_blocked_readers(kq, hnsw, db_size)
+            # #38: parked BLPOP & co., the same way.
+            if self.slow_path.blocked_clients._count() > 0:
+                self._service_blocked_clients(kq, hnsw, db_size)
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the
             # LRU cache. Cheap (atomic load, 0-N memcpy per tick); no-op

@@ -9,8 +9,14 @@ bitfield -2
 bitfield_ro -2
 bitop -4
 bitpos -3
+blmove 6
+blmpop -5
 blpop -3
 brpop -3
+brpoplpush 4
+bzmpop -5
+bzpopmax -3
+bzpopmin -3
 client -2
 cluster -2
 command -1
