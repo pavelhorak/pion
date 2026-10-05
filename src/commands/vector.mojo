@@ -5,6 +5,7 @@ from std.collections import Array, List
 from std.memory import alloc, unsafe_memcpy, unsafe_memset, stack_allocation
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
+from std.time import perf_counter_ns
 from std.sys.info import CompilationTarget
 from std.math import log, sqrt
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
@@ -180,6 +181,27 @@ def _copy_value_clamped(val: GenericValue, dest: UnsafePointer[UInt8, MutUntrack
     if is_null(src): return 0
     unsafe_memcpy(dest=dest, src=src, count=cap)
     return cap
+
+
+def drop_dead(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], mut ids: List[Int],
+              mut scores: List[Float32], keep: Int):
+    """#46: the results without documents that left the keyspace (or whose
+    vector left them), at most `keep` of them, in order."""
+    var w = 0
+    var any_dead = is_not_null(shared_hnsw) and shared_hnsw[].any_dead()
+    for r in range(len(ids)):
+        if w >= keep:
+            break
+        if any_dead and shared_hnsw[].slot_dead(ids[r]):
+            continue
+        ids[w] = ids[r]
+        if r < len(scores):
+            scores[w] = scores[r]
+        w += 1
+    while len(ids) > w:
+        _ = ids.pop()
+    while len(scores) > w:
+        _ = scores.pop()
 
 
 @always_inline
@@ -1326,6 +1348,8 @@ def retire_index(
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                 shared_hnsw[].ingest_count, UInt64(0)
             )
+        # #46: slot numbering starts over, and so do the tombstones
+        shared_hnsw[].new_generation()
         shared_hnsw[].ready = False
         if is_not_null(shared_hnsw[].ready_atomic):
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
@@ -1608,6 +1632,10 @@ def handle_ft_optimize(
             hnsw.index_ready = True
     except:
         pass
+    # #46: a fresh id per build, saved with it and recorded with its
+    # tombstones, so replay never applies one build's tombstones to another
+    var _bid = UInt64(perf_counter_ns()) ^ (UInt64(Int(external_call["random", Int64]())) << 20)
+    hnsw.build_id = _bid if _bid != 0 else UInt64(1)
     # Publish full index + PQ data to shared view (all workers borrow via borrow_from_shared)
     if is_not_null(shared_hnsw):
         hnsw.publish_to_shared(shared_hnsw)
@@ -1867,14 +1895,21 @@ def handle_ft_create(
         shared_hnsw[].pre_vector_field_len = hnsw.vector_field_len
         unsafe_memcpy(dest=shared_hnsw[].pre_vector_field_name.unsafe_ptr(), src=hnsw.vector_field_name.unsafe_ptr(), count=hnsw.vector_field_len)
 
-        # Pre-allocate shared ingest buffer (capacity = max_elements for dataset scale)
-        if is_null(shared_hnsw[].ingest_fp32):
+        # Pre-allocate shared ingest buffer (capacity = max_elements for dataset scale).
+        # Not while a built index is served (#46): re-issuing FT.CREATE for it
+        # (clients do, defensively) restarted slot numbering under the live
+        # index, so the next HSET renamed its slot 0. An HSET after FT.OPTIMIZE
+        # is stored but not indexed — the documented ingest contract.
+        var _serving = is_not_null(shared_hnsw[].ready_atomic) and Atomic[Scalar[DType.uint64]].fetch_add[
+            ordering=Ordering.ACQUIRE](shared_hnsw[].ready_atomic, UInt64(0)) != 0
+        if is_null(shared_hnsw[].ingest_fp32) and not _serving:
             var cap = hnsw.max_elements
             shared_hnsw[].ingest_fp32 = alloc[Float32](cap * hnsw.dim)
             shared_hnsw[].ingest_ids = alloc[Int32](cap)
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                 shared_hnsw[].ingest_count, UInt64(0)
             )
+            shared_hnsw[].new_generation()      # #46: slots start again from 0
 
     writer.append_ok_response()
     return ci
@@ -2215,6 +2250,9 @@ def handle_ft_hybrid(
     if _text_tok.length > 0:
         _bm25_ids = search_bm25(hnsw, _text_tok.ptr, _text_tok.length, _k * 4, _bm25_scores,
                                 _bm25_k1, _bm25_b)
+    # #46: documents that left the keyspace leave the candidates
+    drop_dead(shared_hnsw, _vec_ids, _vec_scores, len(_vec_ids))
+    drop_dead(shared_hnsw, _bm25_ids, _bm25_scores, len(_bm25_ids))
 
     # ── RRF fusion with configurable alpha ──
     var _rrf_ids = List[Int]()
@@ -2566,8 +2604,13 @@ def handle_ft_search(
                 writer.flush_response(fd, server, kq)
                 return -1
             var _bm25_scores = List[Float32]()
+            # #46: with dead documents, look further and drop them
+            var _bm25_fetch = _bm25_k
+            if is_not_null(shared_hnsw) and shared_hnsw[].any_dead():
+                _bm25_fetch = _bm25_k * 4 if _bm25_k * 4 > 64 else 64
             var _bm25_ids = search_bm25(hnsw, _bm25_text_tok.ptr, _bm25_text_tok.length,
-                                        _bm25_k, _bm25_scores, _bm25_k1, _bm25_b)
+                                        _bm25_fetch, _bm25_scores, _bm25_k1, _bm25_b)
+            drop_dead(shared_hnsw, _bm25_ids, _bm25_scores, _bm25_k)
             write_ft_search_response(writer, _bm25_ids, _bm25_scores, keyspace, shared_hnsw)
             writer.flush_response(fd, server, kq)
             return -1  # signal caller to return consumed_bytes
@@ -2624,6 +2667,8 @@ def handle_ft_search(
             var _hbm25_ids    = List[Int]()
             if _htext_len > 0:
                 _hbm25_ids = search_bm25(hnsw, _htext_ptr, _htext_len, _hk * 4, _hbm25_scores)
+            drop_dead(shared_hnsw, _hvec_ids, _hvec_scores, len(_hvec_ids))      # #46
+            drop_dead(shared_hnsw, _hbm25_ids, _hbm25_scores, len(_hbm25_ids))
             # RRF fusion (k=60)
             var _rrf_ids    = List[Int]()
             var _rrf_scores = List[Float32]()
@@ -3035,9 +3080,10 @@ def handle_ft_search(
 
                 var merged_results = List[Int]()
                 var merged_scores = List[Float32]()
-                for ii in range(final_k):
+                for ii in range(n_all):
                     merged_results.append(all_res_ids[ii])
                     merged_scores.append(all_res_scores[ii])
+                drop_dead(shared_hnsw, merged_results, merged_scores, final_k)   # #46
 
                 write_ft_search_response(writer, merged_results, merged_scores, keyspace, shared_hnsw)
             else:
@@ -3051,13 +3097,16 @@ def handle_ft_search(
                 # those bytes are sub-byte-packed → garbage distances. Fall through
                 # to the CPU quant search path; the FP32 GPU rerank still fires from
                 # _try_gpu_rerank() inside hnsw.search.
-                if hnsw.has_gpu and is_not_null(hnsw.compact_buffer) and filters.count == 0 \
+                # #46: dead slots are filtered like a metadata filter (below),
+                # through the HNSW path that widens its candidates
+                var _dead = is_not_null(shared_hnsw) and shared_hnsw[].any_dead()
+                if hnsw.has_gpu and is_not_null(hnsw.compact_buffer) and filters.count == 0 and not _dead \
                    and not (hnsw.polarquant or hnsw.turboquant or hnsw.nanoquant):
                     comptime if CompilationTarget.is_macos():
                         use_gpu_search = external_call["pion_metal_should_use_gpu", Int32]() == 1
                 scratch_dists.clear()
                 var results2 = List[Int]()
-                if filters.count > 0:
+                if filters.count > 0 or _dead:
                     # gh #367: post-filter a widening candidate set until k pass
                     # or the whole index has been searched. The old path took
                     # k*2 candidates once, so a selective filter returned a
@@ -3085,6 +3134,12 @@ def handle_ft_search(
                         for ri3 in range(len(results2)):
                             if len(filtered_ids) >= k: break
                             var _ext_id = results2[ri3]
+                            if _dead and shared_hnsw[].slot_dead(_ext_id):
+                                continue                       # #46: the document is gone
+                            if filters.count == 0:
+                                filtered_ids.append(_ext_id)
+                                filtered_scores.append(scratch_dists[ri3])
+                                continue
                             var _passes: Bool
                             var _nidx = -1
                             if _use_fast_meta and _ext_id >= 0 and _ext_id < hnsw.max_elements:

@@ -1399,6 +1399,14 @@ server = "self"
 tier = "gate"
 timeout = 300
 
+# #46: a document that leaves the keyspace (or whose vector leaves it) leaves
+# FT.SEARCH's results, across restarts, SAVE, the build, and workers.
+[[test]]
+file = "tests/test_vector_doc_lifecycle.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
 # Every keyword argument of the differential's scripts, mangled: a parser that
 # matches a keyword by its first letters, or ignores an unknown one, shows up
 # as a divergence from Redis (#32).

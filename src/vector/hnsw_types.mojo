@@ -1,7 +1,7 @@
 from src.common.ptr import is_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.math import sqrt
-from std.memory import alloc
+from std.memory import alloc, unsafe_memset
 from std.atomic import Atomic, Ordering
 from src.common.lock_free import ShardQueryBus
 # gh #87.1: ivf_pq module deleted.
@@ -227,6 +227,15 @@ struct SharedHNSWView(Movable):
     # workers that load nothing answered FT.SEARCH with "no such index" until
     # the loader had published, on a multi-worker warm restart.
     var warm_load_pending: Pointer[UInt64, MutUntrackedOrigin]
+    # #46: the index's tombstones: a byte per ingest slot (1 = the document
+    # left the keyspace or the vector left the document) and how many there
+    # are, shared by every worker (src/common/vec_tomb.mojo), and the id of
+    # the build the slots belong to — random per FT.OPTIMIZE, saved in the
+    # index file, 0 before a build. Pointers, so copies of the view share them.
+    var vec_dead: Pointer[UInt8, MutUntrackedOrigin]
+    var vec_dead_count: Pointer[UInt64, MutUntrackedOrigin]
+    var build_id: Pointer[UInt64, MutUntrackedOrigin]
+    var vec_gen: Pointer[UInt64, MutUntrackedOrigin]     # see VecTomb.gen
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -263,6 +272,10 @@ struct SharedHNSWView(Movable):
         self.gpu_rerank_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.pre_ef_construction = 0
         self.warm_load_pending = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.vec_dead = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.vec_dead_count = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.build_id = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.vec_gen = null_ptr[UInt64, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -382,6 +395,39 @@ struct SharedHNSWView(Movable):
         self.gpu_rerank_fp32 = take.gpu_rerank_fp32
         self.pre_ef_construction = take.pre_ef_construction
         self.warm_load_pending = take.warm_load_pending
+        self.vec_dead = take.vec_dead
+        self.vec_dead_count = take.vec_dead_count
+        self.build_id = take.build_id
+        self.vec_gen = take.vec_gen
+
+    @always_inline
+    def slot_dead(self, slot: Int) -> Bool:
+        """#46: the document at `slot` left the keyspace, or its vector left it."""
+        return Int(self.vec_dead) != 0 and slot >= 0 and slot < self.hk_max_elements and self.vec_dead[slot] != 0
+
+    @always_inline
+    def any_dead(self) -> Bool:
+        return Int(self.vec_dead_count) != 0 and self.vec_dead_count[] != 0
+
+    def mark_dead(self, slot: Int):
+        """#46: slot `slot` is dead (any worker; the count is atomic)."""
+        if Int(self.vec_dead) == 0 or slot < 0 or slot >= self.hk_max_elements or self.vec_dead[slot] != 0:
+            return
+        self.vec_dead[slot] = 1
+        _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](self.vec_dead_count, UInt64(1))
+
+    def new_generation(mut self):
+        """#46: slot numbering starts again from 0 (FT.DROPINDEX, an index
+        replaced, a fresh ingest buffer): no slot is dead, there is no build,
+        and links made before are stale (VecTomb.gen)."""
+        if Int(self.vec_dead) != 0:
+            unsafe_memset(self.vec_dead, 0, self.hk_max_elements)
+        if Int(self.vec_dead_count) != 0:
+            self.vec_dead_count[] = 0
+        if Int(self.build_id) != 0:
+            self.build_id[] = 0
+        if Int(self.vec_gen) != 0:
+            _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELEASE](self.vec_gen, UInt64(1))
 
     def add_ingest_vector(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) -> Int:
         """Buffer a FP32 vector during load phase. Called from any worker's HSET handler.

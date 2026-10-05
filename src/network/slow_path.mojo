@@ -1,4 +1,5 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
+from src.common.vec_tomb import VecTomb
 from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc, unsafe_memcpy, unsafe_memset, stack_allocation
 from std.collections import Array, List
@@ -59,7 +60,7 @@ from src.commands.mpop import parse_mpop
 from src.commands.blocking import BlockedClientRegistry, parse_block_timeout, new_blocked_client
 from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro, handle_pfselftest, handle_pfdebug
 from src.commands.monitor import MonitorRegistry, monitor_line
-from src.network.vector_ingest import ingest_hash_vector
+from src.network.vector_ingest import ingest_hash_vector, record_all_dead, ingest_whole_hash, hash_addr, after_rename
 from src.commands.replication_cmds import handle_role, handle_replicaof, handle_failover, handle_sync, handle_replconf
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
@@ -319,6 +320,8 @@ struct SlowPathHandler:
     # The engine's writer while a script runs: a script's PUBLISH reaches
     # subscribers through it (the script's own writer only captures replies).
     var script_main_writer: UnsafePointer[ResponseWriter, MutUntrackedOrigin]
+    # #46: the worker's vector-index tombstones (state.mojo sets it)
+    var vec_tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]
 
     def __init__(
         out self,
@@ -393,6 +396,7 @@ struct SlowPathHandler:
         self.monitor_exec_line = List[UInt8]()
         self.local_affinity = null_ptr[UInt8, MutUntrackedOrigin]()
         self.script_main_writer = null_ptr[ResponseWriter, MutUntrackedOrigin]()
+        self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         self.cluster = cluster
         self.shard_query_seq = alloc[UInt64](1)
         self.shard_query_seq[0] = 1
@@ -1975,7 +1979,7 @@ struct SlowPathHandler:
                                     break
                                 hs_added += res.value
                                 # #43: the index's vector field is indexed here too
-                                _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal,
+                                _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,
                                                        tokens[i+1].ptr, tokens[i+1].length, tokens[j_hs].ptr,
                                                        tokens[j_hs].length, tokens[j_hs+1].ptr, tokens[j_hs+1].length)
                                 j_hs += 2
@@ -2016,7 +2020,7 @@ struct SlowPathHandler:
                                 if not hmset_res.is_valid:
                                     hmset_wrong = True
                                     break
-                                _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #43
+                                _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,   # #43
                                                        tokens[i+1].ptr, tokens[i+1].length, tokens[j_hmset].ptr,
                                                        tokens[j_hmset].length, tokens[j_hmset+1].ptr, tokens[j_hmset+1].length)
                                 j_hmset += 2
@@ -2388,6 +2392,8 @@ struct SlowPathHandler:
                     elif tl == 7 and cmd_matches_7(tp, 114, 101, 115, 116, 111, 114, 101):
                         if handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal):
                             self.tx_state.bump_key_version(tokens[i + 1].ptr, tokens[i + 1].length)
+                            _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #46
+                                                  self.vec_tomb, tokens[i + 1].ptr, tokens[i + 1].length)
                         i = cmd_end_tok - 1
                     # ── MIGRATE ──
                     elif tl == 7 and cmd_matches_7(tp, 109, 105, 103, 114, 97, 116, 101):
@@ -2415,6 +2421,10 @@ struct SlowPathHandler:
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.optimize"): # FT.OPTIMIZE
                             _ = handle_ft_optimize(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, self.keyspace, self.worker_id, writer)
+                            # #46: the slots already dead, under the new build's id
+                            if is_not_null(self.shared_hnsw) and is_not_null(self.shared_hnsw[].ready_atomic) \
+                                    and self.shared_hnsw[].ready_atomic[] != 0:
+                                record_all_dead(self.shared_hnsw, self.vec_tomb, self.dispatcher)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.create"): # FT.CREATE
                             _ = handle_ft_create(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, config, writer, self.worker_id)
@@ -2863,7 +2873,11 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── RENAME ──
                     elif tl == 6 and cmd_matches_6(tp, 114, 101, 110, 97, 109, 101):
+                        var _vmv = hash_addr(self.keyspace, tokens[i + 1].ptr, tokens[i + 1].length) if i + 2 < cmd_end_tok else 0
                         _ = handle_rename(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        if _vmv != 0:   # #46: a renamed hash's slot names its old key
+                            after_rename(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb, _vmv,
+                                         tokens[i + 1].ptr, tokens[i + 1].length, tokens[i + 2].ptr, tokens[i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
@@ -2871,7 +2885,11 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── RENAMENX ──
                     elif tl == 8 and cmd_matches_8(tp, 114, 101, 110, 97, 109, 101, 110, 120):
+                        var _vmv = hash_addr(self.keyspace, tokens[i + 1].ptr, tokens[i + 1].length) if i + 2 < cmd_end_tok else 0
                         _ = handle_renamenx(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        if _vmv != 0:   # #46: a renamed hash's slot names its old key
+                            after_rename(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb, _vmv,
+                                         tokens[i + 1].ptr, tokens[i + 1].length, tokens[i + 2].ptr, tokens[i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
@@ -2880,6 +2898,9 @@ struct SlowPathHandler:
                     # ── COPY ──
                     elif tl == 4 and cmd_matches_4(tp, 99, 111, 112, 121):
                         _ = handle_copy(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        if i + 2 < cmd_end_tok:   # #46: the copy's vector, as HSET's
+                            _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,
+                                                  tokens[i + 2].ptr, tokens[i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                         i = cmd_end_tok - 1
@@ -2984,7 +3005,8 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── HSETNX ──
                     elif tl == 6 and cmd_matches_6(tp, 104, 115, 101, 116, 110, 120):
-                        _ = handle_hsetnx(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher, self.shared_hnsw)
+                        _ = handle_hsetnx(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher, self.shared_hnsw,
+                                          self.vec_tomb)
                         i = cmd_end_tok - 1
                     # ── R3: HEXPIRE (7 bytes: h=104,e=101,x=120,p=112,i=105,r=114,e=101) ──
                     elif tl == 7 and (tp[0]|0x20)==104 and (tp[1]|0x20)==101 and (tp[2]|0x20)==120 and (tp[3]|0x20)==112 and (tp[4]|0x20)==105 and (tp[5]|0x20)==114 and (tp[6]|0x20)==101:
@@ -3963,6 +3985,8 @@ struct SlowPathHandler:
                         # RESTORE, as a cluster's MIGRATE sends it mid-resharding
                         if handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal):
                             self.tx_state.bump_key_version(tokens[i + 1].ptr, tokens[i + 1].length)
+                            _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #46
+                                                  self.vec_tomb, tokens[i + 1].ptr, tokens[i + 1].length)
                         i = cmd_end_tok - 1
                     else:
                         writer.append_error_response("ERR unknown command '" + token.value() + "'")

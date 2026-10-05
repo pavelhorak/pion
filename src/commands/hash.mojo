@@ -1,5 +1,6 @@
 """Hash commands: HMGET, HGETALL, HKEYS, HVALS, HLEN, HDEL, HEXISTS, HINCRBY, HINCRBYFLOAT, HRANDFIELD, HSCAN, HSETNX.
 R3: Hash field expiration: HEXPIRE, HPEXPIRE, HEXPIREAT, HPEXPIREAT, HTTL, HPTTL, HPERSIST, HEXPIRETIME, HPEXPIRETIME."""
+from src.common.vec_tomb import VecTomb
 from src.common.container_free import remove_and_free, hash_get_live
 from std.ffi import external_call
 from src.common.ptr import is_not_null, null_ptr
@@ -553,7 +554,8 @@ def handle_hscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 
 @always_inline
 def handle_hsetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut dispatcher: CommandDispatcher,
-                  shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin]()) raises -> Int:
+                  shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin](),
+                  tomb: Pointer[VecTomb, MutUntrackedOrigin] = null_ptr[VecTomb, MutUntrackedOrigin]()) raises -> Int:
     """HSETNX key field value — returns number of extra tokens consumed. A
     field it sets that is the index's vector field is indexed (#43)."""
     var kt = tokens[unsafe_offset=i+1]
@@ -575,7 +577,7 @@ def handle_hsetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         elif val.is_none() or val.type.value != ValueType.HASH:
             # Create hash via dispatcher; field is new so always sets
             _ = dispatcher.execute_hset(key_str, field_str, val_str3)
-            _ = ingest_hash_vector(shared_hnsw, keyspace, dispatcher.wal, kt.ptr, kt.length, ft.ptr, ft.length, vt.ptr, vt.length)
+            _ = ingest_hash_vector(shared_hnsw, keyspace, dispatcher.wal, tomb, kt.ptr, kt.length, ft.ptr, ft.length, vt.ptr, vt.length)
             writer.append_int_response(Int64(1))
         else:
             var hash_ptr2 = val.as_hash().unsafe_bitcast[SlabHashMap]()
@@ -586,7 +588,7 @@ def handle_hsetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                 _ = dispatcher.wal[].append_field_kv(5, key_str.unsafe_ptr(), key_str.byte_length(),
                                                      field_str.unsafe_ptr(), field_str.byte_length(),
                                                      val_str3.unsafe_ptr(), val_str3.byte_length())
-                _ = ingest_hash_vector(shared_hnsw, keyspace, dispatcher.wal, kt.ptr, kt.length, ft.ptr, ft.length, vt.ptr, vt.length)
+                _ = ingest_hash_vector(shared_hnsw, keyspace, dispatcher.wal, tomb, kt.ptr, kt.length, ft.ptr, ft.length, vt.ptr, vt.length)
                 writer.append_int_response(Int64(1))
             else: writer.append_int_response(Int64(0))
         return 3

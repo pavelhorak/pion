@@ -15,6 +15,8 @@ from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.network.gossip import GossipManager
 from src.network.replication import PrimaryReplicator, ReplicaReceiver, apply_wal_entries
 from src.common.hash_map import SlabHashMap, StripedHashMap
+from src.common.vec_tomb import VecTomb
+from src.network.vector_ingest import restore_index_state
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
 from src.memory.slab_allocator import SlabAllocator
@@ -61,6 +63,8 @@ struct Pion:
     var hash_map_pool: Pointer[ObjectPool[SlabHashMap], MutUntrackedOrigin]
     var skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]
     var list_pool: Pointer[ObjectPool[SlabList], MutUntrackedOrigin]
+    # #46: this worker's view of the vector index's tombstones
+    var vec_tomb: Pointer[VecTomb, MutUntrackedOrigin]
 
     def __init__(out self, var node_list: List[String], config: PionConfig, shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin], shared_listen_fd: Int32 = -1, worker_id: Int = 0, num_workers: Int = 1, secondary_listen_fd: Int32 = Int32(-1), binary_listen_fd: Int32 = Int32(-1), cluster: Pointer[ClusterState, MutUntrackedOrigin] = null_ptr[ClusterState, MutUntrackedOrigin]()):
         self.nodes = node_list.copy()
@@ -78,6 +82,14 @@ struct Pion:
         self.list_pool = alloc[ObjectPool[SlabList]](1)
         self.ai_queue = alloc[LockFreeRingBuffer](1)
         _ = self.ai_queue[].__init__(1024)
+        self.vec_tomb = alloc[VecTomb](1)
+        if is_not_null(shared_hnsw):
+            self.vec_tomb.unsafe_write(VecTomb(shared_hnsw[].vec_dead, shared_hnsw[].vec_dead_count,
+                                               shared_hnsw[].hk_max_elements, shared_hnsw[].vec_gen))
+        else:
+            self.vec_tomb.unsafe_write(VecTomb(null_ptr[UInt8, MutUntrackedOrigin](),
+                                               null_ptr[UInt64, MutUntrackedOrigin](), 0,
+                                               null_ptr[UInt64, MutUntrackedOrigin]()))
 
         # === Phase 2: Lightweight value-type init ===
         self.config = config
@@ -118,6 +130,8 @@ struct Pion:
             cluster=cluster,
             ttl_map=self.ttl_map,
         )
+        self.engine.fast_path.vec_tomb = self.vec_tomb   # #46
+        self.engine.slow_path.vec_tomb = self.vec_tomb
         if shared_listen_fd >= 0:
             # V3.1: use the single shared listen socket created in main() before parallelize.
             # All workers register this fd with their own kqueue and race to accept().
@@ -254,6 +268,9 @@ struct Pion:
                     # the index beats never serving.
                     print("Worker " + String(worker_id) + ": gave up waiting for the vector index load after 600 s")
                     break
+        # #46: the index has loaded (or there is none): apply this worker's
+        # recorded tombstones for its build and relink the hashes to their slots
+        restore_index_state(self.shared_hnsw, self.keyspace, self.vec_tomb)
 
         # === Phase 7: Gossip + Replication (worker 0 only) ===
         # Only worker 0 starts background threads; other workers read shared ClusterState.

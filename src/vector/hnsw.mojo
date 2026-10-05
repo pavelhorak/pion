@@ -311,6 +311,10 @@ struct HNSWGraph(Movable):
     # At END of struct per the field-ordering rule.
     var residual_scratch: UnsafePointer[Float32, MutUntrackedOrigin]
     var residual_scratch_cap: Int
+    # #46: this build's id, random per FT.OPTIMIZE (index header word 31; 0
+    # for a file that predates it). Tombstones record it, so replay applies
+    # them to the build they were made against. At END per the field rule.
+    var build_id: UInt64
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
@@ -414,6 +418,7 @@ struct HNSWGraph(Movable):
         self.fp32_norm_scratch_cap = 0
         self.fp32_norm_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.residual_scratch_cap = 0
+        self.build_id = 0
         self.residual_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.gpu_slot_ext_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.gpu_distances = null_ptr[Float32, MutUntrackedOrigin]()
@@ -878,6 +883,8 @@ struct HNSWGraph(Movable):
             shared[].pre_vector_field_len = self.vector_field_len
             for i in range(self.vector_field_len):
                 shared[].pre_vector_field_name[i] = self.vector_field_name[i]
+        if is_not_null(shared[].build_id):
+            shared[].build_id[] = self.build_id   # #46
         shared[].ready = True  # legacy plain-Bool, kept for diagnostics
         # Real visibility barrier: atomic Release store after all field writes.
         # FT.SEARCH borrow check uses Atomic Acquire load to pair with this
@@ -1072,6 +1079,7 @@ struct HNSWGraph(Movable):
         # 27-30) = up to 32 bytes. Same no-bump reasoning as words 24/25: an
         # older file reads length 0 and keeps the default field.
         hdr[26] = UInt64(self.vector_field_len) if self.vector_field_len <= 32 else UInt64(0)
+        hdr[31] = self.build_id                  # #46
         var vf_dst = hdr.bitcast[UInt8]() + 216
         if self.vector_field_len <= 32:
             for i in range(self.vector_field_len):
@@ -1238,6 +1246,7 @@ struct HNSWGraph(Movable):
         var saved_metric    = UInt8(hdr[24]) if hdr[24] <= 1 else UInt8(0)  # gh #271
         var saved_qsec      = hdr[25]        # gh #350: optional quant sections
         var saved_vf_len    = Int(hdr[26])   # gh #407: 0 = file predates the field
+        self.build_id = hdr[31]                  # #46: 0 = file predates it
 
         # Sanity checks: must match this worker's config
         if saved_dim != self.dim or saved_M != self.M or saved_max_elem != self.max_elements:

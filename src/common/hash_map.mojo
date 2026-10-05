@@ -8,6 +8,7 @@ from std.math import iota
 from std.collections import List
 from src.common.value import GenericValue, ValueType, BLOB_TAG
 from src.common.prng import Xoshiro256PlusPlus
+from src.common.vec_tomb import VecTomb
 
 # Per-lane weights (1 << lane) for packing a 16-lane bool compare into a
 # movemask-style bitmask. Computed once at compile time.
@@ -44,6 +45,14 @@ struct SlabHashMap(Movable):
     # did not follow RENAME. Owned here, a field TTL goes wherever the hash
     # goes and dies with it.
     var field_ttl: Pointer[SlabHashMap, MutUntrackedOrigin]
+    # #46: a HASH whose vector the shared index holds: its slot, the hash of
+    # the field the vector is in, and its worker's tombstones. The slot dies
+    # with this map (__del__), and when the field is set or removed. -1 / null
+    # everywhere else. At the END: the keyspace's shards are hot (gh #149).
+    var vec_slot: Int
+    var vec_field_h: UInt64
+    var vec_tomb: Pointer[VecTomb, MutUntrackedOrigin]
+    var vec_gen: UInt64          # the slot numbering's generation at the link
 
     # Metadata constants
     comptime EMPTY = UInt8(0b10000000)
@@ -60,6 +69,10 @@ struct SlabHashMap(Movable):
         self.tombstones = 0
         self.graveyard = null_ptr[List[GenericValue], MutUntrackedOrigin]()
         self.field_ttl = null_ptr[SlabHashMap, MutUntrackedOrigin]()
+        self.vec_slot = -1
+        self.vec_field_h = 0
+        self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
+        self.vec_gen = 0
         self.metadata = alloc[UInt8](real_cap + 16)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), real_cap + 16)
         self.keys = alloc[GenericValue](real_cap)
@@ -73,6 +86,8 @@ struct SlabHashMap(Movable):
     def reset(mut self):
         """Lazy reset: skip entirely when the map is already clean (fresh from pool)."""
         self._drop_field_ttl()
+        self.vec_slot = -1          # #46: a recycled map indexes nothing
+        self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         if self.size == 0:
             return
         # gh #131 §1.4: visit only OCCUPIED slots via the Swiss metadata instead of
@@ -108,7 +123,33 @@ struct SlabHashMap(Movable):
         self.tombstones = take.tombstones
         self.graveyard = take.graveyard
         self.field_ttl = take.field_ttl
-    
+        self.vec_slot = take.vec_slot
+        self.vec_field_h = take.vec_field_h
+        self.vec_tomb = take.vec_tomb
+        self.vec_gen = take.vec_gen
+
+    # ── #46: the vector this hash put in the index ───────────────────────────
+    def index_vector(mut self, slot: Int, field_h: UInt64, tomb: Pointer[VecTomb, MutUntrackedOrigin]):
+        """The index holds this hash's vector at `slot` (field hash `field_h`)."""
+        self.vec_slot = slot
+        self.vec_field_h = field_h
+        self.vec_tomb = tomb
+        self.vec_gen = tomb[].generation() if Int(tomb) != 0 else UInt64(0)
+
+    @no_inline
+    def drop_vector(mut self):
+        """This hash's vector leaves the index: its slot dies."""
+        if self.vec_slot >= 0 and Int(self.vec_tomb) != 0:
+            self.vec_tomb[].kill(self.vec_slot, self.vec_gen)
+        self.vec_slot = -1
+
+    @always_inline
+    def _vector_field_touched(mut self, h: UInt64):
+        """A set or remove of the field with hash `h`: when it is the indexed
+        vector's field, the indexed vector is no longer this hash's."""
+        if self.vec_slot >= 0 and h == self.vec_field_h:
+            self.drop_vector()
+
     # ── gh #392: per-field expiry of a HASH ─────────────────────────────────
     def _drop_field_ttl(mut self):
         if Int(self.field_ttl) != 0:
@@ -204,6 +245,7 @@ struct SlabHashMap(Movable):
             self._rehash()
 
         var h = UInt64(key.__hash__())
+        self._vector_field_touched(h)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
 
@@ -449,7 +491,9 @@ struct SlabHashMap(Movable):
 
     @always_inline
     def set_with_hash(mut self, key: GenericValue, var value: GenericValue, h: UInt64):
-        """Like set() but skips hash computation — caller provides precomputed hash."""
+        """Like set() but skips hash computation — caller provides precomputed hash.
+        Only the keyspace stores through this (MSET's loop among them), so it
+        has no #46 vector-field check: a hash's fields go through set()."""
         if (self.size + self.tombstones) * 100 > self.capacity * 70:
             self._rehash()
         var h1 = self._h1(h)
@@ -510,6 +554,7 @@ struct SlabHashMap(Movable):
     @always_inline
     def remove_generic_with_hash(mut self, key: GenericValue, h: UInt64) -> Bool:
         """Like remove_generic() but skips hash computation — caller provides precomputed hash."""
+        self._vector_field_touched(h)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
         var mask = self.capacity - 1
@@ -555,6 +600,7 @@ struct SlabHashMap(Movable):
         (list/hash/set/zset/geo/stream/vset, and HLL/bitmap) in `taken`, so the caller can free the
         container it points to (gh #369) without a second probe. String
         payloads are freed here as before and never handed back."""
+        self._vector_field_touched(h)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
         var mask = self.capacity - 1
@@ -699,6 +745,7 @@ struct SlabHashMap(Movable):
 
     def remove_generic(mut self, key: GenericValue) -> Bool:
         var h = UInt64(key.__hash__())
+        self._vector_field_touched(h)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
         
@@ -843,6 +890,10 @@ struct SlabHashMap(Movable):
         self.size = 0
 
     def __del__(deinit self):
+        # #46: every route that drops a hash ends here (DEL, expiry, FLUSHALL,
+        # an overwrite, a pop or HDEL that empties it): its vector dies with it
+        if self.vec_slot >= 0 and Int(self.vec_tomb) != 0:
+            self.vec_tomb[].kill(self.vec_slot, self.vec_gen)
         if Int(self.field_ttl) != 0:
             self.field_ttl.unsafe_deinit_pointee()
             self.field_ttl.unsafe_free()

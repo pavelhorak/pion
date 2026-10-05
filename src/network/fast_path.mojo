@@ -1,4 +1,6 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
+from src.network.vector_ingest import ingest_hash_vector
+from src.common.vec_tomb import VecTomb
 from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc, unsafe_memcpy, unsafe_memset, stack_allocation
 from std.collections import Array, Span
@@ -220,6 +222,21 @@ struct FastPathHandler(Movable):
     var blobs: UnsafePointer[BlobStore, MutUntrackedOrigin]
     var blob_threshold: Int          # BLOB_TIER_OFF disables the tier (--no-blob-tier)
     var field_sweep_cursor: Int      # gh #392: position in keyspace.field_ttl_index (last: hot struct)
+    # #46: the worker's vector-index tombstones (state.mojo sets it)
+    var vec_tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]
+
+    @no_inline
+    def _ingest_field(mut self, key_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], k_len: Int,
+                      field_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], f_len: Int,
+                      val_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], val_len: Int):
+        """#43/#46: after an HSET stored the field, send the index's vector
+        field to the index and link the hash to its slot (vector_ingest.mojo,
+        shared with the slow path). It used to run before the hash was even
+        looked up, so `SET k x; HSET k vec <v>` indexed a vector for a key
+        that answered WRONGTYPE. Out of line: the plain HSET row never takes it."""
+        _ = ingest_hash_vector(self.shared_hnsw, self.keyspace,
+                               self.wal if self.has_wal else null_ptr[WAL, MutUntrackedOrigin](),
+                               self.vec_tomb, key_ptr, k_len, field_ptr, f_len, val_ptr, val_len)
 
     @no_inline
     def _set_blob_value(mut self, key_val: GenericValue,
@@ -282,6 +299,7 @@ struct FastPathHandler(Movable):
         self.ttl_map = ttl_map
         self.ttl_sweep_cursor = 0
         self.field_sweep_cursor = 0
+        self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         self.has_cluster = is_not_null(cluster) and cluster[].enabled
         self.has_ttl = is_not_null(ttl_map)  # True if TTL map exists (lazy expiry checks enabled)
         self.has_wal = True  # default on; NetworkEngine sets False when --no-wal
@@ -1693,39 +1711,6 @@ struct FastPathHandler(Movable):
                         it_pos += 2
                         if val_len < 0 or it_pos + val_len + 2 > n:
                             return consumed
-                        # Route vector field to HNSW ingest buffer (single-field HSET)
-                        var _sh_ptr = self.shared_hnsw
-                        if is_not_null(_sh_ptr):
-                            if _sh_ptr[].pre_index_ready:
-                                if val_len == _sh_ptr[].pre_dim * 4:
-                                    if f_len == _sh_ptr[].pre_vector_field_len:
-                                        var _is_vf = True
-                                        var _vfn_ptr = _sh_ptr[].pre_vector_field_name.unsafe_ptr()
-                                        for _vbi in range(f_len):
-                                            if (field_ptr[_vbi] | 0x20) != _vfn_ptr[_vbi]:
-                                                _is_vf = False
-                                                break
-                                        if _is_vf:
-                                            var _slot = _sh_ptr[].add_ingest_vector(0, (buffer + it_pos).bitcast[Float32]())
-                                            if _slot >= 0:
-                                                # Store reverse mapping: slot ID → original hash key
-                                                var _hk_buf = stack_allocation[30, UInt8]()
-                                                _hk_buf[0]=95;_hk_buf[1]=95;_hk_buf[2]=104;_hk_buf[3]=107;_hk_buf[4]=95;_hk_buf[5]=95 # __hk__
-                                                var _hk_end = format_int_to_buf(_hk_buf, 6, Int64(_slot))
-                                                self.keyspace[].set(GenericValue.borrow(_hk_buf, _hk_end), GenericValue.borrow_buf(key_ptr, k_len))
-                                                # gh #211: effect-log the __hk__ SET (gh #170 rule —
-                                                # every keyspace mutation replays); it's the only
-                                                # durable slot→key source for keys >31B.
-                                                if self.has_wal:
-                                                    _ = self.wal[].append_kv(1, _hk_buf, _hk_end, key_ptr, k_len)
-                                                # Cross-worker shared mapping: byte 0 = len, bytes 1..31 = key.
-                                                # gh #211: >31B keys must stay len 0 (fall through to the
-                                                # __hk__ probe) — a truncated key stored as complete
-                                                # resolves to a wrong doc key.
-                                                if is_not_null(_sh_ptr[].hk_keys_buf) and _slot < _sh_ptr[].hk_max_elements and k_len <= 31:
-                                                    var _dst = _sh_ptr[].hk_keys_buf + _slot * 32
-                                                    _dst[0] = UInt8(k_len)
-                                                    unsafe_memcpy(dest=_dst + 1, src=key_ptr, count=k_len)
                         var key_val = GenericValue.borrow_buf(key_ptr, k_len)
                         var field_val = GenericValue.borrow_buf(field_ptr, f_len)
                         var val_val = GenericValue.borrow_buf(buffer + it_pos, val_len)
@@ -1750,6 +1735,8 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_field_kv(5, key_ptr, k_len,
                                                                field_ptr, f_len,
                                                                buffer + it_pos, val_len)
+                            if is_not_null(self.shared_hnsw) and self.shared_hnsw[].pre_index_ready:
+                                self._ingest_field(key_ptr, k_len, field_ptr, f_len, buffer + it_pos, val_len)
                             writer.append_int_response(Int64(1))
                         elif val.type.value == ValueType.HASH:
                             var hash_ptr = val.as_hash().bitcast[SlabHashMap]()
@@ -1767,6 +1754,8 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_field_kv(5, key_ptr, k_len,
                                                                field_ptr, f_len,
                                                                buffer + it_pos, val_len)
+                            if is_not_null(self.shared_hnsw) and self.shared_hnsw[].pre_index_ready:
+                                self._ingest_field(key_ptr, k_len, field_ptr, f_len, buffer + it_pos, val_len)
                             writer.append_int_response(Int64(1) if hash_ptr[].size > _hs_before else Int64(0))
                         else:
                             valid = False
@@ -1858,37 +1847,6 @@ struct FastPathHandler(Movable):
                             it_pos += 2
                             if v_len2 < 0 or it_pos + v_len2 + 2 > n:
                                 return consumed
-                            # Route to shared ingest buffer if this is the vector field
-                            # V3.1: use SharedHNSWView for cross-worker coordination
-                            var is_vec2 = False
-                            if is_not_null(self.shared_hnsw):
-                                if self.shared_hnsw[].pre_index_ready:
-                                    if v_len2 == self.shared_hnsw[].pre_dim * 4:
-                                        is_vec2 = True
-                            if is_vec2 and f_len2 == self.shared_hnsw[].pre_vector_field_len:
-                                var _vfn2 = self.shared_hnsw[].pre_vector_field_name.unsafe_ptr()
-                                for bi in range(f_len2):
-                                    if (f_ptr2[bi] | 0x20) != _vfn2[bi]:
-                                        is_vec2 = False
-                                        break
-                            elif is_vec2:
-                                is_vec2 = False
-                            if is_vec2:
-                                var _slot2 = self.shared_hnsw[].add_ingest_vector(0, (buffer + it_pos).bitcast[Float32]())
-                                if _slot2 >= 0:
-                                    var _hk2_buf = stack_allocation[30, UInt8]()
-                                    _hk2_buf[0]=95;_hk2_buf[1]=95;_hk2_buf[2]=104;_hk2_buf[3]=107;_hk2_buf[4]=95;_hk2_buf[5]=95
-                                    var _hk2_end = format_int_to_buf(_hk2_buf, 6, Int64(_slot2))
-                                    self.keyspace[].set(GenericValue.borrow(_hk2_buf, _hk2_end), GenericValue.borrow_buf(key_ptr2, k_len2))
-                                    # gh #211: effect-log the __hk__ SET (see single-field HSET above)
-                                    if self.has_wal:
-                                        _ = self.wal[].append_kv(1, _hk2_buf, _hk2_end, key_ptr2, k_len2)
-                                    # Cross-worker shared mapping (see single-field HSET above for
-                                    # rationale; gh #211: >31B keys stay len 0, never truncated)
-                                    if is_not_null(self.shared_hnsw[].hk_keys_buf) and _slot2 < self.shared_hnsw[].hk_max_elements and k_len2 <= 31:
-                                        var _dst2 = self.shared_hnsw[].hk_keys_buf + _slot2 * 32
-                                        _dst2[0] = UInt8(k_len2)
-                                        unsafe_memcpy(dest=_dst2 + 1, src=key_ptr2, count=k_len2)
                             # gh #360: the vector field is ALSO stored in the hash.
                             # It used to go to the HNSW ingest buffer only, so
                             # `HGET key <vector-field>` answered nil after a
@@ -1905,6 +1863,11 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_field_kv(5, key_ptr2, k_len2,
                                                                f_ptr2, f_len2,
                                                                buffer + it_pos, v_len2)
+                            # #43/#46: the index's vector field goes to the index
+                            # once it is stored, linked to this hash
+                            if is_not_null(self.shared_hnsw) and self.shared_hnsw[].pre_index_ready \
+                                    and v_len2 == self.shared_hnsw[].pre_dim * 4:
+                                self._ingest_field(key_ptr2, k_len2, f_ptr2, f_len2, buffer + it_pos, v_len2)
                             it_pos += v_len2 + 2
                         writer.append_int_response(Int64(hash_ptr2[].size - _hms_before))
                     else:

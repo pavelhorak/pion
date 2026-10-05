@@ -1,5 +1,6 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import free_graveyard
+from src.network.vector_ingest import log_dead_slots
 from std.sys.info import CompilationTarget
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy, stack_allocation
@@ -397,6 +398,10 @@ struct NetworkEngine:
         # One load and a compare per recv buffer when there are none.
         if len(self.fast_path.keyspace[].graveyard[]) > 0:
             free_graveyard(self.fast_path.keyspace)
+        # #46: record the vector slots this batch killed (freeing a hash above,
+        # or a field write, kills its slot), so a restart keeps them dead
+        if is_not_null(self.slow_path.vec_tomb) and len(self.slow_path.vec_tomb[].pending) > 0:
+            log_dead_slots(self.slow_path.shared_hnsw, self.slow_path.vec_tomb, self.slow_path.dispatcher)
         self.client_buffer_lens[unsafe_offset=client_idx] = cur_len
         # gh #14: leave the RCU critical section. Placed after the flush, not
         # before it — a handler's reply can still reference borrowed memory
@@ -678,6 +683,9 @@ struct NetworkEngine:
         # write logs them itself, ahead of its own record).
         if is_not_null(self.fast_path.wal):
             self.fast_path.wal[].log_expired()
+        # #46: and the vector slots the sweep's frees killed
+        if is_not_null(self.slow_path.vec_tomb) and len(self.slow_path.vec_tomb[].pending) > 0:
+            log_dead_slots(self.slow_path.shared_hnsw, self.slow_path.vec_tomb, self.slow_path.dispatcher)
 
         if not self.shutting_down:
             if external_call["pion_shutdown_requested", Int32]() != 0:

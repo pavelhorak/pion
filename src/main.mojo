@@ -1273,6 +1273,16 @@ def main():
     unsafe_memset(hk_keys_buf, 0, hk_max * 32)
     shared_hnsw_ptr[].hk_keys_buf = hk_keys_buf
     shared_hnsw_ptr[].hk_max_elements = hk_max
+    # #46: tombstones, a byte per slot, and the build id they belong to
+    var vec_dead = alloc[UInt8](hk_max)
+    unsafe_memset(vec_dead, 0, hk_max)
+    shared_hnsw_ptr[].vec_dead = vec_dead
+    shared_hnsw_ptr[].vec_dead_count = alloc[UInt64](1)
+    shared_hnsw_ptr[].vec_dead_count[] = 0
+    shared_hnsw_ptr[].build_id = alloc[UInt64](1)
+    shared_hnsw_ptr[].build_id[] = 0
+    shared_hnsw_ptr[].vec_gen = alloc[UInt64](1)
+    shared_hnsw_ptr[].vec_gen[] = 1
 
     # 64-byte stride per worker: shard_ready[worker_id * 8] (UInt64 units × 8 bytes each = 64 bytes).
     # Each worker's ready flag occupies its own cache line — eliminates LDXR/STXR livelock on ARM64.
