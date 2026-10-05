@@ -191,3 +191,12 @@ int pion_parse_double(const char* p, int64_t n, int mode, double* out) {
     *out = v;
     return 1;
 }
+
+#include <stdio.h>
+
+/* snprintf("%.*f") — Redis's "%f" in error messages (GEO's "invalid
+   longitude,latitude pair %f,%f"). Returns the length or -1. */
+int64_t pion_fmt_fixed(double v, int decimals, char* out, int64_t cap) {
+    int l = snprintf(out, (size_t)cap, "%.*f", decimals, v);
+    return (l < 0 || (int64_t)l + 1 > cap) ? -1 : l;
+}

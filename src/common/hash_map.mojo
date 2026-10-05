@@ -177,13 +177,13 @@ struct SlabHashMap(Movable):
         if old.type.value == ValueType.STRING:
             old.free_str_payload()
         elif Int(self.graveyard) != 0 and (old.is_container()
-                                           or old.type.value == ValueType.HLL):
+                                           or old.type.value == ValueType.HLL
+                                           or old.type.value == ValueType.BITMAP):
             self._park(old)
-        # BITMAP is left out on purpose: setbit() reallocates a growing bitmap
-        # and FREES the old buffer itself, then its caller set()s the new one —
-        # parking the old value here freed it a second time (tcmalloc "Attempt
-        # to free invalid pointer" under the Redis differential). DEL still
-        # frees a bitmap (remove_generic_taking hands it back).
+        # BITMAP was once left out, because setbit() freed the buffer it grew
+        # out of, so a bitmap that SET, BITOP or FLUSHALL replaced was never
+        # freed at all. setbit() now leaves the old buffer here. The set() paths skip this call when the new
+        # value keeps the same buffer (an in-place SETBIT).
 
     @no_inline
     def _park(mut self, old: GenericValue):

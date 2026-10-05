@@ -509,7 +509,7 @@ struct CommandDispatcher:
             if offset // 8 >= byte_len:
                 return IntCmdResult(0, True)
             else:
-                return IntCmdResult(Int64(getbit(bitmap_ptr, offset)), True)
+                return IntCmdResult(Int64(getbit(bitmap_ptr, byte_len, offset)), True)
         else:
             return IntCmdResult(0, False)
 
@@ -521,7 +521,7 @@ struct CommandDispatcher:
             var bitmap_ptr = alloc[UInt8](byte_len)
             unsafe_memset(bitmap_ptr, 0, byte_len)
             
-            var old_val = getbit(bitmap_ptr, offset)
+            var old_val = getbit(bitmap_ptr, byte_len, offset)
             
             var result = setbit(byte_len, bitmap_ptr, offset, value)
             var new_bitmap_ptr = result.ptr
@@ -539,7 +539,7 @@ struct CommandDispatcher:
         elif val.type.value == ValueType.BITMAP:
             var bitmap_ptr = val.as_bitmap()
             var byte_len = val.bitmap_len()
-            var old_val = getbit(bitmap_ptr, offset)
+            var old_val = getbit(bitmap_ptr, byte_len, offset)
 
             var result = setbit(byte_len, bitmap_ptr, offset, value)
             var new_bitmap_ptr = result.ptr
@@ -768,10 +768,10 @@ struct CommandDispatcher:
             zset_ptr = self.skip_list_pool[].acquire()
             zset_ptr.unsafe_write(SlabSkipList(16))
             var new_val = GenericValue()
-            new_val.type = ValueType(ValueType.GEO)
+            new_val.type = ValueType(ValueType.ZSET)     # a geo key is a sorted set, as in Redis
             new_val.set_ptr(zset_ptr.unsafe_bitcast[NoneType]())
             self.keyspace[].set(key, new_val)
-        elif val.type.value == ValueType.GEO:
+        elif val.type.value == ValueType.GEO or val.type.value == ValueType.ZSET:
             zset_ptr = val.as_geo().unsafe_bitcast[SlabSkipList]()
         else:
             return IntCmdResult(0, False)
@@ -779,7 +779,7 @@ struct CommandDispatcher:
         var hash = geohash_encode(latitude, longitude, GEO_STEP_MAX)
         # gh #187: GEOADD counts new members only (Redis semantics)
         var geo_added = zset_ptr[].upsert(Float64(hash.bits), GenericValue.from_string(member))
-        _ = self.wal[].append_scored(15, key.unsafe_ptr(), key.byte_length(),
+        _ = self.wal[].append_scored(9, key.unsafe_ptr(), key.byte_length(),
                                      Float64(hash.bits), member.unsafe_ptr(),
                                      member.byte_length())
         return IntCmdResult(Int64(geo_added), True)

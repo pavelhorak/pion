@@ -1,576 +1,660 @@
-"""Geospatial commands: GEOPOS, GEODIST, GEOHASH, GEORADIUS, GEORADIUSBYMEMBER, GEOSEARCH, GEOSEARCHSTORE."""
-from src.common.ptr import is_not_null
-from src.common.utils import arg_eq, strict_atol, format_float64_to_buf
+"""Geospatial commands: GEOADD, GEOPOS, GEODIST, GEOHASH, GEORADIUS,
+GEORADIUS_RO, GEORADIUSBYMEMBER, GEORADIUSBYMEMBER_RO, GEOSEARCH,
+GEOSEARCHSTORE — Redis's geo.c, ported.
+
+A geo key IS a sorted set, as in Redis: the score is the point's 52-bit
+geohash (src/common/geohash.mojo), so every Z* command works on a geo key and
+the GEO commands work on a sorted set built with ZADD. Pion used to keep geo
+keys as their own type, which Z* commands refused; values of that type from an
+older WAL or snapshot load as sorted sets.
+
+Each search parses as Redis's georadiusGeneric does — the same options, the
+same errors in the same order, nothing ignored — and walks the cell holding the
+centre and its eight neighbours as Redis does, so an unsorted reply and ANY
+pick the same members. Coordinates print as Redis 8's addReplyDouble prints
+them.
+"""
+from src.common.ptr import is_not_null, null_ptr
+from src.common.utils import arg_eq, parse_redis_double, DOUBLE_VALUE, parse_int64_strict, format_float64_to_buf, format_score
+from src.common.container_free import remove_and_free
 from std.memory import alloc, stack_allocation
 from std.memory.unsafe_pointer import Pointer
-from std.collections import Array
-from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
+from std.ffi import external_call
+from src.network.resp3 import RESP3Token
 from src.network.response_writer import ResponseWriter
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
 from src.common.skip_list import SlabSkipList
-from src.common.geohash import geohash_encode, geohash_encode_wgs84, geohash_decode, GeoHashBits, GEO_STEP_MAX
+from src.common.geohash import (geohash_encode, geohash_encode_wgs84, geohash_decode_score,
+                                geohash_search_cells, geohash_align52, geohash_distance,
+                                geohash_within, GeoHashBits, GEO_STEP_MAX,
+                                GEO_LAT_MIN, GEO_LAT_MAX, GEO_LONG_MIN, GEO_LONG_MAX)
 from src.memory.object_pool import ObjectPool
-from std.math import sin, cos, sqrt, asin, pi
+from src.io.wal import WAL
 
+
+comptime _E_WRONGTYPE = "WRONGTYPE Operation against a key holding the wrong kind of value"
 
 
 @always_inline
-def _geo_unit(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) raises -> Float64:
-    """Redis's extractUnitOrReply: exactly m / km / ft / mi (any case), with
-    Redis's constants — or raise its error (the slow path's recovery forwards
-    it as the reply). The five copies this replaces matched on the first one
-    or two bytes, so "kilograms" was km and anything starting with f was ft,
-    and four of them used 1609.344 for a mile where Redis (and GEODIST) use
-    1609.34."""
+def _is_geo_type(v: GenericValue) -> Bool:
+    """A sorted set, or the old separate geo type (WAL/snapshot from before)."""
+    return v.type.value == ValueType.ZSET or v.type.value == ValueType.GEO
+
+
+@always_inline
+def _zset_of(v: GenericValue) -> Pointer[SlabSkipList, MutUntrackedOrigin]:
+    return v.as_zset().unsafe_bitcast[SlabSkipList]()
+
+
+def _geo_unit(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Float64:
+    """extractUnitOrReply: m / km / ft / mi, any case; -1 for anything else."""
     if arg_eq(p, n, "m"): return 1.0
     if arg_eq(p, n, "km"): return 1000.0
     if arg_eq(p, n, "ft"): return 0.3048
     if arg_eq(p, n, "mi"): return 1609.34
-    raise Error("ERR unsupported unit provided. please use M, KM, FT, MI")
+    return -1.0
 
 
-def _geo_order(dists: List[Float64], asc: Bool, desc: Bool, count: Int) -> List[Int]:
-    """Result order for GEORADIUS*: by distance when ASC/DESC is given, and
-    ascending when COUNT is given without an order (Redis sorts to choose the
-    COUNT nearest). The handlers parsed ASC/DESC and never applied them."""
-    var idx = List[Int]()
-    for k in range(len(dists)):
-        idx.append(k)
-    if asc or desc or count > 0:
-        for a in range(1, len(idx)):         # insertion sort: result sets are small
-            var j = a
-            while j > 0 and ((dists[idx[j]] < dists[idx[j - 1]]) != desc) \
-                    and dists[idx[j]] != dists[idx[j - 1]]:
-                var t = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = t
-                j -= 1
-    return idx^
+def _fmt_f6(v: Float64) -> String:
+    """C's "%f", for the error message Redis builds with it."""
+    var buf = alloc[UInt8](400)
+    var n = Int(external_call["pion_fmt_fixed", Int64](v, Int32(6), buf, Int64(400)))
+    var s = String("")
+    if n > 0:
+        for k in range(n):
+            s += chr(Int(buf[unsafe_offset=k]))
+    buf.unsafe_free()
+    return s
 
 
-def _geo_refuse_unsupported(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) raises:
-    """Options Redis supports and Pion's GEORADIUS* do not: refuse them. They
-    were silently ignored, which answers a differently-shaped reply."""
-    if arg_eq(tp, tl, "withhash") or arg_eq(tp, tl, "store") or arg_eq(tp, tl, "storedist") \
-       or arg_eq(tp, tl, "any"):
-        raise Error("ERR this GEORADIUS option is not supported by Pion")
-    raise Error("ERR syntax error")
+def _lonlat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut writer: ResponseWriter,
+            mut lon: Float64, mut lat: Float64) -> Bool:
+    """extractLongLatOrReply: two floats (string2d), within the WGS84 range
+    Redis indexes. Writes the error on failure."""
+    var a = parse_redis_double(tokens[j].ptr, tokens[j].length, DOUBLE_VALUE)
+    if not a.ok:
+        writer.append_error_response("ERR value is not a valid float")
+        return False
+    var b = parse_redis_double(tokens[j + 1].ptr, tokens[j + 1].length, DOUBLE_VALUE)
+    if not b.ok:
+        writer.append_error_response("ERR value is not a valid float")
+        return False
+    lon = a.value
+    lat = b.value
+    if lon < GEO_LONG_MIN or lon > GEO_LONG_MAX or lat < GEO_LAT_MIN or lat > GEO_LAT_MAX:
+        writer.append_error_response("ERR invalid longitude,latitude pair " + _fmt_f6(lon) + "," + _fmt_f6(lat))
+        return False
+    return True
 
-@always_inline
-def handle_geopos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) raises -> Int:
-    """GEOPOS key member [member ...] -> array of [lon, lat] or nil."""
-    if i + 2 < num_tokens:
-        var _gpk = tokens[unsafe_offset=i+1].value()
-        var _gpv = keyspace[].get(_gpk)
-        # gh #232: wrong type answered like an empty container. Every
-        # call site ignores this return and sets i = cmd_end_tok - 1
-        # itself, so returning 0 here consumes the frame correctly.
-        # gh #232: GEOADD stores ValueType.GEO, so this guard must accept it —
-        # checking only for ZSET made Pion's own GEO commands reject their
-        # own keys. The wrong-type sweep could not see it: it has no GEO
-        # fixture, so the LEGITIMATE case was never probed. Testing only the
-        # refusal direction is how a guard breaks the command it guards.
-        if (not _gpv.is_none() and _gpv.type.value != ValueType.ZSET
-                and _gpv.type.value != ValueType.GEO):
-            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            return 0
-        var _gp_nc = num_tokens - i - 2
-        var _gp_h = "*" + String(_gp_nc) + "\r\n"
-        writer.append_to_response(_gp_h.unsafe_ptr(), _gp_h.byte_length())
-        for _gpi in range(_gp_nc):
-            var _gp_mem = tokens[unsafe_offset=i+2+_gpi].value()
-            var _gp_found = False
-            if not _gpv.is_none() and _gpv.type.value == ValueType.GEO:
-                var _gpp = _gpv.as_geo().unsafe_bitcast[SlabSkipList]()
-                var _gpc = _gpp[].head[].forward[0]
-                while is_not_null(_gpc):
-                    if _gpc[].obj.__str__() == _gp_mem:
-                        var _gh = GeoHashBits(GEO_STEP_MAX, UInt64(_gpc[].score))
-                        var _ga = geohash_decode(_gh)
-                        var _glat = (_ga.latitude.min + _ga.latitude.max) / 2.0
-                        var _glon = (_ga.longitude.min + _ga.longitude.max) / 2.0
-                        writer.append_to_response("*2\r\n".unsafe_ptr(), 4)
-                        var _glons = String(_glon); writer.append_bulk_string_response(_glons.unsafe_ptr(), _glons.byte_length())
-                        var _glats = String(_glat); writer.append_bulk_string_response(_glats.unsafe_ptr(), _glats.byte_length())
-                        _gp_found = True; break
-                    _gpc = _gpc[].forward[0]
-            if not _gp_found: writer.append_null_response()
-        return 1 + _gp_nc
-    else:
+
+def _distance(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut writer: ResponseWriter,
+              mut radius: Float64, mut conversion: Float64) -> Bool:
+    """extractDistanceOrReply: a non-negative radius and a unit."""
+    var r = parse_redis_double(tokens[j].ptr, tokens[j].length, DOUBLE_VALUE)
+    if not r.ok:
+        writer.append_error_response("ERR need numeric radius")
+        return False
+    if r.value < 0:
+        writer.append_error_response("ERR radius cannot be negative")
+        return False
+    var u = _geo_unit(tokens[j + 1].ptr, tokens[j + 1].length)
+    if u < 0:
+        writer.append_error_response("ERR unsupported unit provided. please use M, KM, FT, MI")
+        return False
+    radius = r.value
+    conversion = u
+    return True
+
+
+def _box(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut writer: ResponseWriter,
+         mut width: Float64, mut height: Float64, mut conversion: Float64) -> Bool:
+    """extractBoxOrReply: non-negative width and height, and a unit."""
+    var w = parse_redis_double(tokens[j].ptr, tokens[j].length, DOUBLE_VALUE)
+    if not w.ok:
+        writer.append_error_response("ERR need numeric width")
+        return False
+    var h = parse_redis_double(tokens[j + 1].ptr, tokens[j + 1].length, DOUBLE_VALUE)
+    if not h.ok:
+        writer.append_error_response("ERR need numeric height")
+        return False
+    if h.value < 0 or w.value < 0:
+        writer.append_error_response("ERR height or width cannot be negative")
+        return False
+    var u = _geo_unit(tokens[j + 2].ptr, tokens[j + 2].length)
+    if u < 0:
+        writer.append_error_response("ERR unsupported unit provided. please use M, KM, FT, MI")
+        return False
+    width = w.value
+    height = h.value
+    conversion = u
+    return True
+
+
+def _member_lonlat(zp: Pointer[SlabSkipList, MutUntrackedOrigin], mp: Pointer[UInt8, MutUntrackedOrigin],
+                   ml: Int, mut lon: Float64, mut lat: Float64) -> Bool:
+    """longLatFromMember: the member's decoded position, False if absent."""
+    var s = zp[].member_score(GenericValue.borrow(mp, ml))
+    if s.is_none():
+        return False
+    geohash_decode_score(s.as_float(), lon, lat)
+    return True
+
+
+def _append_coord(mut writer: ResponseWriter, v: Float64):
+    """addReplyDouble, as Redis 8 replies a coordinate: d2string's shortest
+    round-trip form (format_score); a RESP3 double, a bulk string under RESP2.
+    Pion printed Mojo's own spelling, which differs in exponent form."""
+    var t = format_score(v)
+    writer.append_double_response(t.unsafe_ptr(), t.byte_length())
+
+
+def _append_distance(mut writer: ResponseWriter, d: Float64):
+    """addReplyDoubleDistance: "%.4f" — trailing zeros are part of it."""
+    var buf = stack_allocation[400, UInt8]()
+    var n = format_float64_to_buf(buf, 0, d, 4, False)
+    writer.append_bulk_string_response(buf, n)
+
+
+# ── GEOADD / GEOPOS / GEODIST / GEOHASH ──────────────────────────────────────
+
+def handle_geoadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                  keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                  skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin],
+                  wal: Pointer[WAL, MutUntrackedOrigin]) -> Int:
+    """GEOADD key [NX|XX] [CH] longitude latitude member [...] — Redis's
+    geoaddCommand: every coordinate is checked before anything is added, then
+    it is a ZADD of geohash scores, NX/XX/CH included. It used to read
+    coordinates with atof, refuse NX/XX/CH as "not a valid float", and add
+    the triples one by one, so a bad later one left the earlier ones added."""
+    if num_tokens - i < 5:
+        writer.append_error_response("ERR wrong number of arguments for 'geoadd' command")
+        return 0
+    var nx = False
+    var xx = False
+    var ch = False
+    var j = i + 2
+    while j < num_tokens:
+        var t = tokens[j]
+        if arg_eq(t.ptr, t.length, "nx"): nx = True
+        elif arg_eq(t.ptr, t.length, "xx"): xx = True
+        elif arg_eq(t.ptr, t.length, "ch"): ch = True
+        else: break
+        j += 1
+    if (num_tokens - j) % 3 != 0 or (xx and nx):
+        writer.append_error_response("ERR syntax error")
+        return num_tokens - 1 - i
+    var n = (num_tokens - j) // 3
+    if n == 0:
+        writer.append_error_response("ERR wrong number of arguments for 'geoadd' command")
+        return num_tokens - 1 - i
+    var scores = List[Float64]()
+    for k in range(n):
+        var lon: Float64 = 0
+        var lat: Float64 = 0
+        if not _lonlat(tokens, j + k * 3, writer, lon, lat):
+            return num_tokens - 1 - i
+        scores.append(Float64(geohash_align52(geohash_encode(lat, lon, GEO_STEP_MAX))))
+    var kt = tokens[i + 1]
+    var key = GenericValue.borrow(kt.ptr, kt.length)
+    var v = keyspace[].get(key)
+    if not v.is_none() and not _is_geo_type(v):
+        writer.append_error_response(_E_WRONGTYPE)
+        return num_tokens - 1 - i
+    var zp = null_ptr[SlabSkipList, MutUntrackedOrigin]()
+    if not v.is_none():
+        zp = _zset_of(v)
+    var added = 0
+    var changed = 0
+    for k in range(n):
+        var mt = tokens[j + k * 3 + 2]
+        var exists = False
+        var old: Float64 = 0
+        if is_not_null(zp):
+            var cur = zp[].member_score(GenericValue.borrow(mt.ptr, mt.length))
+            exists = not cur.is_none()
+            if exists:
+                old = cur.as_float()
+        if (nx and exists) or (xx and not exists):
+            continue
+        if exists and old == scores[k]:
+            continue
+        if not is_not_null(zp):
+            zp = skip_list_pool[].acquire()
+            zp.unsafe_write(SlabSkipList(16))
+            var nv = GenericValue()
+            nv.type = ValueType(ValueType.ZSET)
+            nv.set_ptr(zp.unsafe_bitcast[NoneType]())
+            keyspace[].set(key, nv)
+        _ = zp[].upsert(scores[k], GenericValue.from_ptr(mt.ptr, mt.length))
+        if exists:
+            changed += 1
+        else:
+            added += 1
+        if is_not_null(wal):
+            _ = wal[].append_scored(9, kt.ptr, kt.length, scores[k], mt.ptr, mt.length)
+    writer.append_int_response(Int64(added + changed if ch else added))
+    return num_tokens - 1 - i
+
+
+def handle_geopos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) -> Int:
+    """GEOPOS key [member ...] — [longitude, latitude] per member, or a null
+    array for one that is not there."""
+    if num_tokens - i < 2:
         writer.append_error_response("ERR wrong number of arguments for 'geopos' command")
         return 0
+    var v = keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+    if not v.is_none() and not _is_geo_type(v):
+        writer.append_error_response(_E_WRONGTYPE)
+        return num_tokens - 1 - i
+    writer.append_array_header(num_tokens - i - 2)
+    for j in range(i + 2, num_tokens):
+        var lon: Float64 = 0
+        var lat: Float64 = 0
+        if v.is_none() or not _member_lonlat(_zset_of(v), tokens[j].ptr, tokens[j].length, lon, lat):
+            writer.append_null_array_response()
+            continue
+        writer.append_array_header(2)
+        _append_coord(writer, lon)
+        _append_coord(writer, lat)
+    return num_tokens - 1 - i
 
 
-@always_inline
-def handle_geodist(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) raises -> Int:
-    """GEODIST key member1 member2 [m|km|mi|ft] -> bulk string distance or nil."""
-    if i + 3 < num_tokens:
-        var _gdk = tokens[unsafe_offset=i+1].value()
-        var _gdm1 = tokens[unsafe_offset=i+2].value()
-        var _gdm2 = tokens[unsafe_offset=i+3].value()
-        var _gd_unit = 1.0  # meters
-        if i + 4 < num_tokens:
-            var _gd_u = tokens[unsafe_offset=i+4].ptr; var _gd_ul = tokens[unsafe_offset=i+4].length
-            # gh #232: DIVIDE by Redis's exact constants instead of multiplying by
-            # rounded reciprocals. 0.000621371 and 3.28084 are truncated forms of
-            # 1/1609.34 and 1/0.3048, and the error shows up in the 4 decimals
-            # GEODIST prints: mi read 103.3179 where Redis says 103.3182.
-            _gd_unit = _geo_unit(_gd_u, _gd_ul)
-        var _gdv = keyspace[].get(_gdk)
-        # gh #232: wrong type answered like an empty container. Every
-        # call site ignores this return and sets i = cmd_end_tok - 1
-        # itself, so returning 0 here consumes the frame correctly.
-        # gh #232: GEOADD stores ValueType.GEO, so this guard must accept it —
-        # checking only for ZSET made Pion's own GEO commands reject their
-        # own keys. The wrong-type sweep could not see it: it has no GEO
-        # fixture, so the LEGITIMATE case was never probed. Testing only the
-        # refusal direction is how a guard breaks the command it guards.
-        if (not _gdv.is_none() and _gdv.type.value != ValueType.ZSET
-                and _gdv.type.value != ValueType.GEO):
-            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            return 0
-        var _gd_s1: Float64 = -1.0; var _gd_s2: Float64 = -1.0
-        if not _gdv.is_none() and _gdv.type.value == ValueType.GEO:
-            var _gdp = _gdv.as_geo().unsafe_bitcast[SlabSkipList]()
-            var _gdcur = _gdp[].head[].forward[0]
-            while is_not_null(_gdcur):
-                var _ms = _gdcur[].obj.__str__()
-                # gh #232: this was an `elif`, so when member1 == member2 the
-                # second assignment never ran, `_gd_s2` stayed -1 and
-                # `GEODIST key m m` answered nil instead of 0.0000. Both tests
-                # must run for the same node.
-                if _ms == _gdm1: _gd_s1 = _gdcur[].score
-                if _ms == _gdm2: _gd_s2 = _gdcur[].score
-                if _gd_s1 >= 0.0 and _gd_s2 >= 0.0: break
-                _gdcur = _gdcur[].forward[0]
-        if _gd_s1 < 0.0 or _gd_s2 < 0.0:
-            writer.append_null_response()
-        else:
-            var _ga1 = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_gd_s1)))
-            var _ga2 = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_gd_s2)))
-            var _lat1 = (_ga1.latitude.min + _ga1.latitude.max) / 2.0 * pi / 180.0
-            var _lon1 = (_ga1.longitude.min + _ga1.longitude.max) / 2.0 * pi / 180.0
-            var _lat2 = (_ga2.latitude.min + _ga2.latitude.max) / 2.0 * pi / 180.0
-            var _lon2 = (_ga2.longitude.min + _ga2.longitude.max) / 2.0 * pi / 180.0
-            var _dlat = _lat2 - _lat1; var _dlon = _lon2 - _lon1
-            var _a = sin(_dlat/2.0)*sin(_dlat/2.0) + cos(_lat1)*cos(_lat2)*sin(_dlon/2.0)*sin(_dlon/2.0)
-            var _dist = 2.0 * 6372797.560856 * asin(sqrt(_a)) / _gd_unit
-            # gh #232: Redis prints GEODIST with `%.4f` — "166.2742", and a
-            # zero distance is "0.0000", so the trailing zeros are part of
-            # the contract and must NOT be trimmed. Pion emitted full
-            # double precision ("166.2741515696002"), which no Redis client
-            # expects to parse.
-            var _dbuf = stack_allocation[48, UInt8]()
-            var _dlen = format_float64_to_buf(_dbuf, 0, _dist, 4, False)
-            writer.append_bulk_string_response(_dbuf, _dlen)
-        return 3 + (1 if i+4 < num_tokens else 0)
-    else:
+def handle_geodist(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) -> Int:
+    """GEODIST key member1 member2 [M|KM|FT|MI] — the unit first, then the
+    key, as Redis; nil if either member is missing."""
+    var argc = num_tokens - i
+    if argc < 4:
         writer.append_error_response("ERR wrong number of arguments for 'geodist' command")
         return 0
+    var to_meter = 1.0
+    if argc == 5:
+        to_meter = _geo_unit(tokens[i + 4].ptr, tokens[i + 4].length)
+        if to_meter < 0:
+            writer.append_error_response("ERR unsupported unit provided. please use M, KM, FT, MI")
+            return argc - 1
+    elif argc > 5:
+        writer.append_error_response("ERR syntax error")
+        return argc - 1
+    var v = keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+    if v.is_none():
+        writer.append_null_response()
+        return argc - 1
+    if not _is_geo_type(v):
+        writer.append_error_response(_E_WRONGTYPE)
+        return argc - 1
+    var lon1: Float64 = 0
+    var lat1: Float64 = 0
+    var lon2: Float64 = 0
+    var lat2: Float64 = 0
+    var zp = _zset_of(v)
+    if (not _member_lonlat(zp, tokens[i + 2].ptr, tokens[i + 2].length, lon1, lat1)
+            or not _member_lonlat(zp, tokens[i + 3].ptr, tokens[i + 3].length, lon2, lat2)):
+        writer.append_null_response()
+        return argc - 1
+    _append_distance(writer, geohash_distance(lon1, lat1, lon2, lat2) / to_meter)
+    return argc - 1
 
 
-@always_inline
-def handle_geohash(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) raises -> Int:
-    """GEOHASH key member [member ...] -> array of geohash strings or nil."""
-    if i + 2 < num_tokens:
-        var _ghk = tokens[unsafe_offset=i+1].value()
-        var _ghv = keyspace[].get(_ghk)
-        # gh #232: wrong type answered like an empty container. Every
-        # call site ignores this return and sets i = cmd_end_tok - 1
-        # itself, so returning 0 here consumes the frame correctly.
-        # gh #232: GEOADD stores ValueType.GEO, so this guard must accept it —
-        # checking only for ZSET made Pion's own GEO commands reject their
-        # own keys. The wrong-type sweep could not see it: it has no GEO
-        # fixture, so the LEGITIMATE case was never probed. Testing only the
-        # refusal direction is how a guard breaks the command it guards.
-        if (not _ghv.is_none() and _ghv.type.value != ValueType.ZSET
-                and _ghv.type.value != ValueType.GEO):
-            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            return 0
-        var _gh_nc = num_tokens - i - 2
-        var _gh_h = "*" + String(_gh_nc) + "\r\n"
-        writer.append_to_response(_gh_h.unsafe_ptr(), _gh_h.byte_length())
-        comptime GH_B32 = "0123456789bcdefghjkmnpqrstuvwxyz"
-        for _ghi in range(_gh_nc):
-            var _gh_mem = tokens[unsafe_offset=i+2+_ghi].value()
-            var _gh_found = False
-            if not _ghv.is_none() and _ghv.type.value == ValueType.GEO:
-                var _ghp = _ghv.as_geo().unsafe_bitcast[SlabSkipList]()
-                var _ghc = _ghp[].head[].forward[0]
-                while is_not_null(_ghc):
-                    if _ghc[].obj.__str__() == _gh_mem:
-                        # gh #181: the textual form re-encodes the stored point
-                        # with the standard ±90 lat range (Redis behaviour);
-                        # base32 of the internal ±85.05 bits gives a wrong hash.
-                        var _gha = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_ghc[].score)))
-                        var _ghstd = geohash_encode_wgs84(
-                            (_gha.latitude.min + _gha.latitude.max) / 2.0,
-                            (_gha.longitude.min + _gha.longitude.max) / 2.0, GEO_STEP_MAX)
-                        var _ghbits = _ghstd.bits << 3  # 52->55 bits for 11 chars
-                        var _ghs = String("")
-                        for _gi in range(11):
-                            # gh #232: the 11th character is ALWAYS '0'. There are
-                            # only 52 bits of hash but 11 base32 chars encode 55,
-                            # so the final 3 bits do not exist — Redis hardcodes
-                            # index 0 there. Deriving it from `bits << 3` instead
-                            # fed the low 2 bits of the score into it, so Palermo
-                            # hashed as sqc8b49rny*s* where Redis says sqc8b49rny*0*.
-                            # The first ten characters were already correct, which
-                            # is why it looked like a rounding artefact.
-                            var _gidx = 0
-                            if _gi < 10:
-                                _gidx = Int((_ghbits >> UInt64(5 * (10 - _gi))) & 0x1F)
-                            _ghs += chr(Int(GH_B32.unsafe_ptr()[unsafe_offset=_gidx]))
-                        writer.append_bulk_string_response(_ghs.unsafe_ptr(), _ghs.byte_length())
-                        _gh_found = True; break
-                    _ghc = _ghc[].forward[0]
-            if not _gh_found: writer.append_null_response()
-        return 1 + _gh_nc
-    else:
+def handle_geohash(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) -> Int:
+    """GEOHASH key [member ...] — the standard 11-character geohash per
+    member (re-encoded over latitude ±90; the 11th character is always '0',
+    52 bits being all there is), or nil."""
+    if num_tokens - i < 2:
         writer.append_error_response("ERR wrong number of arguments for 'geohash' command")
         return 0
+    var v = keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+    if not v.is_none() and not _is_geo_type(v):
+        writer.append_error_response(_E_WRONGTYPE)
+        return num_tokens - 1 - i
+    comptime B32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+    writer.append_array_header(num_tokens - i - 2)
+    var buf = stack_allocation[16, UInt8]()
+    for j in range(i + 2, num_tokens):
+        var lon: Float64 = 0
+        var lat: Float64 = 0
+        if v.is_none() or not _member_lonlat(_zset_of(v), tokens[j].ptr, tokens[j].length, lon, lat):
+            writer.append_null_response()
+            continue
+        var bits = geohash_encode_wgs84(lat, lon, GEO_STEP_MAX).bits
+        for c in range(11):
+            var idx = 0
+            if c < 10:
+                idx = Int((bits >> UInt64(52 - (c + 1) * 5)) & 0x1F)
+            buf[unsafe_offset=c] = B32.unsafe_ptr()[unsafe_offset=idx]
+        writer.append_bulk_string_response(buf, 11)
+    return num_tokens - 1 - i
 
 
-@always_inline
-def handle_georadius(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) raises -> Int:
-    """GEORADIUS key longitude latitude radius unit [WITHCOORD] [WITHDIST] [COUNT count] [ASC|DESC]."""
-    if i + 5 < num_tokens:
-        var _grk = tokens[unsafe_offset=i+1].value()
-        var _gr_lon0 = atof(tokens[unsafe_offset=i+2].value()) * pi / 180.0
-        var _gr_lat0 = atof(tokens[unsafe_offset=i+3].value()) * pi / 180.0
-        var _gr_rad = atof(tokens[unsafe_offset=i+4].value())
-        var _gr_u = tokens[unsafe_offset=i+5].ptr; var _gr_ul = tokens[unsafe_offset=i+5].length
-        var _gr_unit = 1.0
-        _gr_unit = _geo_unit(_gr_u, _gr_ul)
-        var _gr_rad_m = _gr_rad * _gr_unit
-        var _gr_withcoord = False; var _gr_withdist = False; var _gr_asc = False; var _gr_desc = False; var _gr_cnt = -1
-        var _gr_ji = i + 6
-        while _gr_ji < num_tokens:
-            var _oa = tokens[unsafe_offset=_gr_ji].ptr; var _ol = tokens[unsafe_offset=_gr_ji].length
-            if arg_eq(_oa, _ol, "withcoord"): _gr_withcoord = True
-            elif arg_eq(_oa, _ol, "withdist"): _gr_withdist = True
-            elif arg_eq(_oa, _ol, "asc"): _gr_asc = True; _gr_desc = False
-            elif arg_eq(_oa, _ol, "desc"): _gr_desc = True; _gr_asc = False
-            elif arg_eq(_oa, _ol, "count") and _gr_ji + 1 < num_tokens:
-                _gr_ji += 1
-                _gr_cnt = strict_atol(tokens[unsafe_offset=_gr_ji].value())
-                if _gr_cnt <= 0: raise Error("ERR COUNT must be > 0")
-            else:
-                _geo_refuse_unsupported(_oa, _ol)
-            _gr_ji += 1
-        var _grv = keyspace[].get(_grk)
-        var _gr_res = List[String](); var _gr_dists = List[Float64](); var _gr_lats = List[Float64](); var _gr_lons = List[Float64]()
-        if not _grv.is_none() and _grv.type.value == ValueType.GEO:
-            var _grp = _grv.as_geo().unsafe_bitcast[SlabSkipList]()
-            var _grc = _grp[].head[].forward[0]
-            while is_not_null(_grc):
-                var _ga = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_grc[].score)))
-                var _mlat = (_ga.latitude.min + _ga.latitude.max) / 2.0
-                var _mlon = (_ga.longitude.min + _ga.longitude.max) / 2.0
-                var _mlat_r = _mlat * pi / 180.0; var _mlon_r = _mlon * pi / 180.0
-                var _dlat = _mlat_r - _gr_lat0; var _dlon = _mlon_r - _gr_lon0
-                var _aa = sin(_dlat/2.0)*sin(_dlat/2.0) + cos(_gr_lat0)*cos(_mlat_r)*sin(_dlon/2.0)*sin(_dlon/2.0)
-                var _d = 2.0 * 6372797.560856 * asin(sqrt(_aa))
-                if _d <= _gr_rad_m:
-                    _gr_res.append(_grc[].obj.__str__()); _gr_dists.append(_d); _gr_lats.append(_mlat); _gr_lons.append(_mlon)
-                _grc = _grc[].forward[0]
-        var _gr_ord = _geo_order(_gr_dists, _gr_asc, _gr_desc, _gr_cnt)
-        var _grn = len(_gr_res)
-        if _gr_cnt > 0 and _gr_cnt < _grn: _grn = _gr_cnt
-        var _gr_oh = "*" + String(_grn) + "\r\n"
-        writer.append_to_response(_gr_oh.unsafe_ptr(), _gr_oh.byte_length())
-        for _gro in range(_grn):
-            var _gri = _gr_ord[_gro]
-            if _gr_withdist or _gr_withcoord:
-                var _gre_n = 1 + (1 if _gr_withdist else 0) + (1 if _gr_withcoord else 0)
-                var _gre_h = "*" + String(_gre_n) + "\r\n"
-                writer.append_to_response(_gre_h.unsafe_ptr(), _gre_h.byte_length())
-            writer.append_bulk_string_response(_gr_res[_gri].unsafe_ptr(), _gr_res[_gri].byte_length())
-            if _gr_withdist:
-                var _ddb = alloc[UInt8](400)   # Redis prints distances with %.4f
-                var _ddl = format_float64_to_buf(_ddb, 0, _gr_dists[_gri] / _gr_unit, 4, False)
-                writer.append_bulk_string_response(_ddb, _ddl)
-                _ddb.free()
-            if _gr_withcoord:
-                writer.append_to_response("*2\r\n".unsafe_ptr(), 4)
-                var _clos = String(_gr_lons[_gri]); writer.append_bulk_string_response(_clos.unsafe_ptr(), _clos.byte_length())
-                var _clas = String(_gr_lats[_gri]); writer.append_bulk_string_response(_clas.unsafe_ptr(), _clas.byte_length())
-        return _gr_ji - i - 1
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'georadius' command")
+# ── The search family ────────────────────────────────────────────────────────
+
+comptime GEO_RADIUS = 0             # GEORADIUS[_RO] key lon lat radius unit ...
+comptime GEO_RADIUS_MEMBER = 1      # GEORADIUSBYMEMBER[_RO] key member radius unit ...
+comptime GEO_SEARCH = 2             # GEOSEARCH key ...
+comptime GEO_SEARCHSTORE = 3        # GEOSEARCHSTORE dest key ...
+
+
+@fieldwise_init
+struct GeoPoint(Copyable, Movable, ImplicitlyCopyable):
+    var member: GenericValue        # the sorted set's own member, read only
+    var score: Float64
+    var lon: Float64
+    var lat: Float64
+    var dist: Float64
+
+
+def _collect_box(zp: Pointer[SlabSkipList, MutUntrackedOrigin], cell: GeoHashBits,
+                 lon: Float64, lat: Float64, circle: Bool, radius_m: Float64,
+                 width_m: Float64, height_m: Float64, limit: Int, mut out: List[GeoPoint]):
+    """membersOfGeoHashBox: the members whose score falls in the cell's
+    range [min, max), kept when inside the shape (geoAppendIfWithinShape)."""
+    var lo = Float64(geohash_align52(cell))
+    var hi = Float64(geohash_align52(GeoHashBits(cell.step, cell.bits + 1)))
+    var x = zp[].head
+    var lvl = zp[].level - 1
+    while lvl >= 0:
+        while is_not_null(x[].forward[lvl]) and x[].forward[lvl][].score < lo:
+            x = x[].forward[lvl]
+        lvl -= 1
+    var node = x[].forward[0]
+    while is_not_null(node) and node[].score < hi:
+        if limit > 0 and len(out) >= limit:
+            return
+        var plon: Float64 = 0
+        var plat: Float64 = 0
+        geohash_decode_score(node[].score, plon, plat)
+        var d: Float64 = 0
+        var inside = geohash_within(lon, lat, plon, plat, radius_m, -1.0 if circle else width_m, height_m, d)
+        if inside:
+            out.append(GeoPoint(node[].obj, node[].score, plon, plat, d))
+        node = node[].forward[0]
+
+
+def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin],
+                wal: Pointer[WAL, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
+                kind: Int, readonly: Bool) -> Int:
+    """georadiusGeneric."""
+    var consumed = num_tokens - 1 - i
+    var name = String("georadius")
+    var min_args = 6
+    if kind == GEO_RADIUS_MEMBER:
+        name = String("georadiusbymember"); min_args = 5
+    elif kind == GEO_SEARCH:
+        name = String("geosearch"); min_args = 7
+    elif kind == GEO_SEARCHSTORE:
+        name = String("geosearchstore"); min_args = 8
+    if readonly:
+        name += "_ro"
+    if num_tokens - i < min_args:
+        writer.append_error_response("ERR wrong number of arguments for '" + name + "' command")
         return 0
+    var src = i + 2 if kind == GEO_SEARCHSTORE else i + 1
+    var zv = keyspace[].get(GenericValue.borrow(tokens[src].ptr, tokens[src].length))
+    if not zv.is_none() and not _is_geo_type(zv):
+        writer.append_error_response(_E_WRONGTYPE)
+        return consumed
+    var has_src = not zv.is_none()
+    var zp = _zset_of(zv) if has_src else null_ptr[SlabSkipList, MutUntrackedOrigin]()
+
+    var lon: Float64 = 0
+    var lat: Float64 = 0
+    var circle = True
+    var radius: Float64 = 0
+    var width: Float64 = 0
+    var height: Float64 = 0
+    var conversion: Float64 = 1
+    var base = i + 2
+    var store = -1                      # token index of the destination key
+    var storedist = False
+    if kind == GEO_RADIUS:
+        base = i + 6
+        if not _lonlat(tokens, i + 2, writer, lon, lat):
+            return consumed
+        if not _distance(tokens, i + 4, writer, radius, conversion):
+            return consumed
+    elif kind == GEO_RADIUS_MEMBER:
+        base = i + 5
+        if has_src:
+            if not _member_lonlat(zp, tokens[i + 2].ptr, tokens[i + 2].length, lon, lat):
+                writer.append_error_response("ERR could not decode requested zset member")
+                return consumed
+            if not _distance(tokens, i + 3, writer, radius, conversion):
+                return consumed
+    elif kind == GEO_SEARCHSTORE:
+        base = i + 3
+        store = i + 1
+
+    var withdist = False
+    var withhash = False
+    var withcoord = False
+    var frommember = False
+    var fromloc = False
+    var byradius = False
+    var bybox = False
+    var sort = 0                        # 0 none, 1 asc, 2 desc
+    var any = False
+    var count = 0
+    var search = kind == GEO_SEARCH or kind == GEO_SEARCHSTORE
+    var j = base
+    while j < num_tokens:
+        var t = tokens[j]
+        var left = num_tokens - j - 1   # arguments after this one
+        if arg_eq(t.ptr, t.length, "withdist"):
+            withdist = True
+        elif arg_eq(t.ptr, t.length, "withhash"):
+            withhash = True
+        elif arg_eq(t.ptr, t.length, "withcoord"):
+            withcoord = True
+        elif arg_eq(t.ptr, t.length, "any"):
+            any = True
+        elif arg_eq(t.ptr, t.length, "asc"):
+            sort = 1
+        elif arg_eq(t.ptr, t.length, "desc"):
+            sort = 2
+        elif arg_eq(t.ptr, t.length, "count") and left >= 1:
+            var c = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            if not c.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return consumed
+            if c.value <= 0:
+                writer.append_error_response("ERR COUNT must be > 0")
+                return consumed
+            count = Int(c.value)
+            j += 1
+        elif (arg_eq(t.ptr, t.length, "store") or arg_eq(t.ptr, t.length, "storedist")) \
+                and left >= 1 and not readonly and not search:
+            store = j + 1
+            storedist = arg_eq(t.ptr, t.length, "storedist")
+            j += 1
+        elif arg_eq(t.ptr, t.length, "storedist") and kind == GEO_SEARCHSTORE:
+            storedist = True
+        elif arg_eq(t.ptr, t.length, "frommember") and left >= 1 and search and not fromloc:
+            if has_src and not _member_lonlat(zp, tokens[j + 1].ptr, tokens[j + 1].length, lon, lat):
+                writer.append_error_response("ERR could not decode requested zset member")
+                return consumed
+            frommember = True
+            j += 1
+        elif arg_eq(t.ptr, t.length, "fromlonlat") and left >= 2 and search and not frommember:
+            if not _lonlat(tokens, j + 1, writer, lon, lat):
+                return consumed
+            fromloc = True
+            j += 2
+        elif arg_eq(t.ptr, t.length, "byradius") and left >= 2 and search and not bybox:
+            if not _distance(tokens, j + 1, writer, radius, conversion):
+                return consumed
+            circle = True
+            byradius = True
+            j += 2
+        elif arg_eq(t.ptr, t.length, "bybox") and left >= 3 and search and not byradius:
+            if not _box(tokens, j + 1, writer, width, height, conversion):
+                return consumed
+            circle = False
+            bybox = True
+            j += 3
+        else:
+            writer.append_error_response("ERR syntax error")
+            return consumed
+        j += 1
+
+    if store >= 0 and (withdist or withhash or withcoord):
+        if kind == GEO_SEARCHSTORE:
+            writer.append_error_response("ERR GEOSEARCHSTORE is not compatible with WITHDIST, WITHHASH and WITHCOORD options")
+        else:
+            writer.append_error_response("ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options")
+        return consumed
+    if search and not (frommember or fromloc):
+        writer.append_error_response("ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for " + _cmd_text(tokens[i]))
+        return consumed
+    if search and not (byradius or bybox):
+        writer.append_error_response("ERR exactly one of BYRADIUS and BYBOX can be specified for " + _cmd_text(tokens[i]))
+        return consumed
+    if any and count == 0:
+        writer.append_error_response("ERR the ANY argument requires COUNT argument")
+        return consumed
+
+    if not has_src:
+        if store >= 0:
+            _store_drop(keyspace, ttl_map, wal, tokens[store])
+            writer.append_int_response(0)
+        else:
+            writer.append_empty_array_response()
+        return consumed
+
+    if count != 0 and sort == 0 and not any:
+        sort = 1                        # COUNT means the nearest N
+
+    # membersOfAllNeighbors
+    var radius_m = radius * conversion
+    var width_m = width * conversion
+    var height_m = height * conversion
+    var cells = geohash_search_cells(lon, lat, radius_m, -1.0 if circle else width_m, height_m)
+    var points = List[GeoPoint]()
+    var limit = count if any else 0
+    var last = -1
+    for c in range(9):
+        if cells[c].bits == 0 and cells[c].step == 0:
+            continue
+        # A huge radius can make neighbours coincide: skip a repeat.
+        if last >= 0 and cells[c].bits == cells[last].bits and cells[c].step == cells[last].step:
+            continue
+        if len(points) > 0 and limit > 0 and len(points) >= limit:
+            break
+        _collect_box(zp, cells[c], lon, lat, circle, radius_m, width_m, height_m, limit, points)
+        last = c
+
+    if len(points) == 0 and store < 0:
+        writer.append_empty_array_response()
+        return consumed
+
+    var returned = len(points) if count == 0 or len(points) < count else count
+    # Order through indices: a stable insertion sort by distance.
+    var order = List[Int]()
+    for k in range(len(points)):
+        order.append(k)
+    if sort != 0:
+        for a in range(1, len(order)):
+            var cur = order[a]
+            var b = a - 1
+            while b >= 0:
+                var pd = points[order[b]].dist
+                var cd = points[cur].dist
+                if (sort == 1 and pd > cd) or (sort == 2 and pd < cd):
+                    order[b + 1] = order[b]
+                    b -= 1
+                else:
+                    break
+            order[b + 1] = cur
+
+    if store < 0:
+        var opts = (1 if withdist else 0) + (1 if withhash else 0) + (1 if withcoord else 0)
+        writer.append_array_header(returned)
+        for k in range(returned):
+            var p = points[order[k]]
+            if opts > 0:
+                writer.append_array_header(opts + 1)
+            writer.append_bulk_value_response(p.member)
+            if withdist:
+                _append_distance(writer, p.dist / conversion)
+            if withhash:
+                writer.append_int_response(Int64(p.score))
+            if withcoord:
+                writer.append_array_header(2)
+                _append_coord(writer, p.lon)
+                _append_coord(writer, p.lat)
+        return consumed
+
+    # STORE / STOREDIST: the result replaces the destination, its TTL with
+    # it; nothing found deletes it.
+    var dt = tokens[store]
+    if returned == 0:
+        _store_drop(keyspace, ttl_map, wal, dt)
+        writer.append_int_response(0)
+        return consumed
+    var dp = skip_list_pool[].acquire()
+    dp.unsafe_write(SlabSkipList(16))
+    for k in range(returned):
+        var p = points[order[k]]
+        # The member is COPIED: sharing the source's payload let a DEL of
+        # either key free the other's members.
+        _ = dp[].upsert(p.dist / conversion if storedist else p.score, p.member.clone())
+    var dkey = GenericValue.borrow(dt.ptr, dt.length)
+    _ = remove_and_free(keyspace, dkey)         # and its TTL
+    var nv = GenericValue()
+    nv.type = ValueType(ValueType.ZSET)
+    nv.set_ptr(dp.unsafe_bitcast[NoneType]())
+    keyspace[].set(dkey, nv)
+    if is_not_null(wal):
+        wal[].log_key_image(keyspace, ttl_map, dt.ptr, dt.length)
+    writer.append_int_response(Int64(returned))
+    return consumed
 
 
-@always_inline
-def handle_geosearch(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) raises -> Int:
-    """GEOSEARCH key FROMMEMBER member|FROMLONLAT lon lat BYRADIUS radius unit|BYBOX w h unit [ASC|DESC] [COUNT count] [WITHCOORD] [WITHDIST]."""
-    if i + 4 < num_tokens:
-        var _gsk = tokens[unsafe_offset=i+1].value()
-        var _gsv = keyspace[].get(_gsk)
-        var _gs_clon: Float64 = 0.0; var _gs_clat: Float64 = 0.0
-        var _gs_rad_m: Float64 = 0.0
-        var _gs_ji = i + 2
-        # Parse FROMMEMBER/FROMLONLAT
-        if _gs_ji < num_tokens:
-            var _fop = tokens[unsafe_offset=_gs_ji].ptr; var _fol = tokens[unsafe_offset=_gs_ji].length
-            # gh #181: byte 3 is 'm' in BOTH FROMMEMBER and FROMLONLAT — the
-            # old test routed every FROMLONLAT into the member branch and the
-            # misaligned radius parse raised out of the handler. Per the
-            # gh #162 lesson, match the WHOLE keyword and reject unknowns.
-            var _is_fm = _fol == 10 and (_fop[unsafe_offset=0]|0x20)==102 and (_fop[unsafe_offset=1]|0x20)==114 and (_fop[unsafe_offset=2]|0x20)==111 and (_fop[unsafe_offset=3]|0x20)==109 and (_fop[unsafe_offset=4]|0x20)==109 and (_fop[unsafe_offset=5]|0x20)==101 and (_fop[unsafe_offset=6]|0x20)==109 and (_fop[unsafe_offset=7]|0x20)==98 and (_fop[unsafe_offset=8]|0x20)==101 and (_fop[unsafe_offset=9]|0x20)==114
-            var _is_fl = _fol == 10 and (_fop[unsafe_offset=0]|0x20)==102 and (_fop[unsafe_offset=1]|0x20)==114 and (_fop[unsafe_offset=2]|0x20)==111 and (_fop[unsafe_offset=3]|0x20)==109 and (_fop[unsafe_offset=4]|0x20)==108 and (_fop[unsafe_offset=5]|0x20)==111 and (_fop[unsafe_offset=6]|0x20)==110 and (_fop[unsafe_offset=7]|0x20)==108 and (_fop[unsafe_offset=8]|0x20)==97 and (_fop[unsafe_offset=9]|0x20)==116
-            if not _is_fm and not _is_fl:
-                writer.append_error_response("ERR syntax error")
-                return 1
-            if _is_fm:  # FROMMEMBER
-                _gs_ji += 1
-                if _gs_ji < num_tokens:
-                    var _fm = tokens[unsafe_offset=_gs_ji].value(); _gs_ji += 1
-                    if not _gsv.is_none() and _gsv.type.value == ValueType.GEO:
-                        var _fgp = _gsv.as_geo().unsafe_bitcast[SlabSkipList]()
-                        var _fgc = _fgp[].head[].forward[0]
-                        while is_not_null(_fgc):
-                            if _fgc[].obj.__str__() == _fm:
-                                var _fga = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_fgc[].score)))
-                                _gs_clat = (_fga.latitude.min + _fga.latitude.max) / 2.0
-                                _gs_clon = (_fga.longitude.min + _fga.longitude.max) / 2.0
-                                break
-                            _fgc = _fgc[].forward[0]
-            else:  # FROMLONLAT
-                _gs_ji += 1
-                if _gs_ji + 1 < num_tokens:
-                    _gs_clon = atof(tokens[unsafe_offset=_gs_ji].value()); _gs_ji += 1
-                    _gs_clat = atof(tokens[unsafe_offset=_gs_ji].value()); _gs_ji += 1
-        # Parse BYRADIUS/BYBOX
-        var _gs_unit = 1.0
-        if _gs_ji < num_tokens:
-            var _bop = tokens[unsafe_offset=_gs_ji].ptr; var _bol = tokens[unsafe_offset=_gs_ji].length
-            _gs_ji += 1
-            if _gs_ji < num_tokens: _gs_rad_m = atof(tokens[unsafe_offset=_gs_ji].value()); _gs_ji += 1
-            if _gs_ji < num_tokens:
-                if _bol >= 8 and (_bop[unsafe_offset=2]|0x20)==120:  # BYBOX - also consume height
-                    if _gs_ji < num_tokens: _gs_ji += 1  # skip height
-                var _gu = tokens[unsafe_offset=_gs_ji].ptr; var _gul = tokens[unsafe_offset=_gs_ji].length; _gs_ji += 1
-                _gs_unit = _geo_unit(_gu, _gul)
-                _gs_rad_m *= _gs_unit
-        var _gs_withcoord = False; var _gs_withdist = False; var _gs_cnt = -1
-        # gh #232: ASC/DESC were not parsed AT ALL, so GEOSEARCH returned
-        # skip-list order and `ASC` was a no-op — with Palermo ahead of Catania
-        # for a point next to Catania. COUNT was worse: it truncated the
-        # UNSORTED list, so `COUNT 1` returned an arbitrary member rather than
-        # the nearest one, which is the entire purpose of the option.
-        var _gs_asc = False; var _gs_desc = False
-        while _gs_ji < num_tokens:
-            var _oa = tokens[unsafe_offset=_gs_ji].ptr; var _ol = tokens[unsafe_offset=_gs_ji].length; _gs_ji += 1
-            if _ol == 9 and (_oa[unsafe_offset=0]|0x20)==119: _gs_withcoord = True
-            elif _ol == 8 and (_oa[unsafe_offset=0]|0x20)==119: _gs_withdist = True
-            elif _ol == 3 and (_oa[unsafe_offset=0]|0x20)==97: _gs_asc = True
-            elif _ol == 4 and (_oa[unsafe_offset=0]|0x20)==100 and (_oa[unsafe_offset=1]|0x20)==101: _gs_desc = True
-            elif _ol == 5 and (_oa[unsafe_offset=0]|0x20)==99:
-                if _gs_ji < num_tokens: _gs_cnt = strict_atol(tokens[unsafe_offset=_gs_ji].value()); _gs_ji += 1
-        var _gs_clat_r = _gs_clat * pi / 180.0; var _gs_clon_r = _gs_clon * pi / 180.0
-        var _gs_res = List[String](); var _gs_dists = List[Float64](); var _gs_lats = List[Float64](); var _gs_lons = List[Float64]()
-        if not _gsv.is_none() and _gsv.type.value == ValueType.GEO:
-            var _gsp = _gsv.as_geo().unsafe_bitcast[SlabSkipList]()
-            var _gsc = _gsp[].head[].forward[0]
-            while is_not_null(_gsc):
-                var _mga = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_gsc[].score)))
-                var _mglat = (_mga.latitude.min + _mga.latitude.max) / 2.0
-                var _mglon = (_mga.longitude.min + _mga.longitude.max) / 2.0
-                var _mglat_r = _mglat * pi / 180.0; var _mglon_r = _mglon * pi / 180.0
-                var _dlat = _mglat_r - _gs_clat_r; var _dlon = _mglon_r - _gs_clon_r
-                var _aa = sin(_dlat/2.0)*sin(_dlat/2.0) + cos(_gs_clat_r)*cos(_mglat_r)*sin(_dlon/2.0)*sin(_dlon/2.0)
-                var _d = 2.0 * 6372797.560856 * asin(sqrt(_aa))
-                if _gs_rad_m <= 0.0 or _d <= _gs_rad_m:
-                    _gs_res.append(_gsc[].obj.__str__()); _gs_dists.append(_d); _gs_lats.append(_mglat); _gs_lons.append(_mglon)
-                _gsc = _gsc[].forward[0]
-        # Emit through an index permutation: the four result lists run in
-        # parallel and List is not ImplicitlyCopyable, so sorting Ints and
-        # indirecting is cheaper and safer than permuting all four.
-        var _ord = List[Int]()
-        for _oi in range(len(_gs_res)): _ord.append(_oi)
-        # Redis sorts for ASC/DESC, and ALSO whenever COUNT is given — COUNT
-        # means "the N nearest", not "any N".
-        if _gs_asc or _gs_desc or _gs_cnt > 0:
-            for _si in range(1, len(_ord)):
-                var _cur = _ord[_si]
-                var _sj = _si - 1
-                while _sj >= 0:
-                    var _worse = (_gs_dists[_ord[_sj]] > _gs_dists[_cur]) if not _gs_desc \
-                                 else (_gs_dists[_ord[_sj]] < _gs_dists[_cur])
-                    if not _worse: break
-                    _ord[_sj + 1] = _ord[_sj]; _sj -= 1
-                _ord[_sj + 1] = _cur
-        var _gsn = len(_gs_res)
-        if _gs_cnt > 0 and _gs_cnt < _gsn: _gsn = _gs_cnt
-        var _gs_oh = "*" + String(_gsn) + "\r\n"
-        writer.append_to_response(_gs_oh.unsafe_ptr(), _gs_oh.byte_length())
-        for _gsk2 in range(_gsn):
-            var _gsi = _ord[_gsk2]
-            if _gs_withdist or _gs_withcoord:
-                var _gse_n = 1 + (1 if _gs_withdist else 0) + (1 if _gs_withcoord else 0)
-                var _gse_h = "*" + String(_gse_n) + "\r\n"
-                writer.append_to_response(_gse_h.unsafe_ptr(), _gse_h.byte_length())
-            writer.append_bulk_string_response(_gs_res[_gsi].unsafe_ptr(), _gs_res[_gsi].byte_length())
-            if _gs_withdist:
-                # gh #232: %.4f, as GEODIST — WITHDIST printed full double
-                # precision (56.4412578701582 where Redis says 56.4413).
-                var _dd = _gs_dists[_gsi] / _gs_unit
-                var _ddbuf = stack_allocation[48, UInt8]()
-                var _ddlen = format_float64_to_buf(_ddbuf, 0, _dd, 4, False)
-                writer.append_bulk_string_response(_ddbuf, _ddlen)
-            if _gs_withcoord:
-                writer.append_to_response("*2\r\n".unsafe_ptr(), 4)
-                var _clos = String(_gs_lons[_gsi]); writer.append_bulk_string_response(_clos.unsafe_ptr(), _clos.byte_length())
-                var _clas = String(_gs_lats[_gsi]); writer.append_bulk_string_response(_clas.unsafe_ptr(), _clas.byte_length())
-        return _gs_ji - i - 1
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'geosearch' command")
-        return 0
+def _store_drop(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
+                wal: Pointer[WAL, MutUntrackedOrigin], dt: RESP3Token):
+    """An empty search result deletes the STORE destination."""
+    if remove_and_free(keyspace, GenericValue.borrow(dt.ptr, dt.length)):
+        if is_not_null(wal):
+            wal[].log_key_image(keyspace, ttl_map, dt.ptr, dt.length)
 
 
-@always_inline
-def handle_geosearchstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) raises -> Int:
-    """GEOSEARCHSTORE dest source FROMMEMBER|FROMLONLAT ... BYRADIUS|BYBOX ..."""
-    if i + 6 < num_tokens:
-        var _gss_dst = tokens[unsafe_offset=i+1].value()
-        var _gss_src = tokens[unsafe_offset=i+2].value()
-        var _gssv = keyspace[].get(_gss_src)
-        var _gss_clat: Float64 = 0.0; var _gss_clon: Float64 = 0.0; var _gss_rad_m: Float64 = 0.0
-        var _gss_ji = i + 3
-        if _gss_ji < num_tokens:
-            var _fp = tokens[unsafe_offset=_gss_ji].ptr; var _fl = tokens[unsafe_offset=_gss_ji].length; _gss_ji += 1
-            # gh #181: whole-keyword match, reject unknowns — see handle_geosearch.
-            var _is_fm2 = _fl == 10 and (_fp[unsafe_offset=0]|0x20)==102 and (_fp[unsafe_offset=1]|0x20)==114 and (_fp[unsafe_offset=2]|0x20)==111 and (_fp[unsafe_offset=3]|0x20)==109 and (_fp[unsafe_offset=4]|0x20)==109 and (_fp[unsafe_offset=5]|0x20)==101 and (_fp[unsafe_offset=6]|0x20)==109 and (_fp[unsafe_offset=7]|0x20)==98 and (_fp[unsafe_offset=8]|0x20)==101 and (_fp[unsafe_offset=9]|0x20)==114
-            var _is_fl2 = _fl == 10 and (_fp[unsafe_offset=0]|0x20)==102 and (_fp[unsafe_offset=1]|0x20)==114 and (_fp[unsafe_offset=2]|0x20)==111 and (_fp[unsafe_offset=3]|0x20)==109 and (_fp[unsafe_offset=4]|0x20)==108 and (_fp[unsafe_offset=5]|0x20)==111 and (_fp[unsafe_offset=6]|0x20)==110 and (_fp[unsafe_offset=7]|0x20)==108 and (_fp[unsafe_offset=8]|0x20)==97 and (_fp[unsafe_offset=9]|0x20)==116
-            if not _is_fm2 and not _is_fl2:
-                writer.append_error_response("ERR syntax error")
-                return 1
-            if _is_fm2:  # FROMMEMBER
-                if _gss_ji < num_tokens:
-                    var _fm2 = tokens[unsafe_offset=_gss_ji].value(); _gss_ji += 1
-                    if not _gssv.is_none() and _gssv.type.value == ValueType.GEO:
-                        var _fgp2 = _gssv.as_geo().unsafe_bitcast[SlabSkipList]()
-                        var _fgc2 = _fgp2[].head[].forward[0]
-                        while is_not_null(_fgc2):
-                            if _fgc2[].obj.__str__() == _fm2:
-                                var _fga2 = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_fgc2[].score)))
-                                _gss_clat = (_fga2.latitude.min + _fga2.latitude.max) / 2.0
-                                _gss_clon = (_fga2.longitude.min + _fga2.longitude.max) / 2.0
-                                break
-                            _fgc2 = _fgc2[].forward[0]
-            else:
-                if _gss_ji + 1 < num_tokens:
-                    _gss_clon = atof(tokens[unsafe_offset=_gss_ji].value()); _gss_ji += 1
-                    _gss_clat = atof(tokens[unsafe_offset=_gss_ji].value()); _gss_ji += 1
-        var _gss_unit = 1.0
-        if _gss_ji < num_tokens:
-            _gss_ji += 1  # skip BYRADIUS/BYBOX keyword
-            if _gss_ji < num_tokens: _gss_rad_m = atof(tokens[unsafe_offset=_gss_ji].value()); _gss_ji += 1
-            if _gss_ji < num_tokens:
-                var _gu2 = tokens[unsafe_offset=_gss_ji].ptr; var _gul2 = tokens[unsafe_offset=_gss_ji].length; _gss_ji += 1
-                _gss_unit = _geo_unit(_gu2, _gul2)
-                _gss_rad_m *= _gss_unit
-        var _gss_clat_r = _gss_clat * pi / 180.0; var _gss_clon_r = _gss_clon * pi / 180.0
-        var _gss_cnt = 0
-        var _dst_ptr = skip_list_pool[].acquire()
-        _dst_ptr.unsafe_write(SlabSkipList(16))
-        if not _gssv.is_none() and _gssv.type.value == ValueType.GEO:
-            var _gssp = _gssv.as_geo().unsafe_bitcast[SlabSkipList]()
-            var _gssc = _gssp[].head[].forward[0]
-            while is_not_null(_gssc):
-                var _mga2 = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_gssc[].score)))
-                var _mglat2 = (_mga2.latitude.min + _mga2.latitude.max) / 2.0
-                var _mglon2 = (_mga2.longitude.min + _mga2.longitude.max) / 2.0
-                var _mglat2_r = _mglat2 * pi / 180.0; var _mglon2_r = _mglon2 * pi / 180.0
-                var _dl = _mglat2_r - _gss_clat_r; var _dlo = _mglon2_r - _gss_clon_r
-                var _aaa = sin(_dl/2.0)*sin(_dl/2.0) + cos(_gss_clat_r)*cos(_mglat2_r)*sin(_dlo/2.0)*sin(_dlo/2.0)
-                var _dd2 = 2.0 * 6372797.560856 * asin(sqrt(_aaa))
-                if _gss_rad_m <= 0.0 or _dd2 <= _gss_rad_m:
-                    _dst_ptr[].insert(_gssc[].score, _gssc[].obj); _gss_cnt += 1
-                _gssc = _gssc[].forward[0]
-        var _gss_new_val = GenericValue(); _gss_new_val.type = ValueType(ValueType.GEO)
-        _gss_new_val.set_ptr(_dst_ptr.unsafe_bitcast[NoneType]())
-        keyspace[].set(_gss_dst, _gss_new_val)
-        writer.append_int_response(Int64(_gss_cnt))
-        return _gss_ji - i - 1
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'geosearchstore' command")
-        return 0
+def _cmd_text(t: RESP3Token) -> String:
+    """The command name as the client spelled it (Redis echoes argv[0])."""
+    return t.value()
 
 
-@always_inline
-def handle_georadiusbymember(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]) raises -> Int:
-    """GEORADIUSBYMEMBER key member radius unit [WITHCOORD] [WITHDIST] [COUNT count] [ASC|DESC]."""
-    if i + 4 < num_tokens:
-        var _grk2 = tokens[unsafe_offset=i+1].value()
-        var _grm2 = tokens[unsafe_offset=i+2].value()
-        var _grr2 = atof(tokens[unsafe_offset=i+3].value())
-        var _gru2 = tokens[unsafe_offset=i+4].ptr; var _grul2 = tokens[unsafe_offset=i+4].length
-        var _grunit2 = 1.0
-        _grunit2 = _geo_unit(_gru2, _grul2)
-        var _grrad2_m = _grr2 * _grunit2
-        var _grbv = keyspace[].get(_grk2)
-        var _grc_lat: Float64 = 0.0; var _grc_lon: Float64 = 0.0; var _grc_found = False
-        if not _grbv.is_none() and _grbv.type.value == ValueType.GEO:
-            var _grbp = _grbv.as_geo().unsafe_bitcast[SlabSkipList]()
-            var _grbc = _grbp[].head[].forward[0]
-            while is_not_null(_grbc):
-                if _grbc[].obj.__str__() == _grm2:
-                    var _grba = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_grbc[].score)))
-                    _grc_lat = (_grba.latitude.min + _grba.latitude.max) / 2.0
-                    _grc_lon = (_grba.longitude.min + _grba.longitude.max) / 2.0
-                    _grc_found = True; break
-                _grbc = _grbc[].forward[0]
-        var _grb_cnt = -1; var _grb_ji = i + 5
-        var _grb_asc = False; var _grb_desc = False; var _grb_wd = False; var _grb_wc = False
-        while _grb_ji < num_tokens:
-            var _oa = tokens[unsafe_offset=_grb_ji].ptr; var _ol = tokens[unsafe_offset=_grb_ji].length; _grb_ji += 1
-            if arg_eq(_oa, _ol, "count") and _grb_ji < num_tokens:
-                _grb_cnt = strict_atol(tokens[unsafe_offset=_grb_ji].value()); _grb_ji += 1
-                if _grb_cnt <= 0: raise Error("ERR COUNT must be > 0")
-            elif arg_eq(_oa, _ol, "asc"): _grb_asc = True; _grb_desc = False
-            elif arg_eq(_oa, _ol, "desc"): _grb_desc = True; _grb_asc = False
-            elif arg_eq(_oa, _ol, "withdist"): _grb_wd = True
-            elif arg_eq(_oa, _ol, "withcoord"): _grb_wc = True
-            else: _geo_refuse_unsupported(_oa, _ol)
-        var _grb_res = List[String]()
-        var _grb_d = List[Float64](); var _grb_la = List[Float64](); var _grb_lo = List[Float64]()
-        if _grc_found and not _grbv.is_none() and _grbv.type.value == ValueType.GEO:
-            var _grbp2 = _grbv.as_geo().unsafe_bitcast[SlabSkipList]()
-            var _grbc2 = _grbp2[].head[].forward[0]
-            var _grc_latr = _grc_lat * pi / 180.0; var _grc_lonr = _grc_lon * pi / 180.0
-            while is_not_null(_grbc2):
-                var _mga3 = geohash_decode(GeoHashBits(GEO_STEP_MAX, UInt64(_grbc2[].score)))
-                var _mgl3 = (_mga3.latitude.min + _mga3.latitude.max) / 2.0 * pi / 180.0
-                var _mglo3 = (_mga3.longitude.min + _mga3.longitude.max) / 2.0 * pi / 180.0
-                var _dl3 = _mgl3 - _grc_latr; var _dlo3 = _mglo3 - _grc_lonr
-                var _aaa3 = sin(_dl3/2.0)*sin(_dl3/2.0) + cos(_grc_latr)*cos(_mgl3)*sin(_dlo3/2.0)*sin(_dlo3/2.0)
-                var _d3 = 2.0 * 6372797.560856 * asin(sqrt(_aaa3))
-                if _d3 <= _grrad2_m:
-                    _grb_res.append(_grbc2[].obj.__str__()); _grb_d.append(_d3)
-                    _grb_la.append(_mgl3 * 180.0 / pi); _grb_lo.append(_mglo3 * 180.0 / pi)
-                _grbc2 = _grbc2[].forward[0]
-        var _grb_n = len(_grb_res)
-        if _grb_cnt > 0 and _grb_cnt < _grb_n: _grb_n = _grb_cnt
-        var _grb_h = "*" + String(_grb_n) + "\r\n"
-        writer.append_to_response(_grb_h.unsafe_ptr(), _grb_h.byte_length())
-        var _grb_ord = _geo_order(_grb_d, _grb_asc, _grb_desc, _grb_cnt)
-        for _grbo in range(_grb_n):
-            var _grbi = _grb_ord[_grbo]
-            if _grb_wd or _grb_wc:
-                var _gbe_h = "*" + String(1 + (1 if _grb_wd else 0) + (1 if _grb_wc else 0)) + "\r\n"
-                writer.append_to_response(_gbe_h.unsafe_ptr(), _gbe_h.byte_length())
-            writer.append_bulk_string_response(_grb_res[_grbi].unsafe_ptr(), _grb_res[_grbi].byte_length())
-            if _grb_wd:
-                var _gbdb = alloc[UInt8](400)
-                var _gbdl = format_float64_to_buf(_gbdb, 0, _grb_d[_grbi] / _grunit2, 4, False)
-                writer.append_bulk_string_response(_gbdb, _gbdl)
-                _gbdb.free()
-            if _grb_wc:
-                writer.append_to_response("*2\r\n".unsafe_ptr(), 4)
-                var _gblo = String(_grb_lo[_grbi]); writer.append_bulk_string_response(_gblo.unsafe_ptr(), _gblo.byte_length())
-                var _gbla = String(_grb_la[_grbi]); writer.append_bulk_string_response(_gbla.unsafe_ptr(), _gbla.byte_length())
-        return _grb_ji - i - 1
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'georadiusbymember' command")
-        return 0
+def handle_georadius(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                     keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                     skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin],
+                     wal: Pointer[WAL, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
+                     readonly: Bool = False) -> Int:
+    """GEORADIUS[_RO] key longitude latitude radius M|KM|FT|MI [WITHCOORD]
+    [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC] [STORE key|STOREDIST key]."""
+    return _geo_search(tokens, i, num_tokens, writer, keyspace, skip_list_pool, wal, ttl_map, GEO_RADIUS, readonly)
+
+
+def handle_georadiusbymember(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                             keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                             skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin],
+                             wal: Pointer[WAL, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
+                             readonly: Bool = False) -> Int:
+    """GEORADIUSBYMEMBER[_RO] key member radius M|KM|FT|MI [options as GEORADIUS]."""
+    return _geo_search(tokens, i, num_tokens, writer, keyspace, skip_list_pool, wal, ttl_map, GEO_RADIUS_MEMBER, readonly)
+
+
+def handle_geosearch(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                     keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                     skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin],
+                     wal: Pointer[WAL, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) -> Int:
+    """GEOSEARCH key FROMMEMBER member|FROMLONLAT lon lat BYRADIUS r unit|BYBOX w h unit
+    [ASC|DESC] [COUNT count [ANY]] [WITHCOORD] [WITHDIST] [WITHHASH]."""
+    return _geo_search(tokens, i, num_tokens, writer, keyspace, skip_list_pool, wal, ttl_map, GEO_SEARCH, False)
+
+
+def handle_geosearchstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                          keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                          skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin],
+                          wal: Pointer[WAL, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) -> Int:
+    """GEOSEARCHSTORE dest key [GEOSEARCH's FROM/BY/ASC|DESC/COUNT [ANY]] [STOREDIST]."""
+    return _geo_search(tokens, i, num_tokens, writer, keyspace, skip_list_pool, wal, ttl_map, GEO_SEARCHSTORE, False)

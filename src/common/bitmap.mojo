@@ -26,13 +26,25 @@ def _bit_in_byte(bit_offset: Int) -> Int:
     rather than each needing its own flip."""
     return 7 - (bit_offset % 8)
 
-def getbit(bitmap: Pointer[UInt8, MutUntrackedOrigin], bit_offset: Int) -> Int:
+def getbit(bitmap: Pointer[UInt8, MutUntrackedOrigin], byte_len: Int, bit_offset: Int) -> Int:
+    """The bit at `bit_offset`; 0 past the end of the `byte_len` bytes, as
+    Redis reads a missing bit. The length is a parameter because SETBIT reads the old bit
+    before it grows the bitmap."""
     var byte_index = bit_offset // 8
+    if bit_offset < 0 or byte_index >= byte_len:
+        return 0
     var bit_index = _bit_in_byte(bit_offset)
     var byte = bitmap.load(byte_index)
     return Int((byte >> UInt8(bit_index)) & 1)
 
 def setbit(byte_len_val: Int, bitmap: Pointer[UInt8, MutUntrackedOrigin], bit_offset: Int, value: Int) -> SetBitResult:
+    """Set one bit, growing into a NEW buffer when the offset is past the end.
+
+    The old buffer is left to the caller. A stored bitmap's goes when the
+    caller `set()`s the new one: the keyspace parks the value it replaces and
+    frees it after the batch's replies are written. It used to be freed here,
+    which kept the keyspace from freeing a bitmap that SET, BITOP or FLUSHALL
+    replaced: it never was."""
     var byte_len = byte_len_val
     var needed_bytes = bit_offset // 8 + 1
     var current_ptr = bitmap
@@ -41,7 +53,6 @@ def setbit(byte_len_val: Int, bitmap: Pointer[UInt8, MutUntrackedOrigin], bit_of
         var new_ptr = alloc[UInt8](needed_bytes)
         unsafe_memcpy(dest=new_ptr, src=bitmap, count=old_len)
         unsafe_memset(new_ptr.unsafe_offset(old_len), 0, needed_bytes - old_len)
-        bitmap.unsafe_free()
         current_ptr = new_ptr
         byte_len = needed_bytes
 

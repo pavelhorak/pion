@@ -214,16 +214,6 @@ def normalize(kind_val, cmd):
         cur, items = (list(val) + [("array", [])])[:2]
         elems = [repr(x) for x in (items[1] if items[0] == "array" else [])]
         return ("scan", cur[1] in (b"0", "0"), sorted(elems))
-    if kind == "bulk" and cmd[0] == "GEOPOS":
-        # GEOPOS coordinates come back as printed doubles and the two servers
-        # format the last digit differently (38.1155563954963 vs
-        # ...49629) — same value, C's %.17g against Mojo's shortest repr.
-        # Compared at 10 decimals: far tighter than geohash resolution (~0.6 m
-        # of error at 26 bits), so a genuinely wrong coordinate still fails.
-        try:
-            return ("geo-coord", round(float(val), 10))
-        except (TypeError, ValueError):
-            return (kind, val)
     if kind == "array" and cmd[0] in ("XRANGE", "XREVRANGE"):
         # Also before the generic array branch. The wrong-type fixture is built
         # with `XADD * `, so every entry carries a wall-clock id and the two
@@ -1014,6 +1004,129 @@ SEMANTIC_SCRIPTS = [
         ["DEL", "%K3"], ["ZADD", "%K3", "1", "a1", "2", "a2", "3", "b1"],
         ["ZSCAN", "%K3", "0"], ["ZSCAN", "%K3", "0", "MATCH", "a*"],
         ["SSCAN", "nosuch:key", "0"], ["HSCAN", "nosuch:key", "0"]]),
+
+    # The bitmap option surface (#31): SETBIT past the end of an
+    # existing bitmap, BITPOS/BITCOUNT ranges in BYTE and BIT units, BITFIELD's
+    # types, `#` offsets, OVERFLOW modes and all-or-nothing refusal, BITOP's
+    # operations.
+    ("bitmap: SETBIT past the end, BITPOS / BITCOUNT ranges", [
+        ["DEL", "%K"], ["SETBIT", "%K", "0", "1"], ["SETBIT", "%K", "100", "0"],
+        ["SETBIT", "%K", "1000", "0"], ["STRLEN", "%K"], ["SETBIT", "%K", "9", "1"],
+        ["SETBIT", "%K", "23", "1"], ["GET", "%K"],
+        ["BITPOS", "%K", "1"], ["BITPOS", "%K", "0"], ["BITPOS", "%K", "1", "1"],
+        ["BITPOS", "%K", "1", "1", "1"], ["BITPOS", "%K", "1", "0", "-1", "BIT"],
+        ["BITPOS", "%K", "1", "1", "8", "BIT"], ["BITPOS", "%K", "1", "10", "22", "BIT"],
+        ["BITPOS", "%K", "0", "0", "0", "BIT"], ["BITPOS", "%K", "1", "0", "-1", "BYTE"],
+        ["BITPOS", "%K", "1", "0", "-1", "NOPE"], ["BITPOS", "%K", "2"],
+        ["BITPOS", "%K", "1", "x"], ["BITPOS", "%K", "1", "200"],
+        ["BITCOUNT", "%K", "0", "0"], ["BITCOUNT", "%K", "1", "2"], ["BITCOUNT", "%K", "0", "9", "BIT"],
+        ["BITCOUNT", "%K", "5", "30", "BIT"], ["BITCOUNT", "%K", "-8", "-1", "BIT"],
+        ["BITCOUNT", "%K", "0", "-1", "BYTE"], ["BITCOUNT", "%K", "0"], ["BITCOUNT", "%K", "0", "1", "NOPE"],
+        ["DEL", "%K2"], ["SETBIT", "%K2", "7", "1"], ["SETBIT", "%K2", "6", "1"],
+        ["BITPOS", "%K2", "0"], ["BITPOS", "%K2", "0", "0", "0"], ["BITPOS", "%K2", "0", "0"],
+        ["BITPOS", "nosuch:key", "0"], ["BITPOS", "nosuch:key", "1"],
+        ["BITPOS", "nosuch:key", "0", "0", "-1", "BIT"], ["BITCOUNT", "nosuch:key", "0", "-1", "BIT"]]),
+    ("bitmap: BITFIELD types, offsets, OVERFLOW, refusal", [
+        ["DEL", "%K"], ["BITFIELD", "%K", "GET", "u8", "0"], ["EXISTS", "%K"],
+        ["BITFIELD", "%K", "SET", "u8", "0", "255", "GET", "u8", "0"], ["STRLEN", "%K"],
+        ["BITFIELD", "%K", "INCRBY", "u8", "0", "10"],
+        ["BITFIELD", "%K", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "300"],
+        ["BITFIELD", "%K", "OVERFLOW", "FAIL", "INCRBY", "u8", "0", "1"],
+        ["BITFIELD", "%K", "OVERFLOW", "SAT", "INCRBY", "i8", "8", "-300"],
+        ["BITFIELD", "%K", "OVERFLOW", "WRAP", "INCRBY", "i8", "8", "200"],
+        ["BITFIELD", "%K", "OVERFLOW", "FAIL", "SET", "u4", "0", "16", "GET", "u4", "0"],
+        ["BITFIELD", "%K", "OVERFLOW", "SAT", "SET", "i4", "0", "100", "GET", "i4", "0"],
+        ["BITFIELD", "%K", "SET", "u8", "#1", "7", "GET", "u8", "#1", "GET", "u16", "#1"],
+        ["BITFIELD", "%K", "GET", "i64", "0"], ["BITFIELD", "%K", "GET", "u63", "0"],
+        ["BITFIELD", "%K", "GET", "u64", "0"], ["BITFIELD", "%K", "GET", "x8", "0"],
+        ["BITFIELD", "%K", "GET", "u0", "0"], ["BITFIELD", "%K", "GET", "i65", "0"],
+        ["BITFIELD", "%K", "GET", "u8", "-1"], ["BITFIELD", "%K", "GET", "u8", "#-1"],
+        ["BITFIELD", "%K", "SET", "u8", "0", "1", "GET", "u8", "x"], ["GET", "%K"],
+        ["BITFIELD", "%K", "SET", "u8", "0", "1", "NOPE"], ["GET", "%K"],
+        ["BITFIELD", "%K", "OVERFLOW", "NOPE"], ["BITFIELD", "%K", "SET", "u8", "0", "notint"],
+        ["BITFIELD", "%K", "INCRBY", "u8", "0"], ["BITFIELD", "%K"], ["BITFIELD", "%K", "OVERFLOW", "SAT"],
+        ["BITFIELD_RO", "%K", "GET", "u8", "0", "GET", "i4", "4"],
+        ["BITFIELD_RO", "%K", "SET", "u8", "0", "1"], ["BITFIELD_RO", "%K", "INCRBY", "u8", "0", "1"],
+        ["BITFIELD_RO", "nosuch:key", "GET", "u8", "0"],
+        ["DEL", "%K2"], ["SET", "%K2", "hello"], ["BITFIELD", "%K2", "GET", "u8", "0", "GET", "i16", "4"],
+        ["BITFIELD", "%K2", "SET", "u8", "0", "72"], ["GET", "%K2"],
+        ["BITFIELD", "%K2", "INCRBY", "u8", "8", "1"], ["GET", "%K2"]]),
+    ("bitmap: BITOP operations", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["SETBIT", "%K", "0", "1"], ["SETBIT", "%K", "9", "1"],
+        ["SETBIT", "%K2", "9", "1"], ["SETBIT", "%K2", "20", "1"],
+        ["BITOP", "AND", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "OR", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "XOR", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "NOT", "%K3", "%K"], ["GET", "%K3"],
+        ["BITOP", "and", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "NOT", "%K3", "%K", "%K2"], ["BITOP", "NOPE", "%K3", "%K"],
+        ["BITOP", "ANDX", "%K3", "%K"], ["BITOP", "AND", "%K3"],
+        ["BITOP", "AND", "%K3", "nosuch:a", "nosuch:b"], ["EXISTS", "%K3"],
+        ["SET", "%K3", "x"], ["BITOP", "OR", "%K3", "nosuch:a"], ["EXISTS", "%K3"],
+        ["SET", "dfs:str", "ab"], ["BITOP", "OR", "%K3", "%K", "dfs:str"], ["GET", "%K3"],
+        ["RPUSH", "dfs:lst", "x"], ["BITOP", "OR", "%K3", "%K", "dfs:lst"], ["DEL", "dfs:lst"],
+        ["BITOP", "DIFF", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "DIFF1", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "ANDOR", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "ONE", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "DIFF", "%K3", "%K"], ["BITOP", "ONE", "%K3", "%K"], ["GET", "%K3"],
+        ["SET", "%K", "x"], ["SET", "%K", "y"], ["SETBIT", "%K", "100", "1"], ["SET", "%K", "z"],
+        ["GET", "%K"], ["DEL", "dfs:str"]]),
+
+    # Geo as Redis's geo.c: a geo key is a sorted set; GEOADD NX/XX/CH and
+    # all-or-nothing validation; the search family's options, errors, STORE /
+    # STOREDIST, WITHHASH, ANY, BYBOX, the _RO forms; coordinates printed as
+    # Redis prints a double.
+    ("geo: GEOADD options, search family, stores", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["GEOADD", "%K", "13.361389", "38.115556", "Palermo", "15.087269", "37.502669", "Catania",
+         "12.496365", "41.902782", "Rome", "0", "0", "Null", "-0.1278", "51.5074", "London"],
+        ["GEOPOS", "%K", "Palermo", "Null", "nosuch"], ["GEOPOS", "%K"], ["GEOPOS", "nosuch:key", "a"],
+        ["GEOHASH", "%K", "Palermo", "Null", "London"], ["GEOHASH", "%K"],
+        ["GEODIST", "%K", "Palermo", "Catania"], ["GEODIST", "%K", "Palermo", "Catania", "km"],
+        ["GEODIST", "%K", "Palermo", "Catania", "parsecs"], ["GEODIST", "%K", "Palermo", "Catania", "km", "x"],
+        ["GEODIST", "%K", "Palermo", "nosuch"], ["GEODIST", "nosuch:key", "a", "b"],
+        ["GEOADD", "%K", "NX", "13.4", "38.1", "Palermo", "1", "1", "New"], ["GEOPOS", "%K", "Palermo", "New"],
+        ["GEOADD", "%K", "XX", "CH", "13.5", "38.2", "Palermo", "2", "2", "Newer"], ["GEOPOS", "%K", "Palermo", "Newer"],
+        ["GEOADD", "%K", "NX", "XX", "1", "1", "x"], ["GEOADD", "%K", "CH", "1", "1"],
+        ["GEOADD", "%K", "1", "1", "a", "200", "1", "b"], ["ZSCORE", "%K", "a"],
+        ["GEOADD", "%K", "1", "86", "a"], ["GEOADD", "%K", "x", "1", "a"], ["GEOADD", "%K", "NOPE", "1", "1", "a"],
+        ["ZCARD", "%K"], ["ZRANGE", "%K", "0", "-1", "WITHSCORES"], ["TYPE", "%K"], ["ZSCORE", "%K", "Rome"],
+        ["ZADD", "%K2", "3479099956230698", "Palermo"], ["GEOPOS", "%K2", "Palermo"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km"], ["GEORADIUS", "%K", "15", "37", "200", "km", "ASC"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km", "DESC", "WITHDIST", "WITHHASH", "WITHCOORD"],
+        ["GEORADIUS", "%K", "15", "37", "1000", "km", "COUNT", "2"],
+        ["GEORADIUS", "%K", "15", "37", "1000", "km", "COUNT", "1", "ANY"],
+        ["GEORADIUS", "%K", "15", "37", "1000", "km", "ANY"], ["GEORADIUS", "%K", "15", "37", "1000", "km", "COUNT", "0"],
+        ["GEORADIUS", "%K", "15", "37", "-1", "km"], ["GEORADIUS", "%K", "15", "37", "x", "km"],
+        ["GEORADIUS", "%K", "15", "37", "1", "parsecs"], ["GEORADIUS", "%K", "200", "37", "1", "km"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km", "STORE", "%K3"], ["ZRANGE", "%K3", "0", "-1", "WITHSCORES"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km", "STOREDIST", "%K3"], ["ZRANGE", "%K3", "0", "-1", "WITHSCORES"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km", "STORE", "%K3", "WITHDIST"],
+        ["GEORADIUS", "%K", "15", "37", "1", "m", "STORE", "%K3"], ["EXISTS", "%K3"],
+        ["GEORADIUS", "nosuch:key", "15", "37", "1", "m", "STORE", "%K3"], ["GEORADIUS", "nosuch:key", "15", "37", "1", "m"],
+        ["GEORADIUS_RO", "%K", "15", "37", "200", "km", "WITHDIST"],
+        ["GEORADIUS_RO", "%K", "15", "37", "200", "km", "STORE", "%K3"],
+        ["GEORADIUSBYMEMBER", "%K", "Palermo", "300", "km", "ASC"], ["GEORADIUSBYMEMBER", "%K", "nosuch", "300", "km"],
+        ["GEORADIUSBYMEMBER", "nosuch:key", "nosuch", "300", "km"],
+        ["GEORADIUSBYMEMBER_RO", "%K", "Palermo", "300", "km", "ASC", "WITHCOORD"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "BYBOX", "400", "400", "km", "ASC", "WITHDIST"],
+        ["GEOSEARCH", "%K", "FROMMEMBER", "Palermo", "BYRADIUS", "200", "km", "DESC"],
+        ["GEOSEARCH", "%K", "FROMMEMBER", "nosuch", "BYRADIUS", "200", "km"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "FROMMEMBER", "Palermo", "BYRADIUS", "200", "km"],
+        ["GEOSEARCH", "%K", "BYRADIUS", "200", "km"], ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "ASC"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "BYBOX", "1", "1", "km"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "BYBOX", "-1", "1", "km"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "STORE", "%K3"],
+        ["GEOSEARCHSTORE", "%K3", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "STOREDIST"],
+        ["ZRANGE", "%K3", "0", "-1", "WITHSCORES"],
+        ["GEOSEARCHSTORE", "%K3", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "WITHDIST"],
+        ["GEOSEARCHSTORE", "%K3", "%K", "FROMLONLAT", "15", "37", "BYBOX", "10", "10", "m"], ["EXISTS", "%K3"],
+        ["GEOSEARCHSTORE", "%K3", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "1000", "km", "COUNT", "2", "ANY"],
+        ["ZCARD", "%K3"], ["ZREM", "%K", "Null"], ["GEORADIUS", "%K", "0", "0", "10", "km"],
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"]]),
+
 ]
 
 

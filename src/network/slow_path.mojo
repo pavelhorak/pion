@@ -55,10 +55,10 @@ from src.commands.pubsub import PubSubRegistry, PubSubBroadcast, handle_pubsub, 
 from src.commands.ttl import handle_expire, handle_pexpire, handle_expireat, handle_pexpireat, handle_ttl, handle_pttl, handle_persist
 # Command modules (Phase 2 extraction)
 from src.commands.list import handle_lindex, handle_lset, handle_linsert, handle_lrem, handle_ltrim, handle_lpos, handle_lmove
-from src.commands.bitmap import handle_bitop, handle_bitpos, handle_pfmerge, handle_bitfield, handle_bitfield_ro
+from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
-from src.commands.geo import handle_geopos, handle_geodist, handle_geohash, handle_georadius, handle_geosearch, handle_geosearchstore, handle_georadiusbymember
+from src.commands.geo import handle_geoadd, handle_geopos, handle_geodist, handle_geohash, handle_georadius, handle_geosearch, handle_geosearchstore, handle_georadiusbymember
 from src.commands.hash import handle_hmget, handle_hgetall, handle_hkeys, handle_hvals, handle_hlen, handle_hdel, handle_hexists, handle_hincrby, handle_hincrbyfloat, handle_hrandfield, handle_hscan, handle_hsetnx, handle_hexpire, handle_hpexpire, handle_hexpireat, handle_hpexpireat, handle_httl, handle_hpttl, handle_hpersist, handle_hexpiretime, handle_hpexpiretime
 from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_bgrewriteaof, handle_command, handle_debug, handle_slowlog, handle_latency, handle_memory, handle_module, handle_acl, handle_reset, handle_client
 from src.commands.lua_engine import LuaEngine, handle_eval, handle_evalsha, handle_script, handle_function, handle_fcall
@@ -1980,99 +1980,15 @@ struct SlowPathHandler:
                         else:
                             writer.append_error_response("ERR wrong number of arguments for 'pfcount' command")
                             i = cmd_end_tok - 1
-                    # ── BITCOUNT (whole-key form; range args unsupported here — the
-                    #    fast path owns the hot form, this is gh #101 slow-path coverage) ──
+                    # ── BITCOUNT, every form (public #31). The fast path answers the
+                    #    whole-key form outside transactions. ──
                     elif tl == 8 and cmd_matches_8(tp, 98, 105, 116, 99, 111, 117, 110, 116):
-                        if cmd_end_tok - i == 2:
-                            var bc_res = self.dispatcher.execute_bitcount(tokens[i+1].value())
-                            if bc_res.is_valid: writer.append_int_response(bc_res.value)
-                            else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            i += 1
-                        elif cmd_end_tok - i == 4 or cmd_end_tok - i == 5:
-                            # gh #232: `BITCOUNT key start end [BYTE|BIT]` — the
-                            # documented ranged form — used to answer
-                            # "range arguments are not supported on this path",
-                            # on strings AND bitmaps. Only the whole-key form
-                            # worked, so every range query failed outright.
-                            var _bcv = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                            if _bcv.is_none():
-                                writer.append_int_response(0)
-                            elif not _bcv.is_string_like():
-                                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            else:
-                                var _bcsc = stack_allocation[32, UInt8]()
-                                var _bclen = 0
-                                var _bcp = _bcv.bitmap_view(_bcsc, _bclen)
-                                var _bc_bit = False
-                                if cmd_end_tok - i == 5:
-                                    var _up = tokens[i+4].ptr; var _ul = tokens[i+4].length
-                                    _bc_bit = _ul == 3 and (_up[0]|0x20) == 98   # BIT
-                                var _total = _bclen * 8 if _bc_bit else _bclen
-                                var _s = Int(strict_atol(tokens[i+2].value()))
-                                var _e = Int(strict_atol(tokens[i+3].value()))
-                                if _s < 0: _s += _total
-                                if _e < 0: _e += _total
-                                # Redis clamps BOTH ends up to 0 after the
-                                # negative-index adjustment, so a range far off
-                                # the left edge collapses to [0,0] rather than
-                                # to an empty range: `BITCOUNT foobar -100 -99`
-                                # is 4 (byte 0), not 0.
-                                if _s < 0: _s = 0
-                                if _e < 0: _e = 0
-                                if _e >= _total: _e = _total - 1
-                                var _cnt = 0
-                                if _total > 0 and _s <= _e:
-                                    var _fb = _s if _bc_bit else _s * 8
-                                    var _lb = _e if _bc_bit else _e * 8 + 7
-                                    for _b in range(_fb, _lb + 1):
-                                        var _by = _b // 8
-                                        # gh #232: Redis numbers bits MSB-first
-                                        # within each byte.
-                                        if (_bcp[_by] >> UInt8(7 - (_b % 8))) & 1 == 1:
-                                            _cnt += 1
-                                writer.append_int_response(Int64(_cnt))
-                            i = cmd_end_tok - 1
-                        elif i + 1 < cmd_end_tok:
-                            writer.append_error_response("ERR syntax error")
-                            i = cmd_end_tok - 1
-                        else:
-                            writer.append_error_response("ERR wrong number of arguments for 'bitcount' command")
-                            i = cmd_end_tok - 1
-                    # ── GEOADD ──
-                    # gh #162: authoritative skip on every path (see the GEO
-                    # block below for why). gh #181: loops over every
-                    # (lon, lat, member) triple — the old arm stored only the
-                    # first triple and silently ignored the rest — and routes
-                    # through execute_geoadd so each member is WAL-logged.
+                        _ = handle_bitcount(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        i = cmd_end_tok - 1
+                    # ── GEOADD ── (src/commands/geo.mojo: validates every triple
+                    #    first, NX/XX/CH, a sorted set as in Redis)
                     elif tl == 6 and cmd_matches_6(tp, 103, 101, 111, 97, 100, 100):
-                        if i + 4 < cmd_end_tok and (cmd_end_tok - i - 2) % 3 == 0:
-                            var key = tokens[i+1].value()
-                            var geo_added = Int64(0)
-                            var geo_wrongtype = False
-                            var geo_badfloat = False
-                            var j_geo = i + 2
-                            while j_geo + 2 < cmd_end_tok:
-                                var glon_tok = tokens[j_geo]
-                                var glat_tok = tokens[j_geo+1]
-                                var gc0 = glon_tok.ptr[0] if glon_tok.length > 0 else UInt8(0)
-                                var gc1 = glat_tok.ptr[0] if glat_tok.length > 0 else UInt8(0)
-                                # Coordinates must start with a digit, sign, or decimal
-                                # point; anything else (a flag like NX) is a validation error.
-                                if not ((gc0 >= 48 and gc0 <= 57) or gc0 == 45 or gc0 == 43 or gc0 == 46
-                                        ) or not ((gc1 >= 48 and gc1 <= 57) or gc1 == 45 or gc1 == 43 or gc1 == 46):
-                                    geo_badfloat = True; break
-                                var gres = self.dispatcher.execute_geoadd(key, atof(glon_tok.value()), atof(glat_tok.value()), tokens[j_geo+2].value())
-                                if gres.is_valid: geo_added += gres.value
-                                else:
-                                    geo_wrongtype = True; break
-                                j_geo += 3
-                            if geo_badfloat: writer.append_error_response("ERR value is not a valid float")
-                            elif geo_wrongtype: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            else: writer.append_int_response(geo_added)
-                        elif i + 4 < cmd_end_tok: writer.append_error_response("ERR syntax error")
-                        else:
-                            writer.append_error_response("ERR wrong number of arguments for 'geoadd' command")
-                            i = cmd_end_tok - 1
+                        _ = handle_geoadd(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── CONFIG ──
                     elif tl == 6 and cmd_matches_6(tp, 99, 111, 110, 102, 105, 103):
@@ -2988,7 +2904,7 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── BITOP ──
                     elif tl == 5 and cmd_matches_5(tp, 98, 105, 116, 111, 112):
-                        _ = handle_bitop(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        _ = handle_bitop(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                         i = cmd_end_tok - 1
@@ -3218,21 +3134,25 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── GEORADIUS ──
                     elif tl == 9 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==114 and (tp[4]|0x20)==97 and (tp[5]|0x20)==100 and (tp[6]|0x20)==105 and (tp[7]|0x20)==117 and (tp[8]|0x20)==115:
-                        _ = handle_georadius(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
+                        _ = handle_georadius(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "georadius_ro"):
+                        _ = handle_georadius(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map, True)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "georadiusbymember_ro"):
+                        _ = handle_georadiusbymember(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map, True)
                         i = cmd_end_tok - 1
                     # ── GEOSEARCH ──
                     elif tl == 9 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==115 and (tp[4]|0x20)==101 and (tp[5]|0x20)==97 and (tp[6]|0x20)==114 and (tp[7]|0x20)==99 and (tp[8]|0x20)==104:
-                        _ = handle_geosearch(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
+                        _ = handle_geosearch(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── GEOSEARCHSTORE ──
                     elif tl == 14 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==115 and (tp[4]|0x20)==101 and (tp[5]|0x20)==97 and (tp[6]|0x20)==114 and (tp[7]|0x20)==99 and (tp[8]|0x20)==104 and (tp[9]|0x20)==115 and (tp[10]|0x20)==116 and (tp[11]|0x20)==111 and (tp[12]|0x20)==114 and (tp[13]|0x20)==101:
-                        _ = handle_geosearchstore(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
-                        if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
-                            self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
+                        _ = handle_geosearchstore(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── GEORADIUSBYMEMBER ──
                     elif tl == 17 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==114 and (tp[4]|0x20)==97 and (tp[5]|0x20)==100 and (tp[6]|0x20)==105 and (tp[7]|0x20)==117 and (tp[8]|0x20)==115 and (tp[9]|0x20)==98 and (tp[10]|0x20)==121 and (tp[11]|0x20)==109 and (tp[12]|0x20)==101 and (tp[13]|0x20)==109 and (tp[14]|0x20)==98 and (tp[15]|0x20)==101 and (tp[16]|0x20)==114:
-                        _ = handle_georadiusbymember(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
+                        _ = handle_georadiusbymember(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── Stream Commands (src/commands/stream.mojo) ──
                     elif cmd_eq(tp, tl, "xlen"):

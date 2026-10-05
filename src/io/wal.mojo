@@ -251,7 +251,9 @@ def _replay_list(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
 
 def _replay_zset(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                  key: GenericValue, create: Bool, geo: Bool) -> Pointer[SlabSkipList, MutUntrackedOrigin]:
-    var vtype = ValueType.GEO if geo else ValueType.ZSET
+    # A geo key is a sorted set (as in Redis); cmd-15 records from before
+    # that, and old snapshots' geo values, load as one.
+    var vtype = ValueType.ZSET
     var val = keyspace[].get(key)
     if val.is_none():
         if not create:

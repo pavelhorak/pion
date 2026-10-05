@@ -40,7 +40,9 @@ geodist -4
 geohash -2
 geopos -2
 georadius -6
+georadius_ro -6
 georadiusbymember -5
+georadiusbymember_ro -5
 geosearch -7
 geosearchstore -8
 get 2

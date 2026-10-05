@@ -284,6 +284,12 @@ struct ResponseWriter(Movable):
                 self.offset = 0
 
     @always_inline
+    def append_status_response(mut self, msg: String):
+        """`+msg` — a simple string (status) reply, e.g. one HELP line."""
+        var line = String("+") + msg + "\r\n"
+        self.append_to_response(line.unsafe_ptr(), line.byte_length())
+
+    @always_inline
     def append_ok_response(mut self):
         # gh #82: hot path — keep the original constant guard. Fixed-byte writes
         # are protected by the safe-zone invariant maintained by variable-length
@@ -345,6 +351,50 @@ struct ResponseWriter(Movable):
         self.offset = off + 5
 
     @always_inline
+    def append_verbatim_response[origin: Origin](mut self, data: Pointer[UInt8, origin], length: Int):
+        """RESP3 verbatim string `=<len + 4>\r\ntxt:<data>\r\n`, as Redis
+        sends INFO and CLIENT INFO / LIST; RESP2 has no such type and gets the
+        same text as a bulk string."""
+        if self.proto != 3:
+            self.append_bulk_string_response(data, length)
+            return
+        if self._check_overflow(length + 32): return
+        self.buffer[unsafe_offset=self.offset] = 61   # '='
+        self.offset += 1
+        self.offset = format_int_to_buf(self.buffer, self.offset, Int64(length + 4))
+        self.buffer[unsafe_offset=self.offset] = 13
+        self.buffer[unsafe_offset=self.offset + 1] = 10
+        self.buffer[unsafe_offset=self.offset + 2] = 116   # 't'
+        self.buffer[unsafe_offset=self.offset + 3] = 120   # 'x'
+        self.buffer[unsafe_offset=self.offset + 4] = 116   # 't'
+        self.buffer[unsafe_offset=self.offset + 5] = 58    # ':'
+        self.offset += 6
+        unsafe_memcpy(dest=self.buffer.unsafe_offset(self.offset), src=data, count=length)
+        self.offset += length
+        self.buffer[unsafe_offset=self.offset] = 13
+        self.buffer[unsafe_offset=self.offset + 1] = 10
+        self.offset += 2
+
+    @always_inline
+    def append_null_array_response(mut self):
+        """A nil ARRAY: `*-1` under RESP2, `_` under RESP3. Commands whose
+        reply is an array (XREAD with no data, a blocking pop that timed out)
+        answer nil this way in Redis, not with a nil bulk string (`$-1`)."""
+        if self.offset + 8 > RESP_BUF_SIZE - 194304: return
+        if self.proto == 3:
+            self.buffer[unsafe_offset=self.offset] = 95   # '_'
+            self.buffer[unsafe_offset=self.offset + 1] = 13
+            self.buffer[unsafe_offset=self.offset + 2] = 10
+            self.offset += 3
+        else:
+            self.buffer[unsafe_offset=self.offset] = 42   # '*'
+            self.buffer[unsafe_offset=self.offset + 1] = 45   # '-'
+            self.buffer[unsafe_offset=self.offset + 2] = 49   # '1'
+            self.buffer[unsafe_offset=self.offset + 3] = 13
+            self.buffer[unsafe_offset=self.offset + 4] = 10
+            self.offset += 5
+
+    @always_inline
     def append_array_header(mut self, count: Int):
         """`*<count>\r\n`. Identical in RESP2 and RESP3 — provided so callers
         stop hand-rolling the bytes (several already did, inconsistently)."""
@@ -374,6 +424,45 @@ struct ResponseWriter(Movable):
         self.buffer[unsafe_offset=self.offset] = 13 # '\r'
         self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
         self.offset += 2
+
+    @always_inline
+    def append_set_header(mut self, count: Int):
+        """RESP3 set `~<count>` (SMEMBERS, SINTER, SUNION, SDIFF, SPOP with a
+        count). RESP2 has no set type and sends the same members as an array."""
+        if self.offset + 16 > RESP_BUF_SIZE - 194304: return
+        self.buffer[unsafe_offset=self.offset] = 126 if self.proto == 3 else 42   # '~' / '*'
+        self.offset += 1
+        self.offset = format_int_to_buf(self.buffer, self.offset, Int64(count))
+        self.buffer[unsafe_offset=self.offset] = 13 # '\r'
+        self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
+        self.offset += 2
+
+    @always_inline
+    def append_scored_header(mut self, members: Int, with_scores: Bool):
+        """Header of a reply that lists `members` sorted-set members, with their
+        scores when `with_scores` (WITHSCORES, ZPOPMIN/ZPOPMAX with a count,
+        ZRANDMEMBER). RESP2 sends one flat array, member then score; RESP3 an
+        array of [member, score] pairs, as Redis does. Pair each call with
+        append_scored_member."""
+        if with_scores and self.proto != 3:
+            self.append_array_header(members * 2)
+        else:
+            self.append_array_header(members)
+
+    @always_inline
+    def append_scored_member(mut self, member: GenericValue, score: Float64, with_scores: Bool):
+        """One member of an append_scored_header reply: the member, then its
+        score as a bulk string (RESP2) or inside a [member, double] pair (RESP3)."""
+        if not with_scores:
+            self.append_bulk_value_response(member)
+            return
+        if self.proto == 3:
+            self.append_array_header(2)
+            self.append_bulk_value_response(member)
+            self.append_score_response(score)
+        else:
+            self.append_bulk_value_response(member)
+            self.append_bulk_score_response(score)
 
     @always_inline
     def append_push_header(mut self, count: Int):

@@ -211,11 +211,11 @@
 |---|:---:|:---:|:---:|:---:|:---:|---|
 | GETBIT | ✅ | ✅ | ✅ | **FAST** | ✅ | |
 | SETBIT | ✅ | ✅ | ✅ | **FAST** | ✅ | |
-| BITCOUNT | ✅ | ✅ | 🟡 | **FAST/SLOW** | ✅ | No-arg and full-key: FAST. Range args (BITCOUNT key start end): SLOW |
-| BITPOS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Find first set/clear bit; start/end range supported |
-| BITOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | AND/OR/XOR/NOT; zero-pads shorter sources |
-| BITFIELD | ✅ | ✅ | ✅ | **SLOW** | ✅ | GET/SET/INCRBY subcommands; u/i type prefix |
-| BITFIELD_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | GET subcommand only |
+| BITCOUNT | ✅ | ✅ | ✅ | **FAST/SLOW** | ✅ | Whole key: FAST. Ranges in BYTE or BIT units: SLOW |
+| BITPOS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Ranges in BYTE or BIT units (#31) |
+| BITOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | AND/OR/XOR/NOT and Redis 8.2's DIFF/DIFF1/ANDOR/ONE; an empty result deletes the destination (#31) |
+| BITFIELD | ✅ | ✅ | ✅ | **SLOW** | ✅ | GET/SET/INCRBY, OVERFLOW WRAP/SAT/FAIL, `#N` offsets, all-or-nothing (#31) |
+| BITFIELD_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | GET only |
 
 ---
 
@@ -233,13 +233,15 @@
 
 | Command | Redis 8 | Valkey 8 | Pion | Pion path | GLIDE | Notes |
 |---|:---:|:---:|:---:|:---:|:---:|---|
-| GEOADD | ✅ | ✅ | ✅ | **SLOW** | ✅ | Backed by SlabSkipList with geohash encoding |
-| GEODIST | ✅ | ✅ | ✅ | **SLOW** | ✅ | Haversine distance; m/km/mi/ft units |
-| GEOPOS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Decodes geohash to lon/lat; multi-member |
-| GEOSEARCH | ✅ | ✅ | ✅ | **SLOW** | ✅ | FROMMEMBER/FROMLONLAT; BYRADIUS/BYBOX; WITHCOORD/WITHDIST/COUNT |
-| GEOSEARCHSTORE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Stores search results as GEO key |
-| GEORADIUS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deprecated but supported; WITHCOORD/WITHDIST/COUNT/ASC/DESC |
-| GEORADIUSBYMEMBER | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deprecated but supported; COUNT option |
+| GEOADD | ✅ | ✅ | ✅ | **SLOW** | ✅ | NX/XX/CH; a geo key is a sorted set, as in Redis (#33) |
+| GEODIST | ✅ | ✅ | ✅ | **SLOW** | ✅ | m/km/ft/mi |
+| GEOPOS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Coordinates printed as Redis prints them |
+| GEOSEARCH | ✅ | ✅ | ✅ | **SLOW** | ✅ | FROMMEMBER/FROMLONLAT, BYRADIUS/BYBOX, ASC/DESC, COUNT [ANY], WITHCOORD/WITHDIST/WITHHASH (#33) |
+| GEOSEARCHSTORE | ✅ | ✅ | ✅ | **SLOW** | ✅ | STOREDIST; an empty result deletes the destination |
+| GEORADIUS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deprecated but supported, every option incl. STORE/STOREDIST/ANY/WITHHASH |
+| GEORADIUSBYMEMBER | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deprecated but supported, as GEORADIUS |
+| GEORADIUS_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | GEORADIUS without STORE |
+| GEORADIUSBYMEMBER_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | GEORADIUSBYMEMBER without STORE |
 | GEOHASH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns 11-char base32 geohash strings |
 
 ---

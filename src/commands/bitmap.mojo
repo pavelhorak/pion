@@ -1,202 +1,640 @@
-"""Bitmap/HLL commands: BITOP, BITPOS, BITFIELD, BITFIELD_RO, PFMERGE."""
+"""Bitmap/HLL commands: BITOP, BITPOS, BITCOUNT, BITFIELD, BITFIELD_RO, PFMERGE.
+
+Redis has no bitmap type: a bitmap IS a string. Pion stores what SETBIT,
+BITFIELD and BITOP write as `BITMAP`, which shares a heap STRING's `[ptr, len]`
+words, and every command here reads either shape. Bit 0 is the most
+significant bit of byte 0 (gh #232).
+
+Arguments follow Redis's bitops.c (public #31): every argument is parsed and
+every key type-checked before anything is written, so a refused command
+changes nothing, and each error is the one Redis sends for that input.
+"""
 from src.common.ptr import null_ptr, is_not_null
 from std.memory.unsafe_pointer import Pointer
-from std.collections import Array
-from std.memory import alloc, stack_allocation, unsafe_memcpy, unsafe_memset
-from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
+from std.memory import alloc, unsafe_memcpy, unsafe_memset
+from std.bit import pop_count
+from src.network.resp3 import RESP3Token
 from src.network.response_writer import ResponseWriter
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
-from src.common.bitmap import getbit, setbit, bitcount, SetBitResult
-from src.common.hll import hll_add, hll_count, hll_merge, HLL_REGISTERS
+from src.common.hll import hll_merge, HLL_REGISTERS
+from src.common.container_free import remove_and_free
 from src.io.wal import WAL
-from src.common.utils import strict_atol, format_int_to_buf
+from src.common.utils import arg_eq, parse_int64_strict
+
+
+comptime _E_NOT_INT = "ERR value is not an integer or out of range"
+comptime _E_SYNTAX = "ERR syntax error"
+comptime _E_WRONGTYPE = "WRONGTYPE Operation against a key holding the wrong kind of value"
+comptime _E_OFFSET = "ERR bit offset is not an integer or out of range"
+comptime _E_BF_TYPE = "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
+# Redis caps a bit offset at proto-max-bulk-len (512 MB) worth of bits.
+comptime _MAX_BIT_OFFSET = 4294967296
 
 
 @always_inline
-def handle_bitop(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """BITOP operation destkey key [key ...] → integer byte length of result."""
-    if i + 3 < num_tokens:
-        var _bop_op = tokens[unsafe_offset=i+1].value()
-        var _i = i + 2
-        var _bop_dest = tokens[unsafe_offset=_i].value()
-        var _bop_src = List[String]()
-        _i += 1
-        while _i < num_tokens and tokens[unsafe_offset=_i].marker != 0:
-            _bop_src.append(tokens[unsafe_offset=_i].value()); _i += 1
-        _i -= 1
-        var _bop_n = len(_bop_src)
-        if _bop_n == 0:
-            writer.append_int_response(Int64(0))
-        else:
-            # Find max byte length among sources (BITMAP or STRING types)
-            var _bop_maxlen = 0
-            for _bi in range(_bop_n):
-                var _sv = keyspace[].get(_bop_src[_bi])
-                if _sv.type.value == ValueType.BITMAP:
-                    var _bl = _sv.bitmap_len()
-                    if _bl > _bop_maxlen: _bop_maxlen = _bl
-                elif _sv.type.value == ValueType.STRING or _sv.type.value == ValueType.STRING_SSO:
-                    var _sl = _sv.string_len()
-                    if _sl > _bop_maxlen: _bop_maxlen = _sl
-            if _bop_maxlen == 0:
-                # All sources empty - store empty bitmap
-                var _dest_v = GenericValue()
-                _dest_v.type = ValueType(ValueType.BITMAP)
-                var _ep = alloc[UInt8](1); unsafe_memset(_ep, 0, 1)
-                _dest_v._data0 = UInt64(Int(_ep))
-                _dest_v._data1 = UInt64(1)
-                keyspace[].set(_bop_dest, _dest_v)
-                writer.append_int_response(Int64(0))
-            else:
-                var _bop_res = alloc[UInt8](_bop_maxlen)
-                unsafe_memset(_bop_res, 0, _bop_maxlen)
-                var _bop_resp = _bop_res
-                # Initialize result from first source (BITMAP or STRING)
-                var _sv0 = keyspace[].get(_bop_src[0])
-                var _sso_buf0 = alloc[UInt8](24)
-                if _sv0.type.value == ValueType.BITMAP:
-                    var _sp0 = _sv0.as_bitmap(); var _sl0 = _sv0.bitmap_len()
-                    unsafe_memcpy(dest=_bop_resp, src=_sp0, count=_sl0)
-                elif _sv0.type.value == ValueType.STRING or _sv0.type.value == ValueType.STRING_SSO:
-                    var _sp0 = _sv0.as_string_safe(_sso_buf0); var _sl0 = _sv0.string_len()
-                    unsafe_memcpy(dest=_bop_resp, src=_sp0, count=_sl0)
-                elif (_bop_op.unsafe_ptr()[unsafe_offset=0]|32) == 110:  # NOT - flip bits
-                    for _bi in range(_bop_maxlen): _bop_resp[unsafe_offset=_bi] = 0xFF
-                # Apply operation
-                var _is_not = (_bop_op.unsafe_ptr()[unsafe_offset=0]|32) == 110
-                var _sso_buf_op = alloc[UInt8](24)
-                if _is_not:
-                    # NOT: flip bits of first source
-                    var _sv_not = keyspace[].get(_bop_src[0])
-                    var _sp_not: Pointer[UInt8, MutUntrackedOrigin]
-                    var _sl_not = 0
-                    if _sv_not.type.value == ValueType.BITMAP:
-                        _sp_not = _sv_not.as_bitmap(); _sl_not = _sv_not.bitmap_len()
-                        for _bi in range(_sl_not): _bop_resp[unsafe_offset=_bi] = ~_sp_not[unsafe_offset=_bi]
-                    elif _sv_not.type.value == ValueType.STRING or _sv_not.type.value == ValueType.STRING_SSO:
-                        _sp_not = _sv_not.as_string_safe(_sso_buf_op); _sl_not = _sv_not.string_len()
-                        for _bi in range(_sl_not): _bop_resp[unsafe_offset=_bi] = ~_sp_not[unsafe_offset=_bi]
-                    for _bi in range(_sl_not, _bop_maxlen): _bop_resp[unsafe_offset=_bi] = 0
-                else:
-                    for _ki in range(1, _bop_n):
-                        var _skv = keyspace[].get(_bop_src[_ki])
-                        var _skp: Pointer[UInt8, MutUntrackedOrigin]
-                        var _skl = 0
-                        if _skv.type.value == ValueType.BITMAP:
-                            _skp = _skv.as_bitmap(); _skl = _skv.bitmap_len()
-                        elif _skv.type.value == ValueType.STRING or _skv.type.value == ValueType.STRING_SSO:
-                            _skp = _skv.as_string_safe(_sso_buf_op); _skl = _skv.string_len()
-                        else:
-                            _skp = _bop_resp  # dummy (zero bytes)
-                        var _opc = _bop_op.unsafe_ptr()[unsafe_offset=0] | 32
-                        for _bi in range(_bop_maxlen):
-                            var _b = UInt8(0) if _bi >= _skl else _skp[unsafe_offset=_bi]
-                            if _opc == 97:  # 'a' AND
-                                _bop_resp[unsafe_offset=_bi] &= _b
-                            elif _opc == 111:  # 'o' OR
-                                _bop_resp[unsafe_offset=_bi] |= _b
-                            elif _opc == 120:  # 'x' XOR
-                                _bop_resp[unsafe_offset=_bi] ^= _b
-                # Store result
-                var _dest_gv = GenericValue()
-                _dest_gv.type = ValueType(ValueType.BITMAP)
-                _dest_gv._data0 = UInt64(Int(_bop_resp))
-                _dest_gv._data1 = UInt64(_bop_maxlen)
-                keyspace[].set(_bop_dest, _dest_gv)
-                _sso_buf0.unsafe_free()
-                _sso_buf_op.unsafe_free()
-                writer.append_int_response(Int64(_bop_maxlen))
-        return _i - i
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'bitop' command")
+def _tok_int(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut out: Int64) -> Bool:
+    """Redis's getLongLongFromObject: an exact integer or nothing."""
+    var r = parse_int64_strict(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length)
+    out = r.value
+    return r.ok
+
+
+@always_inline
+def _bit_at(p: Pointer[UInt8, MutUntrackedOrigin], pos: Int) -> Int:
+    return Int((p[unsafe_offset=pos >> 3] >> UInt8(7 - (pos & 7))) & 1)
+
+
+def _popcount(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Int:
+    var c = 0
+    var k = 0
+    while k + 8 <= n:
+        c += Int(pop_count(p.unsafe_offset(k).unsafe_bitcast[UInt64]().load()))
+        k += 8
+    while k < n:
+        c += Int(pop_count(p[unsafe_offset=k]))
+        k += 1
+    return c
+
+
+def _count_bit_range(p: Pointer[UInt8, MutUntrackedOrigin], first: Int, last: Int) -> Int:
+    """Set bits in the inclusive bit range [first, last]."""
+    var c = 0
+    var pos = first
+    while pos <= last and (pos & 7) != 0:
+        c += _bit_at(p, pos)
+        pos += 1
+    if pos + 7 <= last:
+        var nbytes = (last + 1 - pos) >> 3
+        c += _popcount(p.unsafe_offset(pos >> 3), nbytes)
+        pos += nbytes * 8
+    while pos <= last:
+        c += _bit_at(p, pos)
+        pos += 1
+    return c
+
+
+@always_inline
+def _clamp_range(mut start: Int, mut end: Int, totlen: Int):
+    """Redis's index conversion for BITCOUNT/BITPOS: negatives count from the
+    end, then BOTH ends clamp up to 0 (`BITCOUNT k -100 -99` is byte 0, not an
+    empty range) and the end clamps down to the last unit."""
+    if start < 0: start = totlen + start
+    if end < 0: end = totlen + end
+    if start < 0: start = 0
+    if end < 0: end = 0
+    if end >= totlen: end = totlen - 1
+
+
+def handle_bitcount(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                    mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Int:
+    """BITCOUNT key [start end [BYTE|BIT]] — every form (the fast path answers
+    the whole-key form outside transactions)."""
+    var argc = num_tokens - i
+    if argc < 2:
+        writer.append_error_response("ERR wrong number of arguments for 'bitcount' command")
         return 0
-
-
-@always_inline
-def _bf_signed(raw: Int64, bits: Int, type_str: String) -> Int64:
-    """gh #232: sign-extend an `i<N>` BITFIELD value.
-
-    The bit loop accumulates an unsigned magnitude, so `i16` holding -1234 came
-    back as 64302 — the right bits read as the wrong number. `u<N>` is returned
-    unchanged. Redis rejects a type whose first byte is neither `i` nor `u`; a
-    non-`i` prefix here is simply treated as unsigned, matching the existing
-    lenient parse of the width."""
-    if bits >= 64 or type_str.byte_length() == 0:
-        return raw
-    if type_str.unsafe_ptr()[unsafe_offset=0] != 105:      # 'i'
-        return raw
-    var sign_bit = Int64(1) << Int64(bits - 1)
-    if (raw & sign_bit) == 0:
-        return raw
-    return raw - (Int64(1) << Int64(bits))
-
-
-@always_inline
-def _bf_wrap(raw: Int64, bits: Int, type_str: String) -> Int64:
-    """gh #232: BITFIELD INCRBY defaults to WRAP overflow, so the REPLY must be
-    the value as it now sits in the field.
-
-    Only `bits` bits are written back, so the stored bitmap already wrapped
-    correctly — but the reply was computed before the truncation, and
-    `INCRBY u16 0 1` on 65535 answered 65536: a number the field cannot hold and
-    that a subsequent GET does not return. Mask to the width, then sign-extend
-    so `i8` wraps to -128 rather than 128."""
-    if bits >= 64:
-        return raw
-    var mask = (Int64(1) << Int64(bits)) - 1
-    return _bf_signed(raw & mask, bits, type_str)
-
-
-@always_inline
-def handle_bitpos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """BITPOS key bit [start [end [BYTE|BIT]]] → integer position of first bit."""
-    if i + 2 < num_tokens:
-        var _bpk = tokens[unsafe_offset=i+1].value()
-        var _bpbit = strict_atol(tokens[unsafe_offset=i+2].value())  # 0 or 1
-        var _bpv = keyspace[].get(_bpk)
-        # gh #232: wrong type answered like an empty container. Every
-        # call site ignores this return and sets i = cmd_end_tok - 1
-        # itself, so returning 0 here consumes the frame correctly.
-        if not _bpv.is_none() and not _bpv.is_string_like():
-            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+    var start = Int64(0)
+    var end = Int64(0)
+    var isbit = False
+    if argc == 4 or argc == 5:
+        if not _tok_int(tokens, i + 2, start) or not _tok_int(tokens, i + 3, end):
+            writer.append_error_response(_E_NOT_INT)
             return 0
-        var _bpp = null_ptr[UInt8, MutUntrackedOrigin]()
-        var _bpblen = 0
-        var _sbuf_bp = alloc[UInt8](24)
-        if _bpv.type.value == ValueType.BITMAP:
-            _bpp = _bpv.as_bitmap(); _bpblen = _bpv.bitmap_len()
-        elif _bpv.type.value == ValueType.STRING or _bpv.type.value == ValueType.STRING_SSO:
-            _bpblen = _bpv.string_len()
-            _bpp = _bpv.as_string_safe(_sbuf_bp)
-        var _bp_start = 0; var _bp_end = _bpblen - 1
-        var _bp_cons = 2
-        if i + 3 < num_tokens: _bp_start = strict_atol(tokens[unsafe_offset=i+3].value()); _bp_cons = 3
-        if i + 4 < num_tokens: _bp_end = strict_atol(tokens[unsafe_offset=i+4].value()); _bp_cons = 4
-        if i + 5 < num_tokens: _bp_cons = 5  # ignore BYTE/BIT modifier
-        if _bp_start < 0: _bp_start = max(0, _bpblen + _bp_start)
-        if _bp_end < 0: _bp_end = _bpblen + _bp_end
-        if _bp_end >= _bpblen: _bp_end = _bpblen - 1
-        var _bp_found = -1
-        if _bpblen > 0 and _bp_start <= _bp_end:
-            for _by in range(_bp_start, _bp_end + 1):
-                var _byte = _bpp[unsafe_offset=_by]
-                for _bi in range(8):
-                    # gh #232: scan MSB-first. Bit 0 of a byte is its most
-                    # significant bit, so an LSB-first scan reports the mirror
-                    # position — `SETBIT k 2 1` then `BITPOS k 1` answered 5.
-                    var _bval = Int((_byte >> UInt8(7 - _bi)) & 1)
-                    if _bval == _bpbit:
-                        _bp_found = _by * 8 + _bi; break
-                if _bp_found >= 0: break
-        if _bpbit == 0 and _bp_found < 0 and _bpblen > 0:
-            _bp_found = _bpblen * 8  # first 0 bit after all bytes
-        writer.append_int_response(Int64(_bp_found))
-        _sbuf_bp.unsafe_free()
-        return _bp_cons
-    else:
+        if argc == 5:
+            var u = tokens[unsafe_offset=i + 4]
+            if arg_eq(u.ptr, u.length, "bit"):
+                isbit = True
+            elif not arg_eq(u.ptr, u.length, "byte"):
+                writer.append_error_response(_E_SYNTAX)
+                return 0
+    elif argc != 2:
+        writer.append_error_response(_E_SYNTAX)
+        return 0
+    var v = keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length))
+    if v.is_none():
+        writer.append_int_response(0)
+        return 0
+    if not v.is_string_like():
+        writer.append_error_response(_E_WRONGTYPE)
+        return 0
+    var scratch = alloc[UInt8](32)
+    var blen = 0
+    var p = v.bitmap_view(scratch, blen)
+    var count = 0
+    if argc == 2:
+        count = _popcount(p, blen)
+    elif not (start < 0 and end < 0 and start > end):
+        var s = Int(start)
+        var e = Int(end)
+        var totlen = blen * 8 if isbit else blen
+        _clamp_range(s, e, totlen)
+        if s <= e:
+            if isbit:
+                count = _count_bit_range(p, s, e)
+            else:
+                count = _popcount(p.unsafe_offset(s), e - s + 1)
+    scratch.unsafe_free()
+    writer.append_int_response(Int64(count))
+    return 0
+
+
+def handle_bitpos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                  mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Int:
+    """BITPOS key bit [start [end [BYTE|BIT]]].
+
+    A missing key is an endless run of 0 bits: 0 for bit 0, -1 for bit 1.
+    Looking for a 0 with no END past a run of 1s answers the first bit after
+    the string; with an END it answers -1, since the range holds no 0."""
+    var argc = num_tokens - i
+    if argc < 3:
         writer.append_error_response("ERR wrong number of arguments for 'bitpos' command")
         return 0
+    var bit = Int64(0)
+    if not _tok_int(tokens, i + 2, bit):
+        writer.append_error_response(_E_NOT_INT)
+        return 0
+    if bit != 0 and bit != 1:
+        writer.append_error_response("ERR The bit argument must be 1 or 0.")
+        return 0
+    var start = Int64(0)
+    var end = Int64(0)
+    var isbit = False
+    var end_given = False
+    if argc >= 4 and argc <= 6:
+        if not _tok_int(tokens, i + 3, start):
+            writer.append_error_response(_E_NOT_INT)
+            return 0
+        if argc == 6:
+            var u = tokens[unsafe_offset=i + 5]
+            if arg_eq(u.ptr, u.length, "bit"):
+                isbit = True
+            elif not arg_eq(u.ptr, u.length, "byte"):
+                writer.append_error_response(_E_SYNTAX)
+                return 0
+        if argc >= 5:
+            if not _tok_int(tokens, i + 4, end):
+                writer.append_error_response(_E_NOT_INT)
+                return 0
+            end_given = True
+    elif argc != 3:
+        writer.append_error_response(_E_SYNTAX)
+        return 0
+    var v = keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length))
+    if v.is_none():
+        writer.append_int_response(Int64(-1) if bit == 1 else Int64(0))
+        return 0
+    if not v.is_string_like():
+        writer.append_error_response(_E_WRONGTYPE)
+        return 0
+    var scratch = alloc[UInt8](32)
+    var blen = 0
+    var p = v.bitmap_view(scratch, blen)
+    # The search range, in bits, inclusive.
+    var first = 0
+    var last = blen * 8 - 1
+    var empty = blen == 0
+    if argc > 3:
+        var s = Int(start)
+        var e = Int(end)
+        var totlen = blen * 8 if isbit else blen
+        if not end_given:
+            e = totlen - 1
+        _clamp_range(s, e, totlen)
+        empty = s > e
+        first = s if isbit else s * 8
+        last = e if isbit else e * 8 + 7
+    var pos = -1
+    if not empty:
+        var want = Int(bit)
+        var skip = UInt8(0) if want == 1 else UInt8(0xFF)
+        var at = first
+        while at <= last:
+            if (at & 7) == 0 and at + 7 <= last and p[unsafe_offset=at >> 3] == skip:
+                at += 8
+                continue
+            if _bit_at(p, at) == want:
+                pos = at
+                break
+            at += 1
+        if pos < 0 and want == 0 and not end_given:
+            pos = last + 1
+    scratch.unsafe_free()
+    writer.append_int_response(Int64(pos))
+    return 0
+
+
+# ── BITFIELD ─────────────────────────────────────────────────────────────────
+
+comptime _BF_GET = 0
+comptime _BF_SET = 1
+comptime _BF_INCRBY = 2
+comptime _OW_WRAP = 0
+comptime _OW_SAT = 1
+comptime _OW_FAIL = 2
+
+
+@fieldwise_init
+struct _BfOp(Copyable, Movable):
+    var opcode: Int
+    var signed: Bool
+    var bits: Int
+    var offset: Int
+    var arg: Int64
+    var overflow: Int
+
+
+def _bf_type(t: RESP3Token, mut signed: Bool, mut bits: Int) -> Bool:
+    """`i1`..`i64` or `u1`..`u63`, lower-case prefix, as Redis parses it."""
+    if t.length < 2:
+        return False
+    var c = t.ptr[unsafe_offset=0]
+    if c == 105:        # 'i'
+        signed = True
+    elif c == 117:      # 'u'
+        signed = False
+    else:
+        return False
+    var w = parse_int64_strict(t.ptr.unsafe_offset(1), t.length - 1)
+    if not w.ok or w.value < 1 or w.value > (Int64(64) if signed else Int64(63)):
+        return False
+    bits = Int(w.value)
+    return True
+
+
+def _bf_offset(t: RESP3Token, bits: Int, mut offset: Int) -> Bool:
+    """A bit offset, or `#N` = N fields of this type in."""
+    var hashed = t.length > 0 and t.ptr[unsafe_offset=0] == 35   # '#'
+    var skip = 1 if hashed else 0
+    var o = parse_int64_strict(t.ptr.unsafe_offset(skip), t.length - skip)
+    if not o.ok or o.value < 0:
+        return False
+    var v = Int(o.value)
+    if hashed:
+        if v > _MAX_BIT_OFFSET // bits:
+            return False
+        v *= bits
+    if v >= _MAX_BIT_OFFSET:
+        return False
+    offset = v
+    return True
+
+
+def _bf_get(p: Pointer[UInt8, MutUntrackedOrigin], blen: Int, offset: Int, bits: Int) -> UInt64:
+    """The field's bits as an unsigned number; bits past `blen` read as 0."""
+    var v = UInt64(0)
+    for j in range(bits):
+        var pos = offset + j
+        var b = UInt64(0)
+        if (pos >> 3) < blen:
+            b = UInt64(_bit_at(p, pos))
+        v = (v << 1) | b
+    return v
+
+
+def _bf_set(p: Pointer[UInt8, MutUntrackedOrigin], offset: Int, bits: Int, value: UInt64):
+    for j in range(bits):
+        var pos = offset + j
+        var bitv = UInt8((value >> UInt64(bits - 1 - j)) & 1)
+        var sh = UInt8(7 - (pos & 7))
+        var byte = p[unsafe_offset=pos >> 3]
+        p[unsafe_offset=pos >> 3] = (byte & ~(UInt8(1) << sh)) | (bitv << sh)
+
+
+@always_inline
+def _bf_sext(raw: UInt64, bits: Int) -> Int64:
+    """Sign-extend an `i<bits>` field (gh #232: -1234 in an i16 read 64302)."""
+    if bits < 64 and (raw & (UInt64(1) << UInt64(bits - 1))) != 0:
+        return Int64(raw | (~UInt64(0) << UInt64(bits)))
+    return Int64(raw)
+
+
+def _bf_overflow_unsigned(value: UInt64, incr: Int64, bits: Int, ow: Int, mut limit: UInt64) -> Bool:
+    """Redis's checkUnsignedBitfieldOverflow: True on overflow, with `limit` the
+    value WRAP or SAT stores (FAIL stores nothing)."""
+    var maxv = (UInt64(1) << UInt64(bits)) - 1
+    var maxincr = Int64(maxv - value)
+    var minincr = Int64(UInt64(0) - value)
+    var up = value > maxv or (incr > 0 and incr > maxincr)
+    var down = not up and incr < 0 and incr < minincr
+    if not up and not down:
+        return False
+    if ow == _OW_WRAP:
+        limit = (value + UInt64(incr)) & ~(~UInt64(0) << UInt64(bits))
+    elif ow == _OW_SAT:
+        limit = maxv if up else UInt64(0)
+    return True
+
+
+def _bf_overflow_signed(value: Int64, incr: Int64, bits: Int, ow: Int, mut limit: Int64) -> Bool:
+    """Redis's checkSignedBitfieldOverflow, its wrapping arithmetic included."""
+    var maxv = Int64(9223372036854775807) if bits == 64 else (Int64(1) << Int64(bits - 1)) - 1
+    var minv = -maxv - 1
+    var maxincr = Int64(UInt64(maxv) - UInt64(value))
+    var minincr = Int64(UInt64(minv) - UInt64(value))
+    var up = value > maxv or (bits != 64 and incr > maxincr) \
+        or (value >= 0 and incr > 0 and incr > maxincr)
+    var down = not up and (value < minv or (bits != 64 and incr < minincr)
+                           or (value < 0 and incr < 0 and incr < minincr))
+    if not up and not down:
+        return False
+    if ow == _OW_WRAP:
+        var c = UInt64(value) + UInt64(incr)
+        if bits < 64:
+            var mask = ~UInt64(0) << UInt64(bits)
+            if (c & (UInt64(1) << UInt64(bits - 1))) != 0:
+                c |= mask
+            else:
+                c &= ~mask
+        limit = Int64(c)
+    elif ow == _OW_SAT:
+        limit = maxv if up else minv
+    return True
+
+
+def handle_bitfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                    mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                    readonly: Bool = False) -> Int:
+    """BITFIELD key [GET type offset] [SET type offset value]
+    [INCRBY type offset increment] [OVERFLOW WRAP|SAT|FAIL] ...
+    (BITFIELD_RO when `readonly`: GET only).
+
+    Parses every operation before touching the key, so a bad argument
+    anywhere refuses the whole command with nothing written. A write
+    creates the key, or grows it, to the farthest bit any operation writes,
+    whether or not an OVERFLOW FAIL then skips the write. A string
+    key is written as a bitmap copy of its bytes."""
+    var name = String("bitfield_ro") if readonly else String("bitfield")
+    if num_tokens - i < 2:
+        writer.append_error_response("ERR wrong number of arguments for '" + name + "' command")
+        return 0
+    var ops = List[_BfOp]()
+    var ow = _OW_WRAP
+    var writes = False
+    var highest = -1
+    var j = i + 2
+    while j < num_tokens:
+        var rem = num_tokens - j - 1
+        var t = tokens[unsafe_offset=j]
+        var opcode = -1
+        if arg_eq(t.ptr, t.length, "get") and rem >= 2:
+            opcode = _BF_GET
+        elif arg_eq(t.ptr, t.length, "set") and rem >= 3:
+            opcode = _BF_SET
+        elif arg_eq(t.ptr, t.length, "incrby") and rem >= 3:
+            opcode = _BF_INCRBY
+        elif arg_eq(t.ptr, t.length, "overflow") and rem >= 1:
+            var m = tokens[unsafe_offset=j + 1]
+            if arg_eq(m.ptr, m.length, "wrap"):
+                ow = _OW_WRAP
+            elif arg_eq(m.ptr, m.length, "sat"):
+                ow = _OW_SAT
+            elif arg_eq(m.ptr, m.length, "fail"):
+                ow = _OW_FAIL
+            else:
+                writer.append_error_response("ERR Invalid OVERFLOW type specified")
+                return 0
+            j += 2
+            continue
+        else:
+            writer.append_error_response(_E_SYNTAX)
+            return 0
+        var signed = False
+        var bits = 0
+        if not _bf_type(tokens[unsafe_offset=j + 1], signed, bits):
+            writer.append_error_response(_E_BF_TYPE)
+            return 0
+        var offset = 0
+        if not _bf_offset(tokens[unsafe_offset=j + 2], bits, offset):
+            writer.append_error_response(_E_OFFSET)
+            return 0
+        var arg = Int64(0)
+        if opcode != _BF_GET:
+            writes = True
+            if offset + bits - 1 > highest:
+                highest = offset + bits - 1
+            if not _tok_int(tokens, j + 3, arg):
+                writer.append_error_response(_E_NOT_INT)
+                return 0
+        ops.append(_BfOp(opcode, signed, bits, offset, arg, ow))
+        j += 3 if opcode == _BF_GET else 4
+
+    var key = GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
+    var v = keyspace[].get(key)
+    if writes and readonly:
+        writer.append_error_response("ERR BITFIELD_RO only supports the GET subcommand")
+        return 0
+    if not v.is_none() and not v.is_string_like():
+        writer.append_error_response(_E_WRONGTYPE)
+        return 0
+
+    var scratch = alloc[UInt8](32)
+    var p = null_ptr[UInt8, MutUntrackedOrigin]()
+    var blen = 0
+    if writes:
+        var need = highest // 8 + 1
+        if not v.is_none() and v.type.value == ValueType.BITMAP and v.bitmap_len() >= need:
+            p = v.as_bitmap()                   # written in place
+            blen = v.bitmap_len()
+        else:
+            if v.is_none():
+                p = alloc[UInt8](need)
+                unsafe_memset(p, 0, need)
+                blen = need
+            else:
+                # A shorter bitmap, or a string: write into a copy grown to
+                # `need`. The keyspace retires what it replaces.
+                p = v.owned_bitmap_copy(need, blen)
+            var nv = GenericValue()
+            nv.type = ValueType(ValueType.BITMAP)
+            nv._data0 = UInt64(Int(p))
+            nv._data1 = UInt64(blen)
+            keyspace[].set(key, nv)
+    elif not v.is_none():
+        p = v.bitmap_view(scratch, blen)
+
+    writer.append_array_header(len(ops))
+    for k in range(len(ops)):
+        var op = ops[k].copy()
+        if op.opcode == _BF_GET:
+            var raw = _bf_get(p, blen, op.offset, op.bits)
+            writer.append_int_response(_bf_sext(raw, op.bits) if op.signed else Int64(raw))
+            continue
+        var store = UInt64(0)
+        var reply = Int64(0)
+        var failed = False
+        if op.signed:
+            var old = _bf_sext(_bf_get(p, blen, op.offset, op.bits), op.bits)
+            var limit = Int64(0)
+            if op.opcode == _BF_INCRBY:
+                var nv = Int64(UInt64(old) + UInt64(op.arg))
+                if _bf_overflow_signed(old, op.arg, op.bits, op.overflow, limit):
+                    nv = limit
+                    failed = op.overflow == _OW_FAIL
+                store = UInt64(nv)
+                reply = nv
+            else:
+                var nv = op.arg
+                if _bf_overflow_signed(op.arg, 0, op.bits, op.overflow, limit):
+                    nv = limit
+                    failed = op.overflow == _OW_FAIL
+                store = UInt64(nv)
+                reply = old
+        else:
+            var old = _bf_get(p, blen, op.offset, op.bits)
+            var limit = UInt64(0)
+            if op.opcode == _BF_INCRBY:
+                var nv = old + UInt64(op.arg)
+                if _bf_overflow_unsigned(old, op.arg, op.bits, op.overflow, limit):
+                    nv = limit
+                    failed = op.overflow == _OW_FAIL
+                store = nv
+                reply = Int64(nv)
+            else:
+                var nv = UInt64(op.arg)
+                if _bf_overflow_unsigned(nv, 0, op.bits, op.overflow, limit):
+                    nv = limit
+                    failed = op.overflow == _OW_FAIL
+                store = nv
+                reply = Int64(old)
+        if failed:
+            writer.append_null_response()
+        else:
+            _bf_set(p, op.offset, op.bits, store)
+            writer.append_int_response(reply)
+    scratch.unsafe_free()
+    return 0
+
+
+def handle_bitfield_ro(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                       mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Int:
+    """BITFIELD_RO key [GET type offset] ..."""
+    return handle_bitfield(tokens, i, num_tokens, writer, keyspace, True)
+
+
+# ── BITOP ────────────────────────────────────────────────────────────────────
+
+comptime _OP_AND = 0
+comptime _OP_OR = 1
+comptime _OP_XOR = 2
+comptime _OP_NOT = 3
+comptime _OP_DIFF = 4
+comptime _OP_DIFF1 = 5
+comptime _OP_ANDOR = 6
+comptime _OP_ONE = 7
+
+
+def handle_bitop(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                 mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                 ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) -> Int:
+    """BITOP AND|OR|XOR|NOT|DIFF|DIFF1|ANDOR|ONE destkey key [key ...].
+
+    With X the first source and Y the rest: DIFF is X and not any Y, DIFF1 is
+    any Y and not X, ANDOR is X and any Y, ONE keeps the bits set in exactly
+    one source. Missing sources are empty strings and shorter ones are
+    zero-padded. The result replaces the destination, its TTL included; an
+    empty result deletes it. Replies with the result's length in bytes."""
+    if num_tokens - i < 4:
+        writer.append_error_response("ERR wrong number of arguments for 'bitop' command")
+        return 0
+    var o = tokens[unsafe_offset=i + 1]
+    var op = -1
+    var opname = String("")
+    if arg_eq(o.ptr, o.length, "and"):
+        op = _OP_AND
+    elif arg_eq(o.ptr, o.length, "or"):
+        op = _OP_OR
+    elif arg_eq(o.ptr, o.length, "xor"):
+        op = _OP_XOR
+    elif arg_eq(o.ptr, o.length, "not"):
+        op = _OP_NOT
+    elif arg_eq(o.ptr, o.length, "diff"):
+        op = _OP_DIFF
+        opname = "DIFF"
+    elif arg_eq(o.ptr, o.length, "diff1"):
+        op = _OP_DIFF1
+        opname = "DIFF1"
+    elif arg_eq(o.ptr, o.length, "andor"):
+        op = _OP_ANDOR
+        opname = "ANDOR"
+    elif arg_eq(o.ptr, o.length, "one"):
+        op = _OP_ONE
+    else:
+        writer.append_error_response(_E_SYNTAX)
+        return 0
+    var nsrc = num_tokens - i - 3
+    if op == _OP_NOT and nsrc != 1:
+        writer.append_error_response("ERR BITOP NOT must be called with a single source key.")
+        return 0
+    if (op == _OP_DIFF or op == _OP_DIFF1 or op == _OP_ANDOR) and nsrc < 2:
+        writer.append_error_response("ERR BITOP " + opname + " must be called with at least two source keys.")
+        return 0
+
+    # Every source is checked before anything is computed or written.
+    var srcs = List[GenericValue]()
+    var maxlen = 0
+    for k in range(nsrc):
+        var sv = keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i + 3 + k].ptr, tokens[unsafe_offset=i + 3 + k].length))
+        if not sv.is_none() and not sv.is_string_like():
+            writer.append_error_response(_E_WRONGTYPE)
+            return 0
+        srcs.append(sv)
+        if not sv.is_none() and sv.string_len() > maxlen:
+            maxlen = sv.string_len()
+
+    var dest = GenericValue.borrow(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
+    if is_not_null(ttl_map):
+        _ = ttl_map[].remove_generic(dest)
+    if maxlen == 0:
+        _ = remove_and_free(keyspace, dest)
+        writer.append_int_response(0)
+        return 0
+
+    # res = the op over the sources; acc = OR of the sources after the first
+    # (DIFF/DIFF1/ANDOR) or the bits seen at least twice (ONE).
+    var res = alloc[UInt8](maxlen)
+    var acc = alloc[UInt8](maxlen)
+    unsafe_memset(res, 0, maxlen)
+    unsafe_memset(acc, 0, maxlen)
+    var scratch = alloc[UInt8](32)
+    for k in range(nsrc):
+        var n = 0
+        var sp = null_ptr[UInt8, MutUntrackedOrigin]()
+        if not srcs[k].is_none():
+            sp = srcs[k].bitmap_view(scratch, n)
+        for b in range(maxlen):
+            var x = sp[unsafe_offset=b] if b < n else UInt8(0)
+            if k == 0:
+                res[unsafe_offset=b] = ~x if op == _OP_NOT else x
+            elif op == _OP_AND:
+                res[unsafe_offset=b] &= x
+            elif op == _OP_OR:
+                res[unsafe_offset=b] |= x
+            elif op == _OP_XOR:
+                res[unsafe_offset=b] ^= x
+            elif op == _OP_ONE:
+                acc[unsafe_offset=b] |= res[unsafe_offset=b] & x
+                res[unsafe_offset=b] ^= x
+            else:
+                acc[unsafe_offset=b] |= x
+    for b in range(maxlen):
+        if op == _OP_DIFF:
+            res[unsafe_offset=b] &= ~acc[unsafe_offset=b]
+        elif op == _OP_DIFF1:
+            res[unsafe_offset=b] = ~res[unsafe_offset=b] & acc[unsafe_offset=b]
+        elif op == _OP_ANDOR:
+            res[unsafe_offset=b] &= acc[unsafe_offset=b]
+        elif op == _OP_ONE:
+            res[unsafe_offset=b] &= ~acc[unsafe_offset=b]
+    scratch.unsafe_free()
+    acc.unsafe_free()
+    var nv = GenericValue()
+    nv.type = ValueType(ValueType.BITMAP)
+    nv._data0 = UInt64(Int(res))
+    nv._data1 = UInt64(maxlen)
+    keyspace[].set(dest, nv)
+    writer.append_int_response(Int64(maxlen))
+    return 0
 
 
 @always_inline
@@ -250,218 +688,4 @@ def handle_pfmerge(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         return _i - i
     else:
         writer.append_error_response("ERR wrong number of arguments for 'pfmerge' command")
-        return 0
-
-
-@always_inline
-def handle_bitfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """BITFIELD key [GET type offset] [SET type offset value] [INCRBY type offset increment] [OVERFLOW ...] → array of integers."""
-    if i + 1 < num_tokens:
-        var _bfk = tokens[unsafe_offset=i+1].value()
-        var _bfv = keyspace[].get(_bfk)
-        # gh #232: wrong type answered like an empty container. Every
-        # call site ignores this return and sets i = cmd_end_tok - 1
-        # itself, so returning 0 here consumes the frame correctly.
-        if not _bfv.is_none() and not _bfv.is_string_like():
-            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            return 0
-        var _bfp: Pointer[UInt8, MutUntrackedOrigin]
-        var _bfblen = 0
-        # gh #232 §4 read-only half, finished: a bitmap IS a string, so
-        # `SET k hello; BITFIELD k GET u8 0` must read 104 ('h'). It returned 0
-        # — a STRING fell into the "no key yet" branch below and was read as an
-        # empty buffer. GETRANGE on the same key already returned 'h', so the
-        # bytes were there; only BITFIELD could not see them. A wrong VALUE,
-        # not an error, which is the shape that reaches production.
-        var _bf_scratch = stack_allocation[32, UInt8]()
-        var _bf_str_src = False
-        if _bfv.type.value == ValueType.BITMAP:
-            _bfp = _bfv.as_bitmap(); _bfblen = _bfv.bitmap_len()
-        elif _bfv.is_string():
-            # Read-only view. STRING_SSO holds its bytes inside the value, so
-            # bitmap_view copies them out to scratch rather than dereferencing
-            # a length-and-characters word as an address.
-            _bfp = _bfv.bitmap_view(_bf_scratch, _bfblen)
-            _bf_str_src = True
-        else:
-            # gh #232: a missing key used to be materialized as a FIXED 8-byte
-            # bitmap, so `BITFIELD k SET u8 0 255` produced an 8-byte string
-            # where Redis produces a 1-byte one, and a read-only
-            # `BITFIELD k GET u8 0` CREATED the key. Start empty: the growth
-            # path below allocates exactly what a write needs, and a pure GET
-            # leaves the keyspace untouched.
-            _bfblen = 0; _bfp = alloc[UInt8](1); unsafe_memset(_bfp, 0, 1)
-        # Count subcommands
-        var _bfni = i + 2; var _bfresults = List[Int64]()
-        while _bfni < num_tokens:
-            var _bfop = tokens[unsafe_offset=_bfni].ptr; var _bfol = tokens[unsafe_offset=_bfni].length
-            if _bfol == 8 and (_bfop[unsafe_offset=0]|0x20)==111:  # OVERFLOW - skip next token
-                _bfni += 2; continue
-            if _bfol < 3: break
-            var _bfop_c = _bfop[unsafe_offset=0]|0x20
-            if _bfop_c == 103:  # GET type offset
-                if _bfni + 2 >= num_tokens: break
-                var _bftype = tokens[unsafe_offset=_bfni+1].value()
-                var _bfoff = strict_atol(tokens[unsafe_offset=_bfni+2].value())
-                # 0 <= offset < 2^32 (Redis's 512 MB bitmap). Unchecked, SET u8 -8 wrote
-                # before the buffer and SET u8 9223372036854775800 killed the server.
-                if _bfoff < 0 or _bfoff >= 4294967296:
-                    raise Error("ERR bit offset is not an integer or out of range")
-                var _bfbits = 64
-                if _bftype.byte_length() > 1:
-                    var _ns = String("")
-                    for _ci in range(1, _bftype.byte_length()): _ns += chr(Int(_bftype.unsafe_ptr()[unsafe_offset=_ci]))
-                    _bfbits = atol(_ns)
-                _bfbits = min(64, max(1, _bfbits))
-                var _bfval: Int64 = 0
-                for _bi in range(_bfbits):
-                    var _bit_off = _bfoff + _bi
-                    var _by = _bit_off // 8; var _bitn = 7 - (_bit_off % 8)  # gh #232: Redis numbers bits MSB-first
-                    if _by < _bfblen:
-                        _bfval |= Int64((_bfp[unsafe_offset=_by] >> UInt8(_bitn)) & 1) << Int64(_bfbits - 1 - _bi)
-                _bfresults.append(_bf_signed(_bfval, _bfbits, _bftype)); _bfni += 3
-            elif _bfop_c == 115:  # SET type offset value
-                # gh #232: the fence is READ-ONLY. `_bfp` here is the STRING's
-                # own payload (or the SSO scratch copy), and the write path
-                # below both mutates it in place and re-stamps the key as
-                # BITMAP on growth — which would corrupt the string, and free
-                # a gh #163 blob-arena pointer the heap allocator must never
-                # touch. Mutating the union needs arena-aware promotion first.
-                if _bf_str_src:
-                    writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                    return 0
-                if _bfni + 3 >= num_tokens: break
-                var _bftype = tokens[unsafe_offset=_bfni+1].value()
-                var _bfoff = strict_atol(tokens[unsafe_offset=_bfni+2].value())
-                # 0 <= offset < 2^32 (Redis's 512 MB bitmap). Unchecked, SET u8 -8 wrote
-                # before the buffer and SET u8 9223372036854775800 killed the server.
-                if _bfoff < 0 or _bfoff >= 4294967296:
-                    raise Error("ERR bit offset is not an integer or out of range")
-                var _bfnew = Int64(strict_atol(tokens[unsafe_offset=_bfni+3].value()))
-                var _bfbits = 64
-                if _bftype.byte_length() > 1:
-                    var _ns = String("")
-                    for _ci in range(1, _bftype.byte_length()): _ns += chr(Int(_bftype.unsafe_ptr()[unsafe_offset=_ci]))
-                    _bfbits = atol(_ns)
-                _bfbits = min(64, max(1, _bfbits))
-                # Read old value
-                var _bfold: Int64 = 0
-                for _bi in range(_bfbits):
-                    var _bit_off = _bfoff + _bi
-                    var _by = _bit_off // 8; var _bitn = 7 - (_bit_off % 8)  # gh #232: Redis numbers bits MSB-first
-                    if _by < _bfblen:
-                        _bfold |= Int64((_bfp[unsafe_offset=_by] >> UInt8(_bitn)) & 1) << Int64(_bfbits - 1 - _bi)
-                # Expand bitmap if needed
-                var _need = (_bfoff + _bfbits - 1) // 8 + 1
-                if _need > _bfblen:
-                    var _newp = alloc[UInt8](_need); unsafe_memcpy(dest=_newp, src=_bfp, count=_bfblen)
-                    unsafe_memset(_newp.unsafe_offset(_bfblen), 0, _need - _bfblen)
-                    _bfp = _newp
-                    _bfblen = _need
-                    var _upd = keyspace[].get(_bfk)
-                    # The key may not exist yet — a BITFIELD write is what
-                    # creates it, so stamp the type rather than assuming it.
-                    _upd.type = ValueType(ValueType.BITMAP)
-                    _upd._data0 = UInt64(Int(_bfp)); _upd._data1 = UInt64(_bfblen)
-                    keyspace[].set(_bfk, _upd)
-                # Write new value bit by bit
-                for _bi in range(_bfbits):
-                    var _bit_off = _bfoff + _bi
-                    var _by = _bit_off // 8; var _bitn = 7 - (_bit_off % 8)  # gh #232: Redis numbers bits MSB-first
-                    var _bbit = UInt8((_bfnew >> Int64(_bfbits - 1 - _bi)) & 1)
-                    if _bbit == 1: _bfp[unsafe_offset=_by] |= UInt8(1 << _bitn)
-                    else: _bfp[unsafe_offset=_by] &= ~UInt8(1 << _bitn)
-                _bfresults.append(_bf_signed(_bfold, _bfbits, _bftype)); _bfni += 4
-            elif _bfop_c == 105:  # INCRBY type offset increment
-                if _bf_str_src:   # gh #232: read-only fence, as for SET above
-                    writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                    return 0
-                if _bfni + 3 >= num_tokens: break
-                var _bftype = tokens[unsafe_offset=_bfni+1].value()
-                var _bfoff = strict_atol(tokens[unsafe_offset=_bfni+2].value())
-                # 0 <= offset < 2^32 (Redis's 512 MB bitmap). Unchecked, SET u8 -8 wrote
-                # before the buffer and SET u8 9223372036854775800 killed the server.
-                if _bfoff < 0 or _bfoff >= 4294967296:
-                    raise Error("ERR bit offset is not an integer or out of range")
-                var _bfinc = Int64(strict_atol(tokens[unsafe_offset=_bfni+3].value()))
-                var _bfbits = 64
-                if _bftype.byte_length() > 1:
-                    var _ns = String("")
-                    for _ci in range(1, _bftype.byte_length()): _ns += chr(Int(_bftype.unsafe_ptr()[unsafe_offset=_ci]))
-                    _bfbits = atol(_ns)
-                _bfbits = min(64, max(1, _bfbits))
-                var _bfcur: Int64 = 0
-                for _bi in range(_bfbits):
-                    var _bit_off = _bfoff + _bi
-                    var _by = _bit_off // 8; var _bitn = 7 - (_bit_off % 8)  # gh #232: Redis numbers bits MSB-first
-                    if _by < _bfblen:
-                        _bfcur |= Int64((_bfp[unsafe_offset=_by] >> UInt8(_bitn)) & 1) << Int64(_bfbits - 1 - _bi)
-                var _bfresval = _bf_wrap(_bf_signed(_bfcur, _bfbits, _bftype) + _bfinc, _bfbits, _bftype)
-                var _need = (_bfoff + _bfbits - 1) // 8 + 1
-                if _need > _bfblen:
-                    var _newp = alloc[UInt8](_need); unsafe_memcpy(dest=_newp, src=_bfp, count=_bfblen)
-                    unsafe_memset(_newp.unsafe_offset(_bfblen), 0, _need - _bfblen)
-                    _bfp = _newp
-                    _bfblen = _need
-                    var _upd = keyspace[].get(_bfk)
-                    # The key may not exist yet — a BITFIELD write is what
-                    # creates it, so stamp the type rather than assuming it.
-                    _upd.type = ValueType(ValueType.BITMAP)
-                    _upd._data0 = UInt64(Int(_bfp)); _upd._data1 = UInt64(_bfblen)
-                    keyspace[].set(_bfk, _upd)
-                for _bi in range(_bfbits):
-                    var _bit_off = _bfoff + _bi
-                    var _by = _bit_off // 8; var _bitn = 7 - (_bit_off % 8)  # gh #232: Redis numbers bits MSB-first
-                    var _bbit = UInt8((_bfresval >> Int64(_bfbits - 1 - _bi)) & 1)
-                    if _bbit == 1: _bfp[unsafe_offset=_by] |= UInt8(1 << _bitn)
-                    else: _bfp[unsafe_offset=_by] &= ~UInt8(1 << _bitn)
-                _bfresults.append(_bfresval); _bfni += 4
-            else: break
-        var _bf_rh = "*" + String(len(_bfresults)) + "\r\n"
-        writer.append_to_response(_bf_rh.unsafe_ptr(), _bf_rh.byte_length())
-        for _ri in range(len(_bfresults)): writer.append_int_response(_bfresults[_ri])
-        return _bfni - i - 1
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'bitfield' command")
-        return 0
-
-
-@always_inline
-def handle_bitfield_ro(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """BITFIELD_RO key [GET type offset] → array of integers (read-only)."""
-    if i + 1 < num_tokens:
-        var _bfrk = tokens[unsafe_offset=i+1].value()
-        var _bfrv = keyspace[].get(_bfrk)
-        var _bfrp = null_ptr[UInt8, MutUntrackedOrigin]()
-        var _bfrblen = 0
-        if _bfrv.type.value == ValueType.BITMAP:
-            _bfrp = _bfrv.as_bitmap(); _bfrblen = _bfrv.bitmap_len()
-        var _bfrni = i + 2; var _bfrresults = List[Int64]()
-        while _bfrni < num_tokens:
-            var _bfrop = tokens[unsafe_offset=_bfrni].ptr; var _bfrol = tokens[unsafe_offset=_bfrni].length
-            if _bfrol < 3: break
-            if (_bfrop[unsafe_offset=0]|0x20) == 103:  # GET
-                if _bfrni + 2 >= num_tokens: break
-                var _bfrtype = tokens[unsafe_offset=_bfrni+1].value()
-                var _bfroff = strict_atol(tokens[unsafe_offset=_bfrni+2].value())
-                var _bfrbits = 64
-                if _bfrtype.byte_length() > 1:
-                    var _ns = String("")
-                    for _ci in range(1, _bfrtype.byte_length()): _ns += chr(Int(_bfrtype.unsafe_ptr()[unsafe_offset=_ci]))
-                    _bfrbits = atol(_ns)
-                _bfrbits = min(64, max(1, _bfrbits))
-                var _bfrval: Int64 = 0
-                for _bi in range(_bfrbits):
-                    var _bit_off = _bfroff + _bi
-                    var _by = _bit_off // 8; var _bitn = 7 - (_bit_off % 8)  # gh #232: Redis numbers bits MSB-first
-                    if _by < _bfrblen:
-                        _bfrval |= Int64((_bfrp[unsafe_offset=_by] >> UInt8(_bitn)) & 1) << Int64(_bfrbits - 1 - _bi)
-                _bfrresults.append(_bf_signed(_bfrval, _bfrbits, _bfrtype)); _bfrni += 3
-            else: break
-        var _bfr_rh = "*" + String(len(_bfrresults)) + "\r\n"
-        writer.append_to_response(_bfr_rh.unsafe_ptr(), _bfr_rh.byte_length())
-        for _ri in range(len(_bfrresults)): writer.append_int_response(_bfrresults[_ri])
-        return _bfrni - i - 1
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'bitfield_ro' command")
         return 0

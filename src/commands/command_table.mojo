@@ -10,7 +10,7 @@ to queue anything with +QUEUED and only fail at replay, by which point the
 other commands in the transaction had already been applied — one typo silently
 turned an atomic transaction into a partially applied one.
 
-Case folding here is A-Z only, NOT the usual `| 0x20`: 13 of these
+Case folding here is A-Z only, NOT the usual `| 0x20`: 15 of these
 names contain '_' (AI.KNN_LM.QUERY), and '_' | 0x20 is 0x7F, so the cheap fold
 would fail to match every substrate command.
 """
@@ -18,7 +18,7 @@ would fail to match every substrate command.
 from src.common.ptr import null_ptr, is_null, is_not_null
 
 
-comptime PION_COMMAND_COUNT = 327
+comptime PION_COMMAND_COUNT = 329
 
 
 @always_inline
@@ -331,6 +331,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "attend.store") or
             _cmd_eq_ci(tp, tl, "bgrewriteaof") or
             _cmd_eq_ci(tp, tl, "ft.dropindex") or
+            _cmd_eq_ci(tp, tl, "georadius_ro") or
             _cmd_eq_ci(tp, tl, "hincrbyfloat") or
             _cmd_eq_ci(tp, tl, "hpexpiretime") or
             _cmd_eq_ci(tp, tl, "punsubscribe") or
@@ -414,6 +415,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         return (
             _cmd_eq_ci(tp, tl, "ai.knn_lm.storebatch") or
             _cmd_eq_ci(tp, tl, "attend.prefix.lookup") or
+            _cmd_eq_ci(tp, tl, "georadiusbymember_ro") or
             _cmd_eq_ci(tp, tl, "kv.prefix.membership") or
             _cmd_eq_ci(tp, tl, "rag.speculate.enable")
         )
@@ -440,7 +442,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
     """Redis's arity for this command, or 0 when Pion does not know one.
 
-    237 of 327 commands have an entry; the rest are Pion-specific
+    239 of 329 commands have an entry; the rest are Pion-specific
     (FT.*, KV.PREFIX.*, AI.*, ATTEND.*) and are deliberately NOT validated.
 
     Encoding is Redis's own, kept verbatim so it can be checked against
@@ -686,6 +688,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "zunionstore"): return -4
     elif tl == 12:
         if _cmd_eq_ci(tp, tl, "bgrewriteaof"): return 1
+        if _cmd_eq_ci(tp, tl, "georadius_ro"): return -6
         if _cmd_eq_ci(tp, tl, "hincrbyfloat"): return 4
         if _cmd_eq_ci(tp, tl, "hpexpiretime"): return -5
         if _cmd_eq_ci(tp, tl, "punsubscribe"): return -1
@@ -703,6 +706,8 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "zrevrangebyscore"): return -4
     elif tl == 17:
         if _cmd_eq_ci(tp, tl, "georadiusbymember"): return -5
+    elif tl == 20:
+        if _cmd_eq_ci(tp, tl, "georadiusbymember_ro"): return -5
     return 0
 
 
@@ -710,7 +715,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
 def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command mutates the keyspace, per real Redis's `write` flag.
 
-    101 of 327 commands are writes. Used by gh #260 to refuse mutations
+    101 of 329 commands are writes. Used by gh #260 to refuse mutations
     once the WAL can no longer persist them, instead of acknowledging writes
     that will not survive a restart.
 
@@ -872,7 +877,7 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command is refused while memory is over --maxmemory (gh #261).
 
-    78 of 327 commands: real Redis's `denyoom` flag plus Pion's
+    78 of 329 commands: real Redis's `denyoom` flag plus Pion's
     substrate ingest commands (PION_DENYOOM in tools/gen_command_table.py).
     Reads, DEL and the POP family stay served under the limit, as in Redis.
     """

@@ -2668,7 +2668,7 @@ struct FastPathHandler(Movable):
                         if bit_offset // 8 >= byte_len:
                             writer.append_int_response(0)
                         else:
-                            writer.append_int_response(Int64(getbit(bitmap_ptr, bit_offset)))
+                            writer.append_int_response(Int64(getbit(bitmap_ptr, byte_len, bit_offset)))
                     else:
                         writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                 elif b0_lower == 115 and cmd_len == 6 and cmd_matches_6(buffer + cmd_start, 115, 101, 116, 98, 105, 116): # SETBIT
@@ -2729,7 +2729,7 @@ struct FastPathHandler(Movable):
                             var byte_len = bit_offset // 8 + 1
                             var bitmap_ptr = alloc[UInt8](byte_len)
                             unsafe_memset(bitmap_ptr, 0, byte_len)
-                            var old_bit = getbit(bitmap_ptr, bit_offset)
+                            var old_bit = getbit(bitmap_ptr, byte_len, bit_offset)
                             var result = setbit(byte_len, bitmap_ptr, bit_offset, bit_value)
                             var new_val = GenericValue()
                             new_val.type = ValueType(ValueType.BITMAP)
@@ -2747,7 +2747,7 @@ struct FastPathHandler(Movable):
                         elif sb_val.type.value == ValueType.BITMAP:
                             var bitmap_ptr = sb_val.as_bitmap()
                             var byte_len = sb_val.bitmap_len()
-                            var old_bit = getbit(bitmap_ptr, bit_offset)
+                            var old_bit = getbit(bitmap_ptr, byte_len, bit_offset)
                             var result = setbit(byte_len, bitmap_ptr, bit_offset, bit_value)
                             sb_val._data0 = UInt64(Int(result.ptr))
                             sb_val._data1 = UInt64(result.len)
@@ -2777,7 +2777,7 @@ struct FastPathHandler(Movable):
                             var _sb_need = bit_offset // 8 + 1
                             var _sb_len = 0
                             var _sb_buf = sb_val.owned_bitmap_copy(_sb_need, _sb_len)
-                            var old_bit = getbit(_sb_buf, bit_offset)
+                            var old_bit = getbit(_sb_buf, _sb_len, bit_offset)
                             var result = setbit(_sb_len, _sb_buf, bit_offset, bit_value)
                             # NOTE: do NOT free the original here. `keyspace.set()`
                             # already calls `free_str_payload()` on the value it
