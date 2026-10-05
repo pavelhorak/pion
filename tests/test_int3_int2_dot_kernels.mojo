@@ -14,6 +14,7 @@ from std.memory import alloc
 from std.memory.unsafe_pointer import UnsafePointer
 from std.random import random_si64, random_float64, seed
 from std.ffi import external_call
+from std.sys import CompilationTarget
 
 from src.vector.kernels import (
     int3_dot_single_simd, int2_dot_single_simd,
@@ -185,9 +186,15 @@ def check_no_overread() -> Int:
     every block through the unpackers and the single-vector kernels. An
     over-read is a SIGSEGV here, not a silent wrong answer."""
     var page = Int(external_call["getpagesize", Int32]())
+    # RW, MAP_PRIVATE|MAP_ANON. The value differs per OS: 0x1002 is macOS's,
+    # and on Linux mmap rejected it, so the test stopped here on every Linux
+    # box and its later checks never ran there (#27).
+    var anon_private = Int32(0x1002)
+    comptime if CompilationTarget.is_linux():
+        anon_private = Int32(0x22)
     var base = external_call["mmap", UnsafePointer[UInt8, MutUntrackedOrigin]](
         Int(0), 2 * page,
-        Int32(3), Int32(0x1002), Int32(-1), Int(0))          # RW, MAP_PRIVATE|MAP_ANON
+        Int32(3), anon_private, Int32(-1), Int(0))
     if Int(base) == -1 or Int(base) == 0:
         print("mmap failed"); return 1
     if external_call["mprotect", Int32](base + page, page, Int32(0)) != 0:

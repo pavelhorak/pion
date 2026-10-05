@@ -775,6 +775,7 @@ tier = "gate"
 file = "tests/test_kv_prefix_cold_tier.py"
 server = "self"
 tier = "gate"
+requires = ["macos"]   # starts the server with --metal-attention
 
 [[test]]
 file = "tests/test_kv_prefix_commit.py"
@@ -970,6 +971,7 @@ timeout = 900
 file = "tests/test_pion_serve_sie_embed.py"
 server = "-w 1"
 tier = "gate"
+requires = ["py:flask"]   # pion-serve/serve.py imports it at the top
 
 [[test]]
 file = "tests/test_ppl_eval_methodology.py"

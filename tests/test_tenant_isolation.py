@@ -145,9 +145,11 @@ def main() -> int:
         _wait_ready(PION_PORT)
 
         # 1. Forced binding. redis-py strips the NOAUTH/WRONGPASS code from
-        # the message, so match on the message text.
+        # the message, so match on the message text. redis-py >= 5 opens with
+        # HELLO, whose NOAUTH has its own text (Redis's, word for word).
         anon = conn()
-        err = expect_error(lambda: anon.get("k"), "authentication required")
+        err = expect_error(lambda: anon.get("k"), "authentication required",
+                           "HELLO must be called with the client already authenticated")
         check("anon GET → NOAUTH", err is not None and "unexpected" not in err, str(err))
 
         # 2. Wrong tenant password — and no fall-through to admin

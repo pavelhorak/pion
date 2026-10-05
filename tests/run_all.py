@@ -335,6 +335,12 @@ def run_one(t, binary, logdir, require_all):
         except OSError:
             pass
     clear_state()
+    # #27: keep what a test's own servers logged before the cleanup below
+    # deletes it. The warm-restart and ssm tests start their servers in a temp
+    # directory, and their logs went with it, so a Linux failure in those
+    # tests left nothing to read. Text logs only, never a WAL or a snapshot.
+    _save_logs([test_tmp] + sorted(set(glob.glob("/tmp/pion*")) - tmp_before - set(FOREIGN_STATE)),
+               os.path.join(logdir, logname + ".logs"))
     litter = 0
     for f in set(glob.glob("/tmp/pion*")) - tmp_before - set(FOREIGN_STATE):
         litter += _size(f)
@@ -363,6 +369,27 @@ def run_one(t, binary, logdir, require_all):
             return "XFAIL", f"{t['xfail']}: {why.splitlines()[0] if why else ''}", dt
         return "FAIL", f"XPASS — {t['xfail']} looks fixed; remove the xfail marker", dt
     return verdict, why, dt
+
+
+def _save_logs(roots, dest, max_bytes=8 << 20):
+    """Copy the text logs under `roots` (files ending .log, .out, .status or
+    .txt, or named `log`) into `dest`, each at most `max_bytes`."""
+    for root in roots:
+        paths = [root] if os.path.isfile(root) else [
+            os.path.join(d, f) for d, _, fs in os.walk(root) for f in fs]
+        for path in paths:
+            name = os.path.basename(path)
+            if not (name == "log" or name.endswith((".log", ".out", ".status", ".txt"))):
+                continue
+            try:
+                if os.path.getsize(path) > max_bytes:
+                    continue
+                os.makedirs(dest, exist_ok=True)
+                flat = os.path.relpath(path, os.path.dirname(root) if os.path.isdir(root) else
+                                       os.path.dirname(path)).replace(os.sep, "__")
+                shutil.copyfile(path, os.path.join(dest, flat))
+            except OSError:
+                pass
 
 
 def discover():

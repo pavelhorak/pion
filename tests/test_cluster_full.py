@@ -153,7 +153,9 @@ def test_keyslot_routing():
         slot = r0.execute_command("CLUSTER", "KEYSLOT", "test_routing")
         test("SET succeeded (key in our slot range)", slot <= 5460, f"slot={slot}")
     except redis.exceptions.ResponseError as e:
-        if "MOVED" in str(e):
+        # redis-py >= 5 raises MovedError, whose text drops the "MOVED" word.
+        moved = getattr(redis.exceptions, "MovedError", None)
+        if "MOVED" in str(e) or (moved is not None and isinstance(e, moved)):
             test("SET returned MOVED (key not in our range)", True)
         else:
             test("SET routing", False, str(e))

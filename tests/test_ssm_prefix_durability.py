@@ -29,6 +29,9 @@ import struct
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
 from typing import Optional
 
 import numpy as np
@@ -132,19 +135,16 @@ def start_server(port: int, log_path: str) -> subprocess.Popen:
     cmd = [binary, "--kvcache", "-w", "1", "-p", str(port),
            "--no-auto-detect", "--no-auto-embed"]
     log_fp = open(log_path, "w")
+    # #27: the previous server's listener can outlive it for a moment; wait
+    # for the port, then for THIS process to answer (a bare connect used to
+    # count as ready and could reach the dead server).
+    wait_port_free(port)
     proc = subprocess.Popen(
         cmd, cwd=PROJECT_ROOT, stdout=log_fp, stderr=log_fp,
         preexec_fn=os.setsid,
     )
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            s = socket.create_connection((HOST, port), timeout=1)
-            s.close()
-            return proc
-        except OSError:
-            time.sleep(0.3)
-    raise RuntimeError(f"pion-server did not start on port {port}")
+    wait_ready_pid(port, proc, 60)
+    return proc
 
 
 def stop_server(proc: Optional[subprocess.Popen], sig: int = signal.SIGTERM) -> None:

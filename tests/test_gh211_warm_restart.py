@@ -28,6 +28,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
+
 try:
     import redis
 except ImportError:
@@ -86,18 +89,11 @@ def start_pion(port: int, binary: str, workers: int, log_path: str,
     # being runnable at all.
     if workers > 1:
         cmd.append("--independent-workers")
+    wait_port_free(port)   # #27: see wait_ready_pid
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=open(log_path, "w"),
                             stderr=subprocess.STDOUT, preexec_fn=os.setsid)
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            r = redis.Redis(port=port, socket_connect_timeout=1)
-            r.ping()
-            r.close()
-            return proc
-        except Exception:
-            time.sleep(0.3)
-    raise RuntimeError(f"{binary} did not come up on port {port}")
+    wait_ready_pid(port, proc, 60)
+    return proc
 
 
 def stop_pion(proc) -> None:

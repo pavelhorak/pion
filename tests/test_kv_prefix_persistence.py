@@ -26,6 +26,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
+
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "benchmarks"))
@@ -128,21 +131,18 @@ def start_server(extra_args=None) -> subprocess.Popen:
     # --no-auto-embed: this test never embeds, and the embedding sidecar
     # inherits our stdout pipe — it outlives the killed server and keeps the
     # write end open, so stop_server()'s drain read() blocks forever.
+    wait_port_free(PORT)   # #27: see wait_ready_pid
     proc = subprocess.Popen(
         [PION_BIN, "--kvcache", "-w", "1", "--no-auto-embed", *extra_args],
         cwd=os.path.dirname(SNAPSHOT_PATH),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        try:
-            s = socket.create_connection((HOST, PORT), timeout=1)
-            s.close()
-            return proc
-        except OSError:
-            time.sleep(0.2)
-    proc.kill()
-    raise RuntimeError("pion-server did not bind in 15s")
+    try:
+        wait_ready_pid(PORT, proc, 60)
+    except RuntimeError:
+        proc.kill()
+        raise
+    return proc
 
 
 def stop_server(proc):

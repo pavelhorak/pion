@@ -234,6 +234,36 @@ def wait_ready(port: int, timeout: float = 30.0, host: str = "127.0.0.1", proc=N
     raise RuntimeError(f"server on :{port} did not answer PING within {timeout} s ({last})")
 
 
+def wait_ready_pid(port: int, proc, timeout: float = 60.0, host: str = "127.0.0.1") -> None:
+    """Block until THIS process answers PING on `port` (#27).
+
+    After a stop, a dead server's listening socket can outlive it for a moment
+    (on Linux, the kernel tears an io_uring instance down after exit), and a
+    connect then succeeds against nothing. Restart harnesses that took a
+    successful connect, or any PONG, as "ready" sometimes talked to the old
+    server. INFO's process_id must be the new pid; a binary that predates the
+    field is accepted on PONG alone."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"server exited with code {proc.returncode} before answering PING")
+        try:
+            with Conn(port, host, timeout=5.0, connect_timeout=0.5) as c:
+                if c.cmd("PING") == "PONG":
+                    info = c.cmd("INFO", "server")
+                    text = info.decode(errors="replace") if isinstance(info, bytes) else ""
+                    pid = next((int(l.split(":", 1)[1]) for l in text.splitlines()
+                                if l.startswith("process_id:")), None)
+                    if pid is None or pid == proc.pid:
+                        return
+                    last = f"answered by pid {pid}, not {proc.pid}"
+        except (OSError, TimeoutError, ConnectionError, RespProtocolError, ValueError) as e:
+            last = e
+        time.sleep(0.1)
+    raise RuntimeError(f"server pid {proc.pid} did not answer on :{port} within {timeout} s ({last})")
+
+
 def wait_port_free(port: int, timeout: float = 10.0, host: str = "127.0.0.1") -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
