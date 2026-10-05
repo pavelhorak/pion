@@ -18,7 +18,7 @@ from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_
 from src.common.lock_free import ShardQueryBus
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
 # gh #87.1: src/vector/ivf_pq.mojo deleted (a measured dead end).
-from src.network.semantic_cache import SemanticCache
+from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_name
 from src.network.rerank_client import RerankClient
 from src.memory.object_pool import ObjectPool
 from src.common.heap import HeapNode
@@ -1969,7 +1969,7 @@ def handle_ft_addtext(
                 hnsw.bm25_register_text_doc(_did_val)
         tf_name_buf.free()
         # Phase 4: also embed text + add to semantic cache HNSW for FT.SEARCHTEXT
-        if scache.enabled and scache.count < 10000:
+        if scache.enabled and scache.count < CACHE_MAX_ENTRIES:
             # gh #140: this is the document side of an asymmetric retriever.
             var _emb_ok = scache.embed_into(
                 text_tok.ptr,
@@ -1977,17 +1977,14 @@ def handle_ft_addtext(
                 scache.embed_buf,
                 is_query=False)
             if _emb_ok:
-                # Store doc_id in responses list (used by FT.SEARCHTEXT)
-                var _doc_str = String("")
-                for _dbi in range(doc_tok.length):
-                    var _db = Int(doc_tok.ptr[_dbi])
-                    if _db < 128: _doc_str += chr(_db)
-                scache.responses.append(_doc_str)
+                # #29: the entry belongs to THIS index, and its doc id keeps
+                # every byte (non-ASCII bytes used to be dropped).
+                var _idx_tok = tokens[ci + 1]
+                var _owner = scache.owner_id(bytes_name("t:", _idx_tok.ptr, _idx_tok.length), True)
                 try:
-                    scache.hnsw.add_and_insert(scache.count, scache.embed_buf)
-                    scache.count += 1
+                    _ = scache.add_entry(_owner, bytes_name("", doc_tok.ptr, doc_tok.length))
                 except:
-                    _ = scache.responses.pop()  # rollback on failure
+                    pass
         ci += 3
         writer.append_ok_response()
     else:
@@ -2015,7 +2012,8 @@ def handle_ft_searchtext(
     elif scache.count == 0:
         writer.append_empty_array_response()
     elif ci + 2 < num_tokens:
-        ci += 1  # skip index name
+        ci += 1
+        var _st_idx_tok = tokens[ci]   # #29: only this index's documents
         var _st_text_tok = tokens[ci + 1]
         var _st_k = 10
         ci += 1  # consume text token
@@ -2028,25 +2026,21 @@ def handle_ft_searchtext(
                     if _kc >= 48 and _kc <= 57: _kv = _kv * 10 + (_kc - 48)
                 if _kv > 0: _st_k = _kv
                 ci += 2
+        var _st_owner = scache.owner_id(bytes_name("t:", _st_idx_tok.ptr, _st_idx_tok.length), False)
         # Embed query text
-        var _st_ok = scache.embed_into(
+        var _st_ok = _st_owner >= 0 and scache.embed_into(
             _st_text_tok.ptr,
             _st_text_tok.length,
             scache.embed_buf)
         if not _st_ok:
             writer.append_empty_array_response()
         else:
-            # gh #140: ef must cover k. The beam was hardcoded to 32, so any
-            # `K > 32` silently returned 32 hits — indistinguishable from a
-            # corpus that only had 32 relevant docs, and the reason the dense
-            # leg looked like it "added zero recall" at the K=120 the caller
-            # actually used. Oversample 2x for recall, matching the beam
-            # headroom FT.SEARCH gets from its own ef_runtime baseline.
-            var _st_ef = _st_k * 2
-            if _st_ef < 32: _st_ef = 32
+            # gh #140: K was clamped by a beam hardcoded to 32. #29: the search
+            # is now exact over this index's documents, so K is honoured as
+            # long as the index holds that many.
             var _st_scores = List[Float32]()
-            var _st_results = scache.hnsw.search_fp32_scored(
-                scache.embed_buf, _st_k, _st_scores, _st_ef)
+            var _st_results = scache.search_owner(
+                scache.embed_buf, _st_owner, _st_k, _st_scores)
             var _st_n = len(_st_results)
             var _st_hdr = String("*") + String(_st_n) + String("\r\n")
             writer.append_to_response(_st_hdr.unsafe_ptr(), _st_hdr.byte_length())

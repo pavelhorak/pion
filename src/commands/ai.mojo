@@ -11,7 +11,7 @@ from src.common.value import GenericValue, ValueType
 from src.common.list import SlabList
 from src.common.utils import format_int_to_buf, parse_filter_float, arg_eq, is_valid_float_arg, parse_float64, THRESHOLD_UNSET
 from src.common.config import PionConfig
-from src.network.semantic_cache import SemanticCache
+from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_name
 from src.network.llm_client import LLMClient
 from src.network.ai_gateway import FLAREGateway
 from src.network.inference_bridge import InferenceBridge, InferenceResponse, INFER_MSG_EMBED, INFER_MSG_GENERATE, INFER_MSG_LOAD_MODEL, INFER_STATUS_OK, INFER_STATUS_ERROR, INFER_RECV_BUF_SIZE
@@ -37,7 +37,8 @@ def handle_ai_chat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             # "CONTEXT" = 7 bytes c(99),o(111),n(110),t(116),e(101),x(120),t(116)
             if _maybe_ctx.length == 7 and (_maybe_ctx.ptr[unsafe_offset=0]|0x20)==99 and (_maybe_ctx.ptr[unsafe_offset=1]|0x20)==111 and (_maybe_ctx.ptr[unsafe_offset=2]|0x20)==110:
                 ii += 1  # skip CONTEXT keyword
-                ii += 1  # skip index name
+                ii += 1
+                var _ctx_idx_tok = tokens[unsafe_offset=ii]   # #29: this index's documents only
                 var _ctx_text_tok = tokens[unsafe_offset=ii + 1]
                 ii += 1  # consume text token
                 # Parse optional K
@@ -51,14 +52,15 @@ def handle_ai_chat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                         if _kv > 0: _ctx_k = _kv
                         ii += 2
                 # Embed context text and retrieve doc_ids for context building
-                if scache.enabled and scache.count > 0:
+                var _ctx_owner = scache.owner_id(bytes_name("t:", _ctx_idx_tok.ptr, _ctx_idx_tok.length), False)
+                if scache.enabled and scache.count > 0 and _ctx_owner >= 0:
                     var _ctx_ok = scache.embed_into(
                         _ctx_text_tok.ptr,
                         _ctx_text_tok.length, scache.embed_buf)
                     if _ctx_ok:
                         var _ctx_scores = List[Float32]()
-                        var _ctx_results = scache.hnsw.search_fp32_scored(
-                            scache.embed_buf, _ctx_k, _ctx_scores, 32)
+                        var _ctx_results = scache.search_owner(
+                            scache.embed_buf, _ctx_owner, _ctx_k, _ctx_scores)
                         # Build context string from doc_ids (space-separated)
                         if len(_ctx_results) > 0:
                             var _ctx_sb = String("")
@@ -591,18 +593,19 @@ def handle_ai_memory(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, nu
                     var list_ptr = val.as_list().unsafe_bitcast[SlabList]()
                     var entry_v = GenericValue.from_string(entry)
                     list_ptr[].lpush(entry_v)
-                # 2) If embeddings enabled, add to semantic index (long-term)
-                if scache.enabled and scache.count < 10000:
+                # 2) If embeddings enabled, add to semantic index (long-term),
+                # as this session's entry (#29).
+                if scache.enabled and scache.count < CACHE_MAX_ENTRIES:
                     var ok = scache.embed_into(
                         content_tok.ptr.unsafe_bitcast[UInt8](), content_tok.length,
                         scache.embed_buf)
                     if ok:
-                        scache.responses.append(entry)
+                        var _mem_owner = scache.owner_id(
+                            bytes_name("m:", sess_tok.ptr, sess_tok.length), True)
                         try:
-                            scache.hnsw.add_and_insert(scache.count, scache.embed_buf)
-                            scache.count += 1
+                            _ = scache.add_entry(_mem_owner, entry)
                         except:
-                            _ = scache.responses.pop()
+                            pass
                 writer.append_ok_response()
             else:
                 ii += 1
@@ -611,16 +614,22 @@ def handle_ai_memory(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, nu
         elif sub_l == 6 and (sub_p[unsafe_offset=0]|0x20)==114 and (sub_p[unsafe_offset=1]|0x20)==101 and (sub_p[unsafe_offset=2]|0x20)==99 and (sub_p[unsafe_offset=3]|0x20)==97 and (sub_p[unsafe_offset=4]|0x20)==108 and (sub_p[unsafe_offset=5]|0x20)==108:
             # AI.MEMORY RECALL <session_id> <query> [K k]
             if ii + 3 < num_tokens:
+                var rsess_tok = tokens[unsafe_offset=ii + 2]
                 var query_tok = tokens[unsafe_offset=ii + 3]
                 ii += 3
+                # #29: this session's memories only. It used to search every
+                # entry in the store, so it could answer with another session's
+                # memory, a cached response or a document id.
+                var _rc_owner = scache.owner_id(
+                    bytes_name("m:", rsess_tok.ptr, rsess_tok.length), False)
                 if not scache.enabled:
                     writer.append_error_response("ERR AI.MEMORY RECALL requires --emb-enabled")
-                elif scache.count == 0:
+                elif scache.count == 0 or _rc_owner < 0:
                     writer.append_empty_array_response()
                 else:
                     var got_hit = scache.cache_get(
                         query_tok.ptr, query_tok.length,
-                        THRESHOLD_UNSET, writer, server, fd, kq)
+                        THRESHOLD_UNSET, writer, server, fd, kq, owner=_rc_owner)
                     if not got_hit:
                         writer.append_empty_array_response()
             else:

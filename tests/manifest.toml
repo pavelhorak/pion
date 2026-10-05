@@ -1331,6 +1331,12 @@ server = "self"
 tier = "gate"
 timeout = 240
 
+[[test]]
+file = "tests/test_embedding_store_owners.py"
+server = "self"
+tier = "gate"
+timeout = 600
+
 [not_tests]
 # benchmarks, profilers, one-off repros and helpers — run by hand, never gated
 files = [

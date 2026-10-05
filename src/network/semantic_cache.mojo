@@ -65,6 +65,16 @@ struct SemanticCache(Movable):
     # (AI.SEMANTIC_CACHE GET, AI.MEMORY RECALL, the gateway) is covered.
     var hits: UInt64
     var misses: UInt64
+    # #29: whose entry each one is. Owner 0 is AI.SEMANTIC_CACHE itself; the
+    # others are FT.ADDTEXT indexes ("t:<index>") and AI.MEMORY sessions
+    # ("m:<session>"), named in owner_names. They share this graph and its
+    # CACHE_MAX_ENTRIES slots, but every lookup sees only its owner's entries.
+    # They used to share the lookups too: AI.SEMANTIC_CACHE GET could answer
+    # with a doc id, FT.SEARCHTEXT returned every index's documents and cached
+    # responses, and AI.MEMORY RECALL ignored the session.
+    var owners: List[Int]
+    var owner_names: List[String]
+    var foreign_count: Int          # entries whose owner is not 0
 
     def __init__(out self, host: String, port: Int, model: String, dimensions: Int,
                 threshold: Float32, enabled: Bool, nle_enabled: Bool = False,
@@ -86,6 +96,10 @@ struct SemanticCache(Movable):
         self.prefix_scratch_cap = 0
         self.hits = UInt64(0)
         self.misses = UInt64(0)
+        self.owners = List[Int]()
+        self.owner_names = List[String]()
+        self.owner_names.append(String(""))   # 0: the semantic cache
+        self.foreign_count = 0
 
     def __moveinit__(out self, deinit take: Self):
         self.hnsw = take.hnsw^
@@ -105,6 +119,9 @@ struct SemanticCache(Movable):
         self.prefix_scratch_cap = take.prefix_scratch_cap
         self.hits = take.hits
         self.misses = take.misses
+        self.owners = take.owners^
+        self.owner_names = take.owner_names^
+        self.foreign_count = take.foreign_count
 
     @always_inline
     def set_bridge(mut self, bridge_ptr: Pointer[InferenceBridge, MutUntrackedOrigin]):
@@ -185,6 +202,7 @@ struct SemanticCache(Movable):
         if not self._embed(query_ptr, query_len): return 1
 
         self.hnsw.add_and_insert(self.count, self.embed_buf)
+        self.owners.append(0)
         # gh #232/#115: this used to spell every byte >= 128 as '?', ONE PER
         # BYTE — so a UTF-8 response came back mangled and longer: "café"
         # stored as "caf??". This is a cache for MODEL OUTPUT, where curly
@@ -213,6 +231,62 @@ struct SemanticCache(Movable):
         self.count += 1
         return 0
 
+    def owner_id(mut self, name: String, create: Bool) -> Int:
+        """The owner number for `name` ("t:<index>", "m:<session>"); -1 when it
+        has no entries and `create` is False (#29)."""
+        for i in range(len(self.owner_names)):
+            if self.owner_names[i] == name:
+                return i
+        if not create:
+            return -1
+        self.owner_names.append(name)
+        return len(self.owner_names) - 1
+
+    def add_entry(mut self, owner: Int, response: String) raises -> Bool:
+        """Store what the caller just embedded into `embed_buf`, for `owner`
+        (#29). False when the cache is full. Every writer goes through here or
+        cache_set, so `owners` stays aligned with `responses`."""
+        if self.count >= CACHE_MAX_ENTRIES:
+            return False
+        self.hnsw.add_and_insert(self.count, self.embed_buf)
+        self.responses.append(response)
+        while len(self.workspaces) < self.count: self.workspaces.append(String(""))
+        self.workspaces.append(String(""))
+        self.owners.append(owner)
+        if owner != 0:
+            self.foreign_count += 1
+        self.count += 1
+        return True
+
+    def search_owner(mut self, query: Pointer[Float32, MutUntrackedOrigin], owner: Int, k: Int,
+                     mut scores: List[Float32]) -> List[Int]:
+        """Exact top-k among `owner`'s entries, nearest first (#29). Scores are
+        the graph's own INT8 L2 units (what search_fp32_scored reports), so the
+        similarity threshold means the same thing on both paths. The store
+        holds at most CACHE_MAX_ENTRIES, so a scan costs well under a
+        millisecond, and it returns exactly k where a graph search filtered
+        by owner afterwards could return fewer."""
+        var ids = List[Int]()
+        if k <= 0 or self.count == 0 or owner < 0:
+            return ids^
+        self.hnsw._quantize_query_to_int8(query)
+        var d = List[Float32]()
+        var e_ids = List[Int]()
+        for e in range(self.count):
+            if e >= len(self.owners) or self.owners[e] != owner:
+                continue
+            var nidx = self.hnsw.node_map[e]
+            if nidx < 0 or nidx >= self.hnsw.num_nodes:
+                continue
+            d.append(self.hnsw._dist_int8_int8(self.hnsw.query_int8, self.hnsw.nodes[nidx].vector))
+            e_ids.append(e)
+        var order = _argsort(d)
+        var take = min(k, len(order))
+        for j in range(take):
+            ids.append(e_ids[order[j]])
+            scores.append(d[order[j]])
+        return ids^
+
     def workspace_at(self, idx: Int) -> String:
         """Stored workspace for an entry, or empty when absent (gh #115)."""
         if idx < 0 or idx >= len(self.workspaces): return String("")
@@ -228,7 +302,11 @@ struct SemanticCache(Movable):
         if not self._embed(query_ptr, query_len): return -1
         var ef = 32
         var scores = List[Float32]()
-        var results = self.hnsw.search_fp32_scored(self.embed_buf, 1, scores, ef)
+        var results: List[Int]
+        if self.foreign_count == 0:
+            results = self.hnsw.search_fp32_scored(self.embed_buf, 1, scores, ef)
+        else:
+            results = self.search_owner(self.embed_buf, 0, 1, scores)   # #29
         if len(results) == 0 or len(scores) == 0: return -1
         var cos_sim = Float32(1.0) - scores[0] / CACHE_UNIT_NORM_SQ
         var thresh = resolve_threshold(threshold_override, self.threshold)   # gh #373
@@ -240,8 +318,11 @@ struct SemanticCache(Movable):
     def cache_get(mut self, query_ptr: Pointer[UInt8, MutUntrackedOrigin], query_len: Int,
                  threshold_override: Float32, mut writer: ResponseWriter,
                  server: TCPServer, fd: Int32, kq: Int32,
-                 with_workspace: Bool = False) raises -> Bool:
-        """Search cache for a similar query.  Writes response to writer and returns True on hit."""
+                 with_workspace: Bool = False, owner: Int = 0) raises -> Bool:
+        """Search cache for a similar query.  Writes response to writer and returns True on hit.
+
+        #29: only `owner`'s entries are candidates: 0 for AI.SEMANTIC_CACHE,
+        an AI.MEMORY session's number for RECALL."""
         if not self.enabled: return False
         if self.count == 0:
             self.misses += UInt64(1)
@@ -250,7 +331,12 @@ struct SemanticCache(Movable):
 
         var ef = 32   # small ef: cache is small, speed is key
         var scores = List[Float32]()
-        var results = self.hnsw.search_fp32_scored(self.embed_buf, 1, scores, ef)
+        var results: List[Int]
+        if owner == 0 and self.foreign_count == 0:
+            # Every entry is a cache entry: the graph answers alone.
+            results = self.hnsw.search_fp32_scored(self.embed_buf, 1, scores, ef)
+        else:
+            results = self.search_owner(self.embed_buf, owner, 1, scores)   # #29
         if len(results) == 0 or len(scores) == 0:
             self.misses += UInt64(1)
             return False
@@ -287,3 +373,47 @@ struct SemanticCache(Movable):
             writer.append_bulk_string_response(resp.unsafe_ptr(), resp.byte_length())
         self.hits += UInt64(1)
         return True
+
+
+def _argsort(d: List[Float32]) -> List[Int]:
+    """Indices of `d` in ascending order, ties by index: a bottom-up merge sort,
+    O(n log n) for the up-to-10,000 entries search_owner scores."""
+    var n = len(d)
+    var a = List[Int]()
+    for i in range(n):
+        a.append(i)
+    var b = List[Int]()
+    for i in range(n):
+        b.append(i)
+    var width = 1
+    while width < n:
+        var lo = 0
+        while lo < n:
+            var mid = min(lo + width, n)
+            var hi = min(lo + 2 * width, n)
+            var x = lo
+            var y = mid
+            var o = lo
+            while x < mid and y < hi:
+                if d[a[y]] < d[a[x]]:
+                    b[o] = a[y]; y += 1
+                else:
+                    b[o] = a[x]; x += 1
+                o += 1
+            while x < mid:
+                b[o] = a[x]; x += 1; o += 1
+            while y < hi:
+                b[o] = a[y]; y += 1; o += 1
+            lo = hi
+        var t = a.copy()
+        a = b.copy()
+        b = t^
+        width *= 2
+    return a^
+
+
+def bytes_name(prefix: String, ptr: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> String:
+    """`prefix` + the bytes of a client token, every byte kept (#29: doc ids
+    and owner names used to drop each non-ASCII byte)."""
+    return prefix + String(StringSpan[MutUntrackedOrigin](
+        unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=ptr, length=n)))
