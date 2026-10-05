@@ -254,26 +254,45 @@
 
 ## 10. Stream Commands
 
-Streams are fully implemented and WAL-persisted (snapshot v2 + WAL cmd 23 XADD /
-27 XDEL; `INFO` reports `streams_persisted:1`). Consumer groups are the one gap —
-every `X*GROUP`/pending/claim command refuses explicitly rather than faking state.
+Streams and their consumer groups follow Redis 7, compared with Redis 8.10
+(#40), and are durable: entries, the stream's metadata, groups, consumers and
+pending entries reach the WAL as effect records (23, 27, 34, 38-45), the
+snapshot, DUMP payloads, COPY and replicas. A pending list stays fast at work
+queue sizes: acknowledging an entry is a binary search, not a shift of every
+later one.
+
+Redis 8.2's group-reference handling is implemented too: XDELEX, XACKDEL, and
+KEEPREF / DELREF / ACKED on XADD and XTRIM trimming (keep the pending entries
+that name a deleted entry, remove them with it, or delete only what no group
+still references). Redis 8's later stream additions are not: XREADGROUP CLAIM
+(8.4), idempotent XADD with XCFGSET and XIDMPRECORD (8.6), XNACK (8.8), and
+XREAD / XREADGROUP MAXCOUNT / MAXSIZE. Each is refused with an error, never
+ignored. XINFO STREAM leaves out the fields they report (`idmp-*`,
+`pids-tracked`, `iids-*`, `nacked-count`) and Redis's internal
+`radix-tree-keys` / `radix-tree-nodes` (Pion keeps no radix tree).
 
 | Command | Redis 8 | Valkey 8 | Pion | Pion path | GLIDE | Notes |
 |---|:---:|:---:|:---:|:---:|:---:|---|
-| XADD | ✅ | ✅ | ✅ | **SLOW** | ✅ | `*`, `ms-seq`, `ms-*`; NOMKSTREAM; MAXLEN/MINID with `=`/`~` and LIMIT (`~` trims exactly — see below) (#34) |
+| XADD | ✅ | ✅ | ✅ | **SLOW** | ✅ | `*`, `ms-seq`, `ms-*`; NOMKSTREAM; MAXLEN/MINID with `=`/`~` and LIMIT (`~` trims exactly — see below) (#34); KEEPREF / DELREF / ACKED for the trim (#40) |
 | XREAD | ✅ | ✅ | ✅ | **SLOW** | ✅ | Only streams with new entries are returned. `BLOCK` parks the connection until an XADD or the timeout; inside MULTI/EXEC it answers at once |
 | XLEN | ✅ | ✅ | ✅ | **SLOW** | ✅ | Real length |
 | XRANGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | `-`/`+`, `ms`, exclusive `(id`; COUNT |
 | XREVRANGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | As XRANGE, reversed |
-| XINFO STREAM | ✅ | ✅ | ✅ | **SLOW** | ✅ | `length`, `last-generated-id`, `entries` |
+| XINFO STREAM | ✅ | ✅ | ✅ | **SLOW** | ✅ | `length`, `last-generated-id`, `max-deleted-entry-id`, `entries-added`, `recorded-first-entry-id`, `groups`, first/last entry; `FULL [COUNT n]` with every group, its pending entries and consumers (#40) |
+| XINFO GROUPS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Consumers, pending, last-delivered-id, entries-read and lag, by Redis 7's rules (a deletion past a group makes its lag nil) (#40) |
+| XINFO CONSUMERS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Pending, idle and inactive, in name order (#40) |
+| XSETID | ✅ | ✅ | ✅ | **SLOW** | ✅ | With ENTRIESADDED and MAXDELETEDID (#40) |
 | XDEL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deletes by ID; every ID validated first |
 | XTRIM | ✅ | ✅ | ✅ | **SLOW** | ✅ | MAXLEN/MINID with `=`/`~` and LIMIT. With `~` Redis removes only whole internal nodes (a small stream keeps everything); Pion has no nodes and trims exactly — both within the "at least N kept" contract |
-| XGROUP | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |
-| XREADGROUP | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |
-| XACK | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |
-| XCLAIM | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |
-| XAUTOCLAIM | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |
-| XPENDING | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |
+| XGROUP | ✅ | ✅ | ✅ | **SLOW** | ✅ | CREATE (MKSTREAM, ENTRIESREAD), SETID (ENTRIESREAD), DESTROY, CREATECONSUMER, DELCONSUMER, HELP (#40) |
+| XREADGROUP | ✅ | ✅ | ✅ | **SLOW** | ✅ | `>` for new entries (COUNT, NOACK), an id for the consumer's history (a deleted entry as `[id, nil]`); `BLOCK` parks the connection until an entry arrives for the group, the group or key goes (NOGROUP), the key changes type (WRONGTYPE) or the timeout; inside MULTI/EXEC it answers at once (#40) |
+| XACK | ✅ | ✅ | ✅ | **SLOW** | ✅ | Counts the entries it acknowledged (#40) |
+| XCLAIM | ✅ | ✅ | ✅ | **SLOW** | ✅ | IDLE, TIME, RETRYCOUNT, FORCE, JUSTID, LASTID; a claimed entry that was deleted leaves the pending list (#40) |
+| XAUTOCLAIM | ✅ | ✅ | ✅ | **SLOW** | ✅ | Cursor, COUNT, JUSTID, and the ids of deleted entries it dropped (#40) |
+| XPENDING | ✅ | ✅ | ✅ | **SLOW** | ✅ | Summary, and the extended form with IDLE and a consumer filter (#40) |
+| XDELEX | ✅ (8.2) | ❌ | ✅ | **SLOW** | — | KEEPREF / DELREF / ACKED; per id 1 deleted, -1 missing, 2 still referenced (#40) |
+| XACKDEL | ✅ (8.2) | ❌ | ✅ | **SLOW** | — | Acknowledges in the group, then deletes as XDELEX (#40) |
+| XNACK, XCFGSET, XIDMPRECORD | ✅ (8.6+) | ❌ | ❌ | — | — | Redis 8 additions, not implemented: unknown command |
 
 ---
 
@@ -657,7 +676,7 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 | Bitmap | 7 / 7 | 100% |
 | HyperLogLog | 3 / 3 | 100% |
 | Geo | 8 / 8 | 100% |
-| Streams | 14 / 20 | base commands ✓ + WAL-persisted; consumer groups refuse |
+| Streams | 19 / 22 | Redis 7's streams and consumer groups and Redis 8.2's XDELEX / XACKDEL, durable; XNACK, XCFGSET, XIDMPRECORD not implemented |
 | Pub/Sub | 9 / 9 | delivery works; cross-worker is the only limit (`-w 1` default) |
 | Scripting | 2 / 16 | 13% |
 | Transactions | 5 / 5 | 100% |

@@ -216,10 +216,12 @@ wait 3
 waitaof 4
 watch -2
 xack -4
+xackdel -6
 xadd -5
 xautoclaim -6
 xclaim -6
 xdel -3
+xdelex -5
 xgroup -2
 xinfo -2
 xlen 2
@@ -228,6 +230,7 @@ xrange -4
 xread -4
 xreadgroup -7
 xrevrange -4
+xsetid -3
 xtrim -4
 zadd -4
 zcard 2

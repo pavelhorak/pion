@@ -820,41 +820,27 @@ def test_pion_parity():
     send_cmd_bytes(sock, ["DEL", "parity_stream"])
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Section 18b: Stream consumer-group commands must fail loudly (gh #81)
+    # Section 18b: Stream consumer groups (#40)
     # ═══════════════════════════════════════════════════════════════════════
-    # Pion does not implement consumer groups. Before gh #81 these handlers
-    # returned success-shaped fake responses (+OK / :0 / *0 / fake *3 cursor),
-    # so any client using XGROUP/XREADGROUP/XACK/XPENDING/XAUTOCLAIM/XCLAIM
-    # silently lost data. They now return -ERR; this section pins that.
-    print("\n=== Section 18b: Consumer-group rejection (gh #81) ===")
-
-    # Seed a real stream so any handler that ignored args and faked success
-    # would still look plausible — we want to see -ERR even with valid input.
-    send_cmd_bytes(sock, ["XADD", "cg_stream", "*", "k", "v"])
-
-    cg_cases = [
-        (["XGROUP", "CREATE", "cg_stream", "grp1", "$"], "XGROUP CREATE"),
-        (["XGROUP", "DESTROY", "cg_stream", "grp1"], "XGROUP DESTROY"),
-        (["XREADGROUP", "GROUP", "grp1", "c1", "COUNT", "10", "STREAMS", "cg_stream", ">"], "XREADGROUP"),
-        (["XACK", "cg_stream", "grp1", "0-0"], "XACK"),
-        (["XPENDING", "cg_stream", "grp1"], "XPENDING"),
-        (["XCLAIM", "cg_stream", "grp1", "c2", "0", "0-0"], "XCLAIM"),
-        (["XAUTOCLAIM", "cg_stream", "grp1", "c2", "0", "0"], "XAUTOCLAIM"),
-        (["XINFO", "GROUPS", "cg_stream"], "XINFO GROUPS"),
-        (["XINFO", "CONSUMERS", "cg_stream", "grp1"], "XINFO CONSUMERS"),
-    ]
-    for cmd_args, label in cg_cases:
-        print(f"Testing {label} rejection...")
-        res = send_cmd_bytes(sock, cmd_args)
-        assert res.startswith("-ERR"), f"{label} must return -ERR (gh #81), got: {res!r}"
-        assert "consumer groups not supported" in res, f"{label} error must mention consumer groups, got: {res!r}"
-
-    # XINFO STREAM must still work — only GROUPS/CONSUMERS subcommands error.
-    print("Testing XINFO STREAM still works...")
+    # gh #81 made these refuse (-ERR) instead of answering success-shaped fake
+    # replies that lost data; #40 implemented them. A smoke pass here; the
+    # whole surface, its durability and a differential against Redis are in
+    # tests/test_stream_groups.py.
+    print("\n=== Section 18b: Consumer groups (#40) ===")
+    send_cmd_bytes(sock, ["DEL", "cg_stream"])
+    res = send_cmd_bytes(sock, ["XGROUP", "CREATE", "cg_stream", "grp1", "$", "MKSTREAM"])
+    assert res == "+OK\r\n", f"XGROUP CREATE MKSTREAM, got: {res!r}"
+    send_cmd_bytes(sock, ["XADD", "cg_stream", "1-1", "k", "v"])
+    res = send_cmd_bytes(sock, ["XREADGROUP", "GROUP", "grp1", "c1", "COUNT", "10", "STREAMS", "cg_stream", ">"])
+    assert res == "*1\r\n*2\r\n$9\r\ncg_stream\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\nk\r\n$1\r\nv\r\n", \
+        f"XREADGROUP delivers the entry, got: {res!r}"
+    res = send_cmd_bytes(sock, ["XPENDING", "cg_stream", "grp1"])
+    assert res.startswith("*4\r\n:1\r\n$3\r\n1-1\r\n"), f"XPENDING counts it, got: {res!r}"
+    assert_int(send_cmd_bytes(sock, ["XACK", "cg_stream", "grp1", "1-1"]), 1, "XACK")
+    res = send_cmd_bytes(sock, ["XINFO", "GROUPS", "cg_stream"])
+    assert res.startswith("*1\r\n") and "grp1" in res, f"XINFO GROUPS lists the group, got: {res!r}"
     res = send_cmd_bytes(sock, ["XINFO", "STREAM", "cg_stream"])
-    assert res.startswith("*"), f"XINFO STREAM must keep working, got: {res!r}"
-    assert "length" in res, f"XINFO STREAM should include length field, got: {res!r}"
-
+    assert res.startswith("*") and "length" in res, f"XINFO STREAM, got: {res!r}"
     send_cmd_bytes(sock, ["DEL", "cg_stream"])
 
     # ═══════════════════════════════════════════════════════════════════════

@@ -131,7 +131,8 @@ from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
 from src.common.bitmap import getbit, setbit
 from src.common.hll import HLL_REGISTERS, hll_add
-from src.common.stream_data import StreamData
+from src.common.stream_data import (StreamData, apply_stream_group_record, encode_meta_rec, encode_group_rec,
+                                    encode_consumer_rec, encode_nack_rec)
 from src.io.blob_store import BlobStore
 from src.common.vector_set import VectorSet, free_vset
 
@@ -336,7 +337,8 @@ def wal_is_aggregate(cmd_id: UInt8) -> Bool:
     """Record ids `wal_apply_aggregate` owns — one predicate for the WAL
     replayer and the snapshot loader, so a new record kind cannot reach one
     and be skipped by the other."""
-    return (cmd_id >= 5 and cmd_id <= 24) or (cmd_id >= 27 and cmd_id <= 34)
+    return (cmd_id >= 5 and cmd_id <= 24) or (cmd_id >= 27 and cmd_id <= 34) \
+        or (cmd_id >= 38 and cmd_id <= 45)      # #40: stream metadata and consumer groups
 
 
 def _replay_vset_field(vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int,
@@ -809,6 +811,14 @@ def wal_apply_aggregate(cmd_id: UInt8,
         vs[].attrs[slot] = String(StringSpan[MutUntrackedOrigin](
             unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=vp.unsafe_offset(ao), length=al)))
         return True
+
+    elif cmd_id >= 38 and cmd_id <= 45:
+        # #40: stream metadata (45, which creates an empty stream) and consumer
+        # groups (38-44); layouts in src/common/stream_data.mojo
+        var gsd = _replay_stream(keyspace, key, cmd_id == 45)
+        if is_null(gsd):
+            return False
+        return apply_stream_group_record(cmd_id, gsd, vp, vl)
 
     elif cmd_id == 27:   # XDEL [8B id_ms][8B id_seq]
         if vl < 16:
@@ -1977,8 +1987,28 @@ struct WAL(Movable):
                     unsafe_memcpy(dest=rec.unsafe_offset(8), src=e.data, count=e.data_len)
                 _ = self.append_u64_val(34, kp, kl, e.id_ms, rec, 8 + e.data_len)
                 rec.unsafe_free()
+            # #40: then its metadata and consumer groups, as the snapshot
+            # writes them (records 45, 38, 41, 43)
+            self.append_list(45, kp, kl, encode_meta_rec(sd))
+            for g in range(len(sd[].groups)):
+                ref grp = sd[].groups[g]
+                self.append_list(38, kp, kl, encode_group_rec(grp))
+                for c in range(grp.ncons()):
+                    self.append_list(41, kp, kl, encode_consumer_rec(grp.name, grp.consumers[grp.by_name[c]]))
+                for k in range(len(grp.pel)):
+                    var nk = grp.pel[k]
+                    var oi = grp.consumer_by_id(nk.consumer)
+                    if oi >= 0:
+                        self.append_list(43, kp, kl, encode_nack_rec(grp.name, grp.consumers[oi].name, nk.ms, nk.seq,
+                                                                      nk.delivery_time, nk.delivery_count))
         vbuf.unsafe_free()
         fbuf.unsafe_free()
+
+    def append_list(mut self, cmd_id: UInt8, kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
+                     payload: List[UInt8]):
+        _ = self.append_kv(cmd_id, kp, kl,
+                           Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(payload.unsafe_ptr())),
+                           len(payload))
 
     def log_key_image(mut self, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                       ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],

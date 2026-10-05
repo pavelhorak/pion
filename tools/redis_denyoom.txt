@@ -51,6 +51,7 @@ subscribe
 sunionstore
 vadd
 xadd
+xsetid
 zadd
 zdiffstore
 zincrby

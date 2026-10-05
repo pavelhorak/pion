@@ -18,7 +18,7 @@ would fail to match every substrate command.
 from src.common.ptr import null_ptr, is_null, is_not_null
 
 
-comptime PION_COMMAND_COUNT = 351
+comptime PION_COMMAND_COUNT = 354
 
 
 @always_inline
@@ -193,8 +193,10 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "vlinks") or
             _cmd_eq_ci(tp, tl, "vrange") or
             _cmd_eq_ci(tp, tl, "xclaim") or
+            _cmd_eq_ci(tp, tl, "xdelex") or
             _cmd_eq_ci(tp, tl, "xgroup") or
             _cmd_eq_ci(tp, tl, "xrange") or
+            _cmd_eq_ci(tp, tl, "xsetid") or
             _cmd_eq_ci(tp, tl, "zcount") or
             _cmd_eq_ci(tp, tl, "zinter") or
             _cmd_eq_ci(tp, tl, "zrange") or
@@ -236,6 +238,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "unwatch") or
             _cmd_eq_ci(tp, tl, "v.fetch") or
             _cmd_eq_ci(tp, tl, "waitaof") or
+            _cmd_eq_ci(tp, tl, "xackdel") or
             _cmd_eq_ci(tp, tl, "zincrby") or
             _cmd_eq_ci(tp, tl, "zmscore") or
             _cmd_eq_ci(tp, tl, "zpopmax") or
@@ -464,7 +467,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
     """Redis's arity for this command, or 0 when Pion does not know one.
 
-    263 of 351 commands have an entry; the rest are Pion-specific
+    266 of 354 commands have an entry; the rest are Pion-specific
     (FT.*, KV.PREFIX.*, AI.*, ATTEND.*) and are deliberately NOT validated.
 
     Encoding is Redis's own, kept verbatim so it can be checked against
@@ -619,8 +622,10 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "vlinks"): return -3
         if _cmd_eq_ci(tp, tl, "vrange"): return -4
         if _cmd_eq_ci(tp, tl, "xclaim"): return -6
+        if _cmd_eq_ci(tp, tl, "xdelex"): return -5
         if _cmd_eq_ci(tp, tl, "xgroup"): return -2
         if _cmd_eq_ci(tp, tl, "xrange"): return -4
+        if _cmd_eq_ci(tp, tl, "xsetid"): return -3
         if _cmd_eq_ci(tp, tl, "zcount"): return 4
         if _cmd_eq_ci(tp, tl, "zinter"): return -3
         if _cmd_eq_ci(tp, tl, "zrange"): return -4
@@ -656,6 +661,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "sort_ro"): return -2
         if _cmd_eq_ci(tp, tl, "unwatch"): return 1
         if _cmd_eq_ci(tp, tl, "waitaof"): return 4
+        if _cmd_eq_ci(tp, tl, "xackdel"): return -6
         if _cmd_eq_ci(tp, tl, "zincrby"): return 4
         if _cmd_eq_ci(tp, tl, "zmscore"): return -3
         if _cmd_eq_ci(tp, tl, "zpopmax"): return -2
@@ -761,7 +767,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
 def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command mutates the keyspace, per real Redis's `write` flag.
 
-    107 of 351 commands are writes. Used by gh #260 to refuse mutations
+    110 of 354 commands are writes. Used by gh #260 to refuse mutations
     once the WAL can no longer persist them, instead of acknowledging writes
     that will not survive a restart.
 
@@ -844,7 +850,9 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "setbit") or
             _cmd_eq_ci(tp, tl, "swapdb") or
             _cmd_eq_ci(tp, tl, "unlink") or
-            _cmd_eq_ci(tp, tl, "xclaim")
+            _cmd_eq_ci(tp, tl, "xclaim") or
+            _cmd_eq_ci(tp, tl, "xdelex") or
+            _cmd_eq_ci(tp, tl, "xsetid")
         )
     elif tl == 7:
         return (
@@ -858,6 +866,7 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "pfdebug") or
             _cmd_eq_ci(tp, tl, "pfmerge") or
             _cmd_eq_ci(tp, tl, "restore") or
+            _cmd_eq_ci(tp, tl, "xackdel") or
             _cmd_eq_ci(tp, tl, "zincrby") or
             _cmd_eq_ci(tp, tl, "zpopmax") or
             _cmd_eq_ci(tp, tl, "zpopmin")
@@ -1025,7 +1034,7 @@ def command_is_noscript(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
 def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command is refused while memory is over --maxmemory (gh #261).
 
-    82 of 351 commands: real Redis's `denyoom` flag plus Pion's
+    83 of 354 commands: real Redis's `denyoom` flag plus Pion's
     substrate ingest commands (PION_DENYOOM in tools/gen_command_table.py).
     Reads, DEL and the POP family stay served under the limit, as in Redis.
     """
@@ -1072,7 +1081,8 @@ def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "msetnx") or
             _cmd_eq_ci(tp, tl, "psetex") or
             _cmd_eq_ci(tp, tl, "rpushx") or
-            _cmd_eq_ci(tp, tl, "setbit")
+            _cmd_eq_ci(tp, tl, "setbit") or
+            _cmd_eq_ci(tp, tl, "xsetid")
         )
     elif tl == 7:
         return (
@@ -1244,7 +1254,7 @@ def command_touches_keyspace(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
     Redis's `readonly`, `write` or `may_replicate` flag ("Replica can't interact
     with the keyspace").
     `sp`/`sl` is the first argument, for the container commands Redis flags per
-    subcommand; `container|*` means every subcommand but HELP. 211 entries
+    subcommand; `container|*` means every subcommand but HELP. 214 entries
     (tools/redis_keyspace.txt).
     """
     if tl == 3:
@@ -1370,7 +1380,9 @@ def command_touches_keyspace(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
             _cmd_eq_ci(tp, tl, "vlinks") or
             _cmd_eq_ci(tp, tl, "vrange") or
             _cmd_eq_ci(tp, tl, "xclaim") or
+            _cmd_eq_ci(tp, tl, "xdelex") or
             _cmd_eq_ci(tp, tl, "xrange") or
+            _cmd_eq_ci(tp, tl, "xsetid") or
             _cmd_eq_ci(tp, tl, "zcount") or
             _cmd_eq_ci(tp, tl, "zinter") or
             _cmd_eq_ci(tp, tl, "zrange") or
@@ -1398,6 +1410,7 @@ def command_touches_keyspace(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
             _cmd_eq_ci(tp, tl, "pfmerge") or
             _cmd_eq_ci(tp, tl, "restore") or
             _cmd_eq_ci(tp, tl, "sort_ro") or
+            _cmd_eq_ci(tp, tl, "xackdel") or
             _cmd_eq_ci(tp, tl, "zincrby") or
             _cmd_eq_ci(tp, tl, "zmscore") or
             _cmd_eq_ci(tp, tl, "zpopmax") or

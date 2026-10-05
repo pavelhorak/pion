@@ -237,12 +237,13 @@ def main():
                                  "length or a token-skip regression (gh #214)"))
                 print(f"  FAIL  pipelined command swallowed after {name}")
 
-        info = array_reply("XINFO STREAM", c("XINFO", "STREAM", "st:shape"), 6)
+        info = array_reply("XINFO STREAM", c("XINFO", "STREAM", "st:shape"), 16)
+        # Redis 7's field order (#40): length, last-generated-id, max-deleted-entry-id, ...
         check("XINFO field names intact",
-              [info[0], info[2], info[4]] == [b"length", b"last-generated-id", b"entries"],
+              [info[0], info[2], info[4]] == [b"length", b"last-generated-id", b"max-deleted-entry-id"],
               repr(info))
         check("XINFO values correct",
-              [info[1], info[3], info[5]] == [b":2", b"2-1", b":2"], repr(info))
+              [info[1], info[3], info[5]] == [b":2", b"2-1", b"0-0"], repr(info))
         no_desync("XINFO STREAM", "XINFO", "STREAM", "st:shape")
 
         acl_list = array_reply("ACL LIST", c("ACL", "LIST"), 1)

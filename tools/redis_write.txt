@@ -86,11 +86,14 @@ vadd
 vrem
 vsetattr
 xack
+xackdel
 xadd
 xautoclaim
 xclaim
 xdel
+xdelex
 xreadgroup
+xsetid
 xtrim
 zadd
 zdiffstore

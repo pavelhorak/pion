@@ -23,6 +23,7 @@ from src.common.hash_map import StripedHashMap
 from src.common.value import GenericValue, ValueType
 from src.network.resp3 import RESP3Token
 from src.network.response_writer import ResponseWriter
+from src.common.stream_data import StreamData, sid_lt
 
 
 struct BlockedClient(Copyable, Movable):
@@ -35,6 +36,7 @@ struct BlockedClient(Copyable, Movable):
     var zset: Bool                 # waits for a sorted set (BZ*), else a list
     var nil_bulk: Bool             # times out with a nil bulk (BRPOPLPUSH, BLMOVE), else a nil array
     var unblock: UInt8             # CLIENT UNBLOCK (#47): UNBLOCK_TIMEOUT or UNBLOCK_ERROR, else 0
+    var group: List[UInt8]         # XREADGROUP (#40): its consumer group; empty otherwise
 
     def __init__(out self, fd: Int32, deadline_ms: Int64, zset: Bool, nil_bulk: Bool):
         self.fd = fd
@@ -45,6 +47,7 @@ struct BlockedClient(Copyable, Movable):
         self.zset = zset
         self.nil_bulk = nil_bulk
         self.unblock = 0
+        self.group = List[UInt8]()
 
 
 # CLIENT UNBLOCK's reasons (#47), kept on a parked client until the event
@@ -132,6 +135,8 @@ def blocked_client_ready(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], 
     """Does a key the client waits on hold what it pops? (Emptied containers
     are removed, so a key of the right type has an element.) A key of another
     type does not wake it: in Redis the client stays blocked."""
+    if len(c.group) > 0:
+        return xreadgroup_ready(keyspace, c.keys, c.key_ends, c.group)
     var want = ValueType.ZSET if c.zset else ValueType.LIST
     var start = 0
     var base = c.keys.unsafe_ptr()
@@ -142,4 +147,31 @@ def blocked_client_ready(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], 
         if not v.is_none() and v.type.value == want:
             return True
         start = end
+    return False
+
+
+def xreadgroup_ready(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                     keys: List[UInt8], key_ends: List[Int], group: List[UInt8]) -> Bool:
+    """#40: should a parked XREADGROUP run again? When a stream has an entry
+    past the group's last-delivered id, or a stream or the group is gone (the
+    run then answers NOGROUP, as Redis's does)."""
+    var start = 0
+    var base = keys.unsafe_ptr()
+    var gp = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(group.unsafe_ptr()))
+    for k in range(len(key_ends)):
+        var end = key_ends[k]
+        var v = keyspace[].get(GenericValue.borrow(
+            Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(base) + start), end - start))
+        start = end
+        if v.is_none() or v.type.value != ValueType.STREAM:
+            return True
+        var sd = v.as_hash().unsafe_bitcast[StreamData]()
+        var g = sd[].group_index(gp, len(group))
+        if g < 0:
+            return True
+        var ll = sd[].last_live()
+        if ll >= 0:
+            var e = sd[].entries[unsafe_offset=ll]
+            if sid_lt(sd[].groups[g].last_ms, sd[].groups[g].last_seq, e.id_ms, e.id_seq):
+                return True
     return False

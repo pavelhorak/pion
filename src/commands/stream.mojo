@@ -18,7 +18,8 @@ from src.network.server import TCPServer
 # gh #174: StreamEntry/StreamData live in src/common so src/io/wal.mojo can
 # replay XADD records without the wal -> stream -> fast_path -> wal cycle.
 # Re-exported here so existing importers of this module are unaffected.
-from src.common.stream_data import StreamEntry, StreamData
+from src.common.stream_data import (StreamEntry, StreamData, encode_meta_rec, encode_pel_del_rec, sid_lt,
+                                    DEL_NONE, DEL_KEEPREF, DEL_DELREF, DEL_ACKED)
 from src.io.wal import WAL
 
 # How many XREAD BLOCK clients one worker parks at once. Past it, XREAD BLOCK
@@ -234,6 +235,7 @@ struct AddTrimArgs(Copyable, Movable, ImplicitlyCopyable):
     var limit: Int            # entries one call may remove; 0 = no limit
     var no_mkstream: Bool
     var id_idx: Int           # XADD: the token holding the id (or "*")
+    var del_strategy: Int     # DEL_KEEPREF (the default), DEL_DELREF or DEL_ACKED
 
 
 def parse_add_trim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, end: Int,
@@ -245,9 +247,9 @@ def parse_add_trim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, 
     MINID was parsed and then ignored (no trim, success reply), `=` was not
     understood, LIMIT not at all, `MAXLEN 0` kept everything, and the
     keywords were matched by their first letters. KEEPREF/DELREF/ACKED choose
-    what happens to consumer-group references; with no consumer groups they
-    are all the same, and accepted."""
-    var a = AddTrimArgs(False, TRIM_NONE, -1, 0, 0, False, -1, False, end)
+    what a trim does to consumer-group references (#40), at most one of them,
+    as Redis: a second one is read as the id (XADD) or refused (XTRIM)."""
+    var a = AddTrimArgs(False, TRIM_NONE, -1, 0, 0, False, -1, False, end, DEL_NONE)
     var limit_given = False
     var j = start
     while j < end:
@@ -302,9 +304,12 @@ def parse_add_trim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, 
             continue
         elif xadd and arg_eq(t.ptr, t.length, "nomkstream"):
             a.no_mkstream = True
-        elif arg_eq(t.ptr, t.length, "keepref") or arg_eq(t.ptr, t.length, "delref") \
-                or arg_eq(t.ptr, t.length, "acked"):
-            pass
+        elif a.del_strategy == DEL_NONE and arg_eq(t.ptr, t.length, "keepref"):
+            a.del_strategy = DEL_KEEPREF
+        elif a.del_strategy == DEL_NONE and arg_eq(t.ptr, t.length, "delref"):
+            a.del_strategy = DEL_DELREF
+        elif a.del_strategy == DEL_NONE and arg_eq(t.ptr, t.length, "acked"):
+            a.del_strategy = DEL_ACKED
         elif xadd:
             var id = parse_id(t.ptr, t.length, 0, True, True)
             if not id.ok:
@@ -329,8 +334,25 @@ def parse_add_trim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, 
     else:
         # ~ without LIMIT removes at most 100 x stream-node-max-entries a call.
         a.limit = 10000 if a.approx else 0
+    if a.del_strategy == DEL_NONE:
+        a.del_strategy = DEL_KEEPREF
     a.ok = True
     return a
+
+
+def drop_group_refs(sd: Pointer[StreamData, MutUntrackedOrigin], ms: UInt64, seq: UInt64,
+                    wal: Pointer[WAL, MutUntrackedOrigin], key_ptr: Pointer[UInt8, MutUntrackedOrigin],
+                    key_len: Int):
+    """DELREF: remove the entry from every group's pending list (Redis's
+    streamCleanupEntryCGroupRefs), logging each removal (record 44)."""
+    for g in range(len(sd[].groups)):
+        var pk = sd[].groups[g].pel_find(ms, seq)
+        if pk < 0:
+            continue
+        sd[].groups[g].remove_nack_at(pk)
+        sd[].groups[g].pel_tidy()
+        if is_not_null(wal):
+            wal[].append_list(44, key_ptr, key_len, encode_pel_del_rec(sd[].groups[g].name, ms, seq))
 
 
 def stream_trim(sd: Pointer[StreamData, MutUntrackedOrigin], a: AddTrimArgs,
@@ -339,7 +361,11 @@ def stream_trim(sd: Pointer[StreamData, MutUntrackedOrigin], a: AddTrimArgs,
     """Remove the oldest entries past MAXLEN, or older than MINID, at most
     `a.limit` of them (0 = no limit), logging each (record 27). With `~`
     Redis removes whole internal nodes only, so it may keep more than asked;
-    Pion has no nodes and trims exactly, which is within the `~` contract."""
+    Pion has no nodes and trims exactly, which is within the `~` contract.
+
+    The delete strategy (#40), as Redis's streamTrim: ACKED skips an entry a
+    group still references and goes on to the next; DELREF removes the
+    entry from every group's pending list too; KEEPREF leaves those."""
     var removed = 0
     for ei in range(sd[].count):
         if a.limit > 0 and removed >= a.limit:
@@ -353,6 +379,10 @@ def stream_trim(sd: Pointer[StreamData, MutUntrackedOrigin], a: AddTrimArgs,
                 break
         elif not (e_ms < a.minid_ms or (e_ms == a.minid_ms and e_seq < a.minid_seq)):
             break
+        if a.del_strategy == DEL_ACKED and sd[].entry_referenced(e_ms, e_seq):
+            continue
+        if a.del_strategy == DEL_DELREF:
+            drop_group_refs(sd, e_ms, e_seq, wal, key_ptr, key_len)
         sd[].kill(ei)
         removed += 1
         if is_not_null(wal):
@@ -364,12 +394,29 @@ def stream_trim(sd: Pointer[StreamData, MutUntrackedOrigin], a: AddTrimArgs,
 
 @always_inline
 def format_stream_id(buf: Pointer[UInt8, MutUntrackedOrigin], ms: UInt64, seq: UInt64) -> Int:
-    """Write 'ms-seq' to buf, return bytes written."""
-    var off = format_int_to_buf(buf, 0, Int64(ms))
+    """Write 'ms-seq' to buf (at least 41 bytes), return bytes written. Both
+    halves are unsigned 64-bit (#40: an id past 2^63 printed negative)."""
+    var off = _format_u64(buf, 0, ms)
     buf[unsafe_offset=off] = 45  # '-'
     off += 1
-    off += format_int_to_buf(buf.unsafe_offset(off), 0, Int64(seq))
+    off = _format_u64(buf, off, seq)
     return off
+
+
+@always_inline
+def _format_u64(buf: Pointer[UInt8, MutUntrackedOrigin], at: Int, v: UInt64) -> Int:
+    if v <= UInt64(9223372036854775807):
+        return format_int_to_buf(buf, at, Int64(v))
+    var tmp = stack_allocation[24, UInt8]()
+    var n = 0
+    var x = v
+    while x > 0:
+        tmp[n] = UInt8(48 + Int(x % 10))
+        x //= 10
+        n += 1
+    for k in range(n):
+        buf[unsafe_offset=at + k] = tmp[n - 1 - k]
+    return at + n
 
 
 # Outcomes of a stream-slot resolve (gh #232). A null return needs a reason:
@@ -465,7 +512,7 @@ def write_entry_to_response(e: StreamEntry, mut writer: ResponseWriter):
     # Array of 2 elements: [id, fields_array]
     writer.append_to_response("*2\r\n".unsafe_ptr(), 4)
     # ID
-    var id_buf = alloc[UInt8](40)
+    var id_buf = alloc[UInt8](48)      # "<u64>-<u64>" is up to 41 bytes
     var id_len = format_stream_id(id_buf, e.id_ms, e.id_seq)
     writer.append_bulk_string_response(id_buf, id_len)
     id_buf.unsafe_free()
@@ -607,10 +654,11 @@ def handle_xadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     if at.strategy != TRIM_NONE:
         _ = stream_trim(sd, at, wal, key_ptr, key_len)
 
-    # Return ID. gh #202: a 40-byte scratch buffer per XADD does not need a
+    # Return ID. gh #202: a 48-byte scratch buffer per XADD does not need a
     # tcmalloc round trip — the reply is copied into the response buffer by
-    # append_bulk_string_response before this frame goes away.
-    var id_buf = stack_allocation[40, UInt8]()
+    # append_bulk_string_response before this frame goes away. (#40: an id is
+    # up to 41 bytes, "<u64>-<u64>"; this was 40.)
+    var id_buf = stack_allocation[48, UInt8]()
     var id_len = format_stream_id(id_buf, id_ms, id_seq)
     writer.append_bulk_string_response(id_buf, id_len)
     return num_tokens - i - 1
@@ -931,6 +979,27 @@ def handle_xread(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     return False
 
 
+def stream_delete_entry(sd: Pointer[StreamData, MutUntrackedOrigin], ms: UInt64, seq: UInt64,
+                        wal: Pointer[WAL, MutUntrackedOrigin], key_ptr: Pointer[UInt8, MutUntrackedOrigin],
+                        key_len: Int) -> Bool:
+    """Delete the live entry with this id, as XDEL / XDELEX / XACKDEL do:
+    logged (record 27) and moving max-deleted-entry-id. False when there is
+    no such entry. The caller compacts and logs the metadata (record 45)."""
+    var ei = sd[].find_live(ms, seq)
+    if ei < 0:
+        return False
+    sd[].kill(ei)
+    # gh #174: log only IDs that actually matched a live entry, so replay
+    # tombstones exactly what the live path did.
+    if is_not_null(wal):
+        _ = wal[].append_u64x2_val(27, key_ptr, key_len, ms, seq, null_ptr[UInt8, MutUntrackedOrigin](), 0)
+    # #40: the largest id deleted by id (max-deleted-entry-id)
+    if sid_lt(sd[].max_del_ms, sd[].max_del_seq, ms, seq):
+        sd[].max_del_ms = ms
+        sd[].max_del_seq = seq
+    return True
+
+
 @always_inline
 def handle_xdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                 wal: Pointer[WAL, MutUntrackedOrigin] = null_ptr[WAL, MutUntrackedOrigin]()) raises -> Int:
@@ -958,19 +1027,13 @@ def handle_xdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     var deleted_count: Int64 = 0
     for j in range(i + 2, num_tokens):
         var r = parse_id(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, 0, True, False)
-        var del_ms = r.ms; var del_seq = r.seq
-        for ei in range(sd[].count):
-            if not sd[].entries[unsafe_offset=ei].deleted and sd[].entries[unsafe_offset=ei].id_ms == del_ms and sd[].entries[unsafe_offset=ei].id_seq == del_seq:
-                sd[].kill(ei)
-                deleted_count += 1
-                # gh #174: log only IDs that actually matched a live entry, so
-                # replay tombstones exactly what the live path did.
-                if is_not_null(wal):
-                    _ = wal[].append_u64x2_val(
-                        27, key_ptr, key_len, del_ms, del_seq,
-                        null_ptr[UInt8, MutUntrackedOrigin](), 0)
-                break
+        if stream_delete_entry(sd, r.ms, r.seq, wal, key_ptr, key_len):
+            deleted_count += 1
     sd[].compact()
+    # #40: a trim removes entries too, through record 27, but only XDEL moves
+    # max-deleted-entry-id; the stream's metadata record carries it
+    if deleted_count > 0 and is_not_null(wal):
+        wal[].append_list(45, key_ptr, key_len, encode_meta_rec(sd))
 
     writer.append_int_response(deleted_count)
     return num_tokens - i - 1
@@ -998,108 +1061,4 @@ def handle_xtrim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     var removed = stream_trim(sd, at, null_ptr[WAL, MutUntrackedOrigin](),
                               tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
     writer.append_int_response(Int64(removed))
-    return num_tokens - i - 1
-
-
-# ── Stub handlers (consumer groups) ──
-
-@always_inline
-def handle_xack(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """XACK is part of consumer-group surface (gh #81) — not implemented."""
-    writer.append_error_response("ERR consumer groups not supported")
-    return num_tokens - i - 1
-
-
-@always_inline
-def handle_xreadgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """XREADGROUP — consumer-group surface (gh #81), not implemented."""
-    writer.append_error_response("ERR consumer groups not supported")
-    return num_tokens - i - 1
-
-
-@always_inline
-def handle_xinfo(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """XINFO STREAM key → basic info. GROUPS/CONSUMERS error out (gh #81)."""
-    if i + 2 < num_tokens:
-        var sub = tokens[unsafe_offset=i + 1].ptr; var sub_len = tokens[unsafe_offset=i + 1].length
-        # XINFO GROUPS | XINFO CONSUMERS — consumer-group surface, not implemented.
-        # Fake `*0` would lie to clients that the stream has no groups.
-        if sub_len == 6 and (sub[unsafe_offset=0] | 0x20) == 103:
-            writer.append_error_response("ERR consumer groups not supported")
-            return num_tokens - i - 1
-        if sub_len == 9 and (sub[unsafe_offset=0] | 0x20) == 99:
-            writer.append_error_response("ERR consumer groups not supported")
-            return num_tokens - i - 1
-        if sub_len == 6 and (sub[unsafe_offset=0] | 0x20) == 115:
-            # XINFO STREAM key
-            var key_val = GenericValue.borrow(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-            var sd = get_stream(keyspace, key_val)
-            if is_not_null(sd):
-                # Return basic info as flat array.
-                #
-                # Every length here used to be hand-typed and two of the three
-                # were wrong, so EVERY `XINFO STREAM` reply Pion has ever sent
-                # was malformed: the header claimed 18 bytes for a 16-byte
-                # literal (injecting two NULs before the length integer), and
-                # the second field declared `$15` for the 17-byte
-                # `last-generated-id` while writing 21 of its 24 bytes — so the
-                # name arrived truncated with no CRLF. A lenient client papered
-                # over it; a strict parser desyncs. Same failure this codebase
-                # already ate in pubsub.mojo (five miscounted literals): never
-                # hand-type a RESP length. Bind the literal to a name and let
-                # `byte_length()` do the counting.
-                # A map under RESP3, as Redis sends XINFO STREAM (#30).
-                writer.append_map_header(3)
-                var hdr = "$6\r\nlength\r\n"
-                writer.append_to_response(hdr.unsafe_ptr(), hdr.byte_length())
-                writer.append_int_response(Int64(sd[].alive))
-                var lgi = "$17\r\nlast-generated-id\r\n"
-                writer.append_to_response(lgi.unsafe_ptr(), lgi.byte_length())
-                var id_buf = stack_allocation[40, UInt8]()
-                var id_len = format_stream_id(id_buf, sd[].last_id_ms, sd[].last_id_seq)
-                writer.append_bulk_string_response(id_buf, id_len)
-                var ent = "$7\r\nentries\r\n"
-                writer.append_to_response(ent.unsafe_ptr(), ent.byte_length())
-                writer.append_int_response(Int64(sd[].count))
-            elif stream_key_is_wrongtype(keyspace, key_val):   # gh #232
-                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            else:
-                writer.append_error_response("ERR no such key")
-            return num_tokens - i - 1
-    writer.append_empty_array_response()
-    return num_tokens - i - 1
-
-
-@always_inline
-def handle_xgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """XGROUP — consumer-group surface (gh #81), not implemented."""
-    writer.append_error_response("ERR consumer groups not supported")
-    return num_tokens - i - 1
-
-
-@always_inline
-def handle_xclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """XCLAIM — consumer-group surface (gh #81), not implemented."""
-    writer.append_error_response("ERR consumer groups not supported")
-    return num_tokens - i - 1
-
-
-@always_inline
-def handle_xpending(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """XPENDING — consumer-group surface (gh #81), not implemented."""
-    writer.append_error_response("ERR consumer groups not supported")
-    return num_tokens - i - 1
-
-
-@always_inline
-def handle_xrevrange_stub(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """Fallback stub."""
-    writer.append_empty_array_response()
-    return num_tokens - i - 1
-
-
-@always_inline
-def handle_xautoclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """XAUTOCLAIM — consumer-group surface (gh #81), not implemented."""
-    writer.append_error_response("ERR consumer groups not supported")
     return num_tokens - i - 1

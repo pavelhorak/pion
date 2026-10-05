@@ -51,7 +51,10 @@ from src.common.hll import hll_add, hll_count, hll_merge, HLL_REGISTERS
 from src.commands.transaction import TransactionState, QueuedCommand, handle_multi, handle_exec_start, handle_discard, handle_watch, handle_unwatch, tx_queue_has_denyoom
 from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, command_is_noscript, command_hidden_from_monitor, command_touches_keyspace, command_monitor_first, PION_COMMAND_COUNT
 from src.commands.tenant import TenantTable, tenant_keyspec, apply_tenant_rewrite, TENANT_SCRATCH_CAP, MAX_TENANT_NAME
-from src.commands.stream import handle_xadd, handle_xlen, handle_xack, handle_xdel, handle_xread, handle_xtrim, handle_xinfo, handle_xrange, handle_xgroup, handle_xclaim, handle_xpending, handle_xrevrange, handle_xautoclaim, handle_xreadgroup, BlockedReaderRegistry, write_xread_reply
+from src.commands.stream import handle_xadd, handle_xlen, handle_xdel, handle_xread, handle_xtrim, handle_xrange, handle_xrevrange, BlockedReaderRegistry, write_xread_reply
+from src.commands.stream_groups import (handle_xgroup, handle_xreadgroup, handle_xack, handle_xpending, handle_xclaim,
+                                        handle_xautoclaim, handle_xsetid, handle_xinfo, handle_xdelex, handle_xackdel,
+                                        XRG_BLOCK)
 from src.commands.pubsub import PubSubRegistry, handle_pubsub, handle_publish_kind, handle_subscribe_kind, handle_unsubscribe_kind, pubsub_drain, KIND_CHANNEL, KIND_PATTERN, KIND_SHARD
 from src.commands.ttl import handle_expire, handle_pexpire, handle_expireat, handle_pexpireat, handle_ttl, handle_pttl, handle_persist
 # Command modules (Phase 2 extraction)
@@ -1026,7 +1029,7 @@ struct SlowPathHandler:
                       cmd_idx: Int, num_cmds: Int, cmd_byte_ends: UnsafePointer[Int, MutUntrackedOrigin],
                       on_primary: Bool, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
                       key_first: Int, key_end: Int, deadline_ms: Int64, zset: Bool,
-                      nil_bulk: Bool = False) -> Bool:
+                      nil_bulk: Bool = False, group_at: Int = -1) -> Bool:
         """#38: park a blocking command that found nothing: register it with a
         copy of its frame and its keys, and stop the batch at its end (the
         caller does that when this returns True). False where it cannot park
@@ -1035,8 +1038,12 @@ struct SlowPathHandler:
             return False
         var start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
         var end = cmd_byte_ends[cmd_idx]
-        self.blocked_clients.add(new_blocked_client(fd, deadline_ms, zset, nil_bulk, buffer + start, end - start,
-                                                    tokens, key_first, key_end))
+        var bc = new_blocked_client(fd, deadline_ms, zset, nil_bulk, buffer + start, end - start,
+                                    tokens, key_first, key_end)
+        if group_at >= 0:              # #40: XREADGROUP waits for its group
+            for b in range(tokens[group_at].length):
+                bc.group.append(tokens[group_at].ptr[b])
+        self.blocked_clients.add(bc^)
         self.parked_waits.park_fd(fd)
         return True
 
@@ -4156,8 +4163,7 @@ struct SlowPathHandler:
                         if self.blocked_readers.count_ptr[0] > 0 and _xadd_key_len > 0:
                             self.blocked_readers.mark_ready(_xadd_key_ptr, _xadd_key_len)
                     elif cmd_eq(tp, tl, "xack"):
-                        # XACK (x=120,a=97,c=99,k=107)
-                        _ = handle_xack(tokens, i, cmd_end_tok, writer)
+                        handle_xack(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xdel"):
                         _ = handle_xdel(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
@@ -4180,31 +4186,46 @@ struct SlowPathHandler:
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xinfo"):
-                        _ = handle_xinfo(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        handle_xinfo(tokens, i, cmd_end_tok, writer, self.keyspace)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xrange"):
                         _ = handle_xrange(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xgroup"):
-                        _ = handle_xgroup(tokens, i, cmd_end_tok, writer)
+                        handle_xgroup(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xclaim"):
-                        _ = handle_xclaim(tokens, i, cmd_end_tok, writer)
+                        handle_xclaim(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xpending"):
-                        _ = handle_xpending(tokens, i, cmd_end_tok, writer)
+                        handle_xpending(tokens, i, cmd_end_tok, writer, self.keyspace)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xrevrange"):
                         _ = handle_xrevrange(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xautoclaim"):
-                        # XAUTOCLAIM (x,a,...)
-                        _ = handle_xautoclaim(tokens, i, cmd_end_tok, writer)
+                        handle_xautoclaim(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xreadgroup"):
-                        # XREADGROUP (x,r,...) — was silently routing to handle_xautoclaim (gh #81)
-                        _ = handle_xreadgroup(tokens, i, cmd_end_tok, writer)
+                        # #40: a BLOCK that found nothing parks the connection as
+                        # BLPOP does (#38): the engine runs it again once a stream
+                        # has an entry for the group, the stream or group is gone,
+                        # or the timeout passes (a nil array, as Redis).
+                        var _xrg_dl = Int64(0)
+                        var _xrg_k = -1
+                        var _xrg_n = 0
+                        var _xrg_g = -1
+                        var _xrg_can = self.can_park_wait and on_primary and cmd_idx < num_cmds and fd >= 0
+                        var _xrg_r = handle_xreadgroup(tokens, i, cmd_end_tok, writer, self.keyspace,
+                                                       self.dispatcher.wal, _xrg_can, _xrg_dl, _xrg_k, _xrg_n, _xrg_g)
                         i = cmd_end_tok - 1
+                        if _xrg_r == XRG_BLOCK:
+                            if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                  tokens, _xrg_k, _xrg_k + _xrg_n, _xrg_dl, False, False, _xrg_g):
+                                primary_consumed = cmd_byte_ends[cmd_idx]
+                                i = num_tokens
+                            else:
+                                writer.append_null_array_response()   # cannot wait: the timeout's nil
                     # ── Pub/Sub Commands (src/commands/pubsub.mojo) ──
                     elif cmd_eq(tp, tl, "pubsub"):
                         _ = handle_pubsub(tokens, i, cmd_end_tok, writer, self.pubsub)
@@ -4710,6 +4731,15 @@ struct SlowPathHandler:
                             elif is_not_null(self.local_affinity) and cmd_eq(tp, tl, "readwrite"):
                                 self.local_affinity[Int(fd)] = 0
                             writer.append_ok_response()
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "xsetid"):
+                        handle_xsetid(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "xdelex"):
+                        handle_xdelex(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "xackdel"):
+                        handle_xackdel(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)  # #40
                         i = cmd_end_tok - 1
                     else:
                         writer.append_error_response("ERR unknown command '" + token.value() + "'")

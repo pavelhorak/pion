@@ -32,7 +32,7 @@ from src.common.hll import HLL_REGISTERS
 from src.io.blob_store import BlobStore
 from src.io.wal import wal_apply_aggregate, wal_apply_ttl, wal_is_aggregate, gv_bytes
 from src.common.vector_set import VectorSet
-from src.common.stream_data import StreamData
+from src.common.stream_data import StreamData, encode_meta_rec, encode_group_rec, encode_consumer_rec, encode_nack_rec
 
 
 comptime SNAP_MAGIC   = UInt64(0x31504E4150534E50)
@@ -145,6 +145,13 @@ def _sink_record(mut sink: RecordSink, ehdr: Pointer[UInt8, MutUntrackedOrigin],
     _snap_write_u32(ehdr, 0, UInt32(vl))
     sink.write(ehdr, 4)
     sink.write(vp, vl)
+
+
+def _sink_list(mut sink: RecordSink, ehdr: Pointer[UInt8, MutUntrackedOrigin], cmd_id: UInt8,
+               kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int, payload: List[UInt8]):
+    """A record whose value is `payload` (#40's stream group records)."""
+    _sink_record(sink, ehdr, cmd_id, kp, kl,
+                 Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(payload.unsafe_ptr())), len(payload))
 
 
 def _sink_field_record(mut sink: RecordSink, ehdr: Pointer[UInt8, MutUntrackedOrigin], cmd_id: UInt8,
@@ -308,6 +315,22 @@ def write_key_records(mut sink: RecordSink, kp: Pointer[UInt8, MutUntrackedOrigi
             sink.write(scored, 8)
             if e.data_len > 0:
                 sink.write(e.data, e.data_len)
+        # #40: then the stream's metadata (record 45, which also keeps an
+        # empty stream: it had no record before and vanished on reload) and
+        # its consumer groups, consumers and pending entries (38, 41, 43).
+        _sink_list(sink, ehdr, 45, kp, kl, encode_meta_rec(sd))
+        for g in range(len(sd[].groups)):
+            ref grp = sd[].groups[g]
+            _sink_list(sink, ehdr, 38, kp, kl, encode_group_rec(grp))
+            for c in range(grp.ncons()):
+                _sink_list(sink, ehdr, 41, kp, kl, encode_consumer_rec(grp.name, grp.consumers[grp.by_name[c]]))
+            for k in range(len(grp.pel)):
+                var nk = grp.pel[k]
+                var oi = grp.consumer_by_id(nk.consumer)
+                if oi < 0:
+                    continue
+                _sink_list(sink, ehdr, 43, kp, kl, encode_nack_rec(grp.name, grp.consumers[oi].name, nk.ms, nk.seq,
+                                                                   nk.delivery_time, nk.delivery_count))
 
     elif t == ValueType.VSET:
         # gh #378: live elements in slot order (VSIM breaks score
@@ -375,7 +398,16 @@ struct SnapshotEngine(Movable):
         if t == ValueType.STREAM:
             # gh #174: one record per live entry — must match what the writer
             # emits below, or the header's kv_count lies about the file.
-            return val.as_hash().unsafe_bitcast[StreamData]()[].alive
+            # #40: plus the metadata record, and per group its record, its
+            # consumers' and its (owned) pending entries'.
+            var sd = val.as_hash().unsafe_bitcast[StreamData]()
+            var n = sd[].alive + 1
+            for g in range(len(sd[].groups)):
+                n += 1 + sd[].groups[g].ncons()
+                for k in range(len(sd[].groups[g].pel)):
+                    if sd[].groups[g].consumer_by_id(sd[].groups[g].pel[k].consumer) >= 0:
+                        n += 1
+            return n
         if t == ValueType.VSET:
             # gh #378: one VADD per live element, plus one VSETATTR for each
             # that carries an attribute — the writer's predicate, exactly.

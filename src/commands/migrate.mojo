@@ -113,8 +113,8 @@ def _record_family(cmd: Int) -> Int:
         return 7                    # bitmap
     if cmd == 17:
         return 8                    # HyperLogLog
-    if cmd == 34:
-        return 9                    # stream
+    if cmd == 34 or cmd == 38 or cmd == 41 or cmd == 43 or cmd == 45:
+        return 9                    # stream: entries, metadata, groups (#40)
     if cmd == 28 or cmd == 30:
         return 10                   # vector set
     return 0
@@ -188,6 +188,26 @@ def _records_ok(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
             first_entry = False
             last_ms = ms
             last_seq = seq
+        elif cmd == 45:                               # stream metadata (#40)
+            if vl != 40:
+                return False
+            var lm = _u64(v, 0)
+            var ls = _u64(v, 8)
+            if not first_entry and (lm < last_ms or (lm == last_ms and ls < last_seq)):
+                return False                          # a last id below its own entries
+        elif cmd == 38 or cmd == 41 or cmd == 43:     # group, consumer, pending entry (#40)
+            var gl = _u32(v, 0) if vl >= 4 else -1
+            if gl < 0 or 4 + gl > vl:
+                return False
+            if cmd == 38:
+                if vl != 4 + gl + 24:
+                    return False
+            else:
+                if 8 + gl > vl:
+                    return False
+                var cl = _u32(v, 4 + gl)
+                if vl != 8 + gl + cl + (16 if cmd == 41 else 32):
+                    return False
         off += 13 + kl + vl
     return family >= 0
 

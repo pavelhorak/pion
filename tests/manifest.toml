@@ -1480,6 +1480,16 @@ server = "self"
 tier = "gate"
 timeout = 300
 
+# #40: stream consumer groups — a work queue end to end, blocking XREADGROUP,
+# a large pending list staying linear, every group surviving WAL replay /
+# SAVE / BGREWRITEAOF / DUMP / COPY and reaching a replica, and the same
+# replies as a live Redis (that part skips without redis-server)
+[[test]]
+file = "tests/test_stream_groups.py"
+server = "self"
+tier = "gate"
+timeout = 900
+
 # #40: a local buffer read through a pointer cast through Int (its origin
 # erased) must outlive the read; canaried with every shape that shipped
 [[test]]
