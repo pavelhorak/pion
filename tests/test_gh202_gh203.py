@@ -246,8 +246,9 @@ def main():
         no_desync("XINFO STREAM", "XINFO", "STREAM", "st:shape")
 
         acl_list = array_reply("ACL LIST", c("ACL", "LIST"), 1)
+        # Redis 8's line for its default user, as Pion's now reads (#47)
         check("ACL LIST entry intact",
-              acl_list[0] == b"user default on nopass ~* &* +@all", repr(acl_list))
+              acl_list[0] == b"user default on nopass sanitize-payload ~* &* +@all", repr(acl_list))
         no_desync("ACL LIST", "ACL", "LIST")
 
         acl_users = array_reply("ACL USERS", c("ACL", "USERS"), 1)

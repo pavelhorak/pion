@@ -33,14 +33,26 @@ struct BlockedClient(Copyable, Movable):
     var key_ends: List[Int]        # where each key in `keys` ends
     var deadline_ms: Int64         # 0 = no timeout
     var zset: Bool                 # waits for a sorted set (BZ*), else a list
+    var nil_bulk: Bool             # times out with a nil bulk (BRPOPLPUSH, BLMOVE), else a nil array
+    var unblock: UInt8             # CLIENT UNBLOCK (#47): UNBLOCK_TIMEOUT or UNBLOCK_ERROR, else 0
 
-    def __init__(out self, fd: Int32, deadline_ms: Int64, zset: Bool):
+    def __init__(out self, fd: Int32, deadline_ms: Int64, zset: Bool, nil_bulk: Bool):
         self.fd = fd
         self.frame = List[UInt8]()
         self.keys = List[UInt8]()
         self.key_ends = List[Int]()
         self.deadline_ms = deadline_ms
         self.zset = zset
+        self.nil_bulk = nil_bulk
+        self.unblock = 0
+
+
+# CLIENT UNBLOCK's reasons (#47), kept on a parked client until the event
+# loop answers it: TIMEOUT answers as its timeout would, ERROR with
+# UNBLOCKED_ERROR. Either way the command does not run again.
+comptime UNBLOCK_TIMEOUT = UInt8(1)
+comptime UNBLOCK_ERROR = UInt8(2)
+comptime UNBLOCKED_ERROR = "UNBLOCKED client unblocked via CLIENT UNBLOCK"
 
 
 struct BlockedClientRegistry(Movable):
@@ -100,12 +112,12 @@ def parse_block_timeout(t: RESP3Token, now_ms: Int64, mut writer: ResponseWriter
     return v
 
 
-def new_blocked_client(fd: Int32, deadline_ms: Int64, zset: Bool,
+def new_blocked_client(fd: Int32, deadline_ms: Int64, zset: Bool, nil_bulk: Bool,
                        frame: Pointer[UInt8, MutUntrackedOrigin], frame_len: Int,
                        tokens: Pointer[RESP3Token, MutUntrackedOrigin], key_first: Int, key_end: Int) -> BlockedClient:
     """A client for tokens[key_first:key_end] (already the keyspace's keys,
     tenant prefix included) and a copy of its command's frame."""
-    var c = BlockedClient(fd, deadline_ms, zset)
+    var c = BlockedClient(fd, deadline_ms, zset, nil_bulk)
     for b in range(frame_len):
         c.frame.append(frame[unsafe_offset=b])
     for k in range(key_first, key_end):

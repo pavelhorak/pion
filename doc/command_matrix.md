@@ -63,9 +63,9 @@
 | RENAMENX | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | COPY | ✅ | ✅ | ✅ | **SLOW** | ✅ | REPLACE; `DB 0` only — one database, as Redis with `databases 1` |
 | MOVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | One database, as Redis with `databases 1`: DB 0 is the source itself, any other index is out of range |
-| OBJECT ENCODING | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
+| OBJECT ENCODING | ✅ | ✅ | ✅ | **SLOW** | ✅ | By Redis 8's size rules: int / embstr (≤44 bytes) / raw; a list is listpack while its elements fit 8 KB, else quicklist; hash listpack up to 512 short entries, set intset up to 512 integers or listpack up to 128, sorted set listpack up to 128; stream. Redis also keeps an encoding a value grew into, which Pion does not track (#47) |
 | OBJECT REFCOUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| OBJECT IDLETIME | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Always 0: Pion keeps no per-key access time |
+| OBJECT IDLETIME | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Refuses: Pion keeps no per-key access time (it answered 0) (#47) |
 | OBJECT FREQ | ✅ | ✅ | ✅ | **SLOW** | ✅ | Refuses, as Redis does without an LFU maxmemory policy (Pion has none). On a missing key every OBJECT subcommand answers nil |
 | SORT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Lists, sets and sorted sets; BY/LIMIT/GET/ASC/DESC/ALPHA/STORE |
 | SORT_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | SORT without STORE |
@@ -380,26 +380,33 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | SWAPDB | ✅ | ✅ | ✅ | **SLOW** | ✅ | One database: `SWAPDB 0 0` is OK, any other index is out of range |
 | SAVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Synchronous WAL flush |
 | BGSAVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Async WAL msync |
-| BGREWRITEAOF | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns +OK (WAL persists all writes; no AOF needed) |
-| LASTSAVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the real unix timestamp of the last SAVE/BGSAVE |
+| BGREWRITEAOF | ✅ | ✅ | ✅ | **SLOW** | ✅ | Rewrites the WAL compactly (the live keyspace as fresh records), and answers Redis's `Background append only file rewriting started` (#47) |
+| LASTSAVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | The unix time of the last SAVE/BGSAVE, and the startup time before one, as Redis (#47) |
 | TIME | ✅ | ✅ | ✅ | **SLOW** | ✅ | [unix seconds, microseconds] |
 | INFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Server / Memory / Cluster / Replication / Persistence / Stats / Pion / Keyspace sections; `INFO <section> ...` returns only those. Port, RSS, uptime, per-worker key counts and the replication role are resolved from real state; `redis_version` stays `7.0.0` for client feature gating, `pion_version` carries the build. A RESP3 verbatim string under `HELLO 3`. |
 | PION.STATS | n/a | n/a | n/a | **SLOW** | n/a | Pion-only. The value receipt: a 16-pair map (RESP3 `%`, RESP2 flat array) — `kvprefix_hits/misses/tokens_served/bytes_served`, `prefill_seconds_avoided` (measured + estimated) and `prefill_seconds_avoided_measured` (client-reported `PREFILL_MS` only), `semantic_hits/misses`, `moe_hits/misses`, `vector_queries`. Per WORKER. `PION.STATS RESET` zeroes the counters. |
-| CONFIG GET | ✅ | ✅ | ✅ | **SLOW** | ✅ | Glob patterns over the parameters Pion can state truthfully (`databases`, `maxmemory`, `maxmemory-policy`, `appendonly`, `save`, `port`, `timeout`) |
-| CONFIG SET | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Only `maxmemory` is runtime-settable; every other key refuses with an explanatory `-ERR` |
+| CONFIG GET | ✅ | ✅ | ✅ | **SLOW** | ✅ | Glob patterns over the parameters Pion can state truthfully (`databases`, `maxmemory`, `maxmemory-policy`, `appendonly`, `save`, `port`, `timeout`, `enable-debug-command`, `slowlog-*`, `latency-monitor-threshold` 0, `latency-tracking` no) |
+| CONFIG SET | ✅ | ✅ | 🟡 | **SLOW** | ✅ | `maxmemory`, `slowlog-log-slower-than` and `slowlog-max-len` are runtime-settable, several pairs at once (all checked before any is set); `latency-monitor-threshold 0` and `latency-tracking no` are accepted (that is what Pion is); every other key refuses with an explanatory `-ERR` |
 | CONFIG REWRITE | ✅ | ✅ | ✅ | **SLOW** | ✅ | `ERR The server is running without a config file`, as Redis without one |
 | CONFIG RESETSTAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Resets the counters INFO reports (PION.STATS) |
-| COMMAND | ✅ | ✅ | 🟡 | **FAST** | ✅ | Bare COMMAND returns `*0` (no per-command specs) |
-| COMMAND COUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the generated command count (351) |
-| COMMAND DOCS | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns *0 (no docs stored) |
-| COMMAND INFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns *0 |
+| COMMAND | ✅ | ✅ | ✅ | **SLOW** | ✅ | Every command's entry: Redis's own (RESP2 and RESP3, key specs, ACL categories, subcommands) for a command Redis has, one built from Pion's table for a Pion-only command (#47) |
+| COMMAND COUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | The commands in Pion's generated table (not their subcommands, as Redis) |
+| COMMAND DOCS | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Each command's group; Pion carries no command documentation text |
+| COMMAND INFO | ✅ | ✅ | ✅ | **SLOW** | ✅ | As COMMAND, for the named commands (nil for an unknown one). Also COMMAND LIST [FILTERBY MODULE\|ACLCAT\|PATTERN] (commands and `command\|subcommand`), GETKEYS / GETKEYSANDFLAGS (Redis's key-spec walk, and its own procedures where the specs are incomplete) and HELP (#47) |
 | DEBUG | ✅ | ✅ | 🟡 | **SLOW** | ❌ | Refused unless `--enable-debug-command yes\|local` (default no, as Redis 7). Has HELP, SET-ACTIVE-EXPIRE and SLEEP; any other subcommand is refused (#45; it answered +OK to everything) |
-| SLOWLOG | ✅ | ✅ | 🟡 | **SLOW** | ✅ | GET→*0, LEN→:0, RESET→+OK |
-| LATENCY | ✅ | ✅ | 🟡 | **SLOW** | ✅ | LATEST/HISTORY→*0, RESET→+OK |
-| MEMORY USAGE | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns approximate byte estimate for key |
-| MEMORY DOCTOR | ✅ | ✅ | 🟡 | **SLOW** | ❌ | Returns fixed health message |
-| MODULE | ✅ | ✅ | 🟡 | **SLOW** | ❌ | LIST→*0, others→+OK |
-| ACL | ✅ | ✅ | 🟡 | **SLOW** | ✅ | WHOAMI→default, LIST→one entry, USERS→*1, CAT/LOG→*0, others→+OK |
+| SLOWLOG | ✅ | ✅ | ✅ | **SLOW** | ✅ | Records commands at or over `slowlog-log-slower-than` (10 ms), up to `slowlog-max-len`, in Redis 8's entry shape (with the argument count; 32 arguments, 128 bytes each; credentials redacted; EXEC not logged, what it ran is). Fast-path commands are O(1) and not timed, except that a threshold under 1 ms sends every command through the timed path, and an LRANGE over 4096 elements is timed. GET [count] / LEN / RESET / HELP. Per worker (#47) |
+| LATENCY | ✅ | ✅ | ✅ | **SLOW** | ✅ | Pion has no latency monitor and no per-command latency tracking, and answers as Redis does with both off: LATEST/HISTORY empty, RESET 0, GRAPH no samples, DOCTOR the monitoring-disabled report, HISTOGRAM an empty map, HELP (#47) |
+| MEMORY USAGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Pion's own layout: the slot, the key if it does not fit, the value's allocations (containers sampled, `SAMPLES n`, 0 = all); nil for a missing key (#47) |
+| MEMORY DOCTOR | ✅ | ✅ | 🟡 | **SLOW** | ❌ | A report of what Pion measures: RSS, its peak, maxmemory. Also MEMORY STATS (those, under Redis's field names), MALLOC-STATS (Redis's answer for an allocator without statistics), PURGE, HELP (#47) |
+| MODULE | ✅ | ✅ | ✅ | **SLOW** | ❌ | LIST names `search` (Pion's built-in FT.*), which clients check for; LOAD / LOADEX / UNLOAD refuse; HELP (#47) |
+| ACL | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Pion's users are the default user (with `--requirepass`) and the `--tenant` users: GETUSER, LIST, USERS, WHOAMI, CAT, DRYRUN, GENPASS and HELP describe them as Redis does (passwords as SHA-256). LOG records failed AUTHs and tenants' denied commands. SETUSER and DELUSER refuse; SAVE / LOAD give Redis's no-ACL-file error (#47) |
+| CLIENT ID / INFO / LIST | ✅ | ✅ | ✅ | **SLOW** | ✅ | IDs are never reused (it was the fd). LIST [TYPE t \| ID id ...] and INFO give Redis's fields that Pion measures: id, addr, laddr, fd, name, age, idle, flags (N P x b O r e T), db, sub/psub/ssub, multi, watch, qbuf, qbuf-free, events, user, redir, resp, lib-name, lib-ver, io-thread; memory and network counters and the last command are left out. Per worker (#47) |
+| CLIENT KILL | ✅ | ✅ | ✅ | **SLOW** | ✅ | `<ip:port>`, or ID / ADDR / LADDR / TYPE / USER / SKIPME / MAXAGE filters, as Redis; a client that kills itself gets its reply and is closed (#47) |
+| CLIENT PAUSE / UNPAUSE | ✅ | ✅ | ✅ | **SLOW** | ✅ | ALL holds every command, WRITE Redis's write and may-replicate commands (and Pion's ingest), an EXEC that writes; held clients show `b` and resume in order; expiry pauses too (#47) |
+| CLIENT REPLY | ✅ | ✅ | ✅ | **SLOW** | ✅ | ON / OFF / SKIP, as Redis (a reply already partly sent cannot be withdrawn) (#47) |
+| CLIENT UNBLOCK | ✅ | ✅ | ✅ | **SLOW** | ✅ | A client blocked in BLPOP & co., XREAD BLOCK or WAIT: TIMEOUT answers as its timeout, ERROR with `-UNBLOCKED` (#47) |
+| CLIENT SETNAME / GETNAME / SETINFO / NO-EVICT / NO-TOUCH / HELP | ✅ | ✅ | ✅ | **SLOW** | ✅ | As Redis (#30, #47) |
+| CLIENT TRACKING / CACHING / GETREDIR / TRACKINGINFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Client-side caching is not supported: TRACKING ON refuses, OFF is OK; GETREDIR -1 and TRACKINGINFO `off`, which is true (#47) |
 | RESET | ✅ | ✅ | ✅ | **SLOW** | ✅ | As Redis: leaves MONITOR, discards MULTI and WATCH, drops every subscription, back to RESP2, the default user (unauthenticated when a password is set) and no name; READONLY off. Runs at once inside MULTI, as do QUIT and WATCH (#44) |
 | MONITOR | ✅ | ✅ | ✅ | **SLOW** | ❌ | Redis's lines: shown after it runs, scripts before what they call, EXEC after its commands, `admin` commands never, AUTH/HELLO credentials redacted. A monitor may not touch the keyspace. With `--independent-workers` a monitor sees its own worker's commands. While a client monitors, every command takes the slow path (#39) |
 | LOLWUT | ✅ | ✅ | ✅ | **SLOW** | ✅ | `VERSION 5` (Schotter) and `VERSION 6` (the skyline), ported from Valkey; otherwise `Pion ver. <version>` (#39) |
@@ -410,7 +417,7 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | QUIT | ✅ | ✅ | 🟡 | **FAST** | ✅ | Returns +OK |
 | AUTH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Real auth: with `--requirepass`/`--tenant`, `AUTH <pw>` gates every command (`-NOAUTH` before, `-WRONGPASS` on a bad password); with no password set, `AUTH` replies the Redis error, not +OK |
 | HELLO | ✅ | ✅ | ✅ | **SLOW** | ✅ | `HELLO 3` switches the connection to RESP3 (map/push replies); `HELLO`/`HELLO 2` stay RESP2 |
-| SHUTDOWN | ✅ | ✅ | ✅ | **SLOW** | ✅ | `NOSAVE` supported. A plain SIGTERM drains the WAL first |
+| SHUTDOWN | ✅ | ✅ | ✅ | **SLOW** | ✅ | `NOSAVE`, `SAVE`, `NOW`, `FORCE` parsed. A plain SIGTERM drains the WAL first. `ABORT` answers `No shutdown in progress.` (it shut the server down) (#47) |
 | XGPU | ❌ | ❌ | ✅ | **SLOW** | ❌ | Pion extension: INFO-style GPU availability block |
 
 ---
@@ -419,7 +426,7 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 
 | Command | Redis 8 | Valkey 8 | Pion | Pion path | GLIDE | Notes |
 |---|:---:|:---:|:---:|:---:|:---:|---|
-| CLUSTER INFO | ✅ | ✅ | ✅ | **SLOW** | ✅ | Reports cluster_enabled:0 or :1 per --cluster flag |
+| CLUSTER INFO | ✅ | ✅ | ✅ | **SLOW** | ✅ | With `--cluster`. Outside cluster mode every CLUSTER subcommand but Pion's STATS answers `This instance has cluster support disabled`, as Redis (#47) |
 | CLUSTER NODES | ✅ | ✅ | ✅ | **SLOW** | ✅ | One-node cluster topology |
 | CLUSTER MYID | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | CLUSTER KEYSLOT | ✅ | ✅ | ✅ | **SLOW** | ✅ | CRC16 hash slot computation |
@@ -430,12 +437,12 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | CLUSTER REPLICAS | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Lists real replicas under `--cluster`; empty on a single node |
 | CLUSTER FAILOVER | ✅ | ✅ | ✅ | **SLOW** | ✅ | Promotes replica to primary; updates cluster_epoch. FORCE variant supported (skips health checks) |
 | CLUSTER SETSLOT | ✅ | ✅ | ✅ | **SLOW** | ✅ | IMPORTING/MIGRATING/STABLE/NODE subcommands for slot ownership transfer |
-| CLUSTER GETKEYSINSLOT | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns *0 (slot-based key scan not implemented) |
-| CLUSTER COUNTKEYSINSLOT | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns :0 |
+| CLUSTER GETKEYSINSLOT | ✅ | ✅ | ✅ | **SLOW** | ✅ | With `--cluster`: the keys in the slot (this worker's keyspace) |
+| CLUSTER COUNTKEYSINSLOT | ✅ | ✅ | ✅ | **SLOW** | ✅ | With `--cluster`: the keys in the slot |
 | CLUSTER STATS | ✅ | n/a | n/a | **SLOW** | n/a | Pion-only. INFO-style bulk-string telemetry: `cluster_stats_local_worker`, `cluster_stats_total_workers`, `kv_prefix_active_total` + per-worker `kv_prefix_active_worker_<id>` (cross-worker via shared directory ACQUIRE), `local_vstore_sessions`, `local_attend_*` (legacy HNSW path; ATTEND.PREFIX.* counters live C-side, scoped out). |
-| ASKING | ✅ | ✅ | ✅ | **FAST** | ✅ | One-shot redirect acknowledgement during slot migration |
-| READONLY | ✅ | ✅ | ✅ | **FAST** | ✅ | Accepted; Pion has no replica-read split, so it is a no-op that keeps cluster clients happy |
-| READWRITE | ✅ | ✅ | ✅ | **FAST** | ✅ | Inverse of READONLY; also a no-op |
+| ASKING | ✅ | ✅ | ✅ | **FAST** | ✅ | With `--cluster`; outside cluster mode refused as Redis refuses it (#47) |
+| READONLY | ✅ | ✅ | ✅ | **FAST** | ✅ | With `--cluster`, allows reads on a replica; outside cluster mode refused as Redis refuses it (#47) |
+| READWRITE | ✅ | ✅ | ✅ | **FAST** | ✅ | Inverse of READONLY; outside cluster mode refused (#47) |
 | MIGRATE | ✅ | ✅ | ✅ | **SLOW** | ✅ | As Redis: `COPY`, `REPLACE`, `AUTH`, `AUTH2`, `KEYS`, `NOKEY`, the target's own errors, each key's remaining TTL, a host name or IPv6 address. To a Pion target (Redis refuses Pion's payload). The deletions are logged (#41) |
 | PSYNC | ✅ | ✅ | 🟡 | **SLOW** | n/a | Refused, as SYNC. It answered +OK, and a Redis replica then waited for an RDB file that never came (#39) |
 | REPLCONF | ✅ | ✅ | ✅ | **SLOW** | n/a | Redis's answers for a client that is not a replica: options checked, `ACK`/`GETACK` answer nothing (#39) |
@@ -635,7 +642,7 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 *Note: "Total supported" counts all commands with ✅ or 🟡 status. Pion-native AI commands (sections 16-19) have no Redis equivalent and are counted separately.*
 
 ### Pion Fast Path (33 commands, zero-alloc dispatch)
-`GET` `SET` `MGET` `MSET` `INCR` `DECR` `HSET` `HGET` `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` `LLEN` `DEL` `EXISTS` `SADD` `SPOP` `ZADD` `ZPOPMIN` `PING` `FUNCTION LOAD` `FCALL` `GETBIT` `SETBIT` `BITCOUNT`(no-arg) `PFADD` `PFCOUNT`(single-key) `ECHO` `TYPE` `SELECT` `CLIENT`(ID/NO-EVICT/NO-TOUCH) `COMMAND` `DBSIZE` `QUIT` (32 commands total; RESET goes to the slow path, which resets the connection)
+`GET` `SET` `MGET` `MSET` `INCR` `DECR` `HSET` `HGET` `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` `LLEN` `DEL` `EXISTS` `SADD` `SPOP` `ZADD` `ZPOPMIN` `PING` `FUNCTION LOAD` `FCALL` `GETBIT` `SETBIT` `BITCOUNT`(no-arg) `PFADD` `PFCOUNT`(single-key) `ECHO` `TYPE` `SELECT` `DBSIZE` `QUIT` (30 commands total; CLIENT and COMMAND go to the slow path (#47); RESET goes to the slow path, which resets the connection)
 
 ### Pion Coverage by Category
 

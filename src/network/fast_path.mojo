@@ -24,7 +24,7 @@ from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.io.wal import WAL, gv_bytes
 from src.io.blob_store import BlobStore, BLOB_TIER_OFF
 from src.commands.transaction import TransactionState
-from src.commands.command_table import PION_COMMAND_COUNT, command_arity, command_is_write
+from src.commands.command_table import command_arity, command_is_write
 from src.network.raft import RaftNode, RaftLogEntry
 from src.common.lock_free import LockFreeRingBuffer, AITask
 # gh #85: the KV_BUS import is gone with the last of the P2 fields — see
@@ -2466,6 +2466,10 @@ struct FastPathHandler(Movable):
                             stop = size + stop
                             if stop < 0: stop = -1
                         if stop >= size: stop = size - 1
+                        # #47: a range this long can take milliseconds; the slow
+                        # path times it for SLOWLOG (gate rows ask for 100-600)
+                        if stop - start >= 4096:
+                            return consumed
                         if start > stop or start >= size:
                             writer.append_empty_array_response()
                         else:
@@ -2955,80 +2959,16 @@ struct FastPathHandler(Movable):
                     it_pos += 7
                     writer.append_ok_response()
                 elif b0_lower == 99 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 108 and (buffer[cmd_start + 2] | 0x20) == 105 and (buffer[cmd_start + 3] | 0x20) == 101 and (buffer[cmd_start + 4] | 0x20) == 110 and (buffer[cmd_start + 5] | 0x20) == 116: # CLIENT
-                    if _bulks_end(buffer, it_pos, n, num_args - 1) < 0:
-                        return consumed    # split frame: the sub-arms skip without bounds
-                    if num_args >= 2 and it_pos < n and buffer[it_pos] == 36:
-                        it_pos += 1
-                        var sub_len = 0
-                        while it_pos < n and buffer[it_pos] != 13:
-                            sub_len = sub_len * 10 + Int(buffer[it_pos] - 48)
-                            it_pos += 1
-                        it_pos += 2
-                        if sub_len < 0 or it_pos + sub_len + 2 > n:
-                            return consumed
-                        var sub_at = it_pos
-                        it_pos += sub_len + 2
-                        # #30: only ID and NO-EVICT / NO-TOUCH here, by their
-                        # whole names. GETNAME answered nil and SETNAME +OK
-                        # without storing anything; both now run in the slow
-                        # path, which keeps the name (as does SETINFO).
-                        if cmd_eq(buffer + sub_at, sub_len, "id"):
-                            writer.append_int_response(Int64(fd))
-                        elif cmd_eq(buffer + sub_at, sub_len, "no-evict") or cmd_eq(buffer + sub_at, sub_len, "no-touch"):
-                            if num_args >= 3 and it_pos < n and buffer[it_pos] == 36:
-                                it_pos += 1
-                                var al = 0
-                                while it_pos < n and buffer[it_pos] != 13:
-                                    al = al * 10 + Int(buffer[it_pos] - 48)
-                                    it_pos += 1
-                                it_pos += 2 + al + 2
-                            writer.append_ok_response()
-                        else:
-                            fast_path_ok = False
-                            break
-                    else:
-                        fast_path_ok = False
-                        break
+                    # #47: CLIENT runs in the slow path, which keeps each connection's
+                    # ID (never reused, unlike the fd this arm answered), name, flags
+                    # and modes in its ClientRegistry. NO-EVICT / NO-TOUCH answered +OK
+                    # here and set nothing.
+                    return consumed
                 elif b0_lower == 99 and cmd_len == 7 and (buffer[cmd_start + 1] | 0x20) == 111 and (buffer[cmd_start + 2] | 0x20) == 109 and (buffer[cmd_start + 3] | 0x20) == 109 and (buffer[cmd_start + 4] | 0x20) == 97 and (buffer[cmd_start + 5] | 0x20) == 110 and (buffer[cmd_start + 6] | 0x20) == 100: # COMMAND
-                    # Whole frame first: with the subcommand still in flight,
-                    # `it_pos < n` failed and the arm answered `*0` for it.
-                    if _bulks_end(buffer, it_pos, n, num_args - 1) < 0:
-                        return consumed
-                    if num_args >= 2 and it_pos < n and buffer[it_pos] == 36:
-                        # gh #220: this replied :200 to EVERY subcommand — so
-                        # `COMMAND DOCS` answered an integer where Redis answers
-                        # an array, and the count itself was invented (the real
-                        # surface is PION_COMMAND_COUNT, derived from the
-                        # dispatch chains). Clients use COMMAND for routing, so
-                        # both the shape and the number matter. Peek at the
-                        # first subcommand byte instead of ignoring it.
-                        #
-                        # Note this arm is why the slow path's handle_command is
-                        # effectively unreachable for ordinary traffic: COMMAND
-                        # never falls through. Keep the two in step.
-                        var _cmd_sub0: UInt8 = 0
-                        var _cmd_first = True
-                        for _ in range(num_args - 1):
-                            if it_pos >= n or buffer[it_pos] != 36: break
-                            it_pos += 1
-                            var al = 0
-                            while it_pos < n and buffer[it_pos] != 13:
-                                al = al * 10 + Int(buffer[it_pos] - 48)
-                                it_pos += 1
-                            it_pos += 2
-                            if _cmd_first and al > 0 and it_pos < n:
-                                _cmd_sub0 = buffer[it_pos] | 0x20
-                                _cmd_first = False
-                            it_pos += al + 2
-                        if _cmd_sub0 == 99:  # COUNT
-                            writer.append_int_response(Int64(PION_COMMAND_COUNT))
-                        else:
-                            # DOCS / INFO / LIST / GETKEYS — array-shaped in
-                            # Redis; empty is incomplete but at least the right
-                            # type, which an integer was not.
-                            writer.append_empty_array_response()
-                    else:
-                        writer.append_empty_array_response()
+                    # #47: COMMAND runs in the slow path (src/commands/command_cmd.mojo),
+                    # which answers INFO, DOCS, LIST and GETKEYS from the command tables;
+                    # this arm answered every subcommand but COUNT with an empty array.
+                    return consumed
                 elif b0_lower == 100 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 98 and (buffer[cmd_start + 2] | 0x20) == 115 and (buffer[cmd_start + 3] | 0x20) == 105 and (buffer[cmd_start + 4] | 0x20) == 122 and (buffer[cmd_start + 5] | 0x20) == 101: # DBSIZE
                     # Step over any arguments before replying: this arm answers a
                     # no-argument command, and `consumed = it_pos` below must cover the
@@ -3061,6 +3001,11 @@ struct FastPathHandler(Movable):
                     it_pos = _fe
                     writer.append_ok_response()
                 elif b0_lower == 114 and cmd_len == 8 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 97 and (buffer[cmd_start + 3] | 0x20) == 100 and (buffer[cmd_start + 4] | 0x20) == 111 and (buffer[cmd_start + 5] | 0x20) == 110 and (buffer[cmd_start + 6] | 0x20) == 108 and (buffer[cmd_start + 7] | 0x20) == 121: # READONLY
+                    # #47: only in cluster mode, and only bare. Outside cluster mode
+                    # Redis refuses it ("This instance has cluster support disabled"),
+                    # and the slow path says so; this answered +OK.
+                    if not self.has_cluster or num_args != 1:
+                        return consumed
                     # Step over any arguments before replying: this arm answers a
                     # no-argument command, and `consumed = it_pos` below must cover the
                     # WHOLE frame, or the surplus bytes are re-parsed as a fresh command
@@ -3076,6 +3021,11 @@ struct FastPathHandler(Movable):
                         self.local_affinity[Int(fd)] = 3  # 3 = READONLY mode
                     writer.append_ok_response()
                 elif b0_lower == 114 and cmd_len == 9 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 97 and (buffer[cmd_start + 3] | 0x20) == 100 and (buffer[cmd_start + 4] | 0x20) == 119 and (buffer[cmd_start + 5] | 0x20) == 114 and (buffer[cmd_start + 6] | 0x20) == 105 and (buffer[cmd_start + 7] | 0x20) == 116 and (buffer[cmd_start + 8] | 0x20) == 101: # READWRITE
+                    # #47: only in cluster mode, and only bare. Outside cluster mode
+                    # Redis refuses it ("This instance has cluster support disabled"),
+                    # and the slow path says so; this answered +OK.
+                    if not self.has_cluster or num_args != 1:
+                        return consumed
                     # Step over any arguments before replying: this arm answers a
                     # no-argument command, and `consumed = it_pos` below must cover the
                     # WHOLE frame, or the surplus bytes are re-parsed as a fresh command
@@ -3091,6 +3041,11 @@ struct FastPathHandler(Movable):
                         self.local_affinity[Int(fd)] = 0
                     writer.append_ok_response()
                 elif b0_lower == 97 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 115 and (buffer[cmd_start + 2] | 0x20) == 107 and (buffer[cmd_start + 3] | 0x20) == 105 and (buffer[cmd_start + 4] | 0x20) == 110 and (buffer[cmd_start + 5] | 0x20) == 103: # ASKING
+                    # #47: only in cluster mode, and only bare. Outside cluster mode
+                    # Redis refuses it ("This instance has cluster support disabled"),
+                    # and the slow path says so; this answered +OK.
+                    if not self.has_cluster or num_args != 1:
+                        return consumed
                     # Step over any arguments before replying: this arm answers a
                     # no-argument command, and `consumed = it_pos` below must cover the
                     # WHOLE frame, or the surplus bytes are re-parsed as a fresh command

@@ -7,6 +7,9 @@ from std.memory import alloc, unsafe_memcpy
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
 from src.common.hash_map import SlabHashMap, StripedHashMap
+from src.common.list import SlabList
+from src.common.skip_list import SlabSkipList
+from src.common.hll import HLL_REGISTERS
 from src.common.value import GenericValue, ValueType
 from src.common.config import PionConfig
 from src.common.metrics import ValueLedger
@@ -515,11 +518,25 @@ def _config_known_value(p: Pointer[UInt8, MutUntrackedOrigin], plen: Int,
     if cmd_eq(p, plen, "enable-debug-command"):
         var m = config.server.enable_debug_command
         return "yes" if m == 1 else ("local" if m == 2 else "no")
+    # #47: SLOWLOG's two settings (process-wide, settable), and the latency
+    # monitor and per-command latency tracking, which Pion does not have
+    if cmd_eq(p, plen, "slowlog-log-slower-than"):
+        return String(Int(external_call["pion_slowlog_get_slower_than", Int64]()))
+    if cmd_eq(p, plen, "slowlog-max-len"):
+        return String(Int(external_call["pion_slowlog_get_max_len", Int64]()))
+    if cmd_eq(p, plen, "slowlog-entry-max-argc"):
+        return "32"           # src/commands/slowlog.mojo's SLOWLOG_MAX_ARGC
+    if cmd_eq(p, plen, "slowlog-entry-max-string-len"):
+        return "128"          # SLOWLOG_MAX_STRING
+    if cmd_eq(p, plen, "latency-monitor-threshold"):
+        return "0"
+    if cmd_eq(p, plen, "latency-tracking"):
+        return "no"
     found = False
     return ""
 
 
-comptime _CONFIG_COUNT = 8
+comptime _CONFIG_COUNT = 14
 
 
 @always_inline
@@ -541,7 +558,13 @@ def _config_name(k: Int) -> StaticString:
     if k == 4: return "save"
     if k == 5: return "port"
     if k == 6: return "timeout"
-    return "enable-debug-command"
+    if k == 7: return "enable-debug-command"
+    if k == 8: return "slowlog-log-slower-than"
+    if k == 9: return "slowlog-max-len"
+    if k == 10: return "latency-monitor-threshold"
+    if k == 11: return "slowlog-entry-max-argc"
+    if k == 12: return "slowlog-entry-max-string-len"
+    return "latency-tracking"
 
 
 def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
@@ -604,28 +627,72 @@ def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         if num_tokens - i < 4 or (num_tokens - i) % 2 != 0:
             writer.append_error_response("ERR wrong number of arguments for 'config|set' command")
             return num_tokens - i - 1
-        if num_tokens - i == 4 and cmd_eq(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length, "maxmemory"):
-            # gh #261: the one runtime-settable parameter. The limit lives in C
-            # and every worker reads it, so this takes effect process-wide on
-            # the next check. Redis units only (1k = 1000, 1kb = 1024); the
-            # `N%` form is a CLI extension that Redis's CONFIG SET rejects too.
-            var mv = tokens[unsafe_offset=i+3]
-            var parsed = parse_memory_value(mv.ptr, mv.length, 0)
-            if not parsed.ok:
+        # gh #261, #47: the runtime-settable parameters. Several pairs are
+        # set together or not at all, as Redis 7 does: every pair is checked
+        # before any is applied. Each value lives in C and every worker reads
+        # it, so a change is process-wide. maxmemory takes Redis units only
+        # (1k = 1000, 1kb = 1024); the `N%` form is a CLI extension that
+        # Redis's CONFIG SET rejects too.
+        var mm_set = False
+        var mm_val = UInt64(0)
+        var slt_set = False
+        var slt_val = Int64(0)
+        var sml_set = False
+        var sml_val = Int64(0)
+        var j = i + 2
+        while j + 1 < num_tokens:
+            var nt = tokens[unsafe_offset=j]
+            var vt = tokens[unsafe_offset=j + 1]
+            if cmd_eq(nt.ptr, nt.length, "maxmemory"):
+                var parsed = parse_memory_value(vt.ptr, vt.length, 0)
+                if not parsed.ok:
+                    writer.append_error_response(
+                        "ERR CONFIG SET failed (possibly related to argument 'maxmemory') "
+                        + "- argument must be a memory value")
+                    return num_tokens - i - 1
+                mm_set = True
+                mm_val = UInt64(parsed.value)
+            elif cmd_eq(nt.ptr, nt.length, "slowlog-log-slower-than") or cmd_eq(nt.ptr, nt.length, "slowlog-max-len"):
+                var is_slt = cmd_eq(nt.ptr, nt.length, "slowlog-log-slower-than")
+                var name = String("slowlog-log-slower-than") if is_slt else String("slowlog-max-len")
+                var pv = parse_int64_strict(vt.ptr, vt.length)
+                if not pv.ok:
+                    writer.append_error_response("ERR CONFIG SET failed (possibly related to argument '" + name
+                                                 + "') - argument couldn't be parsed into an integer")
+                    return num_tokens - i - 1
+                var lo = Int64(-1) if is_slt else Int64(0)
+                if pv.value < lo:
+                    writer.append_error_response("ERR CONFIG SET failed (possibly related to argument '" + name
+                                                 + "') - argument must be between " + String(Int(lo))
+                                                 + " and 9223372036854775807 inclusive")
+                    return num_tokens - i - 1
+                if is_slt:
+                    slt_set = True
+                    slt_val = pv.value
+                else:
+                    sml_set = True
+                    sml_val = pv.value
+            elif (cmd_eq(nt.ptr, nt.length, "latency-monitor-threshold") and vt.length == 1 and vt.ptr[0] == 48) \
+                    or (cmd_eq(nt.ptr, nt.length, "latency-tracking") and arg_eq(vt.ptr, vt.length, "no")):
+                pass     # already so: Pion has neither
+            else:
+                # Nothing else here is settable at runtime: every knob is a
+                # CLI flag read once at startup, so acknowledging a SET would
+                # claim a change that never happens. Erroring is the whole
+                # point of gh #257. (latency-monitor-threshold and
+                # latency-tracking land here unless they ask for what Pion is.)
                 writer.append_error_response(
-                    "ERR CONFIG SET failed (possibly related to argument 'maxmemory') "
-                    + "- argument must be a memory value")
-                return 3
-            external_call["pion_set_maxmemory", NoneType](UInt64(parsed.value))
-            writer.append_ok_response()
-            return 3
-        # Nothing else here is settable at runtime: every knob is a CLI flag
-        # read once at startup, so acknowledging a SET would claim a change
-        # that never happens. Erroring is the whole point of gh #257.
-        writer.append_error_response(
-            "ERR CONFIG SET is not supported — Pion is configured by CLI "
-            + "flags at startup (see ./pion-server --help). This command "
-            + "used to reply +OK without applying anything.")
+                    "ERR CONFIG SET is not supported for '" + bytes_to_string(nt.ptr, nt.length)
+                    + "' — Pion is configured by CLI flags at startup (see ./pion-server --help).")
+                return num_tokens - i - 1
+            j += 2
+        if mm_set:
+            external_call["pion_set_maxmemory", NoneType](mm_val)
+        if slt_set:
+            external_call["pion_slowlog_set_slower_than", NoneType](slt_val)
+        if sml_set:
+            external_call["pion_slowlog_set_max_len", NoneType](sml_val)
+        writer.append_ok_response()
         return num_tokens - i - 1
     if arg_eq(sub.ptr, sub.length, "resetstat"):
         if num_tokens - i != 2:
@@ -827,32 +894,9 @@ def handle_bgrewriteaof(mut dispatcher: CommandDispatcher, keyspace: Pointer[Str
                         ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) -> Int:
     """BGREWRITEAOF — compact the WAL: the live keyspace as fresh records, TTLs included."""
     dispatcher.wal[].compact_rewrite(keyspace, ttl_map)
-    writer.append_ok_response()
+    # #47: Redis's reply. Pion's rewrite has already run by now.
+    writer.append_status_response("Background append only file rewriting started")
     return 0
-
-
-@always_inline
-def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """COMMAND [COUNT|DOCS|INFO|LIST|GETKEYS ...] — command introspection."""
-    if i + 1 < num_tokens:
-        var _cmd_sub = tokens[unsafe_offset=i+1].ptr; var _cmd_sl = tokens[unsafe_offset=i+1].length
-        var _cmd_s0 = _cmd_sub[unsafe_offset=0] | 0x20
-        if _cmd_s0 == 99:
-            # COMMAND COUNT → :N. This was hardcoded to 150 while the real
-            # surface is PION_COMMAND_COUNT (gh #220) — more than double, so it
-            # was not a placeholder but an active misreport to any client that
-            # introspects (libraries use COMMAND for routing).
-            writer.append_int_response(PION_COMMAND_COUNT)
-        else:
-            # COMMAND DOCS/INFO/LIST/GETKEYS → *0
-            writer.append_empty_array_response()
-        return num_tokens - i - 1
-    else:
-        # Bare COMMAND is array-shaped in Redis (the full command list), so an
-        # empty array is incomplete but correctly typed; an integer was not.
-        # Mirrors the fast-path arm, which is what actually serves COMMAND.
-        writer.append_empty_array_response()
-        return 0
 
 
 @always_inline
@@ -910,124 +954,308 @@ def handle_debug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 
 
 @always_inline
-def handle_slowlog(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """SLOWLOG GET|LEN|RESET [count] → *0 / :0 / +OK."""
-    if i + 1 < num_tokens:
-        var _slg_s = tokens[unsafe_offset=i+1].ptr
-        var _slg_s0 = _slg_s[unsafe_offset=0] | 0x20
-        if _slg_s0 == 103:
-            writer.append_empty_array_response()  # GET → *0
-        elif _slg_s0 == 108:
-            writer.append_int_response(0)  # LEN → :0
-        else:
-            writer.append_ok_response()  # RESET → +OK
-        return num_tokens - i - 1
-    else:
-        writer.append_empty_array_response()
-        return 0
-
-
-@always_inline
 def handle_latency(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """LATENCY LATEST|HISTORY|RESET|GRAPH → *0 / +OK."""
-    if i + 1 < num_tokens:
-        var _lat_s = tokens[unsafe_offset=i+1].ptr
-        var _lat_s0 = _lat_s[unsafe_offset=0] | 0x20
-        if _lat_s0 == 114:
-            writer.append_ok_response()  # RESET
-        else:
-            writer.append_empty_array_response()  # LATEST/HISTORY/GRAPH
-        return num_tokens - i - 1
-    else:
-        writer.append_empty_array_response()
+    """LATENCY (#47). Pion has no latency monitor (latency-monitor-threshold
+    is 0, and CONFIG SET refuses another value) and does not track
+    per-command latency (latency-tracking is no), so every subcommand answers
+    as Redis does in that state: LATEST and HISTORY empty, RESET 0, GRAPH "no
+    samples", DOCTOR its monitoring-is-disabled report, HISTOGRAM an empty
+    map. RESET answered +OK, and DOCTOR, GRAPH, HISTOGRAM and HELP an empty
+    array."""
+    var argc = num_tokens - i
+    if argc < 2:
+        writer.append_error_response("ERR wrong number of arguments for 'latency' command")
         return 0
+    var sub = tokens[unsafe_offset=i + 1]
+    var sp = sub.ptr
+    var sl = sub.length
+    if arg_eq(sp, sl, "latest"):
+        if argc != 2:
+            _subcommand_arity(writer, "latency", "latest")
+        else:
+            writer.append_empty_array_response()
+    elif arg_eq(sp, sl, "history"):
+        if argc != 3:
+            _subcommand_arity(writer, "latency", "history")
+        else:
+            writer.append_empty_array_response()
+    elif arg_eq(sp, sl, "reset"):
+        writer.append_int_response(0)
+    elif arg_eq(sp, sl, "graph"):
+        if argc != 3:
+            _subcommand_arity(writer, "latency", "graph")
+        else:
+            writer.append_error_response("ERR No samples available for event '"
+                                         + tokens[unsafe_offset=i + 2].text_value() + "'")
+    elif arg_eq(sp, sl, "doctor"):
+        if argc != 2:
+            _subcommand_arity(writer, "latency", "doctor")
+        else:
+            var t = String("I'm sorry, Dave, I can't do that. Latency monitoring is disabled in this Redis instance. "
+                           + "You may use \"CONFIG SET latency-monitor-threshold <milliseconds>.\" in order to "
+                           + "enable it. If we weren't in a deep space mission I'd suggest to take a look at "
+                           + "https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/latency-monitor.\n")
+            writer.append_verbatim_response(t.unsafe_ptr(), t.byte_length())
+    elif arg_eq(sp, sl, "histogram"):
+        writer.append_map_header(0)
+    elif arg_eq(sp, sl, "help"):
+        if argc != 2:
+            _subcommand_arity(writer, "latency", "help")
+            return argc - 1
+        var lines = List[String]()
+        lines.append("DOCTOR")
+        lines.append("    Return a human readable latency analysis report.")
+        lines.append("GRAPH <event>")
+        lines.append("    Return an ASCII latency graph for the <event> class.")
+        lines.append("HISTORY <event>")
+        lines.append("    Return time-latency samples for the <event> class.")
+        lines.append("LATEST")
+        lines.append("    Return the latest latency samples for all events.")
+        lines.append("RESET [<event> ...]")
+        lines.append("    Reset latency data of one or more <event> classes.")
+        lines.append("    (default: reset all data for all event classes)")
+        lines.append("HISTOGRAM [COMMAND ...]")
+        lines.append("    Return a cumulative distribution of latencies in the format of a histogram for the specified command names.")
+        lines.append("    If no commands are specified then all histograms are replied.")
+        _help_reply(writer, "LATENCY", lines)
+    else:
+        _unknown_subcommand(writer, sub, "LATENCY")
+    return argc - 1
+
+
+def _memory_usage(v: GenericValue, key_len: Int, samples: Int) -> Int64:
+    """MEMORY USAGE's estimate: the slot (metadata byte, 32-byte key and
+    value), the key's bytes when they do not fit in it, and the value's own
+    allocations: a string's bytes; a hash's, set's or sorted set's table plus
+    its elements' bytes, sampled as Redis samples them (`samples` elements, 0
+    all) and scaled to the whole; a list's elements."""
+    var total = Int64(65)
+    if key_len > 23:
+        total += Int64(key_len)
+    var t = v.type.value
+    if t == ValueType.STRING or t == ValueType.BITMAP:
+        total += Int64(v.string_len())
+    elif t == ValueType.HLL:
+        total += Int64(HLL_REGISTERS)
+    elif t == ValueType.HASH:
+        var m = v.as_hash().bitcast[SlabHashMap]()
+        total += Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
+    elif t == ValueType.SET:
+        var m = v.as_set().bitcast[SlabHashMap]()
+        total += Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
+    elif t == ValueType.LIST:
+        var l = v.as_list().bitcast[SlabList]()
+        total += Int64(l[].size) * 34 + 64
+    elif t == ValueType.ZSET or t == ValueType.GEO:
+        var z = v.as_zset().bitcast[SlabSkipList]()
+        var m = Pointer[SlabHashMap, MutUntrackedOrigin](unsafe_from_address=Int(Pointer(to=z[].members)))
+        total += Int64(z[].length) * 96 + Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
+    return total
+
+
+def _sampled_payload(m: Pointer[SlabHashMap, MutUntrackedOrigin], samples: Int) -> Int64:
+    """The heap bytes of a hash's or set's fields and values: every element
+    when samples is 0, else the first `samples` found, scaled to the size."""
+    var seen = 0
+    var bytes = Int64(0)
+    for slot in range(m[].capacity):
+        var md = m[].metadata[slot]
+        if md == 0x80 or md == 0xFF:
+            continue
+        if m[].keys[slot].type.value == ValueType.STRING:
+            bytes += Int64(m[].keys[slot].string_len())
+        if m[].values[slot].type.value == ValueType.STRING:
+            bytes += Int64(m[].values[slot].string_len())
+        seen += 1
+        if samples > 0 and seen >= samples:
+            break
+    if seen == 0:
+        return 0
+    return bytes * Int64(m[].size) // Int64(seen)
 
 
 @always_inline
 def handle_memory(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut writer: ResponseWriter) raises -> Int:
-    """MEMORY USAGE key [SAMPLES n] / MEMORY DOCTOR / MEMORY STATS / MEMORY MALLOC-STATS."""
-    if i + 1 < num_tokens:
-        var _mem_sub = tokens[unsafe_offset=i+1].ptr
-        var _mem_s0 = _mem_sub[unsafe_offset=0] | 0x20
-        if _mem_s0 == 117:
-            # MEMORY USAGE key → :N (approximate bytes)
-            var _mem_sz: Int64 = 64  # default estimate
-            var extra = 1
-            if i + 2 < num_tokens:
-                var _mem_key = tokens[unsafe_offset=i+2].value()
-                var _mem_v = keyspace[].get(_mem_key)
-                if not _mem_v.is_none(): _mem_sz = Int64(_mem_v.string_len() + 64)
-                extra = num_tokens - i - 1
-            writer.append_int_response(_mem_sz)
-            return extra
-        elif _mem_s0 == 100:
-            # MEMORY DOCTOR → bulk string advice
-            writer.append_bulk_string_response("Pion is in great health".unsafe_ptr(), 23)
-            return 1
-        else:
-            # MEMORY STATS/MALLOC-STATS → *0
-            writer.append_empty_array_response()
-            return num_tokens - i - 1
-    else:
+    """MEMORY (#47). USAGE of a missing key is nil (it answered 64), and
+    USAGE takes SAMPLES. STATS reports what Pion measures, under Redis's field
+    names: the process RSS (which INFO's used_memory and --maxmemory also
+    use), its peak, and the keys. MALLOC-STATS gives Redis's answer for an
+    allocator without statistics, PURGE has nothing to purge, DOCTOR reports
+    the same measurements, and HELP has Redis's text. STATS, MALLOC-STATS and
+    PURGE answered an empty array."""
+    var argc = num_tokens - i
+    if argc < 2:
         writer.append_error_response("ERR wrong number of arguments for 'memory' command")
         return 0
+    var sub = tokens[unsafe_offset=i + 1]
+    var sp = sub.ptr
+    var sl = sub.length
+    if arg_eq(sp, sl, "usage"):
+        if argc < 3:
+            _subcommand_arity(writer, "memory", "usage")
+            return argc - 1
+        var samples = 5
+        if argc > 3:
+            if argc != 5 or not arg_eq(tokens[unsafe_offset=i + 3].ptr, tokens[unsafe_offset=i + 3].length, "samples"):
+                writer.append_error_response("ERR syntax error")
+                return argc - 1
+            var sv = parse_int64_strict(tokens[unsafe_offset=i + 4].ptr, tokens[unsafe_offset=i + 4].length)
+            if not sv.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return argc - 1
+            samples = Int(sv.value) if sv.value > 0 else 0
+        var kt = tokens[unsafe_offset=i + 2]
+        var v = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
+        if v.is_none():
+            writer.append_null_response()
+        else:
+            writer.append_int_response(_memory_usage(v, kt.length, samples))
+    elif arg_eq(sp, sl, "stats"):
+        if argc != 2:
+            _subcommand_arity(writer, "memory", "stats")
+            return argc - 1
+        var rss = external_call["pion_rss_sample_now", UInt64]()
+        var peak = external_call["pion_crash_rss_peak_bytes", UInt64]()
+        if peak < rss:
+            peak = rss
+        var keys: Int64 = 0
+        for k in range(8):
+            keys += Int64(keyspace[].shards[k].size)
+        writer.append_map_header(5)
+        writer.append_bulk_string_response("peak.allocated".unsafe_ptr(), 14)
+        writer.append_int_response(Int64(peak))
+        writer.append_bulk_string_response("total.allocated".unsafe_ptr(), 15)
+        writer.append_int_response(Int64(rss))
+        writer.append_bulk_string_response("keys.count".unsafe_ptr(), 10)
+        writer.append_int_response(keys)
+        writer.append_bulk_string_response("peak.percentage".unsafe_ptr(), 15)
+        var pct = String(Float64(rss) * 100.0 / Float64(peak)) if peak > 0 else String("0")
+        writer.append_double_response(pct.unsafe_ptr(), pct.byte_length())
+        writer.append_bulk_string_response("allocator.resident".unsafe_ptr(), 18)
+        writer.append_int_response(Int64(rss))
+    elif arg_eq(sp, sl, "malloc-stats"):
+        if argc != 2:
+            _subcommand_arity(writer, "memory", "malloc-stats")
+            return argc - 1
+        var t = String("Stats not supported for the current allocator")
+        writer.append_bulk_string_response(t.unsafe_ptr(), t.byte_length())
+    elif arg_eq(sp, sl, "purge"):
+        if argc != 2:
+            _subcommand_arity(writer, "memory", "purge")
+            return argc - 1
+        writer.append_ok_response()
+    elif arg_eq(sp, sl, "doctor"):
+        if argc != 2:
+            _subcommand_arity(writer, "memory", "doctor")
+            return argc - 1
+        var rss = external_call["pion_rss_sample_now", UInt64]()
+        var peak = external_call["pion_crash_rss_peak_bytes", UInt64]()
+        if peak < rss:
+            peak = rss
+        var maxmem = external_call["pion_get_maxmemory", UInt64]()
+        var t = String("Pion measures its memory as the process RSS. Now ") + String(Int(rss >> 20)) + " MB, peak " \
+                + String(Int(peak >> 20)) + " MB, maxmemory "
+        if maxmem > 0:
+            t += String(Int(maxmem >> 20)) + " MB (" + String(Int(Float64(rss) * 100.0 / Float64(maxmem))) + "% used).\n"
+        else:
+            t += "not set.\n"
+        writer.append_verbatim_response(t.unsafe_ptr(), t.byte_length())
+    elif arg_eq(sp, sl, "help"):
+        if argc != 2:
+            _subcommand_arity(writer, "memory", "help")
+            return argc - 1
+        var lines = List[String]()
+        lines.append("DOCTOR")
+        lines.append("    Return memory problems reports.")
+        lines.append("MALLOC-STATS")
+        lines.append("    Return internal statistics report from the memory allocator.")
+        lines.append("PURGE")
+        lines.append("    Attempt to purge dirty pages for reclamation by the allocator.")
+        lines.append("STATS")
+        lines.append("    Return information about the memory usage of the server.")
+        lines.append("USAGE <key> [SAMPLES <count>]")
+        lines.append("    Return memory in bytes used by <key> and its value. Nested values are")
+        lines.append("    sampled up to <count> times (default: 5, 0 means sample all).")
+        _help_reply(writer, "MEMORY", lines)
+    else:
+        _unknown_subcommand(writer, sub, "MEMORY")
+    return argc - 1
 
 
 @always_inline
+def _help_reply(mut writer: ResponseWriter, cmd: StaticString, lines: List[String]):
+    """A HELP reply as Redis's addReplyHelp writes it: the header line, the
+    command's lines, then HELP's own entry, each a status string."""
+    writer.append_array_header(len(lines) + 3)
+    writer.append_status_response(String(cmd) + " <subcommand> [<arg> [value] [opt] ...]. Subcommands are:")
+    for k in range(len(lines)):
+        writer.append_status_response(lines[k])
+    writer.append_status_response("HELP")
+    writer.append_status_response("    Print this help.")
+
+
+def _unknown_subcommand(mut writer: ResponseWriter, sub: RESP3Token, cmd: StaticString):
+    """Redis's reply to a subcommand the command does not have."""
+    writer.append_error_response("ERR unknown subcommand '" + sub.text_value() + "'. Try " + String(cmd) + " HELP.")
+
+
+def _subcommand_arity(mut writer: ResponseWriter, cmd: StaticString, sub: StaticString):
+    """Redis's reply to a known subcommand given the wrong number of arguments."""
+    writer.append_error_response("ERR wrong number of arguments for '" + String(cmd) + "|" + String(sub) + "' command")
+
+
 def handle_module(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """MODULE LOAD|UNLOAD|LIST|LOADEX → +OK / fake module list for LangChain compat."""
-    if i + 1 < num_tokens:
-        var _mod_s = tokens[unsafe_offset=i+1].ptr
-        if (_mod_s[unsafe_offset=0]|0x20) == 108 and tokens[unsafe_offset=i+1].length == 4:
-            # MODULE LIST → return fake modules (search + ReJSON) for LangChain compatibility
-            # Redis MODULE LIST returns: *N where each entry is [name, val, ver, num, path, str, args, arr]
-            # LangChain only checks for 'name' field = 'search' or 'ReJSON'
-            var resp = String("*2\r\n*6\r\n$4\r\nname\r\n$6\r\nsearch\r\n$3\r\nver\r\n:20800\r\n$4\r\npath\r\n$0\r\n\r\n*6\r\n$4\r\nname\r\n$6\r\nReJSON\r\n$3\r\nver\r\n:20800\r\n$4\r\npath\r\n$0\r\n\r\n")
-            writer.append_to_response(resp.unsafe_ptr(), resp.byte_length())
-        else:
-            writer.append_ok_response()
-        return num_tokens - i - 1
-    else:
+    """MODULE LIST | LOAD | LOADEX | UNLOAD | HELP (#47).
+
+    Pion loads no modules. LIST names `search`, the RediSearch-compatible FT.*
+    commands Pion serves (LangChain and RedisVL look for it before they use
+    FT.*). It also named ReJSON, whose JSON.* commands Pion does not have, so
+    a client that trusted it failed at its first JSON command. LOAD, LOADEX and
+    UNLOAD refuse. The subcommand was matched by its first letter and length,
+    so `MODULE LOAD x` answered with the list, and the rest answered +OK."""
+    var argc = num_tokens - i
+    if argc < 2:
+        writer.append_error_response("ERR wrong number of arguments for 'module' command")
+        return 0
+    var sub = tokens[unsafe_offset=i + 1]
+    if arg_eq(sub.ptr, sub.length, "list"):
+        if argc != 2:
+            _subcommand_arity(writer, "module", "list")
+            return argc - 1
+        writer.append_array_header(1)
+        writer.append_map_header(4)
+        writer.append_bulk_string_response("name".unsafe_ptr(), 4)
+        writer.append_bulk_string_response("search".unsafe_ptr(), 6)
+        writer.append_bulk_string_response("ver".unsafe_ptr(), 3)
+        writer.append_int_response(20800)
+        writer.append_bulk_string_response("path".unsafe_ptr(), 4)
+        writer.append_bulk_string_response("".unsafe_ptr(), 0)
+        writer.append_bulk_string_response("args".unsafe_ptr(), 4)
         writer.append_empty_array_response()
-        return 0
-
-
-@always_inline
-def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """ACL WHOAMI|LIST|USERS|CAT|LOG|GETUSER|SETUSER|DELUSER|SAVE → stubs."""
-    if i + 1 < num_tokens:
-        var _acl_s = tokens[unsafe_offset=i+1].ptr
-        var _acl_s0 = _acl_s[unsafe_offset=0] | 0x20
-        if _acl_s0 == 119:
-            # ACL WHOAMI → $7\r\ndefault\r\n
-            writer.append_bulk_string_response("default".unsafe_ptr(), 7)
-        elif _acl_s0 == 108 and tokens[unsafe_offset=i+1].length == 4:
-            # ACL LIST → array with one default entry.
-            # Both numbers here were wrong: the payload is 34 bytes but the
-            # header declared `$31`, and the write length was 41 of the
-            # literal's 45 — so the entry arrived truncated under a bulk length
-            # that never matched it either way. Let `byte_length()` count the
-            # frame; the `$34` is the payload length and is checked by the
-            # strict-parsing test rather than by eye.
-            var acl_list = "*1\r\n$34\r\nuser default on nopass ~* &* +@all\r\n"
-            writer.append_to_response(acl_list.unsafe_ptr(), acl_list.byte_length())
-        elif _acl_s0 == 117 and tokens[unsafe_offset=i+1].length == 5:
-            # ACL USERS → *1 + "default". Was writing 18 bytes of a 17-byte
-            # literal, appending one byte of whatever followed it.
-            var acl_users = "*1\r\n$7\r\ndefault\r\n"
-            writer.append_to_response(acl_users.unsafe_ptr(), acl_users.byte_length())
-        elif _acl_s0 == 99:
-            # ACL CAT → *0
-            writer.append_empty_array_response()
-        elif _acl_s0 == 108:
-            # ACL LOG → *0 / RESET → +OK
-            writer.append_empty_array_response()
-        else:
-            writer.append_ok_response()
-        return num_tokens - i - 1
+    elif arg_eq(sub.ptr, sub.length, "help"):
+        if argc != 2:
+            _subcommand_arity(writer, "module", "help")
+            return argc - 1
+        var lines = List[String]()
+        lines.append("LIST")
+        lines.append("    Return a list of loaded modules.")
+        lines.append("LOAD <path> [<arg> ...]")
+        lines.append("    Load a module library from <path>, passing to it any optional arguments.")
+        lines.append("LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]")
+        lines.append("    Load a module library from <path>, while passing it module configurations and optional arguments.")
+        lines.append("UNLOAD <name>")
+        lines.append("    Unload a module.")
+        _help_reply(writer, "MODULE", lines)
+    elif arg_eq(sub.ptr, sub.length, "load") or arg_eq(sub.ptr, sub.length, "loadex") \
+            or arg_eq(sub.ptr, sub.length, "unload"):
+        if argc < 3:
+            writer.append_error_response("ERR wrong number of arguments for 'module|" + sub.text_value().lower()
+                                         + "' command")
+            return argc - 1
+        writer.append_error_response("ERR Pion does not load modules: its FT.* search is built in")
     else:
-        writer.append_error_response("ERR wrong number of arguments for 'acl' command")
-        return 0
+        _unknown_subcommand(writer, sub, "MODULE")
+    return argc - 1
 
 
 @always_inline
@@ -1035,60 +1263,3 @@ def handle_reset(mut writer: ResponseWriter) -> Int:
     """RESET → +RESET\\r\\n (RESP3 connection reset)."""
     writer.append_to_response("+RESET\r\n".unsafe_ptr(), 8)
     return 0
-
-
-@always_inline
-def handle_client(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, fd: Int32, mut writer: ResponseWriter,
-                  mut names: Dict[Int, String]) raises -> Int:
-    """CLIENT ID|SETNAME|GETNAME|INFO|LIST|NO-EVICT|NO-TOUCH|SETINFO.
-
-    #30: SETNAME now keeps the name (GETNAME answered nil whatever was set),
-    INFO and LIST are RESP3 verbatim strings, and a subcommand Pion does not
-    implement (KILL, PAUSE, TRACKING, REPLY, ...) is refused with Redis's
-    error. It answered +OK and did nothing: a CLIENT KILL "succeeded" without
-    killing anything."""
-    if i + 1 >= num_tokens:
-        writer.append_error_response("ERR wrong number of arguments for 'client' command")
-        return 0
-    var sub = tokens[unsafe_offset=i + 1]
-    var sp = sub.ptr
-    var sl = sub.length
-    var extra = num_tokens - i - 1
-    if arg_eq(sp, sl, "id"):
-        writer.append_int_response(Int64(fd))
-    elif arg_eq(sp, sl, "setname"):
-        if i + 3 != num_tokens:
-            writer.append_error_response("ERR wrong number of arguments for 'client|setname' command")
-            return extra
-        var nt = tokens[unsafe_offset=i + 2]
-        for k in range(nt.length):
-            var c = nt.ptr[unsafe_offset=k]
-            if c < 33 or c > 126:
-                writer.append_error_response("ERR Client names cannot contain spaces, newlines or special characters.")
-                return extra
-        if nt.length == 0:
-            if Int(fd) in names:
-                _ = names.pop(Int(fd))
-        else:
-            names[Int(fd)] = nt.value()
-        writer.append_ok_response()
-    elif arg_eq(sp, sl, "getname"):
-        if Int(fd) in names:
-            var nm = names[Int(fd)]
-            writer.append_bulk_string_response(nm.unsafe_ptr(), nm.byte_length())
-        else:
-            writer.append_null_response()
-    elif arg_eq(sp, sl, "info") or arg_eq(sp, sl, "list"):
-        var nm = names[Int(fd)] if Int(fd) in names else String("")
-        var info = (String("id=") + String(Int(fd)) + " addr=127.0.0.1 fd=" + String(Int(fd))
-                    + " name=" + nm + " db=0 flags=N resp=" + String(Int(writer.proto)) + "\n")
-        writer.append_verbatim_response(info.unsafe_ptr(), info.byte_length())
-    elif arg_eq(sp, sl, "no-evict") or arg_eq(sp, sl, "no-touch"):
-        # Pion evicts nothing and keeps no LRU, so both are already true.
-        writer.append_ok_response()
-    elif arg_eq(sp, sl, "setinfo"):
-        writer.append_ok_response()
-    else:
-        writer.append_error_response(String("ERR unknown subcommand '") + sub.value()
-                                     + "'. Try CLIENT HELP.")
-    return extra

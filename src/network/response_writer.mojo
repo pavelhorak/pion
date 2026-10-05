@@ -84,6 +84,10 @@ struct ResponseWriter(Movable):
     # so plain increments are lockless. Exposed as INFO send_eagain_stalls —
     # the kill-test/observability signal for the substrate large-send path.
     var send_stalls: UInt64
+    # #47: how many times the writer flushed. CLIENT REPLY OFF drops a
+    # command's reply by cutting the buffer back to where the reply began,
+    # which is only right when nothing was sent in between.
+    var flush_count: Int
 
     def __init__(out self):
         self.buffer = alloc[UInt8](RESP_BUF_SIZE)
@@ -96,6 +100,7 @@ struct ResponseWriter(Movable):
         self.overflow_emitted = False
         self.proto = 2
         self.send_stalls = 0
+        self.flush_count = 0
         for i in range(65536):
             self.pending_offsets[unsafe_offset=i] = 0
             self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
@@ -119,6 +124,7 @@ struct ResponseWriter(Movable):
         self.overflow_emitted = False
         self.proto = 2
         self.send_stalls = 0
+        self.flush_count = 0
 
     @always_inline
     def bind_ring(mut self, ring_ptr: Pointer[IOUring, MutUntrackedOrigin]):
@@ -164,6 +170,7 @@ struct ResponseWriter(Movable):
 
     @always_inline
     def flush_response(mut self, fd: Int32, server: TCPServer, kq: Int32):
+        self.flush_count += 1
         if self.use_uring:
             self._flush_uring(fd)
         elif kq == -1:
@@ -832,6 +839,7 @@ struct ResponseWriter(Movable):
 
         crlf.unsafe_free()
         self.offset = 0
+        self.flush_count += 1   # #47: sent directly, not through flush_response
 
     @always_inline
     def append_large_value_response_writev(mut self, fd: Int32, val: GenericValue):
@@ -880,6 +888,7 @@ struct ResponseWriter(Movable):
 
             crlf.unsafe_free()
             self.offset = 0
+            self.flush_count += 1   # #47: sent directly, not through flush_response
         else:
             self.append_bulk_value_response(val)
 

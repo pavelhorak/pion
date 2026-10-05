@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <string.h>
 #include <poll.h>
+#include <time.h>
 
 int set_nonblock_c(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -338,6 +339,112 @@ int64_t pion_peer_id(int fd, char *buf, int64_t cap) {
     int l = snprintf(buf, (size_t)cap, v6 ? "[%s]:%d" : "%s:%d", ip, port);
     return (l < 0 || l >= cap) ? 0 : l;
 }
+
+/* #47: this end of the connection ("ip:port"), CLIENT LIST's laddr. */
+int64_t pion_local_id(int fd, char *buf, int64_t cap) {
+    struct sockaddr_storage sa;
+    socklen_t salen = sizeof(sa);
+    if (getsockname(fd, (struct sockaddr *)&sa, &salen) != 0) return 0;
+    char ip[INET6_ADDRSTRLEN];
+    int port = 0;
+    int v6 = 0;
+    if (sa.ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in *)&sa;
+        if (!inet_ntop(AF_INET, &s->sin_addr, ip, sizeof(ip))) return 0;
+        port = ntohs(s->sin_port);
+    } else if (sa.ss_family == AF_INET6) {
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *)&sa;
+        if (!inet_ntop(AF_INET6, &s->sin6_addr, ip, sizeof(ip))) return 0;
+        port = ntohs(s->sin6_port);
+        v6 = 1;
+    } else {
+        return 0;
+    }
+    int l = snprintf(buf, (size_t)cap, v6 ? "[%s]:%d" : "%s:%d", ip, port);
+    return (l < 0 || l >= cap) ? 0 : l;
+}
+
+/* #47: CLIENT IDs, never reused, unique across the workers. A connection's
+   ID used to be its fd, so the next connection to get the fd had a killed
+   client's ID. */
+static unsigned long long pion_client_ids = 0;
+
+unsigned long long pion_next_client_id(void) {
+    return __atomic_add_fetch(&pion_client_ids, 1, __ATOMIC_RELAXED);
+}
+
+/* #47: CLIENT KILL. Shutting the socket down, rather than closing it, leaves
+   the fd to the worker that serves it: its event loop reads EOF and closes
+   the connection the way it closes any other, so no other worker frees what
+   that worker uses, and the fd is not reused while that worker still has it.
+   A client that kills itself is shut down only once its reply is out (the
+   engine's close_after). */
+int pion_kill_fd(int fd) {
+    return shutdown(fd, SHUT_RDWR);
+}
+
+/* #47: a cheap monotonic tick counter, for SLOWLOG's per-command timing and
+   CLIENT LIST's idle. On arm64 and x86-64 it is the CPU's counter register (a
+   fraction of a nanosecond to read on Apple silicon), elsewhere
+   CLOCK_MONOTONIC in ns. pion_ticks_per_us converts. */
+uint64_t pion_ticks(void) {
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#elif defined(__x86_64__)
+    unsigned lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+double pion_ticks_per_us(void) {
+#if defined(__aarch64__)
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return (double)f / 1e6;
+#elif defined(__x86_64__)
+    /* The TSC's rate is not architectural: measure it once against
+       CLOCK_MONOTONIC (2 ms; a second worker racing here measures the
+       same rate). */
+    static double rate = 0;
+    if (rate == 0) {
+        struct timespec a, b;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        uint64_t c0 = pion_ticks();
+        do { clock_gettime(CLOCK_MONOTONIC, &b); }
+        while ((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec) < 2000000);
+        uint64_t c1 = pion_ticks();
+        double us = ((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)) / 1000.0;
+        rate = (double)(c1 - c0) / us;
+    }
+    return rate;
+#else
+    return 1000.0;
+#endif
+}
+
+/* #47: wall-clock milliseconds (CLIENT LIST age, SLOWLOG timestamps). */
+int64_t pion_unix_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* #47: slowlog-log-slower-than (us; -1 off, 0 every command) and
+   slowlog-max-len, process-wide so a CONFIG SET on one worker reaches all. */
+static int64_t pion_slowlog_slower_than = 10000;
+static int64_t pion_slowlog_max_len = 128;
+
+int64_t pion_slowlog_get_slower_than(void) { return __atomic_load_n(&pion_slowlog_slower_than, __ATOMIC_RELAXED); }
+void pion_slowlog_set_slower_than(int64_t v) { __atomic_store_n(&pion_slowlog_slower_than, v, __ATOMIC_RELAXED); }
+int64_t pion_slowlog_get_max_len(void) { return __atomic_load_n(&pion_slowlog_max_len, __ATOMIC_RELAXED); }
+void pion_slowlog_set_max_len(int64_t v) { __atomic_store_n(&pion_slowlog_max_len, v, __ATOMIC_RELAXED); }
 
 static void mon_add(LcsBuf *b, const char *s, size_t n) { lcs_add(b, s, n); }
 

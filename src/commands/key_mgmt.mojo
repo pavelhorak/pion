@@ -197,6 +197,102 @@ def _object_help(mut writer: ResponseWriter):
         writer.append_to_response(line.unsafe_ptr(), line.byte_length())
 
 
+def _is_redis_int(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    """Would Redis store these bytes as an integer (string2ll: no leading
+    zeros, no '+', at most 20 bytes)?"""
+    if n == 0 or n > 20:
+        return False
+    var k = 1 if p[0] == 45 else 0
+    if k >= n or (p[k] == 48 and n - k > 1) or (k == 1 and p[1] == 48):
+        return False
+    return parse_int64_strict(p, n).ok
+
+
+def _member_fits(v: GenericValue, buf: Pointer[UInt8, MutUntrackedOrigin], mut all_int: Bool) -> Bool:
+    """Is a member at most 64 bytes (a listpack entry), and is it an integer?"""
+    if not v.is_string():
+        return True
+    var n = v.string_len()
+    if all_int and not _is_redis_int(v.as_string_safe(buf), n):
+        all_int = False
+    return n <= 64
+
+
+def object_encoding(val: GenericValue) -> String:
+    """OBJECT ENCODING, by Redis's rules for the size the value has (#47; a
+    small list said quicklist): an integer string is int, others embstr up to
+    44 bytes and raw beyond; a list is a listpack while its elements' bytes
+    fit in 8 KB (list-max-listpack-size -2), else a quicklist; a hash is a
+    listpack up to 512 entries of at most 64 bytes (Redis 8's
+    hash-max-listpack-entries), a sorted set up to 128, else a hashtable or
+    skiplist; a set is an intset up to 512 integers, a listpack up to 128
+    short members, else a hashtable. Redis also keeps the encoding a
+    value grew into until it is rewritten, which Pion does not track."""
+    var t = val.type.value
+    var buf = alloc[UInt8](64)
+    var out = String("raw")
+    if t == ValueType.INT:
+        out = "int"
+    elif t == ValueType.STRING_SSO or t == ValueType.STRING:
+        var n = val.string_len()
+        if _is_redis_int(val.as_string_safe(buf), n):
+            out = "int"
+        elif n <= 44:
+            out = "embstr"
+    elif t == ValueType.FLOAT:
+        out = "embstr"
+    elif t == ValueType.LIST:
+        var l = val.as_list().bitcast[SlabList]()
+        out = "quicklist"
+        if l[].size <= 8192:
+            var elems = l[].get_all()
+            var bytes = 7
+            for k in range(len(elems)):
+                bytes += elems[k].string_len()
+            if bytes <= 8192:
+                out = "listpack"
+    elif t == ValueType.HASH or t == ValueType.SET:
+        var m = (val.as_hash() if t == ValueType.HASH else val.as_set()).bitcast[SlabHashMap]()
+        var all_int = t == ValueType.SET
+        var short = True
+        if m[].size <= 512:
+            for slot in range(m[].capacity):
+                var md = m[].metadata[slot]
+                if md == 0x80 or md == 0xFF:
+                    continue
+                if not _member_fits(m[].keys[slot], buf, all_int):
+                    short = False
+                if t == ValueType.HASH:
+                    var no_int = False
+                    if not _member_fits(m[].values[slot], buf, no_int):
+                        short = False
+        var lp_max = 512 if t == ValueType.HASH else 128   # Redis 8: hash-max-listpack-entries 512
+        if t == ValueType.SET and all_int and m[].size <= 512:
+            out = "intset"
+        elif m[].size <= lp_max and short:
+            out = "listpackex" if t == ValueType.HASH and is_not_null(m[].field_ttl) and m[].field_ttl[].size > 0 else "listpack"
+        else:
+            out = "hashtable"
+    elif t == ValueType.ZSET or t == ValueType.GEO:
+        var z = val.as_zset().bitcast[SlabSkipList]()
+        var short = z[].length <= 128
+        if short:
+            var no_int = False
+            var mm = z[].members.capacity
+            for slot in range(mm):
+                var md = z[].members.metadata[slot]
+                if md == 0x80 or md == 0xFF:
+                    continue
+                if not _member_fits(z[].members.keys[slot], buf, no_int):
+                    short = False
+                    break
+        out = "listpack" if short else "skiplist"
+    elif t == ValueType.STREAM:
+        out = "stream"
+    buf.free()
+    return out^
+
+
 @always_inline
 def handle_object(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
     """OBJECT subcommand key — inspect object internals."""
@@ -215,21 +311,14 @@ def handle_object(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             writer.append_null_response()
         # ENCODING subcommand
         elif arg_eq(sub_p2, sub_l2, "encoding"):
-            var enc_str: String
-            var vt2 = val.type.value
-            if vt2 == ValueType.INT: enc_str = "int"
-            elif vt2 == ValueType.STRING_SSO: enc_str = "embstr"
-            elif vt2 == ValueType.STRING: enc_str = "raw"
-            elif vt2 == ValueType.LIST: enc_str = "quicklist"
-            elif vt2 == ValueType.HASH: enc_str = "hashtable"
-            elif vt2 == ValueType.SET: enc_str = "hashtable"
-            elif vt2 == ValueType.ZSET or vt2 == ValueType.GEO: enc_str = "skiplist"
-            else: enc_str = "raw"
+            var enc_str = object_encoding(val)
             writer.append_bulk_string_response(enc_str.unsafe_ptr(), enc_str.byte_length())
         elif arg_eq(sub_p2, sub_l2, "refcount"):
             writer.append_int_response(Int64(1))
         elif arg_eq(sub_p2, sub_l2, "idletime"):
-            writer.append_int_response(Int64(0))
+            # #47: Pion keeps no per-key access time, so it refuses, as Redis
+            # refuses when its policy does not track idle time (this said 0)
+            writer.append_error_response("ERR Pion does not track key access times, idle time not tracked")
         elif arg_eq(sub_p2, sub_l2, "freq"):
             # Access frequency exists only under an LFU maxmemory policy, and
             # Pion has none (noeviction): Redis refuses, it does not answer 0.
@@ -679,12 +768,14 @@ struct ParkedWait(Copyable, Movable, ImplicitlyCopyable):
     var num_req: Int
     var target: UInt64      # WAL offset every counted replica must have applied
     var deadline_ns: Int64  # 0 = no deadline: `WAIT n 0` waits until n replicas ack
+    var unblock: UInt8      # CLIENT UNBLOCK (#47): UNBLOCK_TIMEOUT or UNBLOCK_ERROR, else 0
 
     def __init__(out self, fd: Int32, num_req: Int, target: UInt64, deadline_ns: Int64):
         self.fd = fd
         self.num_req = num_req
         self.target = target
         self.deadline_ns = deadline_ns
+        self.unblock = 0
 
 
 struct ParkedWaits(Movable):

@@ -31,7 +31,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         var sub0 = sub_ptr[unsafe_offset=0] | 0x20
         consumed += 1  # consume subcommand token
 
-        if sub_len == 4 and sub0 == 105:
+        if arg_eq(sub_ptr, sub_len, "info"):
             # CLUSTER INFO (i=105,n=110,f=102,o=111)
             var ci_buf = alloc[UInt8](600)
             var ci_mb = ci_buf
@@ -89,7 +89,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             writer.append_bulk_string_response(ci_mb, ci_off)
             ci_buf.unsafe_free()
 
-        elif sub_len == 5 and sub0 == 110:
+        elif arg_eq(sub_ptr, sub_len, "nodes"):
             # CLUSTER NODES (n=110,o=111,d=100,e=101,s=115)
             var nb_buf = alloc[UInt8](4096)
             var nb_mb = nb_buf
@@ -129,7 +129,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             writer.append_bulk_string_response(nb_mb, nb_off)
             nb_buf.unsafe_free()
 
-        elif sub_len == 4 and sub0 == 109 and (sub_ptr[unsafe_offset=1] | 0x20) == 121:
+        elif arg_eq(sub_ptr, sub_len, "myid"):
             # CLUSTER MYID (m=109,y=121,i=105,d=100)
             if cluster_enabled:
                 writer.append_bulk_string_response(cluster[].node_id.unsafe_ptr(), 40)
@@ -137,7 +137,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 var dummy_id = String("0000000000000000000000000000000000000000")
                 writer.append_bulk_string_response(dummy_id.unsafe_ptr(), 40)
 
-        elif sub_len == 7 and sub0 == 107:
+        elif arg_eq(sub_ptr, sub_len, "keyslot"):
             # CLUSTER KEYSLOT key (k=107,e=101,y=121,s=115,l=108,o=111,t=116)
             if i + 2 < num_tokens:
                 var key_tok = tokens[unsafe_offset=i + 2]
@@ -151,7 +151,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             else:
                 writer.append_error_response("ERR wrong number of arguments for 'cluster|keyslot' command")
 
-        elif sub_len == 5 and sub0 == 115 and (sub_ptr[unsafe_offset=1] | 0x20) == 108:
+        elif arg_eq(sub_ptr, sub_len, "slots"):
             # CLUSTER SLOTS (s=115,l=108,o=111,t=116,s=115)
             var n_total = n_cluster_nodes
             var slots_arr = String("*") + String(n_total) + String("\r\n")
@@ -190,7 +190,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                     writer.append_int_response(Int64(cluster[].peer_ports[pi]))
                     writer.append_bulk_string_response(cluster[].peer_node_id_ptr(pi), 40)
 
-        elif sub_len == 6 and sub0 == 115 and (sub_ptr[unsafe_offset=1] | 0x20) == 104:
+        elif arg_eq(sub_ptr, sub_len, "shards"):
             # CLUSTER SHARDS (s=115,h=104,a=97,r=114,d=100,s=115) — Redis 7+ format
             var n_total = n_cluster_nodes
             var shards_arr = String("*") + String(n_total) + String("\r\n")
@@ -265,7 +265,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                     var pe_tail = String("$18\r\nreplication-offset\r\n:0\r\n$6\r\nhealth\r\n$6\r\nonline\r\n$4\r\nrole\r\n$6\r\nmaster\r\n")
                     writer.append_to_response(pe_tail.unsafe_ptr(), pe_tail.byte_length())
 
-        elif sub_len == 4 and sub0 == 109 and (sub_ptr[unsafe_offset=1] | 0x20) == 101:
+        elif arg_eq(sub_ptr, sub_len, "meet"):
             # CLUSTER MEET host port — register peer at runtime
             if i + 3 < num_tokens and cluster_enabled:
                 var host_tok = tokens[unsafe_offset=i + 2]
@@ -294,7 +294,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 consumed += 2
             writer.append_ok_response()
 
-        elif sub_len == 6 and sub0 == 102 and (sub_ptr[unsafe_offset=1] | 0x20) == 111:
+        elif arg_eq(sub_ptr, sub_len, "forget"):
             # CLUSTER FORGET node-id — remove peer by node ID
             if i + 2 < num_tokens and cluster_enabled:
                 var forget_tok = tokens[unsafe_offset=i + 2]
@@ -335,7 +335,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 consumed += 1
             writer.append_ok_response()
 
-        elif sub_len == 9 and sub0 == 114:
+        elif arg_eq(sub_ptr, sub_len, "replicate"):
             # CLUSTER REPLICATE node-id — become a replica of the given node
             if i + 2 < num_tokens and cluster_enabled:
                 var rep_tok = tokens[unsafe_offset=i + 2]
@@ -362,7 +362,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             else:
                 writer.append_error_response("ERR wrong number of arguments for 'cluster|replicate'")
 
-        elif sub_len == 8 and sub0 == 102 and (sub_ptr[unsafe_offset=1] | 0x20) == 97:
+        elif arg_eq(sub_ptr, sub_len, "failover"):
             # CLUSTER FAILOVER [FORCE] — promote replica to primary (N3)
             if not cluster_enabled:
                 writer.append_error_response("ERR cluster not enabled")
@@ -422,7 +422,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                     cluster[].save_topology("pion-nodes.conf")
                     writer.append_ok_response()
 
-        elif sub_len == 5 and sub0 == 114:
+        elif arg_eq(sub_ptr, sub_len, "reset"):
             # CLUSTER RESET (r=114,e=101,s=115,e=101,t=116)
             if cluster_enabled:
                 cluster[].is_replica = False
@@ -430,12 +430,12 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 cluster[].cluster_epoch += 1
             writer.append_ok_response()
 
-        elif sub_len == 8 and sub0 == 114 and (sub_ptr[unsafe_offset=4]|0x20) == 99:
+        elif arg_eq(sub_ptr, sub_len, "replicas"):
             # CLUSTER REPLICAS node-id → *0 (no replicas in shared-nothing)
             if i + 2 < num_tokens: consumed += 1
             writer.append_empty_array_response()
 
-        elif sub_len == 13 and sub0 == 103:
+        elif arg_eq(sub_ptr, sub_len, "getkeysinslot"):
             # CLUSTER GETKEYSINSLOT slot count — iterate keyspace for matching keys
             if i + 3 < num_tokens:
                 var gk_slot = strict_atol(tokens[unsafe_offset=i + 2].value())
@@ -468,7 +468,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             else:
                 writer.append_error_response("ERR wrong number of arguments for 'cluster getkeysinslot'")
 
-        elif sub_len == 15 and sub0 == 99:
+        elif arg_eq(sub_ptr, sub_len, "countkeysinslot"):
             # CLUSTER COUNTKEYSINSLOT slot — count keys in slot
             if i + 2 < num_tokens:
                 var ck_slot = strict_atol(tokens[unsafe_offset=i + 2].value())
@@ -492,7 +492,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             else:
                 writer.append_int_response(0)
 
-        elif sub_len == 8 and sub0 == 97 and (sub_ptr[unsafe_offset=1]|0x20)==100 and (sub_ptr[unsafe_offset=2]|0x20)==100:
+        elif arg_eq(sub_ptr, sub_len, "addslots"):
             # CLUSTER ADDSLOTS slot [slot ...]
             var si2 = i + 2
             while si2 < num_tokens and tokens[unsafe_offset=si2].marker != 0:
@@ -505,7 +505,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             cluster[].cluster_epoch += 1
             writer.append_ok_response()
 
-        elif sub_len == 8 and sub0 == 100 and (sub_ptr[unsafe_offset=1]|0x20)==101 and (sub_ptr[unsafe_offset=2]|0x20)==108:
+        elif arg_eq(sub_ptr, sub_len, "delslots"):
             # CLUSTER DELSLOTS slot [slot ...]
             var si3 = i + 2
             while si3 < num_tokens and tokens[unsafe_offset=si3].marker != 0:
@@ -519,7 +519,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             writer.append_ok_response()
 
         # §3: CLUSTER SETSLOT <slot> IMPORTING|MIGRATING|NODE|STABLE [node-id]
-        elif sub_len == 7 and sub0 == 115 and (sub_ptr[unsafe_offset=1]|0x20)==101 and (sub_ptr[unsafe_offset=2]|0x20)==116:
+        elif arg_eq(sub_ptr, sub_len, "setslot"):
             # "setslot" (s=115,e=101,t=116,s=115,l=108,o=111,t=116)
             if i + 3 < num_tokens:
                 var slot_str = tokens[unsafe_offset=i + 2].value()
@@ -573,7 +573,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             else:
                 writer.append_error_response("ERR wrong number of arguments for CLUSTER SETSLOT")
 
-        elif sub_len == 5 and sub0 == 115 and (sub_ptr[unsafe_offset=1] | 0x20) == 116:
+        elif arg_eq(sub_ptr, sub_len, "stats"):
             # CLUSTER STATS (s=115,t=116,a=97,t=116,s=115) — gh #44
             #
             # Returns INFO-style key:value telemetry for the W7 Mac-cluster

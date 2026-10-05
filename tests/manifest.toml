@@ -1469,3 +1469,13 @@ files = [
   "tests/run_all.py",
   "tests/simd_kernel_bench.mojo",
 ]
+
+# #47: admin and introspection commands do what they answer, or refuse:
+# CLIENT (IDs, LIST, KILL, PAUSE, REPLY, UNBLOCK), SLOWLOG, ACL users and LOG,
+# COMMAND, LATENCY, MEMORY, standalone CLUSTER; byte-identical with Redis
+# where Pion does not differ on purpose (that part skips without redis-server)
+[[test]]
+file = "tests/test_admin_commands.py"
+server = "self"
+tier = "gate"
+timeout = 300

@@ -31,7 +31,7 @@ from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE, URING_MAX_FDS
 from src.io.xdp import XDPEngine, XDPFrameInfo, TCP_SYN, TCP_ACK, TCP_FIN, TCP_RST, TCP_PSH
 from src.network.cluster import ClusterState, REPL_PORT_OFFSET
 from src.commands.stream import write_xread_reply
-from src.commands.blocking import blocked_client_ready
+from src.commands.blocking import blocked_client_ready, UNBLOCK_ERROR, UNBLOCKED_ERROR
 
 # Client receive buffer size. Supports LMCache KV cache blobs (typical 2-4 MB
 # per chunk, up to ~16 MB for 70B+ models) and shared-KV-cache tensor frames
@@ -172,6 +172,8 @@ struct NetworkEngine:
                                          ttl_map=ttl_map)
         self.slow_path = SlowPathHandler(keyspace, hash_map_pool, skip_list_pool, list_pool, ai_queue, wal, raft, shared_hnsw, config=config, worker_id=worker_id, num_workers=num_workers, cluster=cluster, ttl_map=ttl_map)
         self.slow_path.local_affinity = self.local_affinity   # RESET clears READONLY (#39)
+        self.slow_path.client_buffer_lens = self.client_buffer_lens   # #47: CLIENT LIST qbuf
+        self.slow_path.client_buf_cap = CLIENT_BUF_SIZE
         # Wire fast_path's transaction pointers to slow_path's transaction state
         self.fast_path.tx_in_multi = self.slow_path.tx_state.in_multi
         self.fast_path.key_versions = self.slow_path.tx_state.key_versions
@@ -228,7 +230,8 @@ struct NetworkEngine:
         self.slow_path.blocked_readers.remove_fd(fd)
         self.slow_path.blocked_clients.remove_fd(fd)   # #38
         _ = self.slow_path.monitors.remove(fd)        # #39
-        self.slow_path.update_dispatch_gate()          # #39, #42
+        self.slow_path.clients.on_close(fd)          # #47 (its REPLY mode goes too)
+        self.slow_path.update_dispatch_gate()          # #39, #42, #47
         self.slow_path.parked_waits.remove_fd(fd)   # gh #390
         self.server.close_client(fd)
         self.client_buffer_lens[unsafe_offset=ci] = 0
@@ -241,7 +244,6 @@ struct NetworkEngine:
         self.writer.pending_offsets[unsafe_offset=ci] = 0
 
     @always_inline
-    @always_inline
     def _set_expiry_clock(mut self):
         """#45: set the keyspace's lazy-expiry clock for the coming batch."""
         var ks = self.fast_path.keyspace
@@ -249,7 +251,9 @@ struct NetworkEngine:
         if is_not_null(tm) and tm[].size > 0:
             ks[].clock_ns = _get_now_ns()
             var cl = self.slow_path.cluster
-            ks[].expire_hides_only = is_not_null(cl) and cl[].enabled and cl[].is_replica
+            # #47: and while CLIENT PAUSE holds writes, as Redis pauses expiry
+            ks[].expire_hides_only = (is_not_null(cl) and cl[].enabled and cl[].is_replica) \
+                                     or self.slow_path.clients.pause_until_ms != 0
         else:
             ks[].clock_ns = 0
 
@@ -285,6 +289,13 @@ struct NetworkEngine:
         provably the same loop, so io_uring shares this body and only keeps
         its own RECV re-arm afterwards (the genuinely poller-specific part)."""
         var cur_len = stored_len + n
+        if n > 0:
+            self.slow_path.clients.touch(fd)    # #47: CLIENT LIST idle
+        # #47: a client that killed itself is closed once its reply is out;
+        # what it sends meanwhile is dropped, as Redis drops it
+        if self.slow_path.clients.close_after[unsafe_offset=client_idx] != 0:
+            self.client_buffer_lens[unsafe_offset=client_idx] = 0
+            return
 
         # gh #14 phase-2 RCU: announce that this worker is inside a dispatch
         # batch, and at which epoch. Bracketing HERE rather than inside
@@ -431,14 +442,17 @@ struct NetworkEngine:
             var acked = 0
             if is_not_null(h):
                 acked = Int(external_call["pion_repl_primary_acked_count", Int32](h, w.target))
-            if acked < w.num_req and (w.deadline_ns == 0 or now < w.deadline_ns):
+            if w.unblock == 0 and acked < w.num_req and (w.deadline_ns == 0 or now < w.deadline_ns):
                 k += 1
                 continue
             pw[].unpark_at(k)          # entry k is now a different one: no k += 1
             var fd = w.fd
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
-            self.writer.append_int_response(Int64(acked))
+            if w.unblock == UNBLOCK_ERROR:          # #47: CLIENT UNBLOCK id ERROR
+                self.writer.append_error_response(UNBLOCKED_ERROR)
+            else:
+                self.writer.append_int_response(Int64(acked))
             self.writer.flush_response(fd, self.server, kq)
             var stored = self.client_buffer_lens[unsafe_offset=ci]
             if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
@@ -462,13 +476,18 @@ struct NetworkEngine:
         var k = 0
         while k < reg[]._count():
             var fd = reg[].readers[k].fd
-            var timed_out = reg[].readers[k].timeout_ms > 0 and now_ms >= reg[].readers[k].timeout_ms
+            # #47: CLIENT UNBLOCK answers it as its timeout would, or with an
+            # error, whatever its streams hold by now
+            var ub = reg[].readers[k].unblock
+            var timed_out = ub != 0 or (reg[].readers[k].timeout_ms > 0 and now_ms >= reg[].readers[k].timeout_ms)
             if not reg[].readers[k].ready and not timed_out:
                 k += 1
                 continue
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
-            var wrote = write_xread_reply(self.writer, self.slow_path.keyspace,
+            var wrote = 0
+            if ub == 0:
+                wrote = write_xread_reply(self.writer, self.slow_path.keyspace,
                                           reg[].readers[k].keys, reg[].readers[k].after_ms,
                                           reg[].readers[k].after_seq, reg[].readers[k].count_limit)
             if wrote == 0:
@@ -477,7 +496,10 @@ struct NetworkEngine:
                     reg[].readers[k].ready = False
                     k += 1
                     continue
-                self.writer.append_null_array_response()
+                if ub == UNBLOCK_ERROR:
+                    self.writer.append_error_response(UNBLOCKED_ERROR)
+                else:
+                    self.writer.append_null_array_response()
             reg[].remove_at(k)            # entry k is now a different one: no k += 1
             self.slow_path.parked_waits.unpark_fd(fd)
             self.writer.flush_response(fd, self.server, kq)
@@ -502,12 +524,33 @@ struct NetworkEngine:
         var now_ms = Int64(_get_now_ns() // 1_000_000)
         var k = 0
         while k < reg[]._count():
+            var ub = reg[].clients[k].unblock
             var dl = reg[].clients[k].deadline_ms
-            var timed_out = dl > 0 and now_ms >= dl
-            if not timed_out and not blocked_client_ready(self.slow_path.keyspace, reg[].clients[k]):
+            var timed_out = ub != 0 or (dl > 0 and now_ms >= dl)
+            var ready = ub == 0 and blocked_client_ready(self.slow_path.keyspace, reg[].clients[k])
+            if not timed_out and not ready:
                 k += 1
                 continue
             var fd = reg[].clients[k].fd
+            if not ready:
+                # Its timeout passed, or CLIENT UNBLOCK (#47): the timeout's
+                # nil, without running the command again. A key that now
+                # holds another type would make it answer WRONGTYPE, where
+                # Redis answers the timeout.
+                var nil_bulk = reg[].clients[k].nil_bulk
+                reg[].remove_at(k)                 # the next client is now at k
+                self.slow_path.parked_waits.unpark_fd(fd)
+                var tci = Int(fd)
+                self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=tci]
+                if ub == UNBLOCK_ERROR:
+                    self.writer.append_error_response(UNBLOCKED_ERROR)
+                elif nil_bulk:
+                    self.writer.append_null_response()
+                else:
+                    self.writer.append_null_array_response()
+                self.writer.flush_response(fd, self.server, kq)
+                self._resume_unparked(fd, kq, hnsw, db_size, uring_group)
+                continue
             # The frame goes to a heap buffer this function frees itself: a
             # List's last use is `unsafe_ptr()`, and Mojo destroys a value
             # right after its last use, so the parse below would read freed
@@ -529,13 +572,56 @@ struct NetworkEngine:
             self.slow_path.monitor_skip = False
             frame.free()
             self.slow_path.can_park_wait = park
-            var stored = self.client_buffer_lens[unsafe_offset=ci]
-            if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
-                self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
-            if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
-               and not self.slow_path.parked_waits.is_parked(ci) \
-               and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
-                self._uring_arm_recv(fd, ci, UInt16(uring_group))
+            self._resume_unparked(fd, kq, hnsw, db_size, uring_group)
+
+    def _resume_unparked(mut self, fd: Int32, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
+                         uring_group: Int) raises:
+        """A parked client was answered: run what it pipelined behind the
+        command that parked it, and on io_uring arm its receive again."""
+        var ci = Int(fd)
+        var stored = self.client_buffer_lens[unsafe_offset=ci]
+        if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+            self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
+        if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
+           and not self.slow_path.parked_waits.is_parked(ci) \
+           and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+            self._uring_arm_recv(fd, ci, UInt16(uring_group))
+
+    @always_inline
+    def _close_after_reply(mut self, fd: Int32):
+        """#47: a client that killed itself, once its pending reply is out
+        (kqueue / epoll write event): shut down, and its loop closes it."""
+        var ci = Int(fd)
+        if self.slow_path.clients.close_after[unsafe_offset=ci] != 0 \
+           and self.writer.pending_offsets[unsafe_offset=ci] == 0:
+            _ = external_call["pion_kill_fd", Int32](fd)
+
+    def _service_pause(mut self, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
+                       uring_group: Int = -1) raises:
+        """#47 CLIENT PAUSE: when the pause is over (its timeout passed, or
+        UNPAUSE) or changed (another PAUSE), the connections it held run their
+        commands, as Redis's unblockPostponedClients; under a pause that still
+        applies to them they are held again. A held connection CLIENT KILL let
+        go runs (and so reads its end of input) at once."""
+        var reg = Pointer(to=self.slow_path.clients)
+        var ended = reg[].pause_until_ms != 0 and external_call["pion_unix_ms", Int64]() >= reg[].pause_until_ms
+        if ended:
+            reg[].pause_until_ms = 0
+        var go = List[Int32]()
+        if ended or reg[].pause_changed:
+            reg[].pause_changed = False
+            for k in range(len(reg[].paused_fds)):
+                var f = reg[].paused_fds[k]
+                reg[].postponed[Int(f)] = 0
+                go.append(f)
+            reg[].paused_fds.clear()
+        for k in range(len(reg[].released)):
+            go.append(reg[].released[k])
+        reg[].released.clear()
+        self.slow_path.update_dispatch_gate()
+        for k in range(len(go)):
+            self.slow_path.parked_waits.unpark_fd(go[k])
+            self._resume_unparked(go[k], kq, hnsw, db_size, uring_group)
 
     def _replica_drain(mut self, cl: Pointer[ClusterState, MutUntrackedOrigin]):
         """gh #390: drain the replica ring, apply every whole record, carry a
@@ -686,9 +772,13 @@ struct NetworkEngine:
         # #46: and the vector slots the sweep's frees killed
         if is_not_null(self.slow_path.vec_tomb) and len(self.slow_path.vec_tomb[].pending) > 0:
             log_dead_slots(self.slow_path.shared_hnsw, self.slow_path.vec_tomb, self.slow_path.dispatcher)
+        # #47: a SLOWLOG threshold set on another worker reaches this one
+        if self.slow_path.slowlog_thr != external_call["pion_slowlog_get_slower_than", Int64]():
+            self.slow_path.update_dispatch_gate()
 
         if not self.shutting_down:
             if external_call["pion_shutdown_requested", Int32]() != 0:
+                external_call["pion_shutdown_begin_drain", NoneType]()   # #47: past ABORT now
                 if is_not_null(self.fast_path.wal):
                     self.fast_path.wal[].sync_durable()
                 self.shutting_down = True
@@ -1003,6 +1093,7 @@ struct NetworkEngine:
                     self.server.set_tcp_nodelay(new_fd)
                     if tcp_active_count < 256:
                         tcp_active_fds[unsafe_offset=tcp_active_count] = new_fd
+                        self.slow_path.clients.on_accept(new_fd)   # #47
                         tcp_active_count += 1
                         # Allocate client buffer for this TCP fd
                         var ci = Int(new_fd)
@@ -1050,13 +1141,15 @@ struct NetworkEngine:
                         if resp_off > 0:
                             _ = self.server.send(tfd, self.writer.buffer, resp_off)
                             self.writer.offset = 0
+                        # #47: a client that killed itself, its reply now sent
+                        if self.slow_path.clients.close_after[unsafe_offset=ci] != 0:
+                            _ = external_call["pion_kill_fd", Int32](tfd)
                     elif n_read == 0:
-                        # Client disconnected — close and remove from active list
-                        self.server.close_client(tfd)
-                        if self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
-                            self.client_buffers[unsafe_offset=ci].unsafe_free()
-                            self.client_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
-                        self.client_buffer_lens[unsafe_offset=ci] = 0
+                        # Client disconnected — close and remove from active list.
+                        # #47: the per-connection cleanup every other loop does
+                        # (subscriptions, MULTI, CLIENT state, buffers): this
+                        # closed the socket and freed the buffer only.
+                        self._close_fd_common(tfd, ci)
                         # Swap with last active fd
                         tcp_active_count -= 1
                         if ti < tcp_active_count:
@@ -1077,7 +1170,8 @@ struct NetworkEngine:
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
-                self.fast_path.sweep_expired_keys(20)
+                if self.slow_path.clients.pause_until_ms == 0:   # #47: CLIENT PAUSE holds expiry too
+                    self.fast_path.sweep_expired_keys(20)
 
             # Parked XREAD BLOCK clients, every tick while any exist (the
             # check is one load): answered when an XADD reached them or on timeout.
@@ -1288,6 +1382,10 @@ struct NetworkEngine:
                         self.ring[].submit_send(fd, self.writer.pending_buffers[unsafe_offset=ci], remaining)
                     else:
                         self.writer.pending_offsets[unsafe_offset=ci] = 0
+                        # #47: a client that killed itself, its reply now out
+                        if self.slow_path.clients.close_after[unsafe_offset=ci] != 0:
+                            self._uring_close_fd(fd, ci)
+                            continue
                         # All sent — arm the next RECV if none is armed.
                         # gh #390: not while a WAIT is parked — _service_parked_waits
                         # moves this buffer's bytes and re-arms itself.
@@ -1326,6 +1424,7 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=ci] = 0
                         self.writer.uring_inflight[unsafe_offset=ci] = 0
+                        self.slow_path.clients.on_accept(new_fd)   # #47
                         self._uring_arm_recv(new_fd, ci, buf_group_id)
 
                 elif kind == UD_TIMEOUT:
@@ -1347,7 +1446,8 @@ struct NetworkEngine:
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
-                self.fast_path.sweep_expired_keys(20)
+                if self.slow_path.clients.pause_until_ms == 0:   # #47: CLIENT PAUSE holds expiry too
+                    self.fast_path.sweep_expired_keys(20)
 
             # Parked XREAD BLOCK clients, every tick while any exist (the
             # check is one load): answered when an XADD reached them or on timeout.
@@ -1370,6 +1470,10 @@ struct NetworkEngine:
             # gh #390: answer parked WAITs (every tick while any is parked).
             if self.slow_path.parked_waits.count() > 0:
                 self._service_parked_waits(Int32(-1), hnsw, db_size, Int(buf_group_id))
+            # #47: connections CLIENT PAUSE held, once it is over or changed
+            if self.slow_path.clients.pause_until_ms != 0 or self.slow_path.clients.pause_changed \
+               or len(self.slow_path.clients.released) > 0:
+                self._service_pause(Int32(-1), hnsw, db_size, Int(buf_group_id))
 
             # Periodic housekeeping: every 64 ticks (gh #85 — unified helper).
             if self.ttl_sweep_counter & 0x3F == 0:
@@ -1537,7 +1641,8 @@ struct NetworkEngine:
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
-                self.fast_path.sweep_expired_keys(20)
+                if self.slow_path.clients.pause_until_ms == 0:   # #47: CLIENT PAUSE holds expiry too
+                    self.fast_path.sweep_expired_keys(20)
 
             # Parked XREAD BLOCK clients, every tick while any exist.
             if self.slow_path.blocked_readers._count() > 0:
@@ -1565,6 +1670,7 @@ struct NetworkEngine:
                 # EPOLLOUT: flush pending writes
                 if events[unsafe_offset=i].events & EPOLLOUT:
                     self.writer.flush_response(fd, self.server, kq)
+                    self._close_after_reply(fd)    # #47
                     # If both EPOLLIN and EPOLLOUT are set, also process EPOLLIN below
                     if not (events[unsafe_offset=i].events & EPOLLIN):
                         continue
@@ -1597,6 +1703,7 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=Int(new_fd)] = 0
+                        self.slow_path.clients.on_accept(new_fd)   # #47
                         # Register for EPOLLIN (level-triggered)
                         ev[unsafe_offset=0].events = EPOLLIN
                         ev[unsafe_offset=0].data = UInt64(new_fd)
@@ -1664,6 +1771,10 @@ struct NetworkEngine:
             # gh #390: answer parked WAITs (every tick while any is parked).
             if self.slow_path.parked_waits.count() > 0:
                 self._service_parked_waits(kq, hnsw, db_size)
+            # #47: connections CLIENT PAUSE held, once it is over or changed
+            if self.slow_path.clients.pause_until_ms != 0 or self.slow_path.clients.pause_changed \
+               or len(self.slow_path.clients.released) > 0:
+                self._service_pause(kq, hnsw, db_size)
 
             # 64-tick gated housekeeping (gh #85 — unified helper).
             if self.ttl_sweep_counter & 0x3F == 0:
@@ -1758,7 +1869,8 @@ struct NetworkEngine:
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
-                self.fast_path.sweep_expired_keys(20)
+                if self.slow_path.clients.pause_until_ms == 0:   # #47: CLIENT PAUSE holds expiry too
+                    self.fast_path.sweep_expired_keys(20)
 
             # Parked XREAD BLOCK clients, every tick while any exist (the
             # check is one load): answered when an XADD reached them or on timeout.
@@ -1779,6 +1891,7 @@ struct NetworkEngine:
                 var fd = Int32(events[unsafe_offset=i].ident)
                 if events[unsafe_offset=i].filter == -2:
                     self.writer.flush_response(fd, self.server, kq)
+                    self._close_after_reply(fd)    # #47
                     continue
                 var is_listen_fd = (fd == self.server.fd or (self.secondary_listen_fd >= 0 and fd == self.secondary_listen_fd) or (self.binary_listen_fd >= 0 and fd == self.binary_listen_fd))
                 if is_listen_fd:
@@ -1808,6 +1921,7 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=Int(new_fd)] = 0
                         # Register level-triggered READ for client
+                        self.slow_path.clients.on_accept(new_fd)   # #47
                         self.server.kevent_add_read(kq, new_fd, edge_triggered=False)
                 else:
                     var client_idx = Int(fd)
@@ -1857,6 +1971,10 @@ struct NetworkEngine:
             # gh #390: answer parked WAITs (every tick while any is parked).
             if self.slow_path.parked_waits.count() > 0:
                 self._service_parked_waits(kq, hnsw, db_size)
+            # #47: connections CLIENT PAUSE held, once it is over or changed
+            if self.slow_path.clients.pause_until_ms != 0 or self.slow_path.clients.pause_changed \
+               or len(self.slow_path.clients.released) > 0:
+                self._service_pause(kq, hnsw, db_size)
 
             # Periodic housekeeping: every 64 ticks (gh #85 — unified helper).
             # At P=1 (~1ms/tick) this is ~64ms granularity — fine for WAL sync,

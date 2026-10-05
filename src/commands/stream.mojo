@@ -41,9 +41,11 @@ struct BlockedReader(Copyable, Movable):
     var keys: List[String]      # stream names, byte for byte
     var after_ms: List[UInt64]
     var after_seq: List[UInt64]
+    var unblock: UInt8          # CLIENT UNBLOCK (#47): UNBLOCK_TIMEOUT or UNBLOCK_ERROR, else 0
 
     def __init__(out self):
         self.fd = Int32(-1); self.ready = False
+        self.unblock = 0
         self.count_limit = 0; self.timeout_ms = 0
         self.keys = List[String]()
         self.after_ms = List[UInt64]()

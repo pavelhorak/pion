@@ -10,7 +10,8 @@ and verifies the per-connection tenant binding:
   4. Cross-tenant forgery: tenant B reading "a:key" verbatim misses (it becomes
      "b:a:key" after rewrite — the prefix-free guarantee).
   5. Admin sees the raw prefixed keyspace; tenants never see raw keys.
-  6. Deny-by-default allowlist: FLUSHALL/EVAL/CONFIG/DBSIZE/SUBSCRIBE/FT.* → -NOPERM.
+  6. Deny-by-default allowlist: FLUSHALL/EVAL/CONFIG/DBSIZE/SUBSCRIBE/FT.* → -NOPERM
+     (Redis's "User <name> has no permissions to run the '<cmd>' command").
   7. KEYS/SCAN filter to the tenant's namespace and strip the prefix.
   8. MULTI/EXEC replay rewrites deterministically.
   9. Multi-key commands (MSET/MGET/DEL/RENAME) land entirely in-namespace.
@@ -216,7 +217,8 @@ def main() -> int:
             (lambda: ta.execute_command("SORT", "mylist"), "SORT"),
             (lambda: ta.randomkey(), "RANDOMKEY"),
         ]:
-            err = expect_error(cmd, "not allowed for tenant")
+            # Redis's NOPERM text, which Pion's tenant users get since #47
+            err = expect_error(cmd, "has no permissions to run the")
             check(f"tenant {label} → NOPERM", err is not None and "unexpected" not in err, str(err))
 
         # 7. KEYS / SCAN filter + strip

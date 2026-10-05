@@ -18,7 +18,7 @@ from src.common.skip_list import SlabSkipList
 from src.common.list import SlabList
 from src.memory.slab_allocator import SlabAllocator
 from src.common.value import GenericValue, ValueType
-from src.common.utils import strict_atol, format_int_to_buf, format_float_to_buf, int_string_len, arg_eq, parse_int64_strict, parse_redis_double, DOUBLE_VALUE, DOUBLE_RANGE, DOUBLE_LONG, set_expiry, SETEXP_INVALID, SETEXP_EXPIRED
+from src.common.utils import bytes_to_string, strict_atol, format_int_to_buf, format_float_to_buf, int_string_len, arg_eq, parse_int64_strict, parse_redis_double, DOUBLE_VALUE, DOUBLE_RANGE, DOUBLE_LONG, set_expiry, SETEXP_INVALID, SETEXP_EXPIRED
 from src.common.metrics import ValueLedger
 from src.common.config import PionConfig
 from src.common.geohash import geohash_encode, geohash_decode, GeoHashBits, GEO_STEP_MAX
@@ -57,7 +57,14 @@ from src.commands.ttl import handle_expire, handle_pexpire, handle_expireat, han
 # Command modules (Phase 2 extraction)
 from src.commands.list import handle_lindex, handle_lset, handle_linsert, handle_lrem, handle_ltrim, handle_lpos, handle_lmove
 from src.commands.mpop import parse_mpop
-from src.commands.blocking import BlockedClientRegistry, parse_block_timeout, new_blocked_client
+from src.commands.blocking import BlockedClientRegistry, parse_block_timeout, new_blocked_client, blocked_client_ready, UNBLOCK_TIMEOUT, UNBLOCK_ERROR
+from src.commands.command_cmd import handle_command
+from src.commands.slowlog import SlowLog, handle_slowlog
+from src.commands.acl import AclLog, AclUsers, handle_acl
+from src.commands.client import (ClientRegistry, ClientView, client_line, client_type_of, peer_addr, local_addr,
+                                 heapsort_u64, lower_bytes, client_help, CLIENT_MAX_FDS,
+                                 REPLY_ON, REPLY_OFF, REPLY_SKIP_NEXT, REPLY_SKIP_NOW)
+from src.commands.command_info import cmd_pause_write, cmd_is_container
 from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro, handle_pfselftest, handle_pfdebug
 from src.commands.monitor import MonitorRegistry, monitor_line
 from src.network.vector_ingest import ingest_hash_vector, record_all_dead, ingest_whole_hash, hash_addr, after_rename
@@ -66,7 +73,7 @@ from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, h
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
 from src.commands.geo import handle_geoadd, handle_geopos, handle_geodist, handle_geohash, handle_georadius, handle_geosearch, handle_geosearchstore, handle_georadiusbymember
 from src.commands.hash import handle_hmget, handle_hgetall, handle_hkeys, handle_hvals, handle_hlen, handle_hdel, handle_hexists, handle_hincrby, handle_hincrbyfloat, handle_hrandfield, handle_hscan, handle_hsetnx, handle_hexpire, handle_hpexpire, handle_hexpireat, handle_hpexpireat, handle_httl, handle_hpttl, handle_hpersist, handle_hexpiretime, handle_hpexpiretime
-from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_move, handle_bgrewriteaof, handle_command, handle_debug, handle_slowlog, handle_latency, handle_memory, handle_module, handle_acl, handle_reset, handle_client, handle_time, handle_lolwut
+from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_move, handle_bgrewriteaof, handle_debug, handle_latency, handle_memory, handle_module, handle_reset, handle_time, handle_lolwut
 from src.commands.lua_engine import LuaEngine, handle_eval, handle_evalsha, handle_script, handle_function, handle_fcall
 from src.commands.cluster import handle_cluster
 from src.commands.migrate import handle_dump, handle_restore, handle_migrate
@@ -322,6 +329,17 @@ struct SlowPathHandler:
     var script_main_writer: UnsafePointer[ResponseWriter, MutUntrackedOrigin]
     # #46: the worker's vector-index tombstones (state.mojo sets it)
     var vec_tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]
+    # #47: CLIENT's per-connection state and CLIENT PAUSE, SLOWLOG, ACL LOG,
+    # and the engine's receive-buffer lengths and capacity (CLIENT LIST qbuf)
+    var clients: ClientRegistry
+    var slowlog: SlowLog
+    var acl_log: AclLog
+    var client_buffer_lens: UnsafePointer[Int, MutUntrackedOrigin]
+    var client_buf_cap: Int
+    var kill_after_reply: Int32       # CLIENT KILL of itself: shut down once its reply is out
+    var slowlog_all: Bool             # slowlog-log-slower-than < 1 ms: every command is timed here
+    var slowlog_thr: Int64            # slowlog-log-slower-than as last read (process-wide, in C)
+    var slowlog_thr_ticks: UInt64     # the same in pion_ticks units; max when off
 
     def __init__(
         out self,
@@ -397,6 +415,15 @@ struct SlowPathHandler:
         self.local_affinity = null_ptr[UInt8, MutUntrackedOrigin]()
         self.script_main_writer = null_ptr[ResponseWriter, MutUntrackedOrigin]()
         self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
+        self.clients = ClientRegistry()
+        self.slowlog = SlowLog()
+        self.acl_log = AclLog()
+        self.client_buffer_lens = null_ptr[Int, MutUntrackedOrigin]()
+        self.client_buf_cap = 0
+        self.kill_after_reply = -1
+        self.slowlog_all = False
+        self.slowlog_thr = 10000
+        self.slowlog_thr_ticks = UInt64(Float64(10000) * self.slowlog.ticks_per_us)
         self.cluster = cluster
         self.shard_query_seq = alloc[UInt64](1)
         self.shard_query_seq[0] = 1
@@ -487,7 +514,9 @@ struct SlowPathHandler:
         self.deferred_count        = 0
         self.deferred_drain_ticks  = Array[Int32, 16](fill=Int32(0))
         self.snapshot_engine = SnapshotEngine("pion.snapshot")
-        self.last_save_time  = Int64(0)
+        # #47: Redis counts the dataset as saved at startup (LASTSAVE), and
+        # so does Pion: what a restart restores is what was on disk then.
+        self.last_save_time  = external_call["pion_unix_ms", Int64]() // 1000
         # M1: Inference bridge
         self.inference_bridge = InferenceBridge(config.inference.enabled, config.inference.socket_path)
         if config.inference.enabled:
@@ -843,15 +872,29 @@ struct SlowPathHandler:
 
     def update_dispatch_gate(mut self):
         """Recompute `fast_path_off` after anything it depends on changed."""
+        # #47: a SLOWLOG threshold under 1 ms is a request to see ordinary
+        # commands, which the fast path does not time: they all come here
+        var slt = external_call["pion_slowlog_get_slower_than", Int64]()
+        self.slowlog_all = slt >= 0 and slt < 1000
+        self.slowlog_thr = slt
+        # (a threshold past the counter's range means never: a Float64 too
+        # large for UInt64 converts to anything on x86)
+        var thr_f = Float64(slt) * self.slowlog.ticks_per_us
+        self.slowlog_thr_ticks = UInt64(thr_f) if slt >= 0 and thr_f < 1.8e19 else UInt64(0xFFFFFFFFFFFFFFFF)
         self.fast_path_off = (self.over_maxmemory or self.monitors.count() > 0
-                              or self.pubsub.subscribed_fds > 0)
+                              or self.pubsub.subscribed_fds > 0
+                              or self.clients.reply_off_count > 0         # #47 CLIENT REPLY OFF / SKIP
+                              or self.clients.pause_until_ms != 0         # #47 CLIENT PAUSE
+                              or self.slowlog_all)                        # #47 SLOWLOG
 
     def fast_path_ok(self, ci: Int) -> Bool:
         """Under the gate: may this connection's commands take the fast path?
         Not while memory is over the limit or a client monitors, nor for a
         subscribed connection, whose commands the slow path checks."""
         return (not self.over_maxmemory and self.monitors.count() == 0
-                and not self.pubsub.subscribed(Int32(ci)))
+                and not self.pubsub.subscribed(Int32(ci))
+                and self.clients.reply[ci] == REPLY_ON and self.clients.pause_until_ms == 0
+                and not self.slowlog_all)
 
     def _reset_connection(mut self, fd: Int32, mut writer: ResponseWriter):
         """RESET, as Redis's clearClientConnectionState (#39): out of MONITOR,
@@ -862,6 +905,11 @@ struct SlowPathHandler:
         _ = self.monitors.remove(fd)
         self.tx_state.cleanup_fd(fd)
         self.pubsub.cleanup_fd(fd)
+        # #47: REPLY back ON, NO-EVICT and NO-TOUCH off (the library name stays)
+        self.clients.set_reply(fd, REPLY_ON)
+        if Int(fd) >= 0 and Int(fd) < CLIENT_MAX_FDS:
+            self.clients.no_evict[Int(fd)] = 0
+            self.clients.no_touch[Int(fd)] = 0
         self.update_dispatch_gate()
         if is_not_null(self.local_affinity) and self.local_affinity[Int(fd)] == 3:
             self.local_affinity[Int(fd)] = 0
@@ -977,7 +1025,8 @@ struct SlowPathHandler:
     def _park_blocked(mut self, fd: Int32, buffer: UnsafePointer[UInt8, MutUntrackedOrigin],
                       cmd_idx: Int, num_cmds: Int, cmd_byte_ends: UnsafePointer[Int, MutUntrackedOrigin],
                       on_primary: Bool, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
-                      key_first: Int, key_end: Int, deadline_ms: Int64, zset: Bool) -> Bool:
+                      key_first: Int, key_end: Int, deadline_ms: Int64, zset: Bool,
+                      nil_bulk: Bool = False) -> Bool:
         """#38: park a blocking command that found nothing: register it with a
         copy of its frame and its keys, and stop the batch at its end (the
         caller does that when this returns True). False where it cannot park
@@ -986,7 +1035,7 @@ struct SlowPathHandler:
             return False
         var start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
         var end = cmd_byte_ends[cmd_idx]
-        self.blocked_clients.add(new_blocked_client(fd, deadline_ms, zset, buffer + start, end - start,
+        self.blocked_clients.add(new_blocked_client(fd, deadline_ms, zset, nil_bulk, buffer + start, end - start,
                                                     tokens, key_first, key_end))
         self.parked_waits.park_fd(fd)
         return True
@@ -1092,6 +1141,576 @@ struct SlowPathHandler:
             return True
         return False
 
+    # ── #47: CLIENT, CLIENT PAUSE / REPLY, SLOWLOG, ACL ─────────────────────
+
+    def _user_of(self, fd: Int32) -> Int:
+        """The connection's user: -1 default, else its tenant."""
+        if self.tenant_table.count == 0:
+            return -1
+        return Int(self.tx_state.tenant_id[Int(fd)])
+
+    def _user_name(self, fd: Int32) -> String:
+        var u = self._user_of(fd)
+        if u < 0:
+            return "default"
+        return bytes_to_string(self.tenant_table.name_ptr(u), self.tenant_table.name_len(u))
+
+    def _acl_users(mut self, config: PionConfig) -> AclUsers:
+        return AclUsers(config.server.requirepass,
+                        UnsafePointer[TenantTable, MutUntrackedOrigin](unsafe_from_address=Int(UnsafePointer(to=self.tenant_table))))
+
+    def _client_view(mut self, fd: Int32, caller: Int32, qbuf_self: Int, resp_self: Int,
+                     pending: Bool) raises -> ClientView:
+        """What CLIENT LIST says about connection fd."""
+        var f = Int(fd)
+        var name = self.tx_state.client_names[f] if f in self.tx_state.client_names else String("")
+        var flags = String("")
+        if self.monitors.contains(fd):
+            flags += "O"
+        if self.pubsub.subscribed(fd):
+            flags += "P"
+        if self.tx_state.is_multi(fd):
+            flags += "x"
+        if self.parked_waits.is_parked(f):
+            flags += "b"
+        if is_not_null(self.local_affinity) and self.local_affinity[f] == 3:
+            flags += "r"
+        if self.clients.no_evict[f] != 0:
+            flags += "e"
+        if self.clients.no_touch[f] != 0:
+            flags += "T"
+        if flags.byte_length() == 0:
+            flags = "N"
+        var sub = len(self.pubsub.names_of(KIND_CHANNEL, fd))
+        var psub = len(self.pubsub.names_of(KIND_PATTERN, fd))
+        var ssub = self.pubsub.get_shard_count(fd)
+        var multi = Int(self.tx_state.queue_counts[f]) if self.tx_state.is_multi(fd) else -1
+        var watch = Int(self.tx_state.watch_counts[f])
+        var qbuf = qbuf_self
+        if fd != caller:
+            qbuf = self.client_buffer_lens[f] if is_not_null(self.client_buffer_lens) else 0
+        var qfree = self.client_buf_cap - qbuf if self.client_buf_cap > qbuf else 0
+        var resp = resp_self if fd == caller else Int(self.tx_state.resp_proto[f])
+        if resp != 3:
+            resp = 2
+        return ClientView(fd, name^, flags^, sub, psub, ssub, multi, watch, qbuf, qfree,
+                          String("rw") if pending else String("r"), self._user_name(fd), resp, self.worker_id)
+
+    def _client_fds(self) -> List[Int32]:
+        """This worker's connections in the order they connected (by ID)."""
+        var keys = List[UInt64]()
+        for f in range(CLIENT_MAX_FDS):
+            var id = self.clients.ids[f]
+            if id != 0:
+                keys.append((id << 16) | UInt64(f))
+        heapsort_u64(keys)
+        var fds = List[Int32]()
+        for k in range(len(keys)):
+            fds.append(Int32(Int(keys[k] & 0xFFFF)))
+        return fds^
+
+    def _client_line_of(mut self, fd: Int32, caller: Int32, qbuf_self: Int, resp_self: Int,
+                        mut writer: ResponseWriter) raises -> String:
+        var pending = is_not_null(writer.pending_offsets) and writer.pending_offsets[Int(fd)] > 0
+        return client_line(self.clients, self._client_view(fd, caller, qbuf_self, resp_self, pending))
+
+    def _client_type(self, fd: Int32) -> Int:
+        """Redis's getClientType: pubsub when subscribed, else normal (a
+        monitor is normal too)."""
+        return 2 if self.pubsub.subscribed(fd) else 0
+
+    def _kill_client(mut self, f: Int32, caller: Int32):
+        """CLIENT KILL: shut the connection down; the event loop of the worker
+        that serves it sees the end of input and closes it. The caller itself
+        is closed after its reply (only its read side is shut). A parked
+        connection is answered first, so that its loop reads again."""
+        if f == caller:
+            self.kill_after_reply = f        # process_slow_path shuts it down after the flush
+            return
+        _ = external_call["pion_kill_fd", Int32](f)
+        _ = self._unblock_client(f, UNBLOCK_TIMEOUT, True)
+        self.clients.release(f)
+
+    def _unblock_client(mut self, f: Int32, reason: UInt8, force: Bool) -> Bool:
+        """CLIENT UNBLOCK: a client parked by a blocking command or by WAIT is
+        answered as its timeout would (or with an error). Not one CLIENT PAUSE
+        holds (Redis answers 0 there too), nor one whose key already holds
+        what it waits for: Redis would have served it already, and the engine
+        will on its next tick. `force` (CLIENT KILL) skips that check."""
+        for k in range(self.blocked_clients._count()):
+            if self.blocked_clients.clients[k].fd == f:
+                if self.blocked_clients.clients[k].unblock != 0:
+                    return False
+                if not force and blocked_client_ready(self.keyspace, self.blocked_clients.clients[k]):
+                    return False
+                self.blocked_clients.clients[k].unblock = reason
+                return True
+        for k in range(self.blocked_readers._count()):
+            if self.blocked_readers.readers[k].fd == f:
+                if self.blocked_readers.readers[k].unblock != 0 or (self.blocked_readers.readers[k].ready and not force):
+                    return False
+                self.blocked_readers.readers[k].unblock = reason
+                return True
+        for k in range(self.parked_waits.count()):
+            if self.parked_waits.entries[k].fd == f:
+                if self.parked_waits.entries[k].unblock != 0:
+                    return False
+                self.parked_waits.entries[k].unblock = reason
+                return True
+        return False
+
+    def _tx_has_write(self, fd: Int32) -> Bool:
+        """CLIENT PAUSE WRITE holds an EXEC whose transaction writes."""
+        var f = Int(fd)
+        var q = self.tx_state.queues[f]
+        if is_null(q):
+            return False
+        for k in range(Int(self.tx_state.queue_counts[f])):
+            var d = q[k].data
+            var l = q[k].length
+            # *N\r\n$L\r\nNAME\r\n[$L\r\nSUB\r\n]: the name and the first argument
+            var at = 0
+            while at < l and d[at] != 10:
+                at += 1
+            var np = d
+            var nl = 0
+            var sp = d
+            var sl = 0
+            for arg in range(2):
+                if at + 1 >= l or d[at + 1] != 36:
+                    break
+                var x = at + 2
+                var alen = 0
+                while x < l and d[x] != 13:
+                    alen = alen * 10 + Int(d[x] - 48)
+                    x += 1
+                var start = x + 2
+                if start + alen > l:
+                    break
+                if arg == 0:
+                    np = d + start
+                    nl = alen
+                else:
+                    sp = d + start
+                    sl = alen
+                at = start + alen + 1
+            if nl > 0 and (cmd_pause_write(np, nl, sp, sl) or command_is_denyoom(np, nl)):
+                return True
+        return False
+
+    def _pause_holds(mut self, fd: Int32, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+                     i: Int, end: Int) -> Bool:
+        """Does CLIENT PAUSE hold this command? ALL: every command. WRITE:
+        Redis's write and may-replicate commands (and Pion's ingest ones), an
+        EXEC whose transaction writes. Never a MONITOR connection, which Redis
+        treats as a replica."""
+        if external_call["pion_unix_ms", Int64]() >= self.clients.pause_until_ms:
+            return False                     # over: the engine lifts it on its next tick
+        if self.monitors.contains(fd):
+            return False
+        if self.clients.pause_all:
+            return True
+        var tp = tokens[i].ptr
+        var tl = tokens[i].length
+        var sp = tokens[i + 1].ptr if end - i > 1 else tp
+        var sl = tokens[i + 1].length if end - i > 1 else 0
+        if cmd_pause_write(tp, tl, sp, sl) or command_is_denyoom(tp, tl):
+            return True
+        if cmd_eq(tp, tl, "exec") and self.tx_state.is_multi(fd):
+            return self._tx_has_write(fd)
+        return False
+
+    def _reply_gate(mut self, fd: Int32, mut writer: ResponseWriter, start: Int, flushes: Int):
+        """CLIENT REPLY, once a command's reply is complete: OFF drops it; SKIP
+        drops the reply of the command after CLIENT REPLY SKIP. A reply that
+        was already (partly) sent cannot be taken back and stays."""
+        var f = Int(fd)
+        var m = self.clients.reply[f]
+        if m == REPLY_ON:
+            return
+        if m == REPLY_SKIP_NEXT:
+            self.clients.reply[f] = REPLY_SKIP_NOW   # the next command's reply goes
+            return
+        if writer.flush_count == flushes and start <= writer.offset:
+            writer.offset = start
+        if m == REPLY_SKIP_NOW:
+            self.clients.set_reply(fd, REPLY_ON)
+            self.update_dispatch_gate()
+
+    def _slowlog_push(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+                      us: Int64, fd: Int32) raises:
+        var f = Int(fd)
+        var name = self.tx_state.client_names[f] if f in self.tx_state.client_names else String("")
+        self.slowlog.push(tokens, first, end, us, peer_addr(fd), name^)
+
+    def _acl_log(mut self, var reason: String, var object: String, var username: String, fd: Int32,
+                 qbuf_self: Int, mut writer: ResponseWriter) raises:
+        """An ACL LOG entry for this connection (a failed AUTH, a command a
+        tenant may not run)."""
+        var ctx = String("multi") if self.tx_state.is_multi(fd) else String("toplevel")
+        var info = self._client_line_of(fd, fd, qbuf_self, Int(writer.proto), writer)
+        # client-info is the line without its newline, as Redis records it
+        var il = info.byte_length()
+        if il > 0:
+            info = bytes_to_string(UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(info.unsafe_ptr())), il - 1)
+        self.acl_log.add(reason^, ctx^, object^, username^, info^)
+
+    def _wrote_wrongpass(self, mut writer: ResponseWriter, start: Int) -> Bool:
+        """Did the command just run answer -WRONGPASS (a failed AUTH)?"""
+        comptime W = "-WRONGPASS"
+        if start < 0 or writer.offset - start < 10:
+            return False
+        var p = W.unsafe_ptr()
+        for k in range(10):
+            if writer.buffer[start + k] != p[k]:
+                return False
+        return True
+
+    def _client_cmd(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32,
+                    mut writer: ResponseWriter, qbuf_self: Int, config: PionConfig) raises -> Bool:
+        """CLIENT (#47). True when the caller killed itself: the rest of its
+        input is dropped and the connection closes after this reply, as
+        Redis's CLIENT_CLOSE_AFTER_REPLY."""
+        var argc = end - i
+        if argc < 2:
+            writer.append_error_response("ERR wrong number of arguments for 'client' command")
+            return False
+        var sub = tokens[i + 1]
+        var sp = sub.ptr
+        var sl = sub.length
+        var f = Int(fd)
+        if arg_eq(sp, sl, "id"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|id' command")
+            else:
+                writer.append_int_response(Int64(self.clients.id_of(fd)))
+        elif arg_eq(sp, sl, "setname"):
+            if argc != 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|setname' command")
+                return False
+            var nt = tokens[i + 2]
+            for k in range(nt.length):
+                var c = nt.ptr[k]
+                if c < 33 or c > 126:
+                    writer.append_error_response("ERR Client names cannot contain spaces, newlines or special characters.")
+                    return False
+            if nt.length == 0:
+                if f in self.tx_state.client_names:
+                    _ = self.tx_state.client_names.pop(f)
+            else:
+                self.tx_state.client_names[f] = bytes_to_string(nt.ptr, nt.length)
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "getname"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|getname' command")
+            elif f in self.tx_state.client_names:
+                var nm = self.tx_state.client_names[f]
+                writer.append_bulk_string_response(nm.unsafe_ptr(), nm.byte_length())
+            else:
+                writer.append_null_response()
+        elif arg_eq(sp, sl, "info"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|info' command")
+                return False
+            var line = self._client_line_of(fd, fd, qbuf_self, Int(writer.proto), writer)
+            writer.append_verbatim_response(line.unsafe_ptr(), line.byte_length())
+        elif arg_eq(sp, sl, "list"):
+            var want_type = -1
+            var ids = List[UInt64]()
+            var by_id = False
+            if argc == 4 and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "type"):
+                want_type = client_type_of(tokens[i + 3].ptr, tokens[i + 3].length)
+                if want_type == -1:
+                    writer.append_error_response("ERR Unknown client type '" + bytes_to_string(tokens[i + 3].ptr, tokens[i + 3].length) + "'")
+                    return False
+            elif argc > 3 and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "id"):
+                by_id = True
+                for k in range(i + 3, end):
+                    var v = parse_int64_strict(tokens[k].ptr, tokens[k].length)
+                    if not v.ok:
+                        writer.append_error_response("ERR Invalid client ID")
+                        return False
+                    ids.append(UInt64(v.value) if v.value > 0 else UInt64(0))
+            elif argc != 2:
+                writer.append_error_response("ERR syntax error")
+                return False
+            var out = String("")
+            if by_id:
+                for k in range(len(ids)):
+                    var t = self.clients.fd_of(ids[k])
+                    if t >= 0:
+                        out += self._client_line_of(t, fd, qbuf_self, Int(writer.proto), writer)
+            else:
+                var fds = self._client_fds()
+                for k in range(len(fds)):
+                    if want_type == -1 or self._client_type(fds[k]) == want_type:
+                        out += self._client_line_of(fds[k], fd, qbuf_self, Int(writer.proto), writer)
+            writer.append_verbatim_response(out.unsafe_ptr(), out.byte_length())
+        elif arg_eq(sp, sl, "kill"):
+            return self._client_kill(tokens, i, end, fd, writer, config)
+        elif arg_eq(sp, sl, "pause"):
+            if argc != 3 and argc != 4:
+                writer.append_error_response("ERR wrong number of arguments for 'client|pause' command")
+                return False
+            if config.server.use_xdp:
+                # The XDP lane serves without parking a connection, and a pause
+                # is a parked connection: refused rather than ignored
+                writer.append_error_response("ERR CLIENT PAUSE is not supported with --xdp")
+                return False
+            var all = True
+            if argc == 4:
+                var m = tokens[i + 3]
+                if arg_eq(m.ptr, m.length, "write"):
+                    all = False
+                elif not arg_eq(m.ptr, m.length, "all"):
+                    writer.append_error_response("ERR CLIENT PAUSE mode must be WRITE or ALL")
+                    return False
+            var tv = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+            if not tv.ok:
+                writer.append_error_response("ERR timeout is not an integer or out of range")
+                return False
+            if tv.value < 0:
+                writer.append_error_response("ERR timeout is negative")
+                return False
+            var now = external_call["pion_unix_ms", Int64]()
+            if tv.value > 0 and tv.value > Int64(9223372036854775807) - now:
+                writer.append_error_response("ERR timeout is out of range")
+                return False
+            self.clients.pause(now + tv.value if tv.value > 0 else Int64(0), all)
+            self.update_dispatch_gate()
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "unpause"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|unpause' command")
+                return False
+            self.clients.unpause()
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "reply"):
+            if argc != 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|reply' command")
+                return False
+            var m = tokens[i + 2]
+            if arg_eq(m.ptr, m.length, "on"):
+                self.clients.set_reply(fd, REPLY_ON)
+                writer.append_ok_response()
+            elif arg_eq(m.ptr, m.length, "off"):
+                self.clients.set_reply(fd, REPLY_OFF)
+            elif arg_eq(m.ptr, m.length, "skip"):
+                if self.clients.reply[f] != REPLY_OFF:
+                    self.clients.set_reply(fd, REPLY_SKIP_NEXT)
+            else:
+                writer.append_error_response("ERR syntax error")
+            self.update_dispatch_gate()
+        elif arg_eq(sp, sl, "unblock"):
+            if argc != 3 and argc != 4:
+                writer.append_error_response("ERR wrong number of arguments for 'client|unblock' command")
+                return False
+            var reason = UNBLOCK_TIMEOUT
+            if argc == 4:
+                var r = tokens[i + 3]
+                if arg_eq(r.ptr, r.length, "error"):
+                    reason = UNBLOCK_ERROR
+                elif not arg_eq(r.ptr, r.length, "timeout"):
+                    writer.append_error_response("ERR CLIENT UNBLOCK reason should be TIMEOUT or ERROR")
+                    return False
+            var idv = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+            if not idv.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return False
+            var t = self.clients.fd_of(UInt64(idv.value)) if idv.value > 0 else Int32(-1)
+            writer.append_int_response(Int64(1) if t >= 0 and self._unblock_client(t, reason, False) else Int64(0))
+        elif arg_eq(sp, sl, "no-evict") or arg_eq(sp, sl, "no-touch"):
+            if argc != 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|" + lower_bytes(sub.ptr, sub.length) + "' command")
+                return False
+            var m = tokens[i + 2]
+            var on = arg_eq(m.ptr, m.length, "on")
+            if not on and not arg_eq(m.ptr, m.length, "off"):
+                writer.append_error_response("ERR syntax error")
+                return False
+            if arg_eq(sp, sl, "no-evict"):
+                self.clients.no_evict[f] = 1 if on else 0
+            else:
+                self.clients.no_touch[f] = 1 if on else 0
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "setinfo"):
+            if argc != 4:
+                writer.append_error_response("ERR wrong number of arguments for 'client|setinfo' command")
+                return False
+            var attr = tokens[i + 2]
+            var v = tokens[i + 3]
+            var is_name = arg_eq(attr.ptr, attr.length, "lib-name")
+            if not is_name and not arg_eq(attr.ptr, attr.length, "lib-ver"):
+                writer.append_error_response("ERR Unrecognized option '" + bytes_to_string(attr.ptr, attr.length) + "'")
+                return False
+            for k in range(v.length):
+                var c = v.ptr[k]
+                if c < 33 or c > 126:
+                    writer.append_error_response("ERR " + bytes_to_string(attr.ptr, attr.length)
+                                                 + " cannot contain spaces, newlines or special characters.")
+                    return False
+            if is_name:
+                if v.length == 0:
+                    if f in self.clients.lib_name:
+                        _ = self.clients.lib_name.pop(f)
+                else:
+                    self.clients.lib_name[f] = bytes_to_string(v.ptr, v.length)
+            else:
+                if v.length == 0:
+                    if f in self.clients.lib_ver:
+                        _ = self.clients.lib_ver.pop(f)
+                else:
+                    self.clients.lib_ver[f] = bytes_to_string(v.ptr, v.length)
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "tracking"):
+            if argc < 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|tracking' command")
+                return False
+            var m = tokens[i + 2]
+            if argc == 3 and arg_eq(m.ptr, m.length, "off"):
+                writer.append_ok_response()          # it is off, and stays off
+            else:
+                writer.append_error_response("ERR CLIENT TRACKING is not supported: Pion does not send "
+                                             + "client-side caching invalidations")
+        elif arg_eq(sp, sl, "caching"):
+            if argc != 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|caching' command")
+                return False
+            writer.append_error_response("ERR CLIENT CACHING can be called only when the client is in tracking "
+                                         + "mode with OPTIN or OPTOUT mode enabled")
+        elif arg_eq(sp, sl, "getredir"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|getredir' command")
+            else:
+                writer.append_int_response(-1)
+        elif arg_eq(sp, sl, "trackinginfo"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|trackinginfo' command")
+                return False
+            writer.append_map_header(3)
+            writer.append_bulk_string_response("flags".unsafe_ptr(), 5)
+            writer.append_set_header(1)
+            writer.append_bulk_string_response("off".unsafe_ptr(), 3)
+            writer.append_bulk_string_response("redirect".unsafe_ptr(), 8)
+            writer.append_int_response(-1)
+            writer.append_bulk_string_response("prefixes".unsafe_ptr(), 8)
+            writer.append_array_header(0)
+        elif arg_eq(sp, sl, "help"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|help' command")
+                return False
+            client_help(writer)
+        else:
+            writer.append_error_response("ERR unknown subcommand '" + bytes_to_string(sp, sl) + "'. Try CLIENT HELP.")
+        return False
+
+    def _client_kill(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32,
+                     mut writer: ResponseWriter, config: PionConfig) raises -> Bool:
+        """CLIENT KILL <ip:port> | CLIENT KILL <filter> <value> ..., as Redis:
+        the old form answers +OK or "No such client" and may kill the caller;
+        the new form answers how many it killed and skips the caller unless
+        SKIPME no."""
+        var argc = end - i
+        var addr = String("")
+        var has_addr = False
+        var laddr = String("")
+        var has_laddr = False
+        var want_type = -1
+        var want_id = UInt64(0)
+        var want_user = -3
+        var skipme = True
+        var maxage = Int64(0)
+        if argc == 3:
+            addr = bytes_to_string(tokens[i + 2].ptr, tokens[i + 2].length)
+            has_addr = True
+            skipme = False
+        elif argc > 3:
+            var j = i + 2
+            while j < end:
+                var o = tokens[j]
+                var more = j + 1 < end
+                if arg_eq(o.ptr, o.length, "id") and more:
+                    var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+                    if not v.ok or v.value < 1:
+                        writer.append_error_response("ERR client-id should be greater than 0")
+                        return False
+                    want_id = UInt64(v.value)
+                elif arg_eq(o.ptr, o.length, "type") and more:
+                    want_type = client_type_of(tokens[j + 1].ptr, tokens[j + 1].length)
+                    if want_type == -1:
+                        writer.append_error_response("ERR Unknown client type '"
+                                                     + bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length) + "'")
+                        return False
+                elif arg_eq(o.ptr, o.length, "addr") and more:
+                    addr = bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length)
+                    has_addr = True
+                elif arg_eq(o.ptr, o.length, "laddr") and more:
+                    laddr = bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length)
+                    has_laddr = True
+                elif arg_eq(o.ptr, o.length, "user") and more:
+                    var users = self._acl_users(config)
+                    want_user = users.find(tokens[j + 1].ptr, tokens[j + 1].length)
+                    if want_user == -2:
+                        writer.append_error_response("ERR No such user '"
+                                                     + bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length) + "'")
+                        return False
+                elif arg_eq(o.ptr, o.length, "skipme") and more:
+                    var v = tokens[j + 1]
+                    if arg_eq(v.ptr, v.length, "yes"):
+                        skipme = True
+                    elif arg_eq(v.ptr, v.length, "no"):
+                        skipme = False
+                    else:
+                        writer.append_error_response("ERR syntax error")
+                        return False
+                elif arg_eq(o.ptr, o.length, "maxage") and more:
+                    var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+                    if not v.ok:
+                        writer.append_error_response("ERR maxage is not an integer or out of range")
+                        return False
+                    if v.value <= 0:
+                        writer.append_error_response("ERR maxage should be greater than 0")
+                        return False
+                    maxage = v.value
+                else:
+                    writer.append_error_response("ERR syntax error")
+                    return False
+                j += 2
+        else:
+            writer.append_error_response("ERR wrong number of arguments for 'client|kill' command")
+            return False
+        var killed = 0
+        var self_kill = False
+        var fds = self._client_fds()
+        for k in range(len(fds)):
+            var t = fds[k]
+            if has_addr and peer_addr(t) != addr:
+                continue
+            if has_laddr and local_addr(t) != laddr:
+                continue
+            if want_type != -1 and self._client_type(t) != want_type:
+                continue
+            if want_id != 0 and self.clients.id_of(t) != want_id:
+                continue
+            if want_user != -3 and self._user_of(t) != want_user:
+                continue
+            if t == fd and skipme:
+                continue
+            if maxage != 0 and self.clients.age_s(t) < maxage:
+                continue
+            if t == fd:
+                self_kill = True
+            self._kill_client(t, fd)
+            killed += 1
+        if argc == 3:
+            if killed == 0:
+                writer.append_error_response("ERR No such client")
+            else:
+                writer.append_ok_response()
+        else:
+            writer.append_int_response(Int64(killed))
+        return self_kill
+
     def process_slow_path(
         mut self,
         buffer: UnsafePointer[UInt8, MutUntrackedOrigin],
@@ -1122,6 +1741,10 @@ struct SlowPathHandler:
         var num_cmds = 0
         var on_primary = True
         var cmd_write_start = 0
+        # #47 CLIENT REPLY: where the current primary command's reply began,
+        # and the writer's flush count then
+        var _rg_start = -1
+        var _rg_flushes = 0
         try:
             var tokens = self.tokens_buf if self.script_depth == 0 else self.script_tokens_buf
             var num_tokens = 0
@@ -1160,7 +1783,17 @@ struct SlowPathHandler:
                     # gh #162: where this command's response starts, so the
                     # recovery `except` can drop a half-written frame before
                     # emitting its error.
+                    # #47 CLIENT REPLY OFF / SKIP: the previous command's reply
+                    # is complete, so drop it here when the mode says so (this
+                    # also covers a command that `continue`d: +QUEUED, -NOAUTH)
+                    if on_primary and self.script_depth == 0:
+                        if self.clients.reply_off_count > 0 and _rg_start >= 0:
+                            self._reply_gate(fd, writer, _rg_start, _rg_flushes)
+                        _rg_start = writer.offset
+                        _rg_flushes = writer.flush_count
                     cmd_write_start = writer.offset
+                    # #47 SLOWLOG: when this command started (a counter read)
+                    var _sl_t0 = external_call["pion_ticks", UInt64]()
                     # cmd_ends holds MAX_CMD_ENDS == MAX_CMD_TOKENS entries and a
                     # command is at least one token, so this can't run off the
                     # end of a real batch (gh #156 — it used to, at 16, and the
@@ -1168,6 +1801,17 @@ struct SlowPathHandler:
                     # every command behind it). The fallback stays for the
                     # degenerate no-command parse.
                     var cmd_end_tok = cmd_ends[cmd_idx] if cmd_idx < num_cmds else num_tokens
+
+                    # #47 CLIENT PAUSE: a command the pause holds is not run;
+                    # the connection is parked in front of it until the pause
+                    # ends (NetworkEngine._service_pause), as Redis postpones it.
+                    if self.clients.pause_until_ms != 0 and on_primary and self.script_depth == 0 \
+                       and self.can_park_wait and self._pause_holds(fd, tokens, i, cmd_end_tok):
+                        self.clients.hold(fd)
+                        self.parked_waits.park_fd(fd)
+                        primary_consumed = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
+                        _rg_start = -1          # nothing of this command was written
+                        break
 
                     # #39: a connection in MONITOR mode may not touch the
                     # keyspace, as in Redis (where a monitor is a kind of replica).
@@ -1391,7 +2035,14 @@ struct SlowPathHandler:
                                     writer.append_error_response("ERR tenant key rewrite exceeds scratch buffer")
                                     _treject = True
                             else:
-                                writer.append_error_response("NOPERM this command is not allowed for tenant connections")
+                                # #47: Redis's NOPERM text, and an ACL LOG entry
+                                var _tobj = lower_bytes(tp, tl)
+                                if cmd_is_container(tp, tl) and cmd_end_tok - i > 1:
+                                    _tobj += "|" + lower_bytes(tokens[i + 1].ptr, tokens[i + 1].length)
+                                writer.append_error_response("NOPERM User " + self._user_name(fd)
+                                                             + " has no permissions to run the '" + _tobj + "' command")
+                                self._acl_log("command", _tobj^, self._user_name(fd), fd,
+                                              n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                             if _treject:
                                 i = cmd_end_tok
                                 while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
@@ -1425,6 +2076,14 @@ struct SlowPathHandler:
                                          rebind[UnsafePointer[TenantTable, MutUntrackedOrigin]](UnsafePointer(to=self.tenant_table)),
                                          self.tx_state.tenant_id,
                                          self.tx_state.resp_proto)
+                        # #47: a rejected AUTH clause goes to ACL LOG, under the user it named
+                        if self._wrote_wrongpass(writer, cmd_write_start):
+                            var _hu = String("default")
+                            for _hk in range(i + 1, cmd_end_tok - 2):
+                                if arg_eq(tokens[_hk].ptr, tokens[_hk].length, "auth"):
+                                    _hu = bytes_to_string(tokens[_hk + 1].ptr, tokens[_hk + 1].length)
+                                    break
+                            self._acl_log("auth", "AUTH", _hu^, fd, n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                         i = cmd_end_tok - 1  # consume all HELLO args (incl. AUTH clause)
                     # ── SET (slow path) ──
                     elif tl == 3 and cmd_matches_3(tp, 115, 101, 116):
@@ -2234,20 +2893,44 @@ struct SlowPathHandler:
                     # SAVE runs synchronously first so its reply ordering is
                     # irrelevant, then the latch is set and we write nothing.
                     elif tl == 8 and cmd_eq(tp, tl, "shutdown"):
+                        # #47: Redis's options, in any order. ABORT used to be
+                        # read as "save and shut down", and it stopped the
+                        # server; it now cancels a shutdown that has not begun
+                        # to drain, or says there is none.
                         var _sd_nosave = False
-                        if i + 1 < cmd_end_tok:
-                            var _ap = tokens[unsafe_offset=i+1].ptr
-                            var _al = tokens[unsafe_offset=i+1].length
+                        var _sd_save = False
+                        var _sd_abort = False
+                        var _sd_other = False
+                        var _sd_bad = False
+                        for _sj in range(i + 1, cmd_end_tok):
+                            var _ap = tokens[unsafe_offset=_sj].ptr
+                            var _al = tokens[unsafe_offset=_sj].length
                             if cmd_eq(_ap, _al, "nosave"):
                                 _sd_nosave = True
-                        if not _sd_nosave:
-                            _ = handle_save(self.snapshot_engine, self.keyspace,
-                                            self.worker_id, self.dispatcher,
-                                            self.last_save_time, writer, self.ttl_map)
-                            # handle_save wrote +OK; SHUTDOWN must not reply, so
-                            # roll that back rather than desyncing the client.
-                            writer.offset = cmd_write_start
-                        external_call["pion_request_shutdown", NoneType]()
+                            elif cmd_eq(_ap, _al, "save"):
+                                _sd_save = True
+                            elif cmd_eq(_ap, _al, "now") or cmd_eq(_ap, _al, "force"):
+                                _sd_other = True
+                            elif cmd_eq(_ap, _al, "abort"):
+                                _sd_abort = True
+                            else:
+                                _sd_bad = True
+                        if _sd_bad or (_sd_abort and (_sd_nosave or _sd_save or _sd_other)) or (_sd_nosave and _sd_save):
+                            writer.append_error_response("ERR syntax error")
+                        elif _sd_abort:
+                            if external_call["pion_abort_shutdown", Int32]() == 1:
+                                writer.append_ok_response()
+                            else:
+                                writer.append_error_response("ERR No shutdown in progress.")
+                        else:
+                            if not _sd_nosave:
+                                _ = handle_save(self.snapshot_engine, self.keyspace,
+                                                self.worker_id, self.dispatcher,
+                                                self.last_save_time, writer, self.ttl_map)
+                                # handle_save wrote +OK; SHUTDOWN must not reply, so
+                                # roll that back rather than desyncing the client.
+                                writer.offset = cmd_write_start
+                            external_call["pion_request_shutdown", NoneType]()
                         i = cmd_end_tok - 1
                     # ── TTL/Expiry Commands (src/commands/ttl.mojo) ──
                     elif tl == 6 and cmd_matches_6(tp, 101, 120, 112, 105, 114, 101):
@@ -2367,10 +3050,19 @@ struct SlowPathHandler:
                         _ = handle_config(tokens, i, cmd_end_tok, writer, config, _cfg_reset)
                         if _cfg_reset:
                             self.ledger.reset()       # CONFIG RESETSTAT: the counters INFO reports
+                        self.update_dispatch_gate()   # #47: a SLOWLOG threshold may move the fast path
                         i = cmd_end_tok - 1
                     # ── CLUSTER ──
                     elif tl == 7 and cmd_matches_7(tp, 99, 108, 117, 115, 116, 101, 114):
-                        _ = handle_cluster(tokens, i, cmd_end_tok, writer, self.cluster, self.keyspace, self.dispatcher.raft, self.shared_hnsw, self.v_store, self.attn_idx, self.worker_id, self.num_workers)
+                        # #47: outside cluster mode Redis answers every CLUSTER
+                        # subcommand with this error; Pion keeps only its own
+                        # CLUSTER STATS. KEYSLOT answered 0 and COUNTKEYSINSLOT 0
+                        # for any key, REPLICATE and RESET +OK, doing nothing.
+                        if not (is_not_null(self.cluster) and self.cluster[].enabled) \
+                           and not (cmd_end_tok - i >= 2 and arg_eq(tokens[i + 1].ptr, tokens[i + 1].length, "stats")):
+                            writer.append_error_response("ERR This instance has cluster support disabled")
+                        else:
+                            _ = handle_cluster(tokens, i, cmd_end_tok, writer, self.cluster, self.keyspace, self.dispatcher.raft, self.shared_hnsw, self.v_store, self.attn_idx, self.worker_id, self.num_workers)
                         i = cmd_end_tok - 1
                     # ── REPLCONF ──
                     elif cmd_eq(tp, tl, "replconf"):
@@ -3624,6 +4316,12 @@ struct SlowPathHandler:
                         _ = handle_auth(tokens, i, cmd_end_tok, writer, config.server.requirepass, self.tx_state.authed, fd,
                                          rebind[UnsafePointer[TenantTable, MutUntrackedOrigin]](UnsafePointer(to=self.tenant_table)),
                                          self.tx_state.tenant_id)
+                        # #47: a failed AUTH goes to ACL LOG, under the user it named
+                        if self._wrote_wrongpass(writer, cmd_write_start):
+                            var _au = String("default")
+                            if cmd_end_tok - i == 3:
+                                _au = bytes_to_string(tokens[i + 1].ptr, tokens[i + 1].length)
+                            self._acl_log("auth", "AUTH", _au^, fd, n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "flushdb"):
                         _ = handle_flushdb(tokens, i, cmd_end_tok, self.keyspace, writer, self.dispatcher.wal)
@@ -3650,14 +4348,14 @@ struct SlowPathHandler:
                         _ = handle_bgrewriteaof(self.dispatcher, self.keyspace, writer, self.ttl_map)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "command"):
-                        _ = handle_command(tokens, i, cmd_end_tok, writer)
+                        _ = handle_command(tokens, i, cmd_end_tok, writer)   # #47
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "debug"):
                         _ = handle_debug(tokens, i, cmd_end_tok, writer, self.keyspace,
                                          config.server.enable_debug_command, fd)   # #45
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "slowlog"):
-                        _ = handle_slowlog(tokens, i, cmd_end_tok, writer)
+                        handle_slowlog(tokens, i, cmd_end_tok, writer, self.slowlog)   # #47
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "latency"):
                         _ = handle_latency(tokens, i, cmd_end_tok, writer)
@@ -3669,7 +4367,8 @@ struct SlowPathHandler:
                         _ = handle_module(tokens, i, cmd_end_tok, writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "acl"):
-                        _ = handle_acl(tokens, i, cmd_end_tok, writer)
+                        handle_acl(tokens, i, cmd_end_tok, writer, self._acl_users(config), self.acl_log,
+                                   self._user_of(fd))   # #47
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "reset"):
                         if cmd_end_tok - i != 1:
@@ -3679,8 +4378,14 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── CLIENT ── (6 bytes: c=99,l=108,i=105,e=101,n=110,t=116)
                     elif tl == 6 and cmd_matches_6(tp, 99, 108, 105, 101, 110, 116):
-                        _ = handle_client(tokens, i, cmd_end_tok, fd, writer, self.tx_state.client_names)
-                        i = cmd_end_tok - 1
+                        # #47: a client that kills itself is closed after this
+                        # reply; what it sent after the command is dropped
+                        var _cl_start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
+                        if self._client_cmd(tokens, i, cmd_end_tok, fd, writer, n - _cl_start, config) and on_primary:
+                            primary_consumed = n
+                            i = num_tokens
+                        else:
+                            i = cmd_end_tok - 1
                     # ── BLPOP / BRPOP ── (gh #318, #38)
                     # gh #423: both name literals stay on the `elif` line so
                     # gen_command_table.py sees BRPOP too.
@@ -3891,7 +4596,7 @@ struct SlowPathHandler:
                                         else:
                                             self._rpoplpush(tokens, i, writer)
                                     elif self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
-                                                            tokens, i + 1, i + 2, _bdl, False):
+                                                            tokens, i + 1, i + 2, _bdl, False, True):
                                         primary_consumed = cmd_byte_ends[cmd_idx]
                                         i = num_tokens
                                     else:
@@ -3988,6 +4693,21 @@ struct SlowPathHandler:
                             _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #46
                                                   self.vec_tomb, tokens[i + 1].ptr, tokens[i + 1].length)
                         i = cmd_end_tok - 1
+                    # #47: READONLY / READWRITE / ASKING outside cluster mode (the
+                    # fast path answers them in cluster mode), or with arguments
+                    elif cmd_eq(tp, tl, "readonly") or cmd_eq(tp, tl, "readwrite") or cmd_eq(tp, tl, "asking"):
+                        if cmd_end_tok - i != 1:
+                            writer.append_error_response("ERR wrong number of arguments for '" + lower_bytes(tp, tl)
+                                                         + "' command")
+                        elif not (is_not_null(self.cluster) and self.cluster[].enabled):
+                            writer.append_error_response("ERR This instance has cluster support disabled")
+                        else:
+                            if is_not_null(self.local_affinity) and cmd_eq(tp, tl, "readonly"):
+                                self.local_affinity[Int(fd)] = 3
+                            elif is_not_null(self.local_affinity) and cmd_eq(tp, tl, "readwrite"):
+                                self.local_affinity[Int(fd)] = 0
+                            writer.append_ok_response()
+                        i = cmd_end_tok - 1
                     else:
                         writer.append_error_response("ERR unknown command '" + token.value() + "'")
                         # Skip remaining tokens of this command
@@ -4019,6 +4739,16 @@ struct SlowPathHandler:
                         var _mpend = self.monitors.pending.copy()
                         self.monitors.pending.clear()
                         self._monitor_send(_mpend, fd, writer, server, kq)
+                    # #47 SLOWLOG: a command that ran at least
+                    # slowlog-log-slower-than. Not EXEC (Redis flags it
+                    # skip_slowlog: the commands it ran are logged instead),
+                    # nor a script's redis.call (the script is).
+                    if self.script_depth == 0:
+                        var _sl_t1 = external_call["pion_ticks", UInt64]()
+                        if _sl_t1 - _sl_t0 >= self.slowlog_thr_ticks and _sl_t1 >= _sl_t0 \
+                           and not (tl == 4 and cmd_matches_4(tp, 101, 120, 101, 99)):
+                            self._slowlog_push(tokens, _mon_i, cmd_end_tok,
+                                               self.slowlog.elapsed_us(_sl_t0, _sl_t1), fd)
                     i += 1
                     # Advance command index
                     while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
@@ -4066,7 +4796,23 @@ struct SlowPathHandler:
                         self.monitor_exec_line.clear()
                         self._monitor_send(_mexec, fd, writer, server, kq)
                 break
+            # #47 CLIENT REPLY: the batch's last command
+            if self.script_depth == 0 and self.clients.reply_off_count > 0 and _rg_start >= 0:
+                self._reply_gate(fd, writer, _rg_start, _rg_flushes)
             writer.flush_response(fd, server, kq)
+            # #47 CLIENT KILL of itself: closed once its reply is out, as Redis's
+            # CLOSE_AFTER_REPLY; what it sends meanwhile is dropped. With the
+            # reply already in the kernel (kqueue / epoll, no EAGAIN), shut it
+            # down now: the peer reads the reply, then the end of the stream,
+            # and the event loop closes it. Otherwise (io_uring's SEND is still
+            # queued, or the reply is pending) the engine does it when the
+            # reply has gone out (`clients.close_after`).
+            if self.kill_after_reply == fd:
+                self.kill_after_reply = -1
+                self.clients.close_after[Int(fd)] = 1
+                if not writer.use_uring and kq != -1 and is_not_null(writer.pending_offsets) \
+                   and writer.pending_offsets[Int(fd)] == 0:
+                    _ = external_call["pion_kill_fd", Int32](fd)
             return primary_consumed
         except e:
             # gh #162: a handler (or a pre-pass) raised mid-batch. Recover at
@@ -4099,6 +4845,8 @@ struct SlowPathHandler:
                 writer.append_error_response(emsg)
             else:
                 writer.append_error_response("ERR internal error executing command")
+            if self.script_depth == 0 and self.clients.reply_off_count > 0 and on_primary:   # #47
+                self._reply_gate(fd, writer, cmd_write_start, _rg_flushes)
             writer.flush_response(fd, server, kq)
             if on_primary and cmd_idx < num_cmds:
                 var skip_to = cmd_byte_ends[cmd_idx]
