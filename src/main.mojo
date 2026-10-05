@@ -725,7 +725,7 @@ def main():
             var terr = tenant_arg_error(args[i + 1])
             if terr.byte_length() > 0:
                 print("FATAL: invalid --tenant argument: " + terr)
-                return
+                external_call["exit", NoneType](Int32(1))   # a bare return exits 0
             if config.server.tenants.byte_length() > 0:
                 config.server.tenants += "\n"
             config.server.tenants += args[i + 1]
@@ -952,7 +952,18 @@ def main():
         print("FATAL: --tenant requires --requirepass (the admin credential).")
         print("  Tenant isolation is fail-closed: without --requirepass an")
         print("  unauthenticated connection could read prefixed keys verbatim.")
-        return
+        external_call["exit", NoneType](Int32(1))   # a bare return exits 0
+
+    # Replication runs on port + 10000. A cluster node on a port above 55535
+    # (or a replica of one) used to start anyway: its replication listener or
+    # connection failed, and it served on, replicating nothing.
+    if config.cluster.enabled:
+        var _rp = config.cluster.primary_port if config.cluster.is_replica else config.server.port
+        if config.server.port + 10000 > 65535 or (config.cluster.is_replica and _rp + 10000 > 65535):
+            print("FATAL: cluster replication uses port + 10000, which leaves no room above port "
+                  + String(_rp if config.cluster.is_replica and _rp + 10000 > 65535 else config.server.port)
+                  + ": use a port up to 55535.")
+            external_call["exit", NoneType](Int32(1))
 
     # Ignore SIGPIPE (signal 13) so writes to closed sockets return EPIPE instead of killing the process
     _ = external_call["signal", Int32](13, 1)
