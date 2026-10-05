@@ -309,6 +309,9 @@ struct CommandDispatcher:
         # the open reference. Asked of the library itself, not the build flag.
         body += "pion_vector:" + vector_backend_line() + "\r\n"
         body += "redis_mode:standalone\r\n"
+        # Redis's field: tells a client WHICH server answered (a restart test
+        # must not mistake a dying predecessor's listener for the new server).
+        body += "process_id:" + String(Int(external_call["getpid", Int32]())) + "\r\n"
         body += "tcp_port:" + String(listen_port) + "\r\n"
         body += "uptime_in_seconds:" + String(uptime_s) + "\r\n"
         body += "# Memory\r\n"

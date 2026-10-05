@@ -1137,18 +1137,21 @@ def main():
     # its BPF detach while the fatal signals (SEGV/BUS/ILL/FPE/ABRT) stay ours.
     # The heartbeat half (status file) is what survives an *uncatchable* jetsam
     # or OOM-killer SIGKILL: it holds RSS as of ~1s before death.
-    if config.server.crash_log.byte_length() > 0 or config.server.status_file.byte_length() > 0:
-        var _crash_log_p = config.server.crash_log + "\0"
-        var _status_p = config.server.status_file + "\0"
-        var _ver = PION_VERSION + "+" + PION_BUILD_SHA + "\0"
-        _ = external_call["pion_crash_init", Int32](
-            _crash_log_p.unsafe_ptr(),
-            _status_p.unsafe_ptr(),
-            _ver.unsafe_ptr(),
-            Int32(config.server.port),
-            Int32(n_workers),
-            Int32(config.server.rss_warn_pct),
-        )
+    #
+    # Installed even with --no-crash-log (it then opens no file): the same call
+    # installs the gh #259 SIGTERM/SIGINT latch, and skipping it made a server
+    # started with that flag die on the signal without its WAL flush.
+    var _crash_log_p = config.server.crash_log + "\0"
+    var _status_p = config.server.status_file + "\0"
+    var _ver = PION_VERSION + "+" + PION_BUILD_SHA + "\0"
+    _ = external_call["pion_crash_init", Int32](
+        _crash_log_p.unsafe_ptr(),
+        _status_p.unsafe_ptr(),
+        _ver.unsafe_ptr(),
+        Int32(config.server.port),
+        Int32(n_workers),
+        Int32(config.server.rss_warn_pct),
+    )
 
     # gh #261: the limit is process-wide and lives in C, where every worker's
     # housekeeping tick reads it. The C side logs each crossing (with the RSS it
