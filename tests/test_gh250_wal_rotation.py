@@ -76,10 +76,21 @@ class Client:
 
 
 def spawn():
+    # The server's output and its crash log / status file stay in WORKDIR, and
+    # are printed if the run fails: a reset connection on Linux x86 left no
+    # evidence while they went to /dev/null and WORKDIR was deleted.
     return subprocess.Popen([BINARY, "-p", str(PORT), "-w", "1", "--no-auto-detect",
                              "--no-auto-embed", "--wal-size", "1"],
-                            cwd=WORKDIR, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
+                            cwd=WORKDIR, stdout=open(os.path.join(WORKDIR, "server.log"), "ab"),
+                            stderr=subprocess.STDOUT)
+
+
+def evidence():
+    for name in sorted(os.listdir(WORKDIR)) if os.path.isdir(WORKDIR) else []:
+        if name == "server.log" or name.endswith(".crash.log") or name.endswith(".status"):
+            with open(os.path.join(WORKDIR, name), "rb") as f:
+                tail = f.read()[-4000:].decode("utf-8", "replace")
+            print(f"--- {name} (tail) ---\n{tail}")
 
 
 def connect():
@@ -132,7 +143,12 @@ def main():
         proc = spawn()
         c = connect()
 
-        missing = [k for k, v in expected.items() if c("GET", k) != v.encode()]
+        try:
+            missing = [k for k, v in expected.items() if c("GET", k) != v.encode()]
+        except OSError:
+            print(f"restarted server: exit code {proc.poll()}")
+            evidence()
+            raise
         check("ZERO string keys lost across the rotation", not missing,
               f"{len(missing)} lost, e.g. {sorted(missing)[:6]}")
         h_missing = [i for i in range(200)
@@ -146,6 +162,8 @@ def main():
     finally:
         try: proc.kill(); proc.wait(timeout=5)
         except Exception: pass
+        if failures:
+            evidence()
         shutil.rmtree(WORKDIR, ignore_errors=True)
 
     print(f"\n{len(passes)} passed, {len(failures)} failed")
