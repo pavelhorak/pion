@@ -75,6 +75,31 @@ from std.sys.info import CompilationTarget
 comptime CALIBRATION_SAMPLE_MAX = 65536
 
 
+@always_inline
+def fma_or_muladd(a: SIMD[DType.float32, 8], b: SIMD[DType.float32, 8],
+                  c: SIMD[DType.float32, 8]) -> SIMD[DType.float32, 8]:
+    """`fma(a, b, c)` where the target has a fused multiply-add, `a * b + c`
+    where it does not. An x86 target without FMA, the release's x86-64-v2
+    build among them, has no instruction for an exactly rounded fma, so LLVM
+    lowers each lane of a vector `fma` to a libm `fmaf` call. In metric_scores
+    that came to about 300K calls and 1.3 ms per FT.SEARCH on an EPYC 8124P,
+    more than the search itself (profiled 2026-10-05). `has_fma()` names an
+    x86 feature and reads False on AArch64, so the test is x86-only and every
+    other target compiles exactly as before. Two overloads, not one generic
+    function: Mojo 1.1 does not infer a SIMD width parameter from an argument."""
+    comptime if CompilationTarget.is_x86() and not CompilationTarget.has_fma():
+        return a * b + c
+    else:
+        return fma(a, b, c)
+
+
+@always_inline
+def fma_or_muladd(a: Float32, b: Float32, c: Float32) -> Float32:
+    comptime if CompilationTarget.is_x86() and not CompilationTarget.has_fma():
+        return a * b + c
+    else:
+        return fma(a, b, c)
+
 
 
 struct HNSWGraph(Movable):
@@ -4017,14 +4042,14 @@ struct HNSWGraph(Movable):
                 var v = self.gpu_rerank_fp32 + nidx * dim
                 var d = 0
                 while d + 32 <= dim:
-                    var t0 = (query + d).load[width=8]() - (v + d).load[width=8]();           c0 = fma(t0, t0, c0)
-                    var t1 = (query + d + 8).load[width=8]() - (v + d + 8).load[width=8]();   c1 = fma(t1, t1, c1)
-                    var t2 = (query + d + 16).load[width=8]() - (v + d + 16).load[width=8](); c2 = fma(t2, t2, c2)
-                    var t3 = (query + d + 24).load[width=8]() - (v + d + 24).load[width=8](); c3 = fma(t3, t3, c3)
+                    var t0 = (query + d).load[width=8]() - (v + d).load[width=8]();           c0 = fma_or_muladd(t0, t0, c0)
+                    var t1 = (query + d + 8).load[width=8]() - (v + d + 8).load[width=8]();   c1 = fma_or_muladd(t1, t1, c1)
+                    var t2 = (query + d + 16).load[width=8]() - (v + d + 16).load[width=8](); c2 = fma_or_muladd(t2, t2, c2)
+                    var t3 = (query + d + 24).load[width=8]() - (v + d + 24).load[width=8](); c3 = fma_or_muladd(t3, t3, c3)
                     d += 32
                 while d + 8 <= dim:
                     var t = (query + d).load[width=8]() - (v + d).load[width=8]()
-                    c0 = fma(t, t, c0)
+                    c0 = fma_or_muladd(t, t, c0)
                     d += 8
                 while d < dim:
                     var t = query[d] - v[d]; tail += t * t; d += 1
@@ -4037,32 +4062,32 @@ struct HNSWGraph(Movable):
                         var ag = SIMD[DType.float32, 8](ga[g])
                         var bg = SIMD[DType.float32, 8](ga[ng + g])
                         var off = g * 32
-                        var t0 = (query + off).load[width=8]() - fma((codes + off).load[width=8]().cast[DType.float32](), ag, bg)
-                        c0 = fma(t0, t0, c0)
-                        var t1 = (query + off + 8).load[width=8]() - fma((codes + off + 8).load[width=8]().cast[DType.float32](), ag, bg)
-                        c1 = fma(t1, t1, c1)
-                        var t2 = (query + off + 16).load[width=8]() - fma((codes + off + 16).load[width=8]().cast[DType.float32](), ag, bg)
-                        c2 = fma(t2, t2, c2)
-                        var t3 = (query + off + 24).load[width=8]() - fma((codes + off + 24).load[width=8]().cast[DType.float32](), ag, bg)
-                        c3 = fma(t3, t3, c3)
+                        var t0 = (query + off).load[width=8]() - fma_or_muladd((codes + off).load[width=8]().cast[DType.float32](), ag, bg)
+                        c0 = fma_or_muladd(t0, t0, c0)
+                        var t1 = (query + off + 8).load[width=8]() - fma_or_muladd((codes + off + 8).load[width=8]().cast[DType.float32](), ag, bg)
+                        c1 = fma_or_muladd(t1, t1, c1)
+                        var t2 = (query + off + 16).load[width=8]() - fma_or_muladd((codes + off + 16).load[width=8]().cast[DType.float32](), ag, bg)
+                        c2 = fma_or_muladd(t2, t2, c2)
+                        var t3 = (query + off + 24).load[width=8]() - fma_or_muladd((codes + off + 24).load[width=8]().cast[DType.float32](), ag, bg)
+                        c3 = fma_or_muladd(t3, t3, c3)
                 else:
                     var d = 0
                     while d + 32 <= dim:
-                        var t0 = (query + d).load[width=8]() - fma((codes + d).load[width=8]().cast[DType.float32](), a8, b8)
-                        c0 = fma(t0, t0, c0)
-                        var t1 = (query + d + 8).load[width=8]() - fma((codes + d + 8).load[width=8]().cast[DType.float32](), a8, b8)
-                        c1 = fma(t1, t1, c1)
-                        var t2 = (query + d + 16).load[width=8]() - fma((codes + d + 16).load[width=8]().cast[DType.float32](), a8, b8)
-                        c2 = fma(t2, t2, c2)
-                        var t3 = (query + d + 24).load[width=8]() - fma((codes + d + 24).load[width=8]().cast[DType.float32](), a8, b8)
-                        c3 = fma(t3, t3, c3)
+                        var t0 = (query + d).load[width=8]() - fma_or_muladd((codes + d).load[width=8]().cast[DType.float32](), a8, b8)
+                        c0 = fma_or_muladd(t0, t0, c0)
+                        var t1 = (query + d + 8).load[width=8]() - fma_or_muladd((codes + d + 8).load[width=8]().cast[DType.float32](), a8, b8)
+                        c1 = fma_or_muladd(t1, t1, c1)
+                        var t2 = (query + d + 16).load[width=8]() - fma_or_muladd((codes + d + 16).load[width=8]().cast[DType.float32](), a8, b8)
+                        c2 = fma_or_muladd(t2, t2, c2)
+                        var t3 = (query + d + 24).load[width=8]() - fma_or_muladd((codes + d + 24).load[width=8]().cast[DType.float32](), a8, b8)
+                        c3 = fma_or_muladd(t3, t3, c3)
                         d += 32
                     while d + 8 <= dim:
-                        var t = (query + d).load[width=8]() - fma((codes + d).load[width=8]().cast[DType.float32](), a8, b8)
-                        c0 = fma(t, t, c0)
+                        var t = (query + d).load[width=8]() - fma_or_muladd((codes + d).load[width=8]().cast[DType.float32](), a8, b8)
+                        c0 = fma_or_muladd(t, t, c0)
                         d += 8
                     while d < dim:
-                        var x1 = fma(Float32(Int(codes[d])), g_inv, 127.0 * g_inv + self.global_min)
+                        var x1 = fma_or_muladd(Float32(Int(codes[d])), g_inv, 127.0 * g_inv + self.global_min)
                         var t = query[d] - x1; tail += t * t; d += 1
             scores[r] = ((c0 + c1) + (c2 + c3)).reduce_add() + tail
             if self.distance_metric == 1:

@@ -389,13 +389,31 @@ rotated:
 
 | Search | Median QPS (3 runs) | Open build (5,836 QPS) | Recall@100 (all) |
 |---|:---:|:---:|:---:|
-| `libpion_vector`, x86-64-v2 build (default) | 7,610 | **−23.3%** (rounds: −24.4, −14.9, −14.3) | 0.960 |
-| `libpion_vector`, VNNI build (`PION_VECTOR_VNNI=1`) | 8,534 | **−31.6%** (rounds: −32.6, −14.3, −32.8) | 0.960 |
+| `libpion_vector`, x86-64-v2 build | 7,610 | **−23.3%** (rounds: −24.4, −14.9, −14.3) | 0.960 |
+| `libpion_vector`, VNNI build | 8,534 | **−31.6%** (rounds: −32.6, −14.3, −32.8) | 0.960 |
 
 The VNNI build passed the differential on this machine, with 0 differences
-against the reference compiled for `icelake-server`. It stays opt-in: its lead
-over the default build (+12% on the medians, but one round tied) is not
-settled. Linux arm64 has not been measured.
+against the reference compiled for `icelake-server`. Its lead over the
+x86-64-v2 build there (+12% on the medians, one round tied) did not settle
+which build should be the default. A second machine did.
+
+**The VNNI build is the default on CPUs that have it** (since 2026-10-05;
+`PION_VECTOR_VNNI=0` forces the x86-64-v2 build). The deciding run was on an
+EPYC 8124P (Zen 4c, bare metal, `-w 16`, io_uring), where the VNNI build again
+passed the differential. Both arms used one binary built for that CPU, with
+the library choosing its build at startup, over six rounds with alternating
+order. VNNI won every round:
+
+| | x86-64-v2 build | VNNI build | Median of the per-round changes |
+|---|:---:|:---:|:---:|
+| Server CPU per query | 939 µs | 623 µs | **−32%** (6 of 6) |
+| QPS, 8 clients each pinned to its own worker | 4,578 | 5,601 | **+22%** (6 of 6) |
+| Peak QPS (VectorDBBench, C=10) | 3,881 | 4,710 | **+20%** (6 of 6) |
+| Recall@100 | 0.960 | 0.960 | equal within 0.001 |
+
+The decision rule was written before the runs. Intel parts with AVX-512 VNNI
+(Ice Lake-SP, Sapphire Rapids) have not been measured. Linux arm64 has not
+been measured.
 
 The interface is open too: `src/vector/vector_abi.mojo` (the calls),
 `beam_view.mojo` and `quant_beam_view.mojo` (the argument structs, whose

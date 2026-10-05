@@ -140,8 +140,9 @@ jobs:
 
       - name: Closed vector library matches its open reference
         # D11: the release notes carry this result. Every platform links its
-        # own vendored archive; on x86 the dispatcher runs the x86-64-v2 build
-        # unless PION_VECTOR_VNNI=1 opts in to the VNNI one.
+        # own vendored archive. On x86 the task checks the x86-64-v2 build
+        # (PION_VECTOR_VNNI=0); the VNNI build, the default on CPUs that have
+        # it, is checked on VNNI hardware with test-vector-differential-vnni.
         run: pixi run test-vector-differential
 
       - name: Correctness before packaging
