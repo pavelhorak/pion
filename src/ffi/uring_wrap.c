@@ -968,6 +968,13 @@ static uint32_t _repl_ring_used(PionReplReplicaBlock* blk) {
 
 static void _repl_send_ack(PionReplReplicaBlock* blk) {
     if (blk->fd < 0) return;
+    /* A FULLRESYNC is ACKed only once the worker has APPLIED it: until the
+       FLUSH marker and the whole snapshot have been drained and applied
+       (nonwal_pending back at 0), applied_offset names a state this replica
+       does not hold yet, and WAIT must not count it. The first ACK then goes
+       out from pion_repl_replica_applied, when the last snapshot byte is
+       applied. */
+    if (blk->nonwal_pending > 0) return;
     char msg[64];
     int l = snprintf(msg, sizeof(msg), "REPLCONF ACK %llu\r\n",
                      (unsigned long long)blk->applied_offset);

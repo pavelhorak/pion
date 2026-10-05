@@ -21,6 +21,8 @@ CASES
      written meanwhile must arrive.
   4. WAIT — counts a caught-up replica fast, and when it cannot be satisfied
      returns after its timeout measured on the clock, not 4.7x it.
+  5. WAIT and a FULLRESYNC — the replica ACKs a snapshot only once it has
+     APPLIED it, so whatever WAIT counted is readable on the replica.
 
     python3 tests/test_replication_resync.py [--port 2451]
 """
@@ -177,6 +179,27 @@ def main():
         t0 = time.time(); r = a.cmd("WAIT", "2", "300"); dt = time.time() - t0
         check("WAIT 2 300 with one replica answers 1", r == 1, repr(r))
         check("... after ~300 ms, not ~1.4 s", 0.25 <= dt < 0.8, f"{dt:.2f} s")
+
+        # ── 5. WAIT must not count a snapshot the replica has not applied ────
+        print("=== 5. WAIT during a FULLRESYNC ===")
+        replica.stop()
+        N = 300_000      # ~12 MB of snapshot: several 4 MB drains on the replica
+        for base in range(0, N, 5000):
+            a.pipeline([("SET", f"{{r}}big:{i}", f"value-{i}") for i in range(base, base + 5000)])
+        b = replica.start()
+        b.cmd("READONLY")
+        deadline, r = time.time() + 60, 0
+        while time.time() < deadline:
+            r = a.cmd("WAIT", "1", "20")
+            if r == 1:
+                break
+        check("WAIT counts the replica once its FULLRESYNC is applied", r == 1, repr(r))
+        # Read the replica at once: whatever WAIT counted must be readable now.
+        probe = [f"{{r}}big:{i}" for i in (0, N // 2, N - 2, N - 1)]
+        got = [b.cmd("GET", k) for k in probe]
+        want = [f"value-{i}".encode() for i in (0, N // 2, N - 2, N - 1)]
+        check("every key is on the replica the moment WAIT counts it", got == want,
+              f"{sum(g is None for g in got)} of {len(probe)} sampled keys missing")
     finally:
         replica.stop()
         primary.stop()
