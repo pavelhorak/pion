@@ -160,6 +160,7 @@ def handle_hello(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     # gh #100 (C2): scan for an inline `AUTH <username> <password>` clause.
     if requirepass.byte_length() > 0:
         var j = i + 1
+        var auth_failed = False
         while j < num_tokens:
             var t = tokens[unsafe_offset=j]
             if t.length == 4 and (t.ptr[unsafe_offset=0]|0x20)==97 and (t.ptr[unsafe_offset=1]|0x20)==117 and (t.ptr[unsafe_offset=2]|0x20)==116 and (t.ptr[unsafe_offset=3]|0x20)==104:  # AUTH
@@ -171,7 +172,9 @@ def handle_hello(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                     var tm = -1
                     if is_not_null(tenants) and tenants[].count > 0:
                         tm = tenants[].match_credentials(user.ptr, user.length, pw.ptr, pw.length)
+                    var ok = False
                     if tm >= 0:
+                        ok = True
                         if is_not_null(authed):
                             authed[unsafe_offset=Int(fd)] = 1
                         if is_not_null(tenant_ids):
@@ -182,12 +185,22 @@ def handle_hello(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                             if pw.ptr[unsafe_offset=k] != requirepass.unsafe_ptr()[unsafe_offset=k]:
                                 m = False; break
                         if m and is_not_null(authed):
+                            ok = True
                             authed[unsafe_offset=Int(fd)] = 1
                             if is_not_null(tenant_ids):
                                 tenant_ids[unsafe_offset=Int(fd)] = -1  # admin
+                    if not ok:
+                        auth_failed = True
                     j += 3
                     continue
             j += 1
+        # #24: a rejected AUTH clause is WRONGPASS, as AUTH itself answers and
+        # as Redis answers HELLO. It also wins over an earlier successful AUTH
+        # on this connection: the clause failed, so the banner is not sent.
+        # NOAUTH is for a HELLO that carried no credentials at all.
+        if auth_failed:
+            writer.append_error_response("WRONGPASS invalid username-password pair or user is disabled.")
+            return extra
         # Still unauthenticated → refuse to emit the banner.
         if is_null(authed) or authed[unsafe_offset=Int(fd)] == 0:
             writer.append_error_response("NOAUTH HELLO must be called with the client already authenticated, otherwise the HELLO <proto> AUTH <user> <pass> option can be used to authenticate the client and select the RESP protocol version at the same time")

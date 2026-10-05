@@ -159,6 +159,26 @@ def main() -> int:
         check("tenant name + admin password rejected (no escalation)",
               err is not None and "unexpected" not in err, str(err))
 
+        # 2b. HELLO's inline AUTH, on the wire (#24). redis-py >= 5 sends
+        # `HELLO 3 AUTH <user> <pass>` instead of AUTH, so these replies are what
+        # a RESP3 client sees: a bad password is WRONGPASS, as AUTH answers and
+        # as Redis answers; NOAUTH only when HELLO carried no credentials.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from resp_strict import Conn
+        h = Conn(PION_PORT)
+        r = h.raw("HELLO", "3", "AUTH", TENANT_A, "wrong")
+        check("HELLO 3 AUTH <tenant> <wrong> → -WRONGPASS", r.startswith(b"-WRONGPASS"), repr(r[:80]))
+        r = h.raw("HELLO", "3", "AUTH", "default", "wrong")
+        check("HELLO 3 AUTH default <wrong> → -WRONGPASS", r.startswith(b"-WRONGPASS"), repr(r[:80]))
+        r = h.raw("HELLO", "3")
+        check("HELLO 3 without credentials → -NOAUTH", r.startswith(b"-NOAUTH"), repr(r[:80]))
+        r = h.raw("HELLO", "3", "AUTH", TENANT_A, PW_A)
+        check("HELLO 3 AUTH <tenant> <right> → RESP3 map", r.startswith(b"%"), repr(r[:80]))
+        r = h.raw("HELLO", "3", "AUTH", TENANT_A, "wrong")
+        check("a failed HELLO AUTH on an authed connection still → -WRONGPASS",
+              r.startswith(b"-WRONGPASS"), repr(r[:80]))
+        h.close()
+
         ta = conn(username=TENANT_A, password=PW_A)
         tb = conn(username=TENANT_B, password=PW_B)
         admin = conn(password=ADMIN_PW)
