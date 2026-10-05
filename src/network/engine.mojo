@@ -29,6 +29,7 @@ from src.network.fast_path import _get_now_ns
 from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE, URING_MAX_FDS, UD_RECV, UD_SEND, UD_ACCEPT, UD_TIMEOUT
 from src.io.xdp import XDPEngine, XDPFrameInfo, TCP_SYN, TCP_ACK, TCP_FIN, TCP_RST, TCP_PSH
 from src.network.cluster import ClusterState, REPL_PORT_OFFSET
+from src.commands.stream import write_xread_reply
 
 # Client receive buffer size. Supports LMCache KV cache blobs (typical 2-4 MB
 # per chunk, up to ~16 MB for 70B+ models) and shared-KV-cache tensor frames
@@ -327,7 +328,7 @@ struct NetworkEngine:
         while cur_len > 0:
             # gh #390: a connection whose WAIT is parked runs nothing more
             # until the WAIT is answered; its bytes wait in the buffer.
-            if self.slow_path.parked_waits.count() > 0 and self.slow_path.parked_waits.is_parked(client_idx):
+            if self.slow_path.parked_waits.any() and self.slow_path.parked_waits.is_parked(client_idx):
                 break
             var consumed = 0
             if not self.over_maxmemory:   # gh #261 — see the field
@@ -413,6 +414,47 @@ struct NetworkEngine:
                 self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
             if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
                and not pw[].is_parked(ci) \
+               and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+                self._uring_arm_recv(fd, ci, UInt16(uring_group))
+
+    def _service_blocked_readers(mut self, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
+                                 uring_group: Int = -1) raises:
+        """Answer every parked XREAD BLOCK whose stream got data (an
+        XADD marked it ready) or whose deadline passed, then run what its
+        client pipelined behind it, as _service_parked_waits does for WAIT.
+        The reply goes through the writer like any other, in order with the
+        replies the connection is owed."""
+        var reg = Pointer(to=self.slow_path.blocked_readers)
+        if reg[]._count() == 0:
+            return
+        var now_ms = Int64(_get_now_ns() // 1_000_000)
+        var k = 0
+        while k < reg[]._count():
+            var fd = reg[].readers[k].fd
+            var timed_out = reg[].readers[k].timeout_ms > 0 and now_ms >= reg[].readers[k].timeout_ms
+            if not reg[].readers[k].ready and not timed_out:
+                k += 1
+                continue
+            var ci = Int(fd)
+            self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
+            var wrote = write_xread_reply(self.writer, self.slow_path.keyspace,
+                                          reg[].readers[k].keys, reg[].readers[k].after_ms,
+                                          reg[].readers[k].after_seq, reg[].readers[k].count_limit)
+            if wrote == 0:
+                if not timed_out:
+                    # Woken, but the new entries are gone again (XDEL, XTRIM).
+                    reg[].readers[k].ready = False
+                    k += 1
+                    continue
+                self.writer.append_null_array_response()
+            reg[].remove_at(k)            # entry k is now a different one: no k += 1
+            self.slow_path.parked_waits.unpark_fd(fd)
+            self.writer.flush_response(fd, self.server, kq)
+            var stored = self.client_buffer_lens[unsafe_offset=ci]
+            if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+                self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
+            if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
+               and not self.slow_path.parked_waits.is_parked(ci) \
                and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                 self._uring_arm_recv(fd, ci, UInt16(uring_group))
 
@@ -944,9 +986,10 @@ struct NetworkEngine:
                 self.ttl_sweep_counter = 0
                 self.fast_path.sweep_expired_keys(20)
 
-            # Blocked XREAD timeout drain (every 8 ticks)
-            if self.ttl_sweep_counter & 0x7 == 0:
-                self.slow_path.drain_blocked_readers(self.server)
+            # Parked XREAD BLOCK clients, every tick while any exist (the
+            # check is one load): answered when an XADD reached them or on timeout.
+            if self.slow_path.blocked_readers._count() > 0:
+                self._service_blocked_readers(Int32(-1), hnsw, db_size, -1)
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the
             # LRU cache. Cheap (atomic load, 0-N memcpy per tick); no-op
@@ -1210,9 +1253,10 @@ struct NetworkEngine:
                 self.ttl_sweep_counter = 0
                 self.fast_path.sweep_expired_keys(20)
 
-            # Blocked XREAD timeout drain (every 8 ticks — ~8ms granularity, fine for second-scale timeouts)
-            if self.ttl_sweep_counter & 0x7 == 0:
-                self.slow_path.drain_blocked_readers(self.server)
+            # Parked XREAD BLOCK clients, every tick while any exist (the
+            # check is one load): answered when an XADD reached them or on timeout.
+            if self.slow_path.blocked_readers._count() > 0:
+                self._service_blocked_readers(Int32(-1), hnsw, db_size, Int(buf_group_id))
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the LRU
             # cache. Cheap (atomic load, no-op when --moe-cache isn't on). gh #85:
@@ -1396,8 +1440,9 @@ struct NetworkEngine:
                 self.ttl_sweep_counter = 0
                 self.fast_path.sweep_expired_keys(20)
 
-            if self.ttl_sweep_counter & 0x7 == 0:
-                self.slow_path.drain_blocked_readers(self.server)
+            # Parked XREAD BLOCK clients, every tick while any exist.
+            if self.slow_path.blocked_readers._count() > 0:
+                self._service_blocked_readers(kq, hnsw, db_size)
 
             # MOE.EXPERT.* Stage 4b warming-completion drain (no-op without
             # --moe-cache). gh #85: aligned across all four loops.
@@ -1613,9 +1658,10 @@ struct NetworkEngine:
                 self.ttl_sweep_counter = 0
                 self.fast_path.sweep_expired_keys(20)
 
-            # Blocked XREAD timeout drain (every 8 ticks — ~8ms granularity, fine for second-scale timeouts)
-            if self.ttl_sweep_counter & 0x7 == 0:
-                self.slow_path.drain_blocked_readers(self.server)
+            # Parked XREAD BLOCK clients, every tick while any exist (the
+            # check is one load): answered when an XADD reached them or on timeout.
+            if self.slow_path.blocked_readers._count() > 0:
+                self._service_blocked_readers(kq, hnsw, db_size)
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the
             # LRU cache. Cheap (atomic load, 0-N memcpy per tick); no-op

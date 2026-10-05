@@ -215,7 +215,7 @@ def apply_wal_entries(
         elif cmd_id == 25 or cmd_id == 26:   # gh #174 TTL records (EXPIREAT / PERSIST)
             _ = wal_apply_ttl(UInt8(cmd_id), key_ptr, key_len,
                               buf.unsafe_offset(val_off), val_len, ttl_map)
-        elif wal_is_aggregate(UInt8(cmd_id)):   # 5-24, 27-31 incl. 31 MSET
+        elif wal_is_aggregate(UInt8(cmd_id)):   # 5-24, 27-34 incl. 31 MSET, 34 XADD
             _ = wal_apply_aggregate(UInt8(cmd_id), key_ptr, key_len,
                                     buf.unsafe_offset(val_off), val_len, keyspace)
         elif cmd_id == 4:  # gh #163 blob pointer — meaningless on a replica

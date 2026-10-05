@@ -394,7 +394,8 @@ struct SnapshotEngine(Movable):
                     self._write_record(fd, ehdr, 17, kp, kl, val.as_hll(), HLL_REGISTERS)
 
                 elif t == ValueType.STREAM:
-                    # gh #174: one cmd-23 record per *live* entry, in ID order.
+                    # gh #174: one XADD record per *live* entry, in ID order:
+                    # cmd 34, whose pairs carry u32 lengths.
                     # Tombstoned entries (XDEL, MAXLEN trim) are skipped rather
                     # than written-then-deleted, so a snapshot compacts the
                     # stream instead of carrying its garbage forward.
@@ -404,7 +405,7 @@ struct SnapshotEngine(Movable):
                             continue
                         var e = sd[].entries[unsafe_offset=ei]
                         _snap_write_u32(ehdr, 0, UInt32(13 + kl + 16 + e.data_len))
-                        ehdr[unsafe_offset=4] = UInt8(23)
+                        ehdr[unsafe_offset=4] = UInt8(34)
                         _snap_write_u32(ehdr, 5, UInt32(kl))
                         _snap_write_all(fd, ehdr, 9)
                         _snap_write_all(fd, kp, kl)

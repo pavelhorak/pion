@@ -254,14 +254,14 @@ every `X*GROUP`/pending/claim command refuses explicitly rather than faking stat
 
 | Command | Redis 8 | Valkey 8 | Pion | Pion path | GLIDE | Notes |
 |---|:---:|:---:|:---:|:---:|:---:|---|
-| XADD | ✅ | ✅ | ✅ | **SLOW** | ✅ | Real IDs (`ms-seq`, `*` auto), stored and WAL-persisted (cmd 23) |
-| XREAD | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns entries; `BLOCK` is parsed but never blocks (returns at once) |
+| XADD | ✅ | ✅ | ✅ | **SLOW** | ✅ | `*`, `ms-seq`, `ms-*`; NOMKSTREAM; MAXLEN/MINID with `=`/`~` and LIMIT (`~` trims exactly — see below) (#34) |
+| XREAD | ✅ | ✅ | ✅ | **SLOW** | ✅ | Only streams with new entries are returned. `BLOCK` parks the connection until an XADD or the timeout; inside MULTI/EXEC it answers at once |
 | XLEN | ✅ | ✅ | ✅ | **SLOW** | ✅ | Real length |
-| XRANGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Real entries, `-`/`+` bounds |
-| XREVRANGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Real entries, reversed |
+| XRANGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | `-`/`+`, `ms`, exclusive `(id`; COUNT |
+| XREVRANGE | ✅ | ✅ | ✅ | **SLOW** | ✅ | As XRANGE, reversed |
 | XINFO STREAM | ✅ | ✅ | ✅ | **SLOW** | ✅ | `length`, `last-generated-id`, `entries` |
-| XDEL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deletes by ID; WAL cmd 27 |
-| XTRIM | ✅ | ✅ | ✅ | **SLOW** | ✅ | `MAXLEN` |
+| XDEL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deletes by ID; every ID validated first |
+| XTRIM | ✅ | ✅ | ✅ | **SLOW** | ✅ | MAXLEN/MINID with `=`/`~` and LIMIT. With `~` Redis removes only whole internal nodes (a small stream keeps everything); Pion has no nodes and trims exactly — both within the "at least N kept" contract |
 | XGROUP | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |
 | XREADGROUP | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |
 | XACK | ✅ | ✅ | ❌ | **SLOW** | ✅ | Refuses: `-ERR consumer groups not supported` |

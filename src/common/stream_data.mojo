@@ -20,7 +20,7 @@ from std.memory import alloc
 struct StreamEntry(Copyable, Movable, ImplicitlyCopyable):
     var id_ms: UInt64
     var id_seq: UInt64
-    var data: Pointer[UInt8, MutUntrackedOrigin]  # packed field-value pairs: [u16 flen][bytes][u16 vlen][bytes]...
+    var data: Pointer[UInt8, MutUntrackedOrigin]  # packed field-value pairs: [u32 flen][bytes][u32 vlen][bytes]...
     var data_len: Int
     var num_fields: Int
     var deleted: Bool

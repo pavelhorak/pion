@@ -324,11 +324,19 @@ def _owned_list_elems(lp: Pointer[SlabList, MutUntrackedOrigin]) -> List[Generic
 
 
 @always_inline
+@always_inline
+def _rec_len(p: Pointer[UInt8, MutUntrackedOrigin], width: Int) -> UInt32:
+    """A little-endian u16 (width 2) or u32 (width 4) length."""
+    if width == 4:
+        return (p.unsafe_bitcast[UInt32]())[]
+    return UInt32((p.unsafe_bitcast[UInt16]())[])
+
+
 def wal_is_aggregate(cmd_id: UInt8) -> Bool:
     """Record ids `wal_apply_aggregate` owns — one predicate for the WAL
     replayer and the snapshot loader, so a new record kind cannot reach one
     and be skipped by the other."""
-    return (cmd_id >= 5 and cmd_id <= 24) or (cmd_id >= 27 and cmd_id <= 33)
+    return (cmd_id >= 5 and cmd_id <= 24) or (cmd_id >= 27 and cmd_id <= 34)
 
 
 def _replay_vset_field(vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int,
@@ -684,7 +692,10 @@ def wal_apply_aggregate(cmd_id: UInt8,
         return True
 
     # ── gh #174 ──────────────────────────────────────────────────────────
-    elif cmd_id == 23:   # XADD [8B id_ms][8B id_seq][packed pairs]
+    elif cmd_id == 23 or cmd_id == 34:
+        # XADD [8B id_ms][8B id_seq][packed pairs]. The pairs' lengths are u16
+        # in cmd 23 (logs and snapshots written by 0.9.4 and earlier) and u32 in
+        # cmd 34; the in-memory entry is always u32, so 23 is widened here.
         if vl < 16:
             return False
         var sd = _replay_stream(keyspace, key, True)
@@ -697,23 +708,38 @@ def wal_apply_aggregate(cmd_id: UInt8,
         # frees it), so the record bytes must be copied out of the mmap — the
         # WAL mapping is unmapped after replay and the snapshot buffer is
         # reused per record.
-        var pack = alloc[UInt8](plen if plen > 0 else 1)
-        if plen > 0:
-            unsafe_memcpy(dest=pack, src=vp.unsafe_offset(16), count=plen)
+        var lw = 4 if cmd_id == 34 else 2      # bytes per length in the record
+        var src = vp.unsafe_offset(16)
         # Recover num_fields by walking the packed pairs rather than trusting a
         # logged count: the walk is the same one the readers do, so a truncated
         # record yields a short entry instead of a reader running off the end.
         var nf = 0
         var w = 0
-        while w + 2 <= plen:
-            var fl = Int((pack.unsafe_offset(w)).unsafe_bitcast[UInt16]()[unsafe_offset=0]); w += 2 + fl
-            if w + 2 > plen:
+        var out_len = 0
+        while w + lw <= plen:
+            var fl = Int(_rec_len(src.unsafe_offset(w), lw)); w += lw + fl
+            if w + lw > plen:
                 break
-            var vlen2 = Int((pack.unsafe_offset(w)).unsafe_bitcast[UInt16]()[unsafe_offset=0]); w += 2 + vlen2
+            var vlen2 = Int(_rec_len(src.unsafe_offset(w), lw)); w += lw + vlen2
             if w > plen:
                 break
             nf += 1
-        sd[].append(id_ms, id_seq, pack, plen, nf)
+            out_len += 8 + fl + vlen2
+        # StreamData.append takes ownership of the payload pointer (StreamEntry
+        # frees it), so the record bytes must be copied out of the mmap — the
+        # WAL mapping is unmapped after replay and the snapshot buffer is
+        # reused per record. Copy the `nf` whole pairs, as u32 lengths.
+        var pack = alloc[UInt8](out_len if out_len > 0 else 1)
+        var r = 0
+        var o = 0
+        for _ in range(nf):
+            for _half in range(2):
+                var n = Int(_rec_len(src.unsafe_offset(r), lw)); r += lw
+                (pack.unsafe_offset(o)).unsafe_bitcast[UInt32]()[] = UInt32(n); o += 4
+                if n > 0:
+                    unsafe_memcpy(dest=pack.unsafe_offset(o), src=src.unsafe_offset(r), count=n)
+                r += n; o += n
+        sd[].append(id_ms, id_seq, pack, out_len, nf)
         return True
 
     elif cmd_id == 24:   # PFADD element
@@ -1868,8 +1894,9 @@ struct WAL(Movable):
         elif t == ValueType.VSET:
             self.append_vset_image(kp, kl, val.as_hash().unsafe_bitcast[VectorSet]())
         elif t == ValueType.STREAM:
-            # cmd 23: val = [8B id_ms][8B id_seq][packed field/values], live
-            # entries only (XDEL/XTRIM tombstones are compacted away).
+            # cmd 34: val = [8B id_ms][8B id_seq][packed field/values, u32
+            # lengths], live entries only (XDEL/XTRIM tombstones are compacted
+            # away).
             var sd = val.as_hash().unsafe_bitcast[StreamData]()
             for ei in range(sd[].count):
                 var e = sd[].entries[unsafe_offset=ei]
@@ -1879,7 +1906,7 @@ struct WAL(Movable):
                 rec.unsafe_bitcast[UInt64]()[unsafe_offset=0] = e.id_seq
                 if e.data_len > 0:
                     unsafe_memcpy(dest=rec.unsafe_offset(8), src=e.data, count=e.data_len)
-                _ = self.append_u64_val(23, kp, kl, e.id_ms, rec, 8 + e.data_len)
+                _ = self.append_u64_val(34, kp, kl, e.id_ms, rec, 8 + e.data_len)
                 rec.unsafe_free()
         vbuf.unsafe_free()
         fbuf.unsafe_free()

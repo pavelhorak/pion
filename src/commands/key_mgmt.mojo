@@ -616,16 +616,26 @@ struct ParkedWaits(Movable):
     its receive buffer. `flags[fd]` makes the per-buffer check one byte load."""
     var entries: List[ParkedWait]
     var flags: Pointer[UInt8, MutUntrackedOrigin]
+    # Connections parked by park_fd (an XREAD BLOCK): they have no
+    # entry, so `count()` does not see them; `any()` does.
+    var fd_parks: Int
 
     def __init__(out self):
         self.entries = List[ParkedWait]()
         self.flags = alloc[UInt8](65536)
         for i in range(65536):
             self.flags[unsafe_offset=i] = 0
+        self.fd_parks = 0
 
     @always_inline
     def count(self) -> Int:
         return len(self.entries)
+
+    @always_inline
+    def any(self) -> Bool:
+        """Any connection parked, by WAIT or by park_fd: the dispatch loop's
+        one-compare guard before the per-fd flag load."""
+        return len(self.entries) > 0 or self.fd_parks > 0
 
     @always_inline
     def is_parked(self, fd: Int) -> Bool:
@@ -634,6 +644,19 @@ struct ParkedWaits(Movable):
     def park(mut self, w: ParkedWait):
         self.entries.append(w)
         self.flags[unsafe_offset=Int(w.fd)] = 1
+
+    def park_fd(mut self, fd: Int32):
+        """Park a connection with no WAIT entry: an XREAD BLOCK,
+        answered by NetworkEngine._service_blocked_readers."""
+        if fd >= 0 and fd < 65536 and self.flags[unsafe_offset=Int(fd)] == 0:
+            self.flags[unsafe_offset=Int(fd)] = 2
+            self.fd_parks += 1
+
+    def unpark_fd(mut self, fd: Int32):
+        """Undo park_fd."""
+        if fd >= 0 and fd < 65536 and self.flags[unsafe_offset=Int(fd)] == 2:
+            self.flags[unsafe_offset=Int(fd)] = 0
+            self.fd_parks -= 1
 
     def unpark_at(mut self, k: Int):
         """Remove entry k (swap with the last)."""
@@ -644,8 +667,11 @@ struct ParkedWaits(Movable):
         _ = self.entries.pop()
 
     def remove_fd(mut self, fd: Int32):
-        """The connection closed while parked: drop its WAIT."""
+        """The connection closed while parked: drop its WAIT or its park."""
         if not self.is_parked(Int(fd)):
+            return
+        if self.flags[unsafe_offset=Int(fd)] == 2:
+            self.unpark_fd(fd)
             return
         var k = 0
         while k < len(self.entries):

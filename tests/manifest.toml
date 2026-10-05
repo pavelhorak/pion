@@ -1328,6 +1328,12 @@ tier = "gate"
 timeout = 240
 
 [[test]]
+file = "tests/test_stream_entries.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
 file = "tests/test_vector_isa_info.py"
 server = "self"
 tier = "gate"

@@ -788,7 +788,9 @@ def test_pion_parity():
     sock.settimeout(3)
     res = send_cmd_bytes(sock, ["XREAD", "BLOCK", "200", "STREAMS", "nonexistent_block_stream", "0"])
     sock.settimeout(None)
-    assert "$-1" in res, f"XREAD BLOCK on empty stream should timeout with null, got: {res!r}"
+    # A nil ARRAY, as redis-server 8.10 answers: `$-1` (a nil bulk string)
+    # was the old reply's wrong type, pinned here from the implementation.
+    assert res.startswith("*-1"), f"XREAD BLOCK on empty stream should time out with a nil array, got: {res!r}"
 
     # XREAD BLOCK wake-up on XADD — tested manually with redis-cli (works)
     # Automated cross-connection test deferred (threading + socket timing issues in test harness)

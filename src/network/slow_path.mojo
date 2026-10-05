@@ -50,7 +50,7 @@ from src.common.hll import hll_add, hll_count, hll_merge, HLL_REGISTERS
 from src.commands.transaction import TransactionState, QueuedCommand, handle_multi, handle_exec_start, handle_discard, handle_watch, handle_unwatch, tx_queue_has_denyoom
 from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, PION_COMMAND_COUNT
 from src.commands.tenant import TenantTable, tenant_keyspec, apply_tenant_rewrite, TENANT_SCRATCH_CAP, MAX_TENANT_NAME
-from src.commands.stream import handle_xadd, handle_xlen, handle_xack, handle_xdel, handle_xread, handle_xtrim, handle_xinfo, handle_xrange, handle_xgroup, handle_xclaim, handle_xpending, handle_xrevrange, handle_xautoclaim, handle_xreadgroup, BlockedReaderRegistry, notify_blocked_readers
+from src.commands.stream import handle_xadd, handle_xlen, handle_xack, handle_xdel, handle_xread, handle_xtrim, handle_xinfo, handle_xrange, handle_xgroup, handle_xclaim, handle_xpending, handle_xrevrange, handle_xautoclaim, handle_xreadgroup, BlockedReaderRegistry, write_xread_reply
 from src.commands.pubsub import PubSubRegistry, PubSubBroadcast, handle_pubsub, handle_publish, handle_subscribe, handle_unsubscribe, handle_psubscribe, handle_punsubscribe, handle_ssubscribe, handle_sunsubscribe, handle_spublish
 from src.commands.ttl import handle_expire, handle_pexpire, handle_expireat, handle_pexpireat, handle_ttl, handle_pttl, handle_persist
 # Command modules (Phase 2 extraction)
@@ -3168,8 +3168,10 @@ struct SlowPathHandler:
                             _xadd_key_len = tokens[i + 1].length
                         _ = handle_xadd(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
+                        # The readers are answered by the event loop's next
+                        # tick, not here: this connection is mid-batch.
                         if self.blocked_readers.count_ptr[0] > 0 and _xadd_key_len > 0:
-                            notify_blocked_readers(self.blocked_readers, self.keyspace, _xadd_key_ptr, _xadd_key_len, server)
+                            self.blocked_readers.mark_ready(_xadd_key_ptr, _xadd_key_len)
                     elif cmd_eq(tp, tl, "xack"):
                         # XACK (x=120,a=97,c=99,k=107)
                         _ = handle_xack(tokens, i, cmd_end_tok, writer)
@@ -3178,8 +3180,17 @@ struct SlowPathHandler:
                         _ = handle_xdel(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xread"):
-                        _ = handle_xread(tokens, i, cmd_end_tok, writer, self.keyspace, self.blocked_readers, fd, server)
-                        i = cmd_end_tok - 1
+                        # A BLOCK that found no data parks the
+                        # connection, as WAIT does (gh #390): no reply yet, and
+                        # nothing pipelined behind it may run first. Stop at its
+                        # byte end; the engine answers it and resumes the rest.
+                        var can_block = self.can_park_wait and on_primary and cmd_idx < num_cmds and fd >= 0
+                        if handle_xread(tokens, i, cmd_end_tok, writer, self.keyspace, self.blocked_readers, fd, can_block):
+                            self.parked_waits.park_fd(fd)
+                            primary_consumed = cmd_byte_ends[cmd_idx]
+                            i = num_tokens
+                        else:
+                            i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xtrim"):
                         _ = handle_xtrim(tokens, i, cmd_end_tok, writer, self.keyspace)
                         if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
@@ -3700,12 +3711,6 @@ struct SlowPathHandler:
                 if skip_to > 0 and skip_to <= n:
                     return skip_to
             return n
-
-    def drain_blocked_readers(mut self, server: TCPServer):
-        """Check for timed-out XREAD BLOCK readers. Called per event loop tick."""
-        if self.blocked_readers.count_ptr[0] == 0: return
-        var now_ms = Int64(_get_now_ns() // 1000000)
-        self.blocked_readers.check_timeouts(now_ms, server)
 
     def drain_pubsub_broadcast(mut self, server: TCPServer):
         """Drain cross-worker pub/sub broadcast ring. Called per event loop tick."""

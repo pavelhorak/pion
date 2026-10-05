@@ -6,13 +6,13 @@ Consumer groups remain stubs.
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, stack_allocation
-from std.collections import Array
+from std.collections import Array, List, Span
 from std.memory import unsafe_memcpy, unsafe_memset
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
-from src.common.utils import strict_atol, format_int_to_buf
+from src.common.utils import strict_atol, format_int_to_buf, arg_eq, parse_int64_strict
 from src.network.fast_path import _get_now_ns
 from src.network.server import TCPServer
 # gh #174: StreamEntry/StreamData live in src/common so src/io/wal.mojo can
@@ -21,100 +21,94 @@ from src.network.server import TCPServer
 from src.common.stream_data import StreamEntry, StreamData
 from src.io.wal import WAL
 
-comptime MAX_BLOCKED_READERS = 64
-comptime MAX_BLOCKED_KEYS = 4  # max stream keys per blocked XREAD
+# How many XREAD BLOCK clients one worker parks at once. Past it, XREAD BLOCK
+# answers an error instead of leaving the client without a reply.
+comptime MAX_BLOCKED_READERS = 4096
 
 
 # ── Blocked XREAD state ──
 
 struct BlockedReader(Copyable, Movable):
-    """A pending XREAD BLOCK request waiting for new data."""
+    """An XREAD BLOCK whose connection is parked until one of its streams gets
+    an entry after its ID, or its deadline passes. Answered by the event loop
+    (`NetworkEngine._service_blocked_readers`), which then runs whatever the
+    client pipelined behind it: a blocked client runs nothing else first, as
+    in Redis (a PING pipelined behind it used to be answered before it)."""
     var fd: Int32
-    var active: Bool
-    var count_limit: Int
-    var timeout_ms: Int64       # 0 = infinite, >0 = deadline (absolute ms from _get_now_ns)
-    var key_hashes: Array[UInt64, 4]  # hashed key names for fast matching
-    var after_ms: Array[UInt64, 4]    # last ID ms per key
-    var after_seq: Array[UInt64, 4]   # last ID seq per key
-    var num_keys: Int
-    # Store key names for response formatting
-    var key_ptrs: Array[Pointer[UInt8, MutUntrackedOrigin], 4]
-    var key_lens: Array[Int, 4]
+    var ready: Bool             # an XADD reached one of its streams
+    var count_limit: Int        # 0 = no COUNT: every entry
+    var timeout_ms: Int64       # 0 = no deadline, else absolute ms (_get_now_ns clock)
+    var keys: List[String]      # stream names, byte for byte
+    var after_ms: List[UInt64]
+    var after_seq: List[UInt64]
 
     def __init__(out self):
-        self.fd = Int32(-1); self.active = False
-        self.count_limit = 100; self.timeout_ms = 0; self.num_keys = 0
-        self.key_hashes = Array[UInt64, 4](fill=UInt64(0))
-        self.after_ms = Array[UInt64, 4](fill=UInt64(0))
-        self.after_seq = Array[UInt64, 4](fill=UInt64(0))
-        self.key_ptrs = Array[Pointer[UInt8, MutUntrackedOrigin], 4](fill=null_ptr[UInt8, MutUntrackedOrigin]())
-        self.key_lens = Array[Int, 4](fill=0)
+        self.fd = Int32(-1); self.ready = False
+        self.count_limit = 0; self.timeout_ms = 0
+        self.keys = List[String]()
+        self.after_ms = List[UInt64]()
+        self.after_seq = List[UInt64]()
 
 
 struct BlockedReaderRegistry(Movable):
-    """Per-worker registry of blocked XREAD requests.
-    Uses heap-allocated count to ensure mutations persist across mut parameter passing."""
-    var readers: Pointer[BlockedReader, MutUntrackedOrigin]
-    var count_ptr: Pointer[Int, MutUntrackedOrigin]  # heap-allocated to survive mut borrow
+    """Per-worker parked XREAD BLOCK clients."""
+    var readers: List[BlockedReader]
+    var count_ptr: Pointer[Int, MutUntrackedOrigin]   # len(readers), read by every event-loop tick
 
     @always_inline
     def _count(self) -> Int:
         return self.count_ptr[unsafe_offset=0]
 
     def __init__(out self):
-        self.readers = alloc[BlockedReader](MAX_BLOCKED_READERS)
-        for i in range(MAX_BLOCKED_READERS):
-            (self.readers.unsafe_offset(i)).unsafe_write(BlockedReader())
+        self.readers = List[BlockedReader]()
         self.count_ptr = alloc[Int](1)
         self.count_ptr[unsafe_offset=0] = 0
 
-    @always_inline
-    @staticmethod
-    def hash_key(ptr: Pointer[UInt8, MutUntrackedOrigin], length: Int) -> UInt64:
-        var h: UInt64 = 0x736f6d6570736575
-        for i in range(length):
-            h = (h ^ UInt64(ptr[unsafe_offset=i])) * UInt64(0x100000001b3)
-        return h
-
-    def add(mut self, reader: BlockedReader) -> Bool:
+    def add(mut self, var reader: BlockedReader) -> Bool:
         """Register a blocked reader. Returns False if full."""
-        for i in range(MAX_BLOCKED_READERS):
-            if not self.readers[unsafe_offset=i].active:
-                self.readers[unsafe_offset=i] = reader.copy()
-                self.count_ptr[unsafe_offset=0] += 1
-                return True
-        return False
+        if len(self.readers) >= MAX_BLOCKED_READERS:
+            return False
+        self.readers.append(reader^)
+        self.count_ptr[unsafe_offset=0] = len(self.readers)
+        return True
+
+    def remove_at(mut self, k: Int):
+        """Drop reader k (swap with the last)."""
+        var last = len(self.readers) - 1
+        if k != last:
+            self.readers[k] = self.readers[last].copy()
+        _ = self.readers.pop()
+        self.count_ptr[unsafe_offset=0] = len(self.readers)
 
     def remove_fd(mut self, fd: Int32):
-        """Remove all blocked readers for a given fd."""
-        for i in range(MAX_BLOCKED_READERS):
-            if self.readers[unsafe_offset=i].active and self.readers[unsafe_offset=i].fd == fd:
-                # Free stored key name copies
-                for k in range(self.readers[unsafe_offset=i].num_keys):
-                    if is_not_null(self.readers[unsafe_offset=i].key_ptrs[k]):
-                        self.readers[unsafe_offset=i].key_ptrs[k].unsafe_free()
-                self.readers[unsafe_offset=i].active = False
-                self.count_ptr[unsafe_offset=0] -= 1
+        """The connection closed while blocked."""
+        var k = 0
+        while k < len(self.readers):
+            if self.readers[k].fd == fd:
+                self.remove_at(k)
+            else:
+                k += 1
 
-    def check_timeouts(mut self, now_ms: Int64, server: TCPServer):
-        """Check for timed-out blocked readers and send null response."""
-        if self.count_ptr[unsafe_offset=0] == 0: return
-        for i in range(MAX_BLOCKED_READERS):
-            if self.readers[unsafe_offset=i].active and self.readers[unsafe_offset=i].timeout_ms > 0 and now_ms >= self.readers[unsafe_offset=i].timeout_ms:
-                # Timed out — send null response ($-1\r\n = 5 bytes)
-                var null_buf = alloc[UInt8](5)
-                null_buf[unsafe_offset=0] = 36  # '$'
-                null_buf[unsafe_offset=1] = 45  # '-'
-                null_buf[unsafe_offset=2] = 49  # '1'
-                null_buf[unsafe_offset=3] = 13  # '\r'
-                null_buf[unsafe_offset=4] = 10  # '\n'
-                _ = server.send(self.readers[unsafe_offset=i].fd, null_buf, 5)
-                null_buf.unsafe_free()
-                for k in range(self.readers[unsafe_offset=i].num_keys):
-                    if is_not_null(self.readers[unsafe_offset=i].key_ptrs[k]):
-                        self.readers[unsafe_offset=i].key_ptrs[k].unsafe_free()
-                self.readers[unsafe_offset=i].active = False
-                self.count_ptr[unsafe_offset=0] -= 1
+    def mark_ready(mut self, key_ptr: Pointer[UInt8, MutUntrackedOrigin], key_len: Int):
+        """An XADD to `key`: every reader blocked on it is answered on the
+        event loop's next tick. Nothing is written here; the XADD's own
+        connection is mid-batch."""
+        for k in range(len(self.readers)):
+            for ki in range(len(self.readers[k].keys)):
+                if _bytes_eq(self.readers[k].keys[ki], key_ptr, key_len):
+                    self.readers[k].ready = True
+                    break
+
+
+@always_inline
+def _bytes_eq(s: String, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    if s.byte_length() != n:
+        return False
+    var sp = s.unsafe_ptr()
+    for j in range(n):
+        if sp[j] != p[unsafe_offset=j]:
+            return False
+    return True
 
 
 # ── ID helpers ──
@@ -132,27 +126,6 @@ struct StreamID(Copyable, Movable, ImplicitlyCopyable):
 
 
 @always_inline
-def parse_stream_id(ptr: Pointer[UInt8, MutUntrackedOrigin], length: Int) -> StreamID:
-    """Parse 'ms-seq', '*', '-', '+'."""
-    if length == 1:
-        if ptr[unsafe_offset=0] == 42: return StreamID(0, 0, False)  # '*' → auto
-        if ptr[unsafe_offset=0] == 45: return StreamID(0, 0, True)   # '-' → min
-        if ptr[unsafe_offset=0] == 43: return StreamID(0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, True)  # '+' → max
-    var ms: UInt64 = 0
-    var seq: UInt64 = 0
-    var i = 0
-    while i < length and ptr[unsafe_offset=i] != 45:  # '-'
-        ms = ms * 10 + UInt64(ptr[unsafe_offset=i] - 48)
-        i += 1
-    if i < length and ptr[unsafe_offset=i] == 45:
-        i += 1
-        while i < length:
-            seq = seq * 10 + UInt64(ptr[unsafe_offset=i] - 48)
-            i += 1
-    return StreamID(ms, seq, True)
-
-
-@always_inline
 def id_ge(a_ms: UInt64, a_seq: UInt64, b_ms: UInt64, b_seq: UInt64) -> Bool:
     return a_ms > b_ms or (a_ms == b_ms and a_seq >= b_seq)
 
@@ -165,6 +138,226 @@ def id_le(a_ms: UInt64, a_seq: UInt64, b_ms: UInt64, b_seq: UInt64) -> Bool:
 @always_inline
 def id_gt(a_ms: UInt64, a_seq: UInt64, b_ms: UInt64, b_seq: UInt64) -> Bool:
     return a_ms > b_ms or (a_ms == b_ms and a_seq > b_seq)
+
+
+# ── Stream IDs and the XADD / XTRIM arguments, as Redis parses them ──────────
+
+@fieldwise_init
+struct ParsedID(Copyable, Movable, ImplicitlyCopyable):
+    var ok: Bool
+    var ms: UInt64
+    var seq: UInt64
+    var seq_given: Bool      # False for the `<ms>-*` form
+
+
+def _string2ull(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, mut out: UInt64) -> Bool:
+    """Redis's string2ull: an exact integer that is not negative; failing
+    that, what strtoull consumes whole — leading spaces, a sign, digits, no
+    overflow, nothing after."""
+    var r = parse_int64_strict(p, n)
+    if r.ok:
+        if r.value < 0:
+            return False
+        out = UInt64(r.value)
+        return True
+    var i = 0
+    while i < n and (p[unsafe_offset=i] == 32 or (p[unsafe_offset=i] >= 9 and p[unsafe_offset=i] <= 13)):
+        i += 1
+    var neg = False
+    if i < n and (p[unsafe_offset=i] == 43 or p[unsafe_offset=i] == 45):
+        neg = p[unsafe_offset=i] == 45
+        i += 1
+    var start = i
+    var v: UInt64 = 0
+    while i < n and p[unsafe_offset=i] >= 48 and p[unsafe_offset=i] <= 57:
+        var d = UInt64(p[unsafe_offset=i] - 48)
+        if v > (UInt64.MAX - d) // 10:
+            return False
+        v = v * 10 + d
+        i += 1
+    if i == start or i != n:
+        return False
+    out = (UInt64(0) - v) if neg else v
+    return True
+
+
+def parse_id(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, missing_seq: UInt64,
+             strict: Bool, seq_star: Bool) -> ParsedID:
+    """streamGenericParseIDOrReply: `-`, `+` (unless `strict`), `<ms>`
+    (seq = `missing_seq`), `<ms>-<seq>`, and `<ms>-*` when `seq_star`. The
+    parse this replaces skipped every byte that was not a digit."""
+    var bad = ParsedID(False, 0, 0, True)
+    if n == 0 or n > 127:
+        return bad
+    if n == 1 and (p[unsafe_offset=0] == 45 or p[unsafe_offset=0] == 43):
+        if strict:
+            return bad
+        if p[unsafe_offset=0] == 45:
+            return ParsedID(True, 0, 0, True)
+        return ParsedID(True, UInt64.MAX, UInt64.MAX, True)
+    var dash = -1
+    for k in range(n):
+        if p[unsafe_offset=k] == 45:
+            dash = k
+            break
+    var ms: UInt64 = 0
+    if not _string2ull(p, dash if dash >= 0 else n, ms):
+        return bad
+    if dash < 0:
+        return ParsedID(True, ms, missing_seq, True)
+    var sp = p.unsafe_offset(dash + 1)
+    var sn = n - dash - 1
+    if seq_star and sn == 1 and sp[unsafe_offset=0] == 42:
+        return ParsedID(True, ms, 0, False)
+    var seq: UInt64 = 0
+    if not _string2ull(sp, sn, seq):
+        return bad
+    return ParsedID(True, ms, seq, True)
+
+
+comptime _E_BAD_ID = "ERR Invalid stream ID specified as stream command argument"
+comptime TRIM_NONE = 0
+comptime TRIM_MAXLEN = 1
+comptime TRIM_MINID = 2
+
+
+@fieldwise_init
+struct AddTrimArgs(Copyable, Movable, ImplicitlyCopyable):
+    var ok: Bool
+    var strategy: Int
+    var maxlen: Int
+    var minid_ms: UInt64
+    var minid_seq: UInt64
+    var approx: Bool
+    var limit: Int            # entries one call may remove; 0 = no limit
+    var no_mkstream: Bool
+    var id_idx: Int           # XADD: the token holding the id (or "*")
+
+
+def parse_add_trim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, end: Int,
+                   xadd: Bool, mut writer: ResponseWriter) -> AddTrimArgs:
+    """streamParseAddOrTrimArgsOrReply: [NOMKSTREAM] [KEEPREF|DELREF|ACKED]
+    [MAXLEN|MINID [=|~] threshold [LIMIT count]] — then, for XADD, the id.
+    On error the reply is written and `ok` is False.
+
+    MINID was parsed and then ignored (no trim, success reply), `=` was not
+    understood, LIMIT not at all, `MAXLEN 0` kept everything, and the
+    keywords were matched by their first letters. KEEPREF/DELREF/ACKED choose
+    what happens to consumer-group references; with no consumer groups they
+    are all the same, and accepted."""
+    var a = AddTrimArgs(False, TRIM_NONE, -1, 0, 0, False, -1, False, end)
+    var limit_given = False
+    var j = start
+    while j < end:
+        var t = tokens[j]
+        var more = end - 1 - j
+        if xadd and t.length == 1 and t.ptr[unsafe_offset=0] == 42:     # "*"
+            break
+        elif (arg_eq(t.ptr, t.length, "maxlen") or arg_eq(t.ptr, t.length, "minid")) and more > 0:
+            if a.strategy != TRIM_NONE:
+                writer.append_error_response("ERR syntax error, MAXLEN and MINID options at the same time are not compatible")
+                return a
+            var is_max = arg_eq(t.ptr, t.length, "maxlen")
+            a.approx = False
+            var nx = tokens[j + 1]
+            if more >= 2 and nx.length == 1 and nx.ptr[unsafe_offset=0] == 126:     # "~"
+                a.approx = True
+                j += 1
+            elif more >= 2 and nx.length == 1 and nx.ptr[unsafe_offset=0] == 61:    # "="
+                j += 1
+            var th = tokens[j + 1]
+            if is_max:
+                var v = parse_int64_strict(th.ptr, th.length)
+                if not v.ok:
+                    writer.append_error_response("ERR value is not an integer or out of range")
+                    return a
+                if v.value < 0:
+                    writer.append_error_response("ERR The MAXLEN argument must be >= 0.")
+                    return a
+                a.maxlen = Int(v.value)
+                a.strategy = TRIM_MAXLEN
+            else:
+                var mid = parse_id(th.ptr, th.length, 0, True, False)
+                if not mid.ok:
+                    writer.append_error_response(_E_BAD_ID)
+                    return a
+                a.minid_ms = mid.ms
+                a.minid_seq = mid.seq
+                a.strategy = TRIM_MINID
+            j += 2
+            continue
+        elif arg_eq(t.ptr, t.length, "limit") and more > 0:
+            var lv = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            if not lv.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return a
+            if lv.value < 0:
+                writer.append_error_response("ERR The LIMIT argument must be >= 0.")
+                return a
+            a.limit = Int(lv.value)
+            limit_given = True
+            j += 2
+            continue
+        elif xadd and arg_eq(t.ptr, t.length, "nomkstream"):
+            a.no_mkstream = True
+        elif arg_eq(t.ptr, t.length, "keepref") or arg_eq(t.ptr, t.length, "delref") \
+                or arg_eq(t.ptr, t.length, "acked"):
+            pass
+        elif xadd:
+            var id = parse_id(t.ptr, t.length, 0, True, True)
+            if not id.ok:
+                writer.append_error_response(_E_BAD_ID)
+                return a
+            break
+        else:
+            writer.append_error_response("ERR syntax error")
+            return a
+        j += 1
+    a.id_idx = j
+    if limit_given and a.limit != 0 and a.strategy == TRIM_NONE:
+        writer.append_error_response("ERR syntax error, LIMIT cannot be used without specifying a trimming strategy")
+        return a
+    if not xadd and a.strategy == TRIM_NONE:
+        writer.append_error_response("ERR syntax error, XTRIM must be called with a trimming strategy")
+        return a
+    if limit_given:
+        if not a.approx:
+            writer.append_error_response("ERR syntax error, LIMIT cannot be used without the special ~ option")
+            return a
+    else:
+        # ~ without LIMIT removes at most 100 x stream-node-max-entries a call.
+        a.limit = 10000 if a.approx else 0
+    a.ok = True
+    return a
+
+
+def stream_trim(sd: Pointer[StreamData, MutUntrackedOrigin], a: AddTrimArgs,
+                wal: Pointer[WAL, MutUntrackedOrigin], key_ptr: Pointer[UInt8, MutUntrackedOrigin],
+                key_len: Int) -> Int:
+    """Remove the oldest entries past MAXLEN, or older than MINID, at most
+    `a.limit` of them (0 = no limit), logging each (record 27). With `~`
+    Redis removes whole internal nodes only, so it may keep more than asked;
+    Pion has no nodes and trims exactly, which is within the `~` contract."""
+    var removed = 0
+    for ei in range(sd[].count):
+        if a.limit > 0 and removed >= a.limit:
+            break
+        if sd[].entries[unsafe_offset=ei].deleted:
+            continue
+        var e_ms = sd[].entries[unsafe_offset=ei].id_ms
+        var e_seq = sd[].entries[unsafe_offset=ei].id_seq
+        if a.strategy == TRIM_MAXLEN:
+            if sd[].alive <= a.maxlen:
+                break
+        elif not (e_ms < a.minid_ms or (e_ms == a.minid_ms and e_seq < a.minid_seq)):
+            break
+        sd[].kill(ei)
+        removed += 1
+        if is_not_null(wal):
+            _ = wal[].append_u64x2_val(27, key_ptr, key_len, e_ms, e_seq,
+                                       null_ptr[UInt8, MutUntrackedOrigin](), 0)
+    sd[].compact()
+    return removed
 
 
 @always_inline
@@ -253,6 +446,17 @@ def stream_key_is_wrongtype(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin
 
 # ── Write stream entry fields to response ──
 
+# Packed entry layout: [u32 flen][field][u32 vlen][value]... little-endian.
+# The lengths were u16, which held a field or value of at most 64 KB. WAL and
+# snapshot records of this layout are cmd 34; cmd 23 records (u16) still replay.
+comptime STREAM_LEN_BYTES = 4
+
+
+@always_inline
+def _pack_len(p: Pointer[UInt8, MutUntrackedOrigin]) -> Int:
+    return Int((p.unsafe_bitcast[UInt32]())[])
+
+
 @always_inline
 def write_entry_to_response(e: StreamEntry, mut writer: ResponseWriter):
     """Write a stream entry as: *2\\r\\n $<id_len>\\r\\n<id>\\r\\n *<2*nf>\\r\\n [field value]..."""
@@ -264,76 +468,23 @@ def write_entry_to_response(e: StreamEntry, mut writer: ResponseWriter):
     writer.append_bulk_string_response(id_buf, id_len)
     id_buf.unsafe_free()
     # Fields array
-    var nf2 = e.num_fields * 2
-    writer.buffer[unsafe_offset=writer.offset] = 42  # '*'
-    writer.offset += 1
-    writer.offset += format_int_to_buf(writer.buffer.unsafe_offset(writer.offset), 0, Int64(nf2))
-    writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset + 1] = 10
-    writer.offset += 2
-    # Parse packed data: [u16 flen][bytes][u16 vlen][bytes]...
+    writer.append_array_header(e.num_fields * 2)
     var doff = 0
     for _ in range(e.num_fields):
-        if doff + 2 > e.data_len: break
-        var flen = Int((e.data.unsafe_offset(doff)).unsafe_bitcast[UInt16]()[])
-        doff += 2
+        if doff + STREAM_LEN_BYTES > e.data_len: break
+        var flen = _pack_len(e.data.unsafe_offset(doff))
+        doff += STREAM_LEN_BYTES
         if doff + flen > e.data_len: break
         writer.append_bulk_string_response(e.data.unsafe_offset(doff), flen)
         doff += flen
-        if doff + 2 > e.data_len: break
-        var vlen = Int((e.data.unsafe_offset(doff)).unsafe_bitcast[UInt16]()[])
-        doff += 2
+        if doff + STREAM_LEN_BYTES > e.data_len: break
+        var vlen = _pack_len(e.data.unsafe_offset(doff))
+        doff += STREAM_LEN_BYTES
         if doff + vlen > e.data_len: break
         writer.append_bulk_string_response(e.data.unsafe_offset(doff), vlen)
         doff += vlen
 
 
-def write_entry_to_buf(e: StreamEntry, buf: Pointer[UInt8, MutUntrackedOrigin], start: Int) -> Int:
-    """Write a stream entry to a raw buffer. Returns new offset."""
-    var off = start
-    # *2\r\n
-    buf[unsafe_offset=off] = 42; buf[unsafe_offset=off + 1] = 50; buf[unsafe_offset=off + 2] = 13; buf[unsafe_offset=off + 3] = 10; off += 4
-    # ID as bulk string
-    var id_buf = alloc[UInt8](40)
-    var id_len = format_stream_id(id_buf, e.id_ms, e.id_seq)
-    buf[unsafe_offset=off] = 36; off += 1
-    off += format_int_to_buf(buf.unsafe_offset(off), 0, Int64(id_len))
-    buf[unsafe_offset=off] = 13; buf[unsafe_offset=off + 1] = 10; off += 2
-    unsafe_memcpy(dest=buf.unsafe_offset(off), src=id_buf, count=id_len); off += id_len
-    buf[unsafe_offset=off] = 13; buf[unsafe_offset=off + 1] = 10; off += 2
-    id_buf.unsafe_free()
-    # Fields array
-    var nf2 = e.num_fields * 2
-    buf[unsafe_offset=off] = 42; off += 1
-    off += format_int_to_buf(buf.unsafe_offset(off), 0, Int64(nf2))
-    buf[unsafe_offset=off] = 13; buf[unsafe_offset=off + 1] = 10; off += 2
-    var doff = 0
-    for _ in range(e.num_fields):
-        if doff + 2 > e.data_len: break
-        var flen = Int((e.data.unsafe_offset(doff)).unsafe_bitcast[UInt16]()[])
-        doff += 2
-        if doff + flen > e.data_len: break
-        buf[unsafe_offset=off] = 36; off += 1
-        off += format_int_to_buf(buf.unsafe_offset(off), 0, Int64(flen))
-        buf[unsafe_offset=off] = 13; buf[unsafe_offset=off + 1] = 10; off += 2
-        unsafe_memcpy(dest=buf.unsafe_offset(off), src=e.data.unsafe_offset(doff), count=flen); off += flen
-        buf[unsafe_offset=off] = 13; buf[unsafe_offset=off + 1] = 10; off += 2
-        doff += flen
-        if doff + 2 > e.data_len: break
-        var vlen = Int((e.data.unsafe_offset(doff)).unsafe_bitcast[UInt16]()[])
-        doff += 2
-        if doff + vlen > e.data_len: break
-        buf[unsafe_offset=off] = 36; off += 1
-        off += format_int_to_buf(buf.unsafe_offset(off), 0, Int64(vlen))
-        buf[unsafe_offset=off] = 13; buf[unsafe_offset=off + 1] = 10; off += 2
-        unsafe_memcpy(dest=buf.unsafe_offset(off), src=e.data.unsafe_offset(doff), count=vlen); off += vlen
-        buf[unsafe_offset=off] = 13; buf[unsafe_offset=off + 1] = 10; off += 2
-        doff += vlen
-    return off
-
-
-# ── Command Handlers ──
-
-@always_inline
 def handle_xadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                 wal: Pointer[WAL, MutUntrackedOrigin] = null_ptr[WAL, MutUntrackedOrigin]()) raises -> Int:
     """XADD key [NOMKSTREAM] [MAXLEN|MINID [=|~] threshold] <id|*> field value [field value ...]"""
@@ -356,67 +507,39 @@ def handle_xadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     var key_len = tokens[unsafe_offset=i + 1].length
     var key_val = GenericValue.borrow(key_ptr, key_len)
 
-    # Parse optional flags and find the ID token
-    var j = i + 2
-    var maxlen = -1
-    var no_mkstream = False
-    while j < num_tokens:
-        var tp = tokens[unsafe_offset=j].ptr; var tl = tokens[unsafe_offset=j].length
-        if tl == 6 and (tp[unsafe_offset=0] | 0x20) == 109 and (tp[unsafe_offset=1] | 0x20) == 97 and (tp[unsafe_offset=2] | 0x20) == 120:
-            # MAXLEN [~] N
-            j += 1
-            if j < num_tokens and tokens[unsafe_offset=j].length == 1 and tokens[unsafe_offset=j].ptr[unsafe_offset=0] == 126: j += 1  # skip ~
-            if j < num_tokens:
-                var ml = strict_atol(tokens[unsafe_offset=j].value())
-                if ml > 0: maxlen = ml
-            j += 1; continue
-        elif tl == 10 and (tp[unsafe_offset=0] | 0x20) == 110:
-            # NOMKSTREAM — gh #232: this was `tl == 11` and NOMKSTREAM is 10
-            # bytes, so the arm never fired. The flag then fell out of the loop
-            # as the ID token: `parse_stream_id` read the literal text into an
-            # id (33420896299-0), field/value pairs shifted by one, and the
-            # last value was dropped outright. It was also unimplemented — the
-            # stream got created either way, where Redis replies nil.
-            no_mkstream = True
-            j += 1; continue
-        elif tl == 5 and (tp[unsafe_offset=0] | 0x20) == 109 and (tp[unsafe_offset=1] | 0x20) == 105:
-            # MINID [~] N — skip for now
-            j += 1
-            if j < num_tokens and tokens[unsafe_offset=j].length == 1 and tokens[unsafe_offset=j].ptr[unsafe_offset=0] == 126: j += 1
-            if j < num_tokens: j += 1
-            continue
-        else:
-            break  # This is the ID token
-
-    if j >= num_tokens:
-        writer.append_error_response("ERR wrong number of arguments for 'xadd' command")
+    # Redis's streamParseAddOrTrimArgsOrReply: the options, then the id.
+    var at = parse_add_trim(tokens, i + 2, num_tokens, True, writer)
+    if not at.ok:
         return num_tokens - i - 1
-
-    # Parse ID
-    var id_tok = tokens[unsafe_offset=j]
-    var r = parse_stream_id(id_tok.ptr, id_tok.length)
-    var id_ms = r.ms; var id_seq = r.seq; var id_explicit = r.explicit
-    j += 1
-
-    # Remaining tokens are field-value pairs
-    var field_start = j
+    var field_start = at.id_idx + 1
     var nf = (num_tokens - field_start) // 2
-    if nf < 1:
+    if num_tokens - field_start < 2 or (num_tokens - field_start) % 2 == 1:
         writer.append_error_response("ERR wrong number of arguments for 'xadd' command")
         return num_tokens - i - 1
+    var no_mkstream = at.no_mkstream
+    var id_tok = tokens[unsafe_offset=at.id_idx]
+    var id_auto = id_tok.length == 1 and id_tok.ptr[unsafe_offset=0] == 42
+    var pid = ParsedID(True, 0, 0, True)
+    if not id_auto:
+        pid = parse_id(id_tok.ptr, id_tok.length, 0, True, True)
+    # Before the key is touched, so a new stream is not left empty.
+    if not id_auto and pid.seq_given and pid.ms == 0 and pid.seq == 0:
+        writer.append_error_response("ERR The ID specified in XADD must be greater than 0-0")
+        return num_tokens - i - 1
 
-    # Pack field-value data: [u16 flen][bytes][u16 vlen][bytes]...
+    # Pack field-value data: [u32 flen][bytes][u32 vlen][bytes]...
     var pack_size = 0
     for fi in range(nf):
-        pack_size += 2 + tokens[unsafe_offset=field_start + fi * 2].length + 2 + tokens[unsafe_offset=field_start + fi * 2 + 1].length
+        pack_size += (2 * STREAM_LEN_BYTES + tokens[unsafe_offset=field_start + fi * 2].length
+                      + tokens[unsafe_offset=field_start + fi * 2 + 1].length)
     var pack_buf = alloc[UInt8](pack_size)
     var poff = 0
     for fi in range(nf):
         var ft = tokens[unsafe_offset=field_start + fi * 2]
         var vt = tokens[unsafe_offset=field_start + fi * 2 + 1]
-        (pack_buf.unsafe_offset(poff)).unsafe_bitcast[UInt16]()[] = UInt16(ft.length); poff += 2
+        (pack_buf.unsafe_offset(poff)).unsafe_bitcast[UInt32]()[] = UInt32(ft.length); poff += STREAM_LEN_BYTES
         unsafe_memcpy(dest=pack_buf.unsafe_offset(poff), src=ft.ptr, count=ft.length); poff += ft.length
-        (pack_buf.unsafe_offset(poff)).unsafe_bitcast[UInt16]()[] = UInt16(vt.length); poff += 2
+        (pack_buf.unsafe_offset(poff)).unsafe_bitcast[UInt32]()[] = UInt32(vt.length); poff += STREAM_LEN_BYTES
         unsafe_memcpy(dest=pack_buf.unsafe_offset(poff), src=vt.ptr, count=vt.length); poff += vt.length
 
     # Get or create stream. Both refusals must free the pack buffer allocated
@@ -432,30 +555,39 @@ def handle_xadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         writer.append_null_response()
         return num_tokens - i - 1
 
-    # Generate ID if auto
-    if not id_explicit:
+    if sd[].last_id_ms == UInt64.MAX and sd[].last_id_seq == UInt64.MAX:
+        pack_buf.unsafe_free()
+        writer.append_error_response("ERR The stream has exhausted the last possible ID, unable to add more items")
+        return num_tokens - i - 1
+    var id_ms: UInt64
+    var id_seq: UInt64
+    if id_auto:
+        # streamNextID: now, or the last id plus one when the clock is behind.
         id_ms = UInt64(_get_now_ns() // 1000000)
-        if id_ms == sd[].last_id_ms:
-            id_seq = sd[].last_id_seq + 1
-        else:
+        if id_ms > sd[].last_id_ms:
             id_seq = 0
-            if id_ms < sd[].last_id_ms:
-                id_ms = sd[].last_id_ms
+        elif sd[].last_id_seq == UInt64.MAX:
+            id_ms = sd[].last_id_ms + 1
+            id_seq = 0
+        else:
+            id_ms = sd[].last_id_ms
+            id_seq = sd[].last_id_seq + 1
+    else:
+        id_ms = pid.ms
+        id_seq = pid.seq
+        if not pid.seq_given:
+            # `<ms>-*`: the next sequence in that millisecond.
+            if sd[].last_id_ms == pid.ms:
+                if sd[].last_id_seq == UInt64.MAX:
+                    pack_buf.unsafe_free()
+                    writer.append_error_response("ERR The ID specified in XADD is equal or smaller than the target stream top item")
+                    return num_tokens - i - 1
                 id_seq = sd[].last_id_seq + 1
-
-    # gh #242: an EXPLICIT id was appended with no ordering check at all, so
-    # `XADD s 5-5` twice, or a smaller id after a larger one, both succeeded —
-    # leaving ids like [5-5, 5-5, 3-3, 5-6]. Stream ids being strictly
-    # increasing is the invariant every consumer cursor relies on: a client
-    # resuming from `(last-id` either loops on the duplicate or skips the
-    # out-of-order entry. Only the AUTO path (above) enforced it.
-    if id_explicit:
-        if id_ms == 0 and id_seq == 0:
-            pack_buf.unsafe_free()
-            writer.append_error_response("ERR The ID specified in XADD must be greater than 0-0")
-            return num_tokens - i - 1
-        if sd[].count > 0 and (id_ms < sd[].last_id_ms
-                               or (id_ms == sd[].last_id_ms and id_seq <= sd[].last_id_seq)):
+            else:
+                id_seq = 0
+        # gh #242: ids strictly increase. Compared with the stream's last id
+        # even once its entries are deleted, as Redis does.
+        if id_ms < sd[].last_id_ms or (id_ms == sd[].last_id_ms and id_seq <= sd[].last_id_seq):
             pack_buf.unsafe_free()
             writer.append_error_response("ERR The ID specified in XADD is equal or smaller than the target stream top item")
             return num_tokens - i - 1
@@ -467,26 +599,11 @@ def handle_xadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     # never replay as "generate an ID now" — recovery runs at a different wall
     # clock, which would renumber the stream and break every consumer cursor.
     if is_not_null(wal):
-        _ = wal[].append_u64x2_val(23, key_ptr, key_len,
+        _ = wal[].append_u64x2_val(34, key_ptr, key_len,   # u32 lengths
                                    id_ms, id_seq, pack_buf, pack_size)
 
-    # Apply MAXLEN trimming
-    if maxlen > 0 and sd[].alive > maxlen:
-        var to_trim = sd[].alive - maxlen
-        for ti in range(sd[].count):
-            if to_trim <= 0: break
-            if not sd[].entries[unsafe_offset=ti].deleted:
-                sd[].kill(ti)
-                to_trim -= 1
-                # Trimming is a resolved effect too: log which entry died, so a
-                # replay tombstones the same one instead of re-running a MAXLEN
-                # against a differently-ordered rebuild.
-                if is_not_null(wal):
-                    _ = wal[].append_u64x2_val(
-                        27, key_ptr, key_len,
-                        sd[].entries[unsafe_offset=ti].id_ms, sd[].entries[unsafe_offset=ti].id_seq,
-                        null_ptr[UInt8, MutUntrackedOrigin](), 0)
-        sd[].compact()
+    if at.strategy != TRIM_NONE:
+        _ = stream_trim(sd, at, wal, key_ptr, key_len)
 
     # Return ID. gh #202: a 40-byte scratch buffer per XADD does not need a
     # tcmalloc round trip — the reply is copied into the response buffer by
@@ -514,12 +631,68 @@ def handle_xlen(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     return 0
 
 
-@always_inline
-def handle_xrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """XRANGE key start end [COUNT count]."""
-    if i + 3 >= num_tokens:
-        writer.append_error_response("ERR wrong number of arguments for 'xrange' command")
+def _xrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+            mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+            rev: Bool) -> Int:
+    """XRANGE key start end [COUNT n] / XREVRANGE key end start [COUNT n], as
+    Redis's xrangeGenericCommand: the ids first (`-`, `+`, `<ms>` with the
+    open sequence, `(id` for an exclusive bound), then COUNT, then the key.
+    A malformed id used to be read digit by digit as some other id, the key
+    was looked up first, and anything after the range was ignored. COUNT 0 or
+    below answers a null array, as Redis does."""
+    var name = String("xrevrange") if rev else String("xrange")
+    if num_tokens - i < 4:
+        writer.append_error_response("ERR wrong number of arguments for '" + name + "' command")
         return 0
+    var st = tokens[unsafe_offset=i + 3] if rev else tokens[unsafe_offset=i + 2]
+    var en = tokens[unsafe_offset=i + 2] if rev else tokens[unsafe_offset=i + 3]
+    var s_ex = st.length > 1 and st.ptr[unsafe_offset=0] == 40
+    var sid = parse_id(st.ptr.unsafe_offset(1) if s_ex else st.ptr, st.length - 1 if s_ex else st.length,
+                       0, s_ex, False)
+    if not sid.ok:
+        writer.append_error_response(_E_BAD_ID)
+        return num_tokens - i - 1
+    var s_ms = sid.ms
+    var s_seq = sid.seq
+    if s_ex:                                          # streamIncrID
+        if s_seq == UInt64.MAX:
+            if s_ms == UInt64.MAX:
+                writer.append_error_response("ERR invalid start ID for the interval")
+                return num_tokens - i - 1
+            s_ms += 1
+            s_seq = 0
+        else:
+            s_seq += 1
+    var e_ex = en.length > 1 and en.ptr[unsafe_offset=0] == 40
+    var eid = parse_id(en.ptr.unsafe_offset(1) if e_ex else en.ptr, en.length - 1 if e_ex else en.length,
+                       UInt64.MAX, e_ex, False)
+    if not eid.ok:
+        writer.append_error_response(_E_BAD_ID)
+        return num_tokens - i - 1
+    var e_ms = eid.ms
+    var e_seq = eid.seq
+    if e_ex:                                          # streamDecrID
+        if e_seq == 0:
+            if e_ms == 0:
+                writer.append_error_response("ERR invalid end ID for the interval")
+                return num_tokens - i - 1
+            e_ms -= 1
+            e_seq = UInt64.MAX
+        else:
+            e_seq -= 1
+    var count = -1
+    var j = i + 4
+    while j < num_tokens:
+        if arg_eq(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, "count") and j + 1 < num_tokens:
+            var c = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
+            if not c.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return num_tokens - i - 1
+            count = Int(c.value) if c.value > 0 else 0
+            j += 2
+        else:
+            writer.append_error_response("ERR syntax error")
+            return num_tokens - i - 1
     var key_val = GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
     var sd = get_stream(keyspace, key_val)
     if is_null(sd):
@@ -528,342 +701,242 @@ def handle_xrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         else:
             writer.append_empty_array_response()
         return num_tokens - i - 1
-
-    var r_start = parse_stream_id(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-    var r_end = parse_stream_id(tokens[unsafe_offset=i + 3].ptr, tokens[unsafe_offset=i + 3].length)
-    var start_ms = r_start.ms; var start_seq = r_start.seq
-    var end_ms = r_end.ms; var end_seq = r_end.seq
-
-    var count_limit = sd[].count  # default: no limit
-    if i + 5 < num_tokens and tokens[unsafe_offset=i + 4].length == 5 and (tokens[unsafe_offset=i + 4].ptr[unsafe_offset=0] | 0x20) == 99:
-        count_limit = strict_atol(tokens[unsafe_offset=i + 5].value())
-
-    # Collect matching entries
-    var result_count = 0
-    # First pass: count
-    for ei in range(sd[].count):
-        if sd[].entries[unsafe_offset=ei].deleted: continue
+    if count == 0:
+        writer.append_null_array_response()
+        return num_tokens - i - 1
+    # One pass picks the entries, so the header is their count.
+    var picked = List[Int]()
+    var n = sd[].count
+    for k in range(n):
+        var ei = n - 1 - k if rev else k
+        if sd[].entries[unsafe_offset=ei].deleted:
+            continue
         var e = sd[].entries[unsafe_offset=ei]
-        if id_ge(e.id_ms, e.id_seq, start_ms, start_seq) and id_le(e.id_ms, e.id_seq, end_ms, end_seq):
-            result_count += 1
-            if result_count >= count_limit: break
-
-    # Write array header
-    writer.buffer[unsafe_offset=writer.offset] = 42  # '*'
-    writer.offset += 1
-    writer.offset += format_int_to_buf(writer.buffer.unsafe_offset(writer.offset), 0, Int64(result_count))
-    writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset + 1] = 10
-    writer.offset += 2
-
-    # Second pass: write entries
-    var written = 0
-    for ei in range(sd[].count):
-        if written >= result_count: break
-        if sd[].entries[unsafe_offset=ei].deleted: continue
-        var e = sd[].entries[unsafe_offset=ei]
-        if id_ge(e.id_ms, e.id_seq, start_ms, start_seq) and id_le(e.id_ms, e.id_seq, end_ms, end_seq):
-            write_entry_to_response(e, writer)
-            written += 1
-
+        if id_ge(e.id_ms, e.id_seq, s_ms, s_seq) and id_le(e.id_ms, e.id_seq, e_ms, e_seq):
+            picked.append(ei)
+            if count > 0 and len(picked) >= count:
+                break
+    writer.append_array_header(len(picked))
+    for k in range(len(picked)):
+        write_entry_to_response(sd[].entries[unsafe_offset=picked[k]], writer)
     return num_tokens - i - 1
+
+
+@always_inline
+def handle_xrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
+    """XRANGE key start end [COUNT count]."""
+    return _xrange(tokens, i, num_tokens, writer, keyspace, False)
 
 
 @always_inline
 def handle_xrevrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """XREVRANGE key end start [COUNT count]."""
-    if i + 3 >= num_tokens:
-        writer.append_error_response("ERR wrong number of arguments for 'xrevrange' command")
-        return 0
-    var key_val = GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
-    var sd = get_stream(keyspace, key_val)
-    if is_null(sd):
-        if stream_key_is_wrongtype(keyspace, key_val):   # gh #232
-            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-        else:
-            writer.append_empty_array_response()
-        return num_tokens - i - 1
-
-    var r_end = parse_stream_id(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-    var r_start = parse_stream_id(tokens[unsafe_offset=i + 3].ptr, tokens[unsafe_offset=i + 3].length)
-    var start_ms = r_start.ms; var start_seq = r_start.seq
-    var end_ms = r_end.ms; var end_seq = r_end.seq
-
-    var count_limit = sd[].count
-    if i + 5 < num_tokens and tokens[unsafe_offset=i + 4].length == 5 and (tokens[unsafe_offset=i + 4].ptr[unsafe_offset=0] | 0x20) == 99:
-        count_limit = strict_atol(tokens[unsafe_offset=i + 5].value())
-
-    # Count matching entries (reverse)
-    var result_count = 0
-    var ei2 = sd[].count - 1
-    while ei2 >= 0:
-        if not sd[].entries[unsafe_offset=ei2].deleted:
-            var e = sd[].entries[unsafe_offset=ei2]
-            if id_ge(e.id_ms, e.id_seq, start_ms, start_seq) and id_le(e.id_ms, e.id_seq, end_ms, end_seq):
-                result_count += 1
-                if result_count >= count_limit: break
-        ei2 -= 1
-
-    writer.buffer[unsafe_offset=writer.offset] = 42
-    writer.offset += 1
-    writer.offset += format_int_to_buf(writer.buffer.unsafe_offset(writer.offset), 0, Int64(result_count))
-    writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset + 1] = 10
-    writer.offset += 2
-
-    var written = 0
-    ei2 = sd[].count - 1
-    while ei2 >= 0:
-        if written >= result_count: break
-        if not sd[].entries[unsafe_offset=ei2].deleted:
-            var e = sd[].entries[unsafe_offset=ei2]
-            if id_ge(e.id_ms, e.id_seq, start_ms, start_seq) and id_le(e.id_ms, e.id_seq, end_ms, end_seq):
-                write_entry_to_response(e, writer)
-                written += 1
-        ei2 -= 1
-
-    return num_tokens - i - 1
+    return _xrange(tokens, i, num_tokens, writer, keyspace, True)
 
 
-def notify_blocked_readers(mut registry: BlockedReaderRegistry, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
-                           key_ptr: Pointer[UInt8, MutUntrackedOrigin], key_len: Int, server: TCPServer):
-    """Called after XADD — wake up any blocked readers waiting on this key."""
-    if registry.count_ptr[unsafe_offset=0] == 0: return
-    var key_hash = BlockedReaderRegistry.hash_key(key_ptr, key_len)
-    for ri in range(MAX_BLOCKED_READERS):
-        if not registry.readers[unsafe_offset=ri].active: continue
-        for ki in range(registry.readers[unsafe_offset=ri].num_keys):
-            if registry.readers[unsafe_offset=ri].key_hashes[ki] != key_hash: continue
-            # Hash match — verify key name
-            if registry.readers[unsafe_offset=ri].key_lens[ki] != key_len: continue
-            var name_eq = True
-            for ci in range(key_len):
-                if registry.readers[unsafe_offset=ri].key_ptrs[ki][unsafe_offset=ci] != key_ptr[unsafe_offset=ci]:
-                    name_eq = False; break
-            if not name_eq: continue
-            # Match! Build and send XREAD response for this blocked reader
-            var reader = registry.readers[unsafe_offset=ri].copy()
-            var resp_buf = alloc[UInt8](65536)
-            var off = 0
-            # *1\r\n (one stream)
-            resp_buf[unsafe_offset=off] = 42; off += 1; resp_buf[unsafe_offset=off] = 49; off += 1
-            resp_buf[unsafe_offset=off] = 13; resp_buf[unsafe_offset=off + 1] = 10; off += 2
-            # *2\r\n (key + entries)
-            resp_buf[unsafe_offset=off] = 42; off += 1; resp_buf[unsafe_offset=off] = 50; off += 1
-            resp_buf[unsafe_offset=off] = 13; resp_buf[unsafe_offset=off + 1] = 10; off += 2
-            # $keylen\r\nkey\r\n
-            resp_buf[unsafe_offset=off] = 36; off += 1
-            off += format_int_to_buf(resp_buf.unsafe_offset(off), 0, Int64(key_len))
-            resp_buf[unsafe_offset=off] = 13; resp_buf[unsafe_offset=off + 1] = 10; off += 2
-            unsafe_memcpy(dest=resp_buf.unsafe_offset(off), src=key_ptr, count=key_len); off += key_len
-            resp_buf[unsafe_offset=off] = 13; resp_buf[unsafe_offset=off + 1] = 10; off += 2
-            # Get stream and find new entries
-            var key_val = GenericValue.borrow(key_ptr, key_len)
-            var sd = get_stream(keyspace, key_val)
-            if is_not_null(sd):
-                var after_ms = reader.after_ms[ki]
-                var after_seq = reader.after_seq[ki]
-                var entry_count = 0
-                for ei in range(sd[].count):
-                    if sd[].entries[unsafe_offset=ei].deleted: continue
-                    if id_gt(sd[].entries[unsafe_offset=ei].id_ms, sd[].entries[unsafe_offset=ei].id_seq, after_ms, after_seq):
-                        entry_count += 1
-                        if entry_count >= reader.count_limit: break
-                # Write entries array header
-                resp_buf[unsafe_offset=off] = 42; off += 1
-                off += format_int_to_buf(resp_buf.unsafe_offset(off), 0, Int64(entry_count))
-                resp_buf[unsafe_offset=off] = 13; resp_buf[unsafe_offset=off + 1] = 10; off += 2
-                var written = 0
-                for ei in range(sd[].count):
-                    if written >= entry_count: break
-                    if sd[].entries[unsafe_offset=ei].deleted: continue
-                    var e = sd[].entries[unsafe_offset=ei]
-                    if id_gt(e.id_ms, e.id_seq, after_ms, after_seq):
-                        # Write entry inline to resp_buf
-                        off = write_entry_to_buf(e, resp_buf, off)
-                        written += 1
-            else:
-                # Empty array
-                resp_buf[unsafe_offset=off] = 42; resp_buf[unsafe_offset=off + 1] = 48
-                resp_buf[unsafe_offset=off + 2] = 13; resp_buf[unsafe_offset=off + 3] = 10; off += 4
-            _ = server.send(reader.fd, resp_buf, off)
-            resp_buf.unsafe_free()
-            # Remove reader
-            for k2 in range(reader.num_keys):
-                if is_not_null(reader.key_ptrs[k2]):
-                    reader.key_ptrs[k2].unsafe_free()
-            registry.readers[unsafe_offset=ri].active = False
-            registry.count_ptr[unsafe_offset=0] -= 1
-            break  # only wake once per reader
+struct XReadID(Copyable, Movable, ImplicitlyCopyable):
+    var ok: Bool
+    var ms: UInt64
+    var seq: UInt64
+
+    def __init__(out self, ok: Bool, ms: UInt64, seq: UInt64):
+        self.ok = ok; self.ms = ms; self.seq = seq
 
 
-@always_inline
-def handle_xread(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
-                keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
-                mut blocked_readers: BlockedReaderRegistry,
-                fd: Int32,
-                server: TCPServer) raises -> Int:
-    """XREAD [COUNT count] [BLOCK ms] STREAMS key [key ...] id [id ...]."""
-    var j = i + 1
-    var count_limit = 100  # default
-    var block_ms: Int64 = -1  # -1 = no BLOCK, 0 = infinite, >0 = timeout ms
-    var streams_idx = -1
+def parse_xread_id(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> XReadID:
+    """XREAD's ids: Redis's strict parse (`-` and `+` are not ids here; `$`
+    and `+` are handled before this), with `<ms>` meaning `<ms>-0`."""
+    var r = parse_id(p, n, 0, True, False)
+    return XReadID(r.ok, r.ms, r.seq)
 
-    # Parse options
-    while j < num_tokens:
-        var tp = tokens[unsafe_offset=j].ptr; var tl = tokens[unsafe_offset=j].length
-        if tl == 5 and (tp[unsafe_offset=0] | 0x20) == 99 and (tp[unsafe_offset=1] | 0x20) == 111 and (tp[unsafe_offset=2] | 0x20) == 117:
-            # COUNT
-            if j + 1 < num_tokens:
-                count_limit = strict_atol(tokens[unsafe_offset=j + 1].value())
-                j += 2; continue
-        elif tl == 5 and (tp[unsafe_offset=0] | 0x20) == 98 and (tp[unsafe_offset=1] | 0x20) == 108:
-            # BLOCK
-            if j + 1 < num_tokens:
-                block_ms = Int64(strict_atol(tokens[unsafe_offset=j + 1].value()))
-                j += 2; continue
-        elif tl == 7 and (tp[unsafe_offset=0] | 0x20) == 115 and (tp[unsafe_offset=1] | 0x20) == 116 and (tp[unsafe_offset=2] | 0x20) == 114:
-            # STREAMS
-            streams_idx = j + 1
-            break
-        j += 1
 
-    if streams_idx < 0 or streams_idx >= num_tokens:
-        writer.append_null_response()
-        return num_tokens - i - 1
-
-    # Count stream keys: tokens from streams_idx, keys and IDs split evenly
-    var remaining = num_tokens - streams_idx
-    var num_streams = remaining // 2
-    if num_streams < 1:
-        writer.append_null_response()
-        return num_tokens - i - 1
-
-    # Check if any stream has data
-    var has_data = False
-    for si in range(num_streams):
-        var key_val = GenericValue.borrow(tokens[unsafe_offset=streams_idx + si].ptr, tokens[unsafe_offset=streams_idx + si].length)
-        var sd = get_stream(keyspace, key_val)
+def write_xread_reply(mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                      keys: List[String], after_ms: List[UInt64], after_seq: List[UInt64],
+                      count_limit: Int) -> Int:
+    """XREAD's reply for the streams that have entries after their IDs, and
+    only those, as Redis: a map key -> entries under RESP3, an array of
+    [key, entries] pairs under RESP2. `count_limit` 0 means every entry.
+    Returns how many streams it wrote; with 0 it writes nothing, and the
+    caller answers nil or blocks."""
+    var with_data = List[Bool]()
+    var n_with = 0
+    for si in range(len(keys)):
+        var kp = keys[si].unsafe_ptr()
+        var sd = get_stream(keyspace, GenericValue.borrow(
+            Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(kp)), keys[si].byte_length()))
+        var has = False
         if is_not_null(sd) and sd[].alive > 0:
-            # Parse the after-ID
-            var id_tok = tokens[unsafe_offset=streams_idx + num_streams + si]
-            var use_last = id_tok.length == 1 and id_tok.ptr[unsafe_offset=0] == 36  # '$' = last ID
-            if use_last:
-                continue  # $ means only new entries, which don't exist yet in non-blocking mode
-            var r = parse_stream_id(id_tok.ptr, id_tok.length)
-            var after_ms = r.ms; var after_seq = r.seq
-            # Check if there's any entry after this ID
             for ei in range(sd[].count):
                 if sd[].entries[unsafe_offset=ei].deleted: continue
-                var e = sd[].entries[unsafe_offset=ei]
-                if id_gt(e.id_ms, e.id_seq, after_ms, after_seq):
-                    has_data = True
+                if id_gt(sd[].entries[unsafe_offset=ei].id_ms, sd[].entries[unsafe_offset=ei].id_seq,
+                         after_ms[si], after_seq[si]):
+                    has = True
                     break
-        if has_data: break
-
-    if not has_data:
-        # If BLOCK specified and fd valid, register as blocked reader
-        if block_ms >= 0 and Int(fd) >= 0:
-            var reader = BlockedReader()
-            reader.fd = fd
-            reader.active = True
-            reader.count_limit = count_limit
-            if block_ms > 0:
-                reader.timeout_ms = Int64(_get_now_ns() // 1000000) + block_ms
-            else:
-                reader.timeout_ms = 0  # infinite
-            var nk = min(num_streams, MAX_BLOCKED_KEYS)
-            reader.num_keys = nk
-            for ki in range(nk):
-                var kp = tokens[unsafe_offset=streams_idx + ki].ptr
-                var kl = tokens[unsafe_offset=streams_idx + ki].length
-                reader.key_hashes[ki] = BlockedReaderRegistry.hash_key(kp, kl)
-                var id_tok = tokens[unsafe_offset=streams_idx + num_streams + ki]
-                var use_last = id_tok.length == 1 and id_tok.ptr[unsafe_offset=0] == 36
-                if use_last:
-                    # $ = wait for new entries from now
-                    var sd2 = get_stream(keyspace, GenericValue.borrow(kp, kl))
-                    if is_not_null(sd2):
-                        reader.after_ms[ki] = sd2[].last_id_ms
-                        reader.after_seq[ki] = sd2[].last_id_seq
-                    else:
-                        reader.after_ms[ki] = 0; reader.after_seq[ki] = 0
-                else:
-                    var r2 = parse_stream_id(id_tok.ptr, id_tok.length)
-                    reader.after_ms[ki] = r2.ms; reader.after_seq[ki] = r2.seq
-                # Copy key name for later response
-                var key_copy = alloc[UInt8](kl)
-                unsafe_memcpy(dest=key_copy, src=kp, count=kl)
-                reader.key_ptrs[ki] = key_copy
-                reader.key_lens[ki] = kl
-            _ = blocked_readers.add(reader)
-            # Don't write any response — client waits for data or timeout
-            return num_tokens - i - 1
-        writer.append_null_response()
-        return num_tokens - i - 1
-
-    # Write outer array: *<num_streams>\r\n
-    writer.buffer[unsafe_offset=writer.offset] = 42
-    writer.offset += 1
-    writer.offset += format_int_to_buf(writer.buffer.unsafe_offset(writer.offset), 0, Int64(num_streams))
-    writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset + 1] = 10
-    writer.offset += 2
-
-    for si in range(num_streams):
-        var key_ptr = tokens[unsafe_offset=streams_idx + si].ptr
-        var key_len = tokens[unsafe_offset=streams_idx + si].length
-        var key_val = GenericValue.borrow(key_ptr, key_len)
-        var sd = get_stream(keyspace, key_val)
-
-        # Each stream: *2\r\n $keylen\r\nkey\r\n *<entries>\r\n [entries...]
-        writer.append_to_response("*2\r\n".unsafe_ptr(), 4)
-        writer.append_bulk_string_response(key_ptr, key_len)
-
-        if is_null(sd) or sd[].alive == 0:
-            writer.append_empty_array_response()
+        with_data.append(has)
+        if has:
+            n_with += 1
+    if n_with == 0:
+        return 0
+    var as_map = writer.proto == 3
+    if as_map:
+        writer.append_map_header(n_with)
+    else:
+        writer.append_array_header(n_with)
+    for si in range(len(keys)):
+        if not with_data[si]:
             continue
-
-        var id_tok = tokens[unsafe_offset=streams_idx + num_streams + si]
-        var use_last = id_tok.length == 1 and id_tok.ptr[unsafe_offset=0] == 36
-        var after_ms: UInt64
-        var after_seq: UInt64
-        if not use_last:
-            var r = parse_stream_id(id_tok.ptr, id_tok.length)
-            after_ms = r.ms; after_seq = r.seq
-        else:
-            after_ms = UInt64(0xFFFFFFFFFFFFFFFF); after_seq = UInt64(0xFFFFFFFFFFFFFFFF)
-
-        # Count entries after ID
+        var kp = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(keys[si].unsafe_ptr()))
+        var kl = keys[si].byte_length()
+        var sd = get_stream(keyspace, GenericValue.borrow(kp, kl))
+        if not as_map:
+            writer.append_array_header(2)
+        writer.append_bulk_string_response(kp, kl)
         var entry_count = 0
         for ei in range(sd[].count):
             if sd[].entries[unsafe_offset=ei].deleted: continue
-            var e = sd[].entries[unsafe_offset=ei]
-            if id_gt(e.id_ms, e.id_seq, after_ms, after_seq):
+            if id_gt(sd[].entries[unsafe_offset=ei].id_ms, sd[].entries[unsafe_offset=ei].id_seq,
+                     after_ms[si], after_seq[si]):
                 entry_count += 1
-                if entry_count >= count_limit: break
-
-        writer.buffer[unsafe_offset=writer.offset] = 42
-        writer.offset += 1
-        writer.offset += format_int_to_buf(writer.buffer.unsafe_offset(writer.offset), 0, Int64(entry_count))
-        writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset + 1] = 10
-        writer.offset += 2
-
+                if count_limit > 0 and entry_count >= count_limit: break
+        writer.append_array_header(entry_count)
         var written = 0
         for ei in range(sd[].count):
             if written >= entry_count: break
             if sd[].entries[unsafe_offset=ei].deleted: continue
             var e = sd[].entries[unsafe_offset=ei]
-            if id_gt(e.id_ms, e.id_seq, after_ms, after_seq):
+            if id_gt(e.id_ms, e.id_seq, after_ms[si], after_seq[si]):
                 write_entry_to_response(e, writer)
                 written += 1
+    return n_with
 
-    return num_tokens - i - 1
+
+def handle_xread(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                 keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                 mut blocked_readers: BlockedReaderRegistry,
+                 fd: Int32, can_block: Bool) raises -> Bool:
+    """XREAD [COUNT count] [BLOCK ms] STREAMS key [key ...] id [id ...].
+    Returns True when the connection must park: a BLOCK found no data and the
+    reader was registered, so no reply is written yet. `can_block` is False
+    inside MULTI/EXEC and on the XDP lane, where BLOCK answers at once, as in
+    Redis's transactions.
+
+    Rewritten for #30 and #34: the reply listed every named stream, empty
+    ones as `*0` (Redis lists only streams with data); without COUNT it
+    stopped at 100 entries (Redis returns all of them); option names matched
+    on their first letters; an odd key/ID list and a malformed ID were read
+    as something; the no-data reply was a nil bulk string, not a nil array."""
+    var j = i + 1
+    var count_limit = 0
+    var block_ms: Int64 = -1   # -1 = no BLOCK, 0 = forever
+    var streams_idx = -1
+    while j < num_tokens:
+        var tp = tokens[unsafe_offset=j].ptr
+        var tl = tokens[unsafe_offset=j].length
+        if arg_eq(tp, tl, "count") and j + 1 < num_tokens:
+            var c = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
+            if not c.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return False
+            count_limit = Int(c.value) if c.value > 0 else 0
+            j += 2
+        elif arg_eq(tp, tl, "block") and j + 1 < num_tokens:
+            var b = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
+            if not b.ok:
+                writer.append_error_response("ERR timeout is not an integer or out of range")
+                return False
+            if b.value < 0:
+                writer.append_error_response("ERR timeout is negative")
+                return False
+            block_ms = b.value
+            j += 2
+        elif arg_eq(tp, tl, "streams"):
+            streams_idx = j + 1
+            break
+        else:
+            writer.append_error_response("ERR syntax error")
+            return False
+    if streams_idx < 0:
+        writer.append_error_response("ERR syntax error")
+        return False
+    var remaining = num_tokens - streams_idx
+    if remaining <= 0 or remaining % 2 != 0:
+        writer.append_error_response("ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.")
+        return False
+    var num_streams = remaining // 2
+
+    var keys = List[String]()
+    var after_ms = List[UInt64]()
+    var after_seq = List[UInt64]()
+    for si in range(num_streams):
+        var kt = tokens[unsafe_offset=streams_idx + si]
+        var key_val = GenericValue.borrow(kt.ptr, kt.length)
+        if stream_key_is_wrongtype(keyspace, key_val):
+            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+            return False
+        var sd = get_stream(keyspace, key_val)
+        var idt = tokens[unsafe_offset=streams_idx + num_streams + si]
+        var ms: UInt64 = 0
+        var seq: UInt64 = 0
+        if idt.length == 1 and idt.ptr[unsafe_offset=0] == 36:          # '$': only what comes next
+            if is_not_null(sd):
+                ms = sd[].last_id_ms; seq = sd[].last_id_seq
+        elif idt.length == 1 and idt.ptr[unsafe_offset=0] == 43:        # '+': the last entry
+            var found = False
+            if is_not_null(sd):
+                var ei = sd[].count - 1
+                while ei >= 0:
+                    if not sd[].entries[unsafe_offset=ei].deleted:
+                        var lm = sd[].entries[unsafe_offset=ei].id_ms
+                        var ls = sd[].entries[unsafe_offset=ei].id_seq
+                        if ls > 0:
+                            ms = lm; seq = ls - 1
+                        elif lm > 0:
+                            ms = lm - 1; seq = UInt64.MAX
+                        found = True
+                        break
+                    ei -= 1
+                if not found:
+                    ms = sd[].last_id_ms; seq = sd[].last_id_seq
+        elif idt.length == 1 and idt.ptr[unsafe_offset=0] == 62:        # '>': XREADGROUP's
+            writer.append_error_response("ERR The > ID can be specified only when calling XREADGROUP using the GROUP <group> <consumer> option.")
+            return False
+        else:
+            var r = parse_xread_id(idt.ptr, idt.length)
+            if not r.ok:
+                writer.append_error_response("ERR Invalid stream ID specified as stream command argument")
+                return False
+            ms = r.ms; seq = r.seq
+        keys.append(String(StringSpan[MutUntrackedOrigin](
+            unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=kt.ptr, length=kt.length))))
+        after_ms.append(ms)
+        after_seq.append(seq)
+
+    if write_xread_reply(writer, keyspace, keys, after_ms, after_seq, count_limit) > 0:
+        return False
+    if block_ms >= 0 and can_block and Int(fd) >= 0:
+        var reader = BlockedReader()
+        reader.fd = fd
+        reader.count_limit = count_limit
+        reader.timeout_ms = (Int64(_get_now_ns() // 1000000) + block_ms) if block_ms > 0 else Int64(0)
+        reader.keys = keys^
+        reader.after_ms = after_ms^
+        reader.after_seq = after_seq^
+        if blocked_readers.add(reader^):
+            return True
+        writer.append_error_response("ERR too many clients blocked on XREAD")
+        return False
+    writer.append_null_array_response()
+    return False
 
 
 @always_inline
 def handle_xdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                 wal: Pointer[WAL, MutUntrackedOrigin] = null_ptr[WAL, MutUntrackedOrigin]()) raises -> Int:
-    """XDEL key id [id ...] → :N."""
+    """XDEL key id [id ...] → :N. As Redis: the key first (missing: 0), then
+    every id strictly (one bad id refuses the command before anything is
+    deleted)."""
     if i + 2 >= num_tokens:
-        writer.append_int_response(0)
+        writer.append_error_response("ERR wrong number of arguments for 'xdel' command")
         return 0
     var key_ptr = tokens[unsafe_offset=i + 1].ptr
     var key_len = tokens[unsafe_offset=i + 1].length
@@ -876,9 +949,13 @@ def handle_xdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
             writer.append_int_response(0)
         return num_tokens - i - 1
 
+    for j in range(i + 2, num_tokens):
+        if not parse_id(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, 0, True, False).ok:
+            writer.append_error_response(_E_BAD_ID)
+            return num_tokens - i - 1
     var deleted_count: Int64 = 0
     for j in range(i + 2, num_tokens):
-        var r = parse_stream_id(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length)
+        var r = parse_id(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, 0, True, False)
         var del_ms = r.ms; var del_seq = r.seq
         for ei in range(sd[].count):
             if not sd[].entries[unsafe_offset=ei].deleted and sd[].entries[unsafe_offset=ei].id_ms == del_ms and sd[].entries[unsafe_offset=ei].id_seq == del_seq:
@@ -899,10 +976,15 @@ def handle_xdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 
 @always_inline
 def handle_xtrim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """XTRIM key MAXLEN|MINID [~] threshold → :N."""
-    if i + 3 >= num_tokens:
-        writer.append_int_response(0)
+    """XTRIM key MAXLEN|MINID [=|~] threshold [LIMIT count] → :N removed.
+    MINID used to answer 0 and trim nothing. The caller logs the result as a
+    key image."""
+    if num_tokens - i < 4:
+        writer.append_error_response("ERR wrong number of arguments for 'xtrim' command")
         return 0
+    var at = parse_add_trim(tokens, i + 2, num_tokens, False, writer)
+    if not at.ok:
+        return num_tokens - i - 1
     var key_val = GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
     var sd = get_stream(keyspace, key_val)
     if is_null(sd):
@@ -911,34 +993,9 @@ def handle_xtrim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
         else:
             writer.append_int_response(0)
         return num_tokens - i - 1
-
-    var j = i + 2
-    var tp = tokens[unsafe_offset=j].ptr; var tl = tokens[unsafe_offset=j].length
-    j += 1
-    # Skip ~ if present
-    if j < num_tokens and tokens[unsafe_offset=j].length == 1 and tokens[unsafe_offset=j].ptr[unsafe_offset=0] == 126: j += 1
-    if j >= num_tokens:
-        writer.append_int_response(0)
-        return num_tokens - i - 1
-
-    var threshold = strict_atol(tokens[unsafe_offset=j].value())
-    var trimmed: Int64 = 0
-
-    if tl == 6 and (tp[unsafe_offset=0] | 0x20) == 109 and (tp[unsafe_offset=1] | 0x20) == 97:
-        # MAXLEN — one pass from the oldest end (this rescanned from index 0
-        # over every tombstone once per trimmed entry).
-        var to_trim = sd[].alive - threshold
-        for ei in range(sd[].count):
-            if to_trim <= 0:
-                break
-            if not sd[].entries[unsafe_offset=ei].deleted:
-                sd[].kill(ei)
-                trimmed += 1
-                to_trim -= 1
-        sd[].compact()
-    # MINID not implemented yet
-
-    writer.append_int_response(trimmed)
+    var removed = stream_trim(sd, at, null_ptr[WAL, MutUntrackedOrigin](),
+                              tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
+    writer.append_int_response(Int64(removed))
     return num_tokens - i - 1
 
 
@@ -989,7 +1046,9 @@ def handle_xinfo(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                 # already ate in pubsub.mojo (five miscounted literals): never
                 # hand-type a RESP length. Bind the literal to a name and let
                 # `byte_length()` do the counting.
-                var hdr = "*6\r\n$6\r\nlength\r\n"
+                # A map under RESP3, as Redis sends XINFO STREAM (#30).
+                writer.append_map_header(3)
+                var hdr = "$6\r\nlength\r\n"
                 writer.append_to_response(hdr.unsafe_ptr(), hdr.byte_length())
                 writer.append_int_response(Int64(sd[].alive))
                 var lgi = "$17\r\nlast-generated-id\r\n"
