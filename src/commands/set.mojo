@@ -1,7 +1,8 @@
 """Set commands: SCARD, SMEMBERS, SREM, SMOVE, SINTER, SINTERCARD, SUNION, SDIFF, *STORE, SSCAN, SRANDMEMBER, SISMEMBER, SMISMEMBER."""
 from src.common.container_free import remove_and_free
 from src.common.ptr import is_not_null, null_ptr
-from src.common.utils import rand_count, strict_atol, _glob_match, _glob_all, scan_cursor, scan_count
+from src.commands.scan_opts import parse_scan_opts, scan_no_opts
+from src.common.utils import rand_count, strict_atol, _glob_match, _glob_all, scan_cursor, scan_count, arg_eq, parse_int64_strict
 from std.memory.unsafe_pointer import Pointer
 from std.collections import Array
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
@@ -101,11 +102,10 @@ def handle_smembers(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
         if not val.is_none() and val.type.value != ValueType.SET:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         elif val.is_none() or val.type.value != ValueType.SET:
-            writer.append_empty_array_response()
+            writer.append_set_header(0)
         else:
             var set_ptr = val.as_set().unsafe_bitcast[SlabHashMap]()
-            var smem_hdr = String("*") + String(set_ptr[].size) + String("\r\n")
-            writer.append_to_response(smem_hdr.unsafe_ptr(), smem_hdr.byte_length())
+            writer.append_set_header(set_ptr[].size)   # RESP3 `~`, as Redis
             for slot in range(set_ptr[].capacity):
                 var m = set_ptr[].metadata[unsafe_offset=slot]
                 if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
@@ -130,6 +130,9 @@ def handle_srandmember(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             # " 1", "") answered as if no count had been given.
             srm_count = rand_count(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
             srm_as_array = True; consumed = 2
+            if num_tokens - i > 3:      # Redis: a count, and nothing after it
+                writer.append_error_response("ERR syntax error")
+                return num_tokens - 1 - i
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered
         # identically, with an empty/zero reply. Redis distinguishes them, and
         # the conflation runs in the dangerous direction: a caller who stored
@@ -248,6 +251,11 @@ def handle_smove(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
             writer.append_int_response(Int64(0))
         elif not dst_val_pre.is_none() and dst_val_pre.type.value != ValueType.SET:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+        elif tokens[unsafe_offset=i+1].length == tokens[unsafe_offset=i+2].length \
+                and src_val._data0 == dst_val_pre._data0:
+            # Same key: Redis answers membership and changes nothing.
+            var same_set = src_val.as_set().unsafe_bitcast[SlabHashMap]()
+            writer.append_int_response(Int64(0) if same_set[].get(mem_vs).is_none() else Int64(1))
         else:
             var src_set = src_val.as_set().unsafe_bitcast[SlabHashMap]()
             if src_set[].get(mem_vs).is_none():
@@ -267,6 +275,10 @@ def handle_smove(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                 else:
                     dst_val.as_set().unsafe_bitcast[SlabHashMap]()[].set(mem_vs, GenericValue.from_int(1))
                 writer.append_int_response(Int64(1))
+                # gh #234: the source goes with its last member (its TTL too).
+                if src_set[].size == 0:
+                    _ = remove_and_free(keyspace, src_vs)
+                    _ = wal[].append(2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         return 3
     else:
         writer.append_error_response("ERR wrong number of arguments for 'smove' command")
@@ -274,6 +286,17 @@ def handle_smove(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 
 
 @always_inline
+@always_inline
+def _any_not_set(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, end: Int,
+                 keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Bool:
+    """True when a key in tokens[start:end] exists and is not a set."""
+    for j in range(start, end):
+        var v = keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length))
+        if not v.is_none() and v.type.value != ValueType.SET:
+            return True
+    return False
+
+
 def handle_sinter(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """SINTER key [key ...] → array of members in intersection of all sets."""
     if i + 1 < num_tokens:
@@ -284,10 +307,12 @@ def handle_sinter(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         # the conflation runs in the dangerous direction: a caller who stored
         # the WRONG KIND of value here is told the container is empty, so the
         # bug looks like missing data instead of a type error at the call site.
-        if not first_si.is_none() and first_si.type.value != ValueType.SET:
+        # Every key is checked, as Redis checks them: a wrong-type key after the
+        # first used to read as an empty set (and a missing first key hid it).
+        if _any_not_set(tokens, i + 1, num_tokens, keyspace):
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         elif first_si.is_none() or first_si.type.value != ValueType.SET:
-            writer.append_empty_array_response()
+            writer.append_set_header(0)
         else:
             var fsi_ptr = first_si.as_set().unsafe_bitcast[SlabHashMap]()
             var sinter_cnt = 0
@@ -303,8 +328,7 @@ def handle_sinter(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                         if oval.as_set().unsafe_bitcast[SlabHashMap]()[].get(k).is_none(): in_all = False; break
                         j_si += 1
                     if in_all: sinter_cnt += 1
-            var si_hdr = String("*") + String(sinter_cnt) + String("\r\n")
-            writer.append_to_response(si_hdr.unsafe_ptr(), si_hdr.byte_length())
+            writer.append_set_header(sinter_cnt)
             for slot in range(fsi_ptr[].capacity):
                 var m = fsi_ptr[].metadata[unsafe_offset=slot]
                 if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
@@ -367,22 +391,32 @@ def handle_sinterstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
 def handle_sintercard(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """SINTERCARD numkeys key [key ...] [LIMIT limit] → integer count of intersection."""
     if i + 2 < num_tokens:
-        var nk_sic = strict_atol(tokens[unsafe_offset=i+1].value())
+        var nk_r = parse_int64_strict(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         # Bounded BEFORE it indexes anything: `ke_sic = i + 2 + numkeys` was
         # never checked, and INT64_MAX wrapped it negative, so the option scan
         # read the token table at a negative offset — one command, SIGSEGV.
-        if nk_sic <= 0:
+        if not nk_r.ok or nk_r.value <= 0:
             writer.append_error_response("ERR numkeys should be greater than 0")
             return num_tokens - 1 - i
-        if nk_sic > num_tokens - (i + 2):
+        if nk_r.value > Int64(num_tokens - (i + 2)):
             writer.append_error_response("ERR Number of keys can't be greater than number of args")
             return num_tokens - 1 - i
+        var nk_sic = Int(nk_r.value)
         var ks_sic = i + 2; var ke_sic = i + 2 + nk_sic
         var sic_limit = 0; var j_sic = ke_sic
+        # LIMIT n and nothing else, as Redis parses it: a word that was five
+        # letters starting with "l" was LIMIT, and anything else was skipped.
         while j_sic < num_tokens:
             var op_sic = tokens[unsafe_offset=j_sic]
-            if op_sic.length == 5 and (op_sic.ptr[unsafe_offset=0]|0x20)==108 and j_sic + 1 < num_tokens:
-                sic_limit = strict_atol(tokens[unsafe_offset=j_sic+1].value()); j_sic += 1
+            if arg_eq(op_sic.ptr, op_sic.length, "limit") and j_sic + 1 < num_tokens:
+                var lim = parse_int64_strict(tokens[unsafe_offset=j_sic+1].ptr, tokens[unsafe_offset=j_sic+1].length)
+                if not lim.ok or lim.value < 0:
+                    writer.append_error_response("ERR LIMIT can't be negative")
+                    return num_tokens - 1 - i
+                sic_limit = Int(lim.value); j_sic += 1
+            else:
+                writer.append_error_response("ERR syntax error")
+                return num_tokens - 1 - i
             j_sic += 1
         var consumed = j_sic - 1 - i
         if nk_sic <= 0: writer.append_int_response(Int64(0))
@@ -438,8 +472,7 @@ def handle_sunion(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                     if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
                         tmp_su[].set(su_ptr[].keys[unsafe_offset=slot], GenericValue.from_int(1))   # borrowed
             j_su += 1
-        var su_hdr = String("*") + String(tmp_su[].size) + String("\r\n")
-        writer.append_to_response(su_hdr.unsafe_ptr(), su_hdr.byte_length())
+        writer.append_set_header(tmp_su[].size)
         for slot in range(tmp_su[].capacity):
             var m = tmp_su[].metadata[unsafe_offset=slot]
             if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
@@ -496,10 +529,11 @@ def handle_sdiff(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
         # the conflation runs in the dangerous direction: a caller who stored
         # the WRONG KIND of value here is told the container is empty, so the
         # bug looks like missing data instead of a type error at the call site.
-        if not first_sd.is_none() and first_sd.type.value != ValueType.SET:
+        # Every key is checked, as Redis checks them (see SINTER).
+        if _any_not_set(tokens, i + 1, num_tokens, keyspace):
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         elif first_sd.is_none() or first_sd.type.value != ValueType.SET:
-            writer.append_empty_array_response()
+            writer.append_set_header(0)
         else:
             var fsd_ptr = first_sd.as_set().unsafe_bitcast[SlabHashMap]()
             var sd_cnt = 0
@@ -515,8 +549,7 @@ def handle_sdiff(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                             if not oval_sd.as_set().unsafe_bitcast[SlabHashMap]()[].get(k).is_none(): in_other = True; break
                         j_sd += 1
                     if not in_other: sd_cnt += 1
-            var sd_hdr = String("*") + String(sd_cnt) + String("\r\n")
-            writer.append_to_response(sd_hdr.unsafe_ptr(), sd_hdr.byte_length())
+            writer.append_set_header(sd_cnt)
             for slot in range(fsd_ptr[].capacity):
                 var m = fsd_ptr[].metadata[unsafe_offset=slot]
                 if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
@@ -586,29 +619,27 @@ def handle_sscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     if i + 2 < num_tokens:
         var key_v_ss = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var ss_cursor = scan_cursor(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
-        var consumed = 2
-        var ss_pat_p = null_ptr[UInt8, MutUntrackedOrigin]()
-        var ss_pat_l = 0
-        var ci = i + 2
-        while ci + 1 < num_tokens:
-            var nxt_ss = tokens[unsafe_offset=ci+1]; var nxtp_ss = nxt_ss.ptr; var nxtl_ss = nxt_ss.length
-            if nxtl_ss == 5 and (nxtp_ss[unsafe_offset=0]|0x20)==109:
-                if ci + 2 < num_tokens:                       # gh #244
-                    ss_pat_p = tokens[unsafe_offset=ci+2].ptr
-                    ss_pat_l = tokens[unsafe_offset=ci+2].length
-                ci += 2; consumed += 2
-            elif nxtl_ss == 5 and (nxtp_ss[unsafe_offset=0]|0x20)==99 and (nxtp_ss[unsafe_offset=1]|0x20)==111:
-                if ci + 2 >= num_tokens: raise Error("ERR syntax error")
-                _ = scan_count(tokens[unsafe_offset=ci+2].ptr, tokens[unsafe_offset=ci+2].length)
-                ci += 2; consumed += 2
-            else: break
+        var consumed = num_tokens - 1 - i
         var val_ss = keyspace[].get(key_v_ss)
-        if val_ss.is_none() or val_ss.type.value != ValueType.SET or ss_cursor != 0:
+        # Redis's order: cursor, key (missing: an empty scan, whatever the
+        # options; another type: WRONGTYPE, which this answered as an empty
+        # scan), then the options.
+        if not val_ss.is_none() and val_ss.type.value != ValueType.SET:
+            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+            return consumed
+        var so = scan_no_opts()
+        if not val_ss.is_none():
+            so = parse_scan_opts(tokens, i + 3, num_tokens, writer, False, False)
+            if not so.ok:
+                return consumed
+        var ss_pat_p = so.pat_p
+        var ss_pat_l = so.pat_l
+        if val_ss.is_none() or ss_cursor != 0:
             var ss_empty = "*2\r\n$1\r\n0\r\n*0\r\n"
             writer.append_to_response(ss_empty.unsafe_ptr(), ss_empty.byte_length())
         else:
             var ssp = val_ss.as_set().unsafe_bitcast[SlabHashMap]()
-            var ss_all = ss_pat_l == 0 or _glob_all(ss_pat_p, ss_pat_l)
+            var ss_all = not so.has_match or _glob_all(ss_pat_p, ss_pat_l)
             var ss_mb = alloc[UInt8](24)
             var ss_n = 0
             for slot in range(ssp[].capacity):

@@ -25,7 +25,7 @@
 | DECR | ✅ | ✅ | ✅ | **FAST** | ✅ | |
 | INCRBY | ✅ | ✅ | ✅ | **SLOW** | ✅ | redis-py `r.incr(key)` sends INCRBY — use Pion `INCR` directly |
 | DECRBY | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| INCRBYFLOAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
+| INCRBYFLOAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | In long double and printed `%.17Lf`, as Redis: the platform's long double, so Linux and macOS answer as their Redis does (#35) |
 | APPEND | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | STRLEN | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | GETSET | ✅ | ✅ | ✅ | **SLOW** | ✅ | Deprecated in Redis 6.2 (use SET ... GET) |
@@ -60,15 +60,15 @@
 | TYPE | ✅ | ✅ | ✅ | **FAST** | ✅ | |
 | RENAME | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | RENAMENX | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| COPY | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| MOVE | ✅ | ✅ | ❌ | — | ❌ | Single-DB only in GLIDE |
+| COPY | ✅ | ✅ | ✅ | **SLOW** | ✅ | REPLACE; `DB 0` only — one database, as Redis with `databases 1` |
+| MOVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | One database, as Redis with `databases 1`: DB 0 is the source itself, any other index is out of range |
 | OBJECT ENCODING | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | OBJECT REFCOUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| OBJECT IDLETIME | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| OBJECT FREQ | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| SORT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Lists only; STORE not supported |
-| SORT_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | Delegates to SORT (read-only, no STORE) |
-| SCAN | ✅ | ✅ | ✅ | **SLOW** | ✅ | Single-sweep; cursor=0 returns all keys |
+| OBJECT IDLETIME | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Always 0: Pion keeps no per-key access time |
+| OBJECT FREQ | ✅ | ✅ | ✅ | **SLOW** | ✅ | Refuses, as Redis does without an LFU maxmemory policy (Pion has none). On a missing key every OBJECT subcommand answers nil |
+| SORT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Lists, sets and sorted sets; BY/LIMIT/GET/ASC/DESC/ALPHA/STORE |
+| SORT_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | SORT without STORE |
+| SCAN | ✅ | ✅ | ✅ | **SLOW** | ✅ | MATCH/COUNT/TYPE; single sweep (cursor 0 returns every key, cursor "0" back) |
 | KEYS | ✅ | ✅ | ✅ | **SLOW** | ✅ | O(N), not safe for production use |
 | RANDOMKEY | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | TOUCH | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
@@ -94,9 +94,9 @@
 | HDEL | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | HEXISTS | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | HINCRBY | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| HINCRBYFLOAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
+| HINCRBYFLOAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Long double, `%.17Lf`, Redis's argument order (#35) |
 | HRANDFIELD | ✅ | ✅ | ✅ | **SLOW** | ✅ | Added in Redis 6.2; no-count replies a bulk string, missing key + count an empty array |
-| HSCAN | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
+| HSCAN | ✅ | ✅ | ✅ | **SLOW** | ✅ | MATCH/COUNT/NOVALUES |
 | HSETNX | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | HEXPIRE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Per-field TTL (Redis 7.4+, Valkey 8.1+). `HEXPIRE key ttl FIELDS n f...` → array of per-field codes |
 | HPEXPIRE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Millisecond form of HEXPIRE |
@@ -128,7 +128,7 @@
 | LTRIM | ✅ | ✅ | ✅ | **SLOW** | ✅ | Works on ziplist and quicklist |
 | LPOS | ✅ | ✅ | ✅ | **SLOW** | ✅ | Added in Redis 6.0.6 |
 | LMOVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Works on ziplist and quicklist |
-| LMPOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | Added in Redis 7.0; ziplist only |
+| LMPOP | ✅ | ✅ | ✅ | **SLOW** | ✅ | Added in Redis 7.0; Redis's argument rules (#32) |
 | BLPOP | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Pops correctly from the first non-empty key. **Does not block**: the TIMEOUT argument is parsed and ignored, so an all-empty key set answers nil immediately instead of waiting. `BLPOP k 0` will not wait for a producer |
 | BRPOP | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Right-hand form; same non-blocking caveat as BLPOP |
 | BLMOVE | ✅ | ✅ | ❌ | — | ✅ | Blocking |
@@ -177,8 +177,8 @@
 | ZREVRANGEBYSCORE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Score range reversed; WITHSCORES/LIMIT supported |
 | ZREVRANGEBYLEX | ✅ | ✅ | ✅ | **SLOW** | ✅ | Lex range reversed output |
 | ZRANGESTORE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Rank-based copy to destination key |
-| ZRANK | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns 0-based rank or nil |
-| ZREVRANK | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns 0-based reverse rank or nil |
+| ZRANK | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns 0-based rank or nil; `WITHSCORE` returns [rank, score] |
+| ZREVRANK | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns 0-based reverse rank or nil; `WITHSCORE` returns [rank, score] |
 | ZSCORE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns score as bulk string or nil |
 | ZMSCORE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Multi-member score array response |
 | ZINCRBY | ✅ | ✅ | ✅ | **SLOW** | ✅ | Collect-reset-rebuild to update score |
@@ -375,18 +375,19 @@ Unsupported commands return `-ERR unknown command '<name>'` when called from Lua
 | FLUSHALL | ✅ | ✅ | ✅ | **FAST/SLOW** | ✅ | Clears this worker's keyspace (one keyspace by default; `-w N > 1` needs `--independent-workers`) |
 | FLUSHDB | ✅ | ✅ | ✅ | **SLOW** | ✅ | Clears this worker's keyspace (same as FLUSHALL in shared-nothing) |
 | DBSIZE | ✅ | ✅ | ✅ | **FAST** | ✅ | Returns sum of shard sizes for this worker |
-| SELECT | ✅ | ✅ | 🟡 | **FAST** | ✅ | Returns +OK; always DB 0 in Pion (shared-nothing) |
-| SWAPDB | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns +OK (no-op; single database) |
+| SELECT | ✅ | ✅ | ✅ | **FAST** | ✅ | One database, as Redis with `databases 1`: `SELECT 0` is OK, any other index is refused |
+| SWAPDB | ✅ | ✅ | ✅ | **SLOW** | ✅ | One database: `SWAPDB 0 0` is OK, any other index is out of range |
 | SAVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Synchronous WAL flush |
 | BGSAVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Async WAL msync |
 | BGREWRITEAOF | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns +OK (WAL persists all writes; no AOF needed) |
 | LASTSAVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the real unix timestamp of the last SAVE/BGSAVE |
-| INFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Server / Memory / Cluster / Replication / Persistence / Stats / Pion / Keyspace sections. Port, RSS, uptime and per-worker key counts are resolved from real state; `redis_version` stays `7.0.0` for client feature gating, `pion_version` carries the build. |
+| TIME | ✅ | ✅ | ✅ | **SLOW** | ✅ | [unix seconds, microseconds] |
+| INFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Server / Memory / Cluster / Replication / Persistence / Stats / Pion / Keyspace sections; `INFO <section> ...` returns only those. Port, RSS, uptime, per-worker key counts and the replication role are resolved from real state; `redis_version` stays `7.0.0` for client feature gating, `pion_version` carries the build. A RESP3 verbatim string under `HELLO 3`. |
 | PION.STATS | n/a | n/a | n/a | **SLOW** | n/a | Pion-only. The value receipt: a 16-pair map (RESP3 `%`, RESP2 flat array) — `kvprefix_hits/misses/tokens_served/bytes_served`, `prefill_seconds_avoided` (measured + estimated) and `prefill_seconds_avoided_measured` (client-reported `PREFILL_MS` only), `semantic_hits/misses`, `moe_hits/misses`, `vector_queries`. Per WORKER. `PION.STATS RESET` zeroes the counters. |
-| CONFIG GET | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns real values for known keys (e.g. `maxmemory`); unknown keys reply empty |
+| CONFIG GET | ✅ | ✅ | ✅ | **SLOW** | ✅ | Glob patterns over the parameters Pion can state truthfully (`databases`, `maxmemory`, `maxmemory-policy`, `appendonly`, `save`, `port`, `timeout`) |
 | CONFIG SET | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Only `maxmemory` is runtime-settable; every other key refuses with an explanatory `-ERR` |
-| CONFIG REWRITE | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns +OK |
-| CONFIG RESETSTAT | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns +OK |
+| CONFIG REWRITE | ✅ | ✅ | ✅ | **SLOW** | ✅ | `ERR The server is running without a config file`, as Redis without one |
+| CONFIG RESETSTAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Resets the counters INFO reports (PION.STATS) |
 | COMMAND | ✅ | ✅ | 🟡 | **FAST** | ✅ | Bare COMMAND returns `*0` (no per-command specs) |
 | COMMAND COUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the generated command count (326) |
 | COMMAND DOCS | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns *0 (no docs stored) |
@@ -626,7 +627,7 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 *Note: "Total supported" counts all commands with ✅ or 🟡 status. Pion-native AI commands (sections 16-19) have no Redis equivalent and are counted separately.*
 
 ### Pion Fast Path (33 commands, zero-alloc dispatch)
-`GET` `SET` `MGET` `MSET` `INCR` `DECR` `HSET` `HGET` `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` `LLEN` `DEL` `EXISTS` `SADD` `SPOP` `ZADD` `ZPOPMIN` `PING` `FUNCTION LOAD` `FCALL` `GETBIT` `SETBIT` `BITCOUNT`(no-arg) `PFADD` `PFCOUNT`(single-key) `ECHO` `TYPE` `SELECT` `CLIENT`(ID/SETNAME/GETNAME/NO-EVICT) `COMMAND` `DBSIZE` `QUIT` `RESET` (33 commands total)
+`GET` `SET` `MGET` `MSET` `INCR` `DECR` `HSET` `HGET` `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` `LLEN` `DEL` `EXISTS` `SADD` `SPOP` `ZADD` `ZPOPMIN` `PING` `FUNCTION LOAD` `FCALL` `GETBIT` `SETBIT` `BITCOUNT`(no-arg) `PFADD` `PFCOUNT`(single-key) `ECHO` `TYPE` `SELECT` `CLIENT`(ID/NO-EVICT/NO-TOUCH) `COMMAND` `DBSIZE` `QUIT` `RESET` (33 commands total)
 
 ### Pion Coverage by Category
 

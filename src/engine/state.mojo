@@ -173,6 +173,7 @@ struct Pion:
         self.keyspace.unsafe_write(StripedHashMap(65536))
         # TTL map: starts small (opt-in feature), grows on demand.
         self.ttl_map.unsafe_write(SlabHashMap(256))
+        self.keyspace[].ttl_map = self.ttl_map    # a removed key drops its TTL
 
         self.hash_map_pool.unsafe_write(ObjectPool[SlabHashMap](1000))
         for i in range(1000):

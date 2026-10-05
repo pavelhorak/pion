@@ -3,6 +3,13 @@ import socket
 import sys
 import time
 
+# `10.5 + 0.1` as Redis computes it: in long double, printed %.17Lf. On Apple
+# silicon long double is a double; on x86-64 and AArch64 Linux it is wider.
+import platform as _platform
+LD_TEN_POINT_SIX = ("10.59999999999999964"
+                    if _platform.system() == "Darwin" and _platform.machine() == "arm64"
+                    else "10.6")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from resp_strict import reader, parse_bytes, RespError  # noqa: E402
 
@@ -167,11 +174,13 @@ def test_pion_parity():
     send_cmd_bytes(sock, ["SET", "fkey", "10.5"])
     res = send_cmd_bytes(sock, ["INCRBYFLOAT", "fkey", "0.1"])
     # gh #232: this asserted "10.6", which is what Pion's Float32 arithmetic
-    # rounded to — not what Redis answers. Probed against a real redis-server
-    # 8.10, `SET fkey 10.5; INCRBYFLOAT fkey 0.1` returns exactly
-    # 10.59999999999999964, and Pion now matches it byte for byte. A parity
-    # test is only worth its name if its expectations come from the oracle.
-    assert_contains(res, "10.59999999999999964", "INCRBYFLOAT")
+    # rounded to — not what Redis answers. A parity test is only worth its
+    # name if its expectations come from the oracle, and the oracle's answer
+    # depends on the platform: Redis adds in long double and prints %.17Lf.
+    # Where long double is a double (Apple silicon) that is
+    # 10.59999999999999964; where it is wider (x86-64 and AArch64 Linux) the
+    # sum rounds to 10.6. Pion does the same arithmetic (pion_ld_incr).
+    assert_contains(res, LD_TEN_POINT_SIX, "INCRBYFLOAT")
 
     # ═══════════════════════════════════════════════════════════════════════
     # Section 3: Lists (list.mojo)
@@ -1210,7 +1219,7 @@ def test_pion_parity():
     send_cmd_bytes(sock, ["DEL", "hf"])
     send_cmd_bytes(sock, ["HSET", "hf", "val", "10.5"])
     res = send_cmd_bytes(sock, ["HINCRBYFLOAT", "hf", "val", "0.1"])
-    assert_contains(res, "10.6", "HINCRBYFLOAT")
+    assert_contains(res, LD_TEN_POINT_SIX, "HINCRBYFLOAT")   # as INCRBYFLOAT, above
 
     print("Testing HRANDFIELD...")
     send_cmd_bytes(sock, ["DEL", "hrf"])

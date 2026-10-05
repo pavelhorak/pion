@@ -101,6 +101,7 @@ memory -2
 mget -2
 migrate -6
 module -2
+move 3
 mset -3
 msetex -4
 msetnx -3
@@ -170,6 +171,7 @@ sunion -2
 sunionstore -3
 sunsubscribe -1
 swapdb 3
+time 1
 touch -2
 ttl 2
 type 2

@@ -1010,6 +1010,15 @@ args = "--start-redis --pion-port 1974 --redis-port 6399"
 tier = "gate"
 requires = ["bin:redis-server"]
 
+# The same probes with both connections on RESP3 (HELLO 3): reply TYPES as
+# well as values (#30).
+[[test]]
+file = "tests/test_redis_differential.py"
+server = "-w 1"
+args = "--start-redis --pion-port 1974 --redis-port 6398 --resp3"
+tier = "gate"
+requires = ["bin:redis-server"]
+
 [[test]]
 file = "tests/test_replication.py"
 server = "--cluster --cluster-host 127.0.0.1 -w 1"
@@ -1332,6 +1341,22 @@ file = "tests/test_stream_entries.py"
 server = "self"
 tier = "gate"
 timeout = 300
+
+[[test]]
+file = "tests/test_flush_durability.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+# Every keyword argument of the differential's scripts, mangled: a parser that
+# matches a keyword by its first letters, or ignores an unknown one, shows up
+# as a divergence from Redis (#32).
+[[test]]
+file = "tests/test_redis_differential.py"
+server = "-w 1"
+args = "--start-redis --pion-port 1974 --redis-port 6397 --mutate"
+tier = "gate"
+requires = ["bin:redis-server"]
 
 [[test]]
 file = "tests/test_vector_isa_info.py"

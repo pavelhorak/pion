@@ -18,7 +18,7 @@ would fail to match every substrate command.
 from src.common.ptr import null_ptr, is_null, is_not_null
 
 
-comptime PION_COMMAND_COUNT = 329
+comptime PION_COMMAND_COUNT = 331
 
 
 @always_inline
@@ -71,6 +71,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "lrem") or
             _cmd_eq_ci(tp, tl, "lset") or
             _cmd_eq_ci(tp, tl, "mget") or
+            _cmd_eq_ci(tp, tl, "move") or
             _cmd_eq_ci(tp, tl, "mset") or
             _cmd_eq_ci(tp, tl, "ping") or
             _cmd_eq_ci(tp, tl, "pttl") or
@@ -82,6 +83,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "sort") or
             _cmd_eq_ci(tp, tl, "spop") or
             _cmd_eq_ci(tp, tl, "srem") or
+            _cmd_eq_ci(tp, tl, "time") or
             _cmd_eq_ci(tp, tl, "type") or
             _cmd_eq_ci(tp, tl, "vadd") or
             _cmd_eq_ci(tp, tl, "vdim") or
@@ -442,7 +444,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
     """Redis's arity for this command, or 0 when Pion does not know one.
 
-    239 of 329 commands have an entry; the rest are Pion-specific
+    241 of 331 commands have an entry; the rest are Pion-specific
     (FT.*, KV.PREFIX.*, AI.*, ATTEND.*) and are deliberately NOT validated.
 
     Encoding is Redis's own, kept verbatim so it can be checked against
@@ -481,6 +483,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "lrem"): return 4
         if _cmd_eq_ci(tp, tl, "lset"): return 4
         if _cmd_eq_ci(tp, tl, "mget"): return -2
+        if _cmd_eq_ci(tp, tl, "move"): return 3
         if _cmd_eq_ci(tp, tl, "mset"): return -3
         if _cmd_eq_ci(tp, tl, "ping"): return -1
         if _cmd_eq_ci(tp, tl, "pttl"): return 2
@@ -492,6 +495,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
         if _cmd_eq_ci(tp, tl, "sort"): return -2
         if _cmd_eq_ci(tp, tl, "spop"): return -2
         if _cmd_eq_ci(tp, tl, "srem"): return -3
+        if _cmd_eq_ci(tp, tl, "time"): return 1
         if _cmd_eq_ci(tp, tl, "type"): return 2
         if _cmd_eq_ci(tp, tl, "vadd"): return -5
         if _cmd_eq_ci(tp, tl, "vdim"): return 2
@@ -715,7 +719,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
 def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command mutates the keyspace, per real Redis's `write` flag.
 
-    101 of 329 commands are writes. Used by gh #260 to refuse mutations
+    101 of 331 commands are writes. Used by gh #260 to refuse mutations
     once the WAL can no longer persist them, instead of acknowledging writes
     that will not survive a restart.
 
@@ -877,7 +881,7 @@ def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command is refused while memory is over --maxmemory (gh #261).
 
-    78 of 329 commands: real Redis's `denyoom` flag plus Pion's
+    78 of 331 commands: real Redis's `denyoom` flag plus Pion's
     substrate ingest commands (PION_DENYOOM in tools/gen_command_table.py).
     Reads, DEL and the POP family stay served under the limit, as in Redis.
     """

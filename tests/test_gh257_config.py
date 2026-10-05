@@ -21,16 +21,17 @@ What is asserted:
   - an UNKNOWN parameter returns `*0` (empty array), byte-for-byte what real
     Redis returns — NOT an empty value
   - `CONFIG SET` errors, and the error names the CLI-flag alternative
-  - `CONFIG REWRITE` / `RESETSTAT` error rather than pretending
+  - `CONFIG REWRITE` errors as Redis does without a config file, and
+    `RESETSTAT` resets the counters INFO reports
   - the connection stays framed afterwards (an error mid-pipeline is exactly
     where gh #232's "array header before the type check" class desyncs)
 
 `save` is expected to DIFFER from Redis: Redis ships default save points and
 Pion has none, so "" is the honest answer, not a compatibility bug.
 
-`databases` is deliberately NOT reported. `SELECT 5` returns +OK on a server
-with a single keyspace, so no value here would be true — that lie belongs to
-gh #262 and is not papered over here.
+`databases` is 1: Pion has one database and refuses `SELECT` of any other,
+as Redis configured with `databases 1` does. (It was left out while `SELECT 5`
+still answered +OK, when no value would have been true.)
 
 Usage: python3 tests/test_gh257_config.py [--port 1974] [--redis-port 6399]
 """
@@ -138,9 +139,10 @@ def main():
         check("unknown param matches redis byte-for-byte", raw == rraw,
               f"pion={raw!r} redis={rraw!r}")
 
-    print("\n[4] databases is NOT fabricated (SELECT accepts any db, so no value is true)")
+    print("\n[4] databases is 1, and SELECT agrees")
     got = c("CONFIG", "GET", "databases")
-    check("CONFIG GET databases is omitted", got == [], f"got {got}")
+    check("CONFIG GET databases is 1", got == ["databases", "1"], f"got {got}")
+    check("SELECT 1 is refused", is_err(c("SELECT", "1")))
 
     print("\n[5] CONFIG SET errors instead of acknowledging")
     # maxmemory is settable since gh #261 — see [5b]. Everything else still
@@ -167,9 +169,9 @@ def main():
           c("CONFIG", "SET", "maxmemory", "0") == "OK"
           and c("CONFIG", "GET", "maxmemory") == ["maxmemory", "0"])
 
-    print("\n[6] REWRITE / RESETSTAT error rather than pretending")
+    print("\n[6] REWRITE errors (no config file); RESETSTAT resets the counters")
     check("CONFIG REWRITE errors", is_err(c("CONFIG", "REWRITE")))
-    check("CONFIG RESETSTAT errors", is_err(c("CONFIG", "RESETSTAT")))
+    check("CONFIG RESETSTAT -> OK", c("CONFIG", "RESETSTAT") == "OK")
 
     print("\n[7] Arity and framing")
     check("CONFIG with no subcommand errors", is_err(c("CONFIG")))

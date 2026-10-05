@@ -74,6 +74,7 @@ SAFE_FUNCS = {
     "member_score": {0},             # SlabSkipList.member_score: dict get
     "_lookup": {1},                  # vset.mojo: keyspace get + type check
     "hash_get_live": {1},            # container_free: keyspace get, purge, remove_and_free
+    "_lex_in": {2, 4},               # sorted_set.mojo: lex_lt comparisons only
     "index_field_ttls": {1},         # container_free: note_field_ttl (a map set)
     # wal.mojo replay lookups: keyspace get, and set on create
     "_replay_hash": {1}, "_replay_list": {1}, "_replay_set": {1}, "_replay_zset": {1},

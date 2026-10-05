@@ -55,12 +55,13 @@ from src.commands.pubsub import PubSubRegistry, PubSubBroadcast, handle_pubsub, 
 from src.commands.ttl import handle_expire, handle_pexpire, handle_expireat, handle_pexpireat, handle_ttl, handle_pttl, handle_persist
 # Command modules (Phase 2 extraction)
 from src.commands.list import handle_lindex, handle_lset, handle_linsert, handle_lrem, handle_ltrim, handle_lpos, handle_lmove
+from src.commands.mpop import parse_mpop
 from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
 from src.commands.geo import handle_geoadd, handle_geopos, handle_geodist, handle_geohash, handle_georadius, handle_geosearch, handle_geosearchstore, handle_georadiusbymember
 from src.commands.hash import handle_hmget, handle_hgetall, handle_hkeys, handle_hvals, handle_hlen, handle_hdel, handle_hexists, handle_hincrby, handle_hincrbyfloat, handle_hrandfield, handle_hscan, handle_hsetnx, handle_hexpire, handle_hpexpire, handle_hexpireat, handle_hpexpireat, handle_httl, handle_hpttl, handle_hpersist, handle_hexpiretime, handle_hpexpiretime
-from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_bgrewriteaof, handle_command, handle_debug, handle_slowlog, handle_latency, handle_memory, handle_module, handle_acl, handle_reset, handle_client
+from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_move, handle_bgrewriteaof, handle_command, handle_debug, handle_slowlog, handle_latency, handle_memory, handle_module, handle_acl, handle_reset, handle_client, handle_time
 from src.commands.lua_engine import LuaEngine, handle_eval, handle_evalsha, handle_script, handle_function, handle_fcall
 from src.commands.cluster import handle_cluster
 from src.commands.migrate import handle_dump, handle_restore, handle_migrate
@@ -722,6 +723,39 @@ struct SlowPathHandler:
             _binary_send_all(server, fd, resp_buf, resp_len)
         return BINARY_HEADER_SIZE + Int(req.body_len)
 
+    def _info_replication_section(self) -> String:
+        """INFO's `# Replication` section from the cluster state: a replica's
+        role, primary and offset; a primary's replicas and offset; a
+        standalone server is a primary with none."""
+        var out = String("# Replication\r\n")
+        var _cl = self.cluster
+        if is_null(_cl) or not _cl[].enabled:
+            out += "role:master\r\nconnected_slaves:0\r\n"
+            return out
+        if _cl[].is_replica:
+            out += "role:slave\r\nmaster_host:"
+            if _cl[].primary_peer_idx >= 0 and _cl[].primary_peer_idx < 16:
+                var _ph_off = _cl[].primary_peer_idx * 64
+                var _ph_len = 0
+                while _ph_len < 63 and _cl[].peer_hosts[_ph_off + _ph_len] != 0:
+                    out += chr(Int(_cl[].peer_hosts[_ph_off + _ph_len]))
+                    _ph_len += 1
+            out += "\r\nslave_repl_offset:"
+            if is_not_null(_cl[].repl_replica_handle):
+                out += String(Int(external_call["pion_repl_replica_bytes_received", Int64](_cl[].repl_replica_handle)))
+            else:
+                out += "0"
+            out += "\r\n"
+        else:
+            out += "role:master\r\nconnected_slaves:"
+            if is_not_null(_cl[].repl_primary_handle):
+                out += String(Int(external_call["pion_repl_primary_connected_count", Int32](_cl[].repl_primary_handle)))
+            else:
+                out += "0"
+            out += "\r\nmaster_repl_offset:" + String(Int(self.dispatcher.wal[].tail_offset)) + "\r\n"
+        out += "repl_backlog_size:268435456\r\n"
+        return out
+
     def _value_receipt_info(self) -> String:
         """gh #262: the `# Pion` INFO section — THIS worker's value receipt."""
         var s = String("# Pion\r\n")
@@ -740,6 +774,41 @@ struct SlowPathHandler:
         s += "moe_misses:" + String(self.moe_tier.misses) + "\r\n"
         s += "vector_queries:" + String(self.ledger.vector_queries) + "\r\n"
         return s
+
+    def _mpop_lists(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first_key: Int,
+                    numkeys: Int, left: Bool, count: Int, mut writer: ResponseWriter) -> Bool:
+        """LMPOP's pop, as Redis's mpopGenericCommand: the keys in order, a
+        missing one skipped, a wrong-type one an error, and from the first
+        non-empty list up to `count` elements, replied `[key, [elements]]`. An
+        emptied list is removed (gh #234). True when it replied; False when no
+        key held anything, which the caller answers (a null array for LMPOP)."""
+        for k in range(numkeys):
+            var kt = tokens[first_key + k]
+            var kv = GenericValue.borrow(kt.ptr, kt.length)
+            var v = self.keyspace[].get(kv)
+            if v.is_none():
+                continue
+            if v.type.value != ValueType.LIST:
+                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                return True
+            var lp = v.as_list().bitcast[SlabList]()
+            if lp[].size == 0:
+                continue
+            var n = min(count, lp[].size)
+            var key_str = kt.value()
+            writer.append_array_header(2)
+            writer.append_bulk_string_response(kt.ptr, kt.length)
+            writer.append_array_header(n)
+            for _ in range(n):
+                var popped = self.dispatcher.execute_lpop(key_str) if left else self.dispatcher.execute_rpop(key_str)
+                writer.append_bulk_value_response(popped)
+                popped.free_str_payload()   # the pop handed back an owned value; the reply copied it
+            if self.dispatcher.execute_llen(key_str) == 0:
+                _ = remove_and_free(self.keyspace, kv)
+                if is_not_null(self.dispatcher.wal):
+                    _ = self.dispatcher.wal[].append(2, kt.ptr, kt.length)
+            return True
+        return False
 
     def process_slow_path(
         mut self,
@@ -1769,15 +1838,14 @@ struct SlowPathHandler:
                             elif not sp_v.is_none() and sp_v.type.value != ValueType.SET:
                                 writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             elif sp_v.is_none():
-                                if sp_has_count: writer.append_empty_array_response()
+                                if sp_has_count: writer.append_set_header(0)   # RESP3 `~0`
                                 else: writer.append_null_response()
                             else:
                                 var sp_set = sp_v.as_set().bitcast[SlabHashMap]()
                                 var sp_n = 1
                                 if sp_has_count:
                                     sp_n = Int(min(sp_count, Int64(sp_set[].size)))
-                                    var sp_hdr = String("*") + String(sp_n) + String("\r\n")
-                                    writer.append_to_response(sp_hdr.unsafe_ptr(), sp_hdr.byte_length())
+                                    writer.append_set_header(sp_n)   # RESP3: a set, as Redis
                                 for _ in range(sp_n):
                                     var popped = self.dispatcher.execute_spop(key)   # logs the SREM
                                     writer.append_bulk_value_response(popped)
@@ -1791,7 +1859,7 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── FLUSHALL ──
                     elif tl == 8 and cmd_matches_8(tp, 102, 108, 117, 115, 104, 97, 108, 108):
-                        _ = handle_flushall(self.keyspace, writer)
+                        _ = handle_flushall(tokens, i, cmd_end_tok, self.keyspace, writer, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── SAVE ──
                     elif tl == 4 and cmd_matches_4(tp, 115, 97, 118, 101):
@@ -1859,67 +1927,24 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── INFO ──
                     elif tl == 4 and cmd_matches_4(tp, 105, 110, 102, 111):
-                        # N3: INFO REPLICATION — expose replication lag
-                        var _info_is_repl = False
-                        if i + 1 < cmd_end_tok:
-                            var _isub = tokens[i+1]
-                            if _isub.length == 11 and (_isub.ptr[0]|0x20) == 114:  # r=replication
-                                _info_is_repl = True
-                        if _info_is_repl and is_not_null(self.cluster) and self.cluster[].enabled:
-                            var _cl = self.cluster
-                            var _rb = alloc[UInt8](512)
-                            var _rp = _rb
-                            var _ro = 0
-                            def _ri_s(s: StringLiteral, b: UnsafePointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                                var sl = s.byte_length(); unsafe_memcpy(dest=b + o, src=s.unsafe_ptr(), count=sl); o += sl
-                            def _ri_n(n: Int, b: UnsafePointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                                o += format_int_to_buf(b + o, 0, Int64(n))
-                            def _ri_nl(b: UnsafePointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                                b[o] = 13; b[o+1] = 10; o += 2
-                            _ri_s("# Replication", _rp, _ro); _ri_nl(_rp, _ro)
-                            if _cl[].is_replica:
-                                _ri_s("role:slave", _rp, _ro); _ri_nl(_rp, _ro)
-                                _ri_s("master_host:", _rp, _ro)
-                                if _cl[].primary_peer_idx >= 0 and _cl[].primary_peer_idx < 16:
-                                    var _ph_off = _cl[].primary_peer_idx * 64
-                                    var _ph_len = 0
-                                    while _ph_len < 63 and _cl[].peer_hosts[_ph_off + _ph_len] != 0:
-                                        _rp[_ro] = _cl[].peer_hosts[_ph_off + _ph_len]
-                                        _ro += 1; _ph_len += 1
-                                _ri_nl(_rp, _ro)
-                                _ri_s("slave_repl_offset:", _rp, _ro)
-                                if is_not_null(_cl[].repl_replica_handle):
-                                    var _rr = UnsafePointer[ReplicaReceiver, MutUntrackedOrigin](unsafe_from_address=Int(_cl[].repl_replica_handle))
-                                    # Can't call methods on raw handle — use FFI directly
-                                    _ri_n(Int(external_call["pion_repl_replica_bytes_received", Int64](_cl[].repl_replica_handle)), _rp, _ro)
-                                else:
-                                    _ri_n(0, _rp, _ro)
-                                _ri_nl(_rp, _ro)
-                            else:
-                                _ri_s("role:master", _rp, _ro); _ri_nl(_rp, _ro)
-                                _ri_s("connected_slaves:", _rp, _ro)
-                                if is_not_null(_cl[].repl_primary_handle):
-                                    _ri_n(Int(external_call["pion_repl_primary_connected_count", Int32](_cl[].repl_primary_handle)), _rp, _ro)
-                                else:
-                                    _ri_n(0, _rp, _ro)
-                                _ri_nl(_rp, _ro)
-                                _ri_s("master_repl_offset:", _rp, _ro)
-                                _ri_n(Int(self.dispatcher.wal[].tail_offset), _rp, _ro)
-                                _ri_nl(_rp, _ro)
-                            _ri_s("repl_backlog_size:268435456", _rp, _ro); _ri_nl(_rp, _ro)
-                            writer.append_bulk_string_response(_rp, _ro)
-                            _rb.free()
-                            i += 1  # consume "replication" token
-                        else:
-                            # gh #262: resolve the real numbers, then report.
-                            var _ik = 0
-                            for _is in range(8):
-                                _ik += self.keyspace[].shards[unsafe_offset=_is].size
-                            var _ie = 0
-                            if is_not_null(self.ttl_map): _ie = self.ttl_map[].size
-                            _ = handle_info(self.dispatcher, writer, self.listen_port, _ik, _ie,
-                                            self.ledger.uptime_seconds(), self._value_receipt_info())
-                            i = cmd_end_tok - 1
+                        # INFO [section ...]. One body for every form (#30):
+                        # the Replication and Cluster sections now come from the
+                        # cluster state for plain INFO too, which printed
+                        # role:master on a replica; `INFO replication` was the
+                        # only form that read it. Sections filter as in Redis.
+                        var _isecs = List[String]()
+                        for _ij in range(i + 1, cmd_end_tok):
+                            _isecs.append(tokens[_ij].value())
+                        var _ik = 0
+                        for _is in range(8):
+                            _ik += self.keyspace[].shards[unsafe_offset=_is].size
+                        var _ie = 0
+                        if is_not_null(self.ttl_map): _ie = self.ttl_map[].size
+                        var _icl = is_not_null(self.cluster) and self.cluster[].enabled
+                        _ = handle_info(self.dispatcher, writer, self.listen_port, _ik, _ie,
+                                        self.ledger.uptime_seconds(), self._value_receipt_info(),
+                                        self._info_replication_section(), _icl, _isecs)
+                        i = cmd_end_tok - 1
                     # ── GETBIT ──
                     elif tl == 6 and cmd_matches_6(tp, 103, 101, 116, 98, 105, 116):
                         if i + 2 < cmd_end_tok:
@@ -1992,7 +2017,10 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── CONFIG ──
                     elif tl == 6 and cmd_matches_6(tp, 99, 111, 110, 102, 105, 103):
-                        _ = handle_config(tokens, i, cmd_end_tok, writer, config)
+                        var _cfg_reset = False
+                        _ = handle_config(tokens, i, cmd_end_tok, writer, config, _cfg_reset)
+                        if _cfg_reset:
+                            self.ledger.reset()       # CONFIG RESETSTAT: the counters INFO reports
                         i = cmd_end_tok - 1
                     # ── CLUSTER ──
                     elif tl == 7 and cmd_matches_7(tp, 99, 108, 117, 115, 116, 101, 114):
@@ -2739,78 +2767,15 @@ struct SlowPathHandler:
                     # ── LMPOP (stub — same pattern as old code) ──
                     elif cmd_eq(tp, tl, "lmpop"):
                         # LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
-                        if i + 3 < cmd_end_tok:
-                            var _lmpop_nk = strict_atol(tokens[i+1].value())
-                            var _lmpop_ci = i + 2
-                            # 1..(keys given, leaving LEFT|RIGHT): unbounded, a
-                            # huge numkeys spun ~2^63 times, and the walk used
-                            # num_tokens — the whole pipeline — so the NEXT
-                            # command's tokens were taken as keys.
-                            var _lmpop_bad = _lmpop_nk < 1 or _lmpop_nk > cmd_end_tok - _lmpop_ci - 1
-                            if _lmpop_bad:
-                                writer.append_error_response("ERR numkeys should be greater than 0 and at most the number of keys given")
-                            else:
-                                _lmpop_ci += _lmpop_nk
-                            if not _lmpop_bad and _lmpop_ci < cmd_end_tok:
-                                var _lmpop_dir_tp = tokens[_lmpop_ci].ptr
-                                var _lmpop_from_left = (_lmpop_dir_tp[0]|0x20) == 108
-                                _lmpop_ci += 1
-                                var _lmpop_count2 = 1
-                                if _lmpop_ci + 1 < cmd_end_tok and tokens[_lmpop_ci].length == 5 and (tokens[_lmpop_ci].ptr[0]|0x20)==99:
-                                    _lmpop_count2 = strict_atol(tokens[_lmpop_ci+1].value()); _lmpop_ci += 2
-                                # gh #232: type-check every candidate key first.
-                                # Skipping a wrong-type key silently falls
-                                # through to the next one and pops from THAT
-                                # list, so the caller gets a plausible answer
-                                # from a key it did not mean.
-                                var _lmpop_wt = False
-                                for _wtk in range(_lmpop_nk):
-                                    if i + 2 + _wtk >= num_tokens: break
-                                    var _wtv = self.keyspace[].get(
-                                        GenericValue.borrow(tokens[i+2+_wtk].ptr, tokens[i+2+_wtk].length))
-                                    if not _wtv.is_none() and _wtv.type.value != ValueType.LIST:
-                                        _lmpop_wt = True
-                                        break
-                                # Try each key in order
-                                var _lmpop_found = _lmpop_wt
-                                if _lmpop_wt:
-                                    writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                                for _ki in range(_lmpop_nk):
-                                    if _lmpop_found: break
-                                    var _kstr = tokens[i+2+_ki].value()
-                                    var _kv = GenericValue.borrow(tokens[i+2+_ki].ptr, tokens[i+2+_ki].length)
-                                    var _kval = self.keyspace[].get(_kv)
-                                    if not _kval.is_none() and _kval.type.value == ValueType.LIST:
-                                        var _lp = _kval.as_list().bitcast[SlabList]()
-                                        if _lp[].size > 0:
-                                            var _out_n = min(_lmpop_count2, _lp[].size)
-                                            var _lmpop_h = "*2\r\n"
-                                            writer.append_to_response(_lmpop_h.unsafe_ptr(), _lmpop_h.byte_length())
-                                            writer.append_bulk_string_response(_kstr.unsafe_ptr(), _kstr.byte_length())
-                                            var _arr_h2 = "*" + String(_out_n) + "\r\n"
-                                            writer.append_to_response(_arr_h2.unsafe_ptr(), _arr_h2.byte_length())
-                                            for _ in range(_out_n):
-                                                var _popped: GenericValue
-                                                if _lmpop_from_left: _popped = self.dispatcher.execute_lpop(_kstr)
-                                                else: _popped = self.dispatcher.execute_rpop(_kstr)
-                                                if _popped.is_none(): break
-                                                writer.append_bulk_value_response(_popped)
-                                                _popped.free_str_payload()   # the pop handed back an owned value; the reply copied it
-                                            _lmpop_found = True
-                                if not _lmpop_found: writer.append_null_response()
-                                i = _lmpop_ci - 1
-                            elif not _lmpop_bad: writer.append_null_response(); i += 2
-                            # The loop's forward clamp consumes the rest of the frame.
-                            i = cmd_end_tok - 1
-                        else:
-                            # Short LMPOP replied a bare null and left `i` where it
-                            # was, so the loop advanced one token and dispatched
-                            # this command's ARGUMENT as a command name
-                            # (`LMPOP k` + `PING` -> $-1, then
-                            # -ERR unknown command 'k', then PONG: three replies
-                            # for two commands).
+                        if cmd_end_tok - i < 4:
                             writer.append_error_response("ERR wrong number of arguments for 'lmpop' command")
-                            i = cmd_end_tok - 1
+                        else:
+                            var _mp = parse_mpop(tokens, i + 1, cmd_end_tok, False)
+                            if _mp.error.byte_length() > 0:
+                                writer.append_error_response(_mp.error)
+                            elif not self._mpop_lists(tokens, i + 2, _mp.numkeys, _mp.first, _mp.count, writer):
+                                writer.append_null_array_response()
+                        i = cmd_end_tok - 1
                     # ── ZMPOP (gh #251) ──
                     elif cmd_eq(tp, tl, "zmpop"):
                         _ = handle_zmpop(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
@@ -2964,19 +2929,26 @@ struct SlowPathHandler:
                                 if zpmin_out <= 0:
                                     writer.append_empty_array_response()
                                 else:
-                                    var zpmin_hdr = String("*") + String(zpmin_out * 2) + String("\r\n")
-                                    writer.append_to_response(zpmin_hdr.unsafe_ptr(), zpmin_hdr.byte_length())
+                                    # RESP3, as Redis: [member, score] without a
+                                    # count, a list of such pairs with one.
+                                    if zpmin_has_cnt:
+                                        writer.append_scored_header(zpmin_out, True)
+                                    else:
+                                        writer.append_array_header(2)
                                     # heap, not stack_allocation: gv_bytes writes it
                                     # out of line (the gh #349 tail-call hazard).
                                     var _zpm_wb = alloc[UInt8](64)
                                     for _ in range(zpmin_out):
                                         var zpmin_res = zpmin_ptr[].pop_min()
                                         if not zpmin_res.valid or zpmin_res.obj.is_none(): break
-                                        writer.append_bulk_value_response(zpmin_res.obj)
                                         # gh #251: was Int64(...), which truncated
                                         # a fractional score (1.5 -> "1").
                                         # #18: nor through Int64() (±inf).
-                                        writer.append_bulk_score_response(zpmin_res.score)
+                                        if zpmin_has_cnt:
+                                            writer.append_scored_member(zpmin_res.obj, zpmin_res.score, True)
+                                        else:
+                                            writer.append_bulk_value_response(zpmin_res.obj)
+                                            writer.append_score_response(zpmin_res.score)
                                         # The fast path logs the resolved effect (ZREM of
                                         # the popped member, cmd 12); this path logged
                                         # nothing, so a replay resurrected every member
@@ -3322,7 +3294,7 @@ struct SlowPathHandler:
                                          self.tx_state.tenant_id)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "flushdb"):
-                        _ = handle_flushdb(tokens, i, cmd_end_tok, self.keyspace, writer)
+                        _ = handle_flushdb(tokens, i, cmd_end_tok, self.keyspace, writer, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # All six bytes: `tl == 6 and 'd','b'` matched ANY six-byte
                     # command starting "db" (DBSIZ\0 ran DBSIZE), which is the
@@ -3331,10 +3303,16 @@ struct SlowPathHandler:
                         _ = handle_dbsize(self.keyspace, writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "select"):
-                        _ = handle_select(tokens, i, cmd_end_tok, writer)
+                        _ = handle_select(tokens, i, cmd_end_tok, writer,
+                                          is_not_null(self.cluster) and self.cluster[].enabled)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "swapdb"):
-                        _ = handle_swapdb(tokens, i, cmd_end_tok, writer)
+                        _ = handle_swapdb(tokens, i, cmd_end_tok, writer,
+                                          is_not_null(self.cluster) and self.cluster[].enabled)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "move"):
+                        _ = handle_move(tokens, i, cmd_end_tok, writer,
+                                        is_not_null(self.cluster) and self.cluster[].enabled)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "bgrewriteaof"):
                         _ = handle_bgrewriteaof(self.dispatcher, self.keyspace, writer, self.ttl_map)
@@ -3365,7 +3343,7 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── CLIENT ── (6 bytes: c=99,l=108,i=105,e=101,n=110,t=116)
                     elif tl == 6 and cmd_matches_6(tp, 99, 108, 105, 101, 110, 116):
-                        _ = handle_client(tokens, i, cmd_end_tok, fd, writer)
+                        _ = handle_client(tokens, i, cmd_end_tok, fd, writer, self.tx_state.client_names)
                         i = cmd_end_tok - 1
                     # ── BLPOP / BRPOP ── (gh #318)
                     #
@@ -3608,6 +3586,13 @@ struct SlowPathHandler:
                         else:
                             _ = handle_pion_stats(writer, self.ledger, self.scache.hits, self.scache.misses,
                                                   self.moe_tier.hits, self.moe_tier.misses, self.worker_id)
+                        i = cmd_end_tok - 1
+                    # ── TIME (#30) ── at the tail: see the elif-order note above
+                    elif cmd_eq(tp, tl, "time"):
+                        if i + 1 < cmd_end_tok:
+                            writer.append_error_response("ERR wrong number of arguments for 'time' command")
+                        else:
+                            handle_time(writer)
                         i = cmd_end_tok - 1
                     else:
                         writer.append_error_response("ERR unknown command '" + token.value() + "'")

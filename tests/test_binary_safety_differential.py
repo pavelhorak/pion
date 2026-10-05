@@ -78,7 +78,8 @@ def main():
     if args.start_redis:
         rdir = tempfile.mkdtemp(prefix="bs-redis-")
         rproc = subprocess.Popen(["redis-server", "--port", str(args.redis_port), "--save", "",
-                                  "--appendonly", "no", "--dir", rdir],
+                                  "--appendonly", "no", "--dir", rdir,
+                                  "--databases", "1"],  # Pion has one database
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.time() + 15

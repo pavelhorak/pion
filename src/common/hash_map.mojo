@@ -871,9 +871,16 @@ struct StripedHashMap(Movable):
     # or its last field TTL went); the sweep drops those. Lazy expiry on every
     # read keeps visibility right regardless.
     var field_ttl_index: Pointer[SlabHashMap, MutUntrackedOrigin]
+    # The worker's key TTLs (the engine's ttl_map), so that removing
+    # a key takes its TTL with it. Before, every route but DEL, UNLINK and
+    # expiry (an aggregate emptied by a pop, GETDEL, a *STORE replacing its
+    # destination) left the entry behind, and the next key of that name expired
+    # at the old deadline. Null for a keyspace that keeps no TTLs.
+    var ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]
 
     def __init__(out self, initial_capacity: Int):
         var shard_cap = max(16, initial_capacity // 8)
+        self.ttl_map = null_ptr[SlabHashMap, MutUntrackedOrigin]()
         self.graveyard = alloc[List[GenericValue]](1)
         self.graveyard.unsafe_write(List[GenericValue]())
         self.field_ttl_index = alloc[SlabHashMap](1)
@@ -887,6 +894,7 @@ struct StripedHashMap(Movable):
         self.shards = take.shards
         self.graveyard = take.graveyard
         self.field_ttl_index = take.field_ttl_index
+        self.ttl_map = take.ttl_map
 
     def __del__(deinit self):
         if Int(self.shards) != 0:
@@ -958,13 +966,24 @@ struct StripedHashMap(Movable):
         self.set(GenericValue.borrow(key_str.unsafe_ptr(), key_str.byte_length()), value^)
 
     @always_inline
+    def _drop_ttl(mut self, key: GenericValue):
+        """A removed key's TTL goes with it. Called FIRST, while `key`
+        is valid: a caller may pass the keyspace's own stored key, which the
+        removal frees. (A key read out of the TTL map itself must be an owned
+        copy — this frees the map's.)"""
+        if Int(self.ttl_map) != 0 and self.ttl_map[].size > 0:
+            _ = self.ttl_map[].remove_generic(key)
+
+    @always_inline
     def remove_generic(mut self, key: GenericValue) -> Bool:
+        self._drop_ttl(key)
         var h = UInt64(key.__hash__())
         return self.shards[unsafe_offset=self._shard(h)].remove_generic_with_hash(key, h)
 
     def remove_generic_taking(mut self, key: GenericValue, mut taken: GenericValue) -> Bool:
         """gh #369: remove, and hand back an aggregate value so its container
         can be freed (see container_free.mojo). One probe, like remove_generic."""
+        self._drop_ttl(key)
         var h = UInt64(key.__hash__())
         return self.shards[unsafe_offset=self._shard(h)].remove_generic_with_hash_taking(key, h, taken)
 
@@ -987,6 +1006,10 @@ struct StripedHashMap(Movable):
         for i in range(8):
             self.shards[unsafe_offset=i].reset()
         self.field_ttl_index[].reset()
+        # The keys' TTLs go with them, or a key created later under a
+        # flushed name expires at the old deadline.
+        if Int(self.ttl_map) != 0:
+            self.ttl_map[].reset()
 
     @always_inline
     def note_field_ttl(mut self, key: GenericValue):

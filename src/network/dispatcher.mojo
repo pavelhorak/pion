@@ -294,7 +294,13 @@ struct CommandDispatcher:
 
     @always_inline
     def execute_info(self, send_stalls: UInt64 = 0, listen_port: Int = 1974, keys: Int = 0,
-                     expires: Int = 0, uptime_s: Int = 0, extra: String = String("")) -> String:
+                     expires: Int = 0, uptime_s: Int = 0, extra: String = String(""),
+                     repl_section: String = String("# Replication\r\nrole:master\r\nconnected_slaves:0\r\n"),
+                     cluster_enabled: Bool = False) -> String:
+        """INFO's body, every section; handle_info filters and frames it.
+        `repl_section` is built by the caller from the cluster state: this
+        used to print `role:master` and `cluster_enabled:0` whatever the
+        server was, and only `INFO replication` read the real role."""
         # gh #262: resolve first, then report. This used to hardcode
         # tcp_port:1974, used_memory:1048576 and an empty # Keyspace — values
         # dressed as measurements. redis_version stays 7.0.0 because client
@@ -328,7 +334,8 @@ struct CommandDispatcher:
         body += "maxmemory_policy:noeviction\r\n"
         body += "maxmemory_refusing_writes:" + String(
             external_call["pion_maxmemory_check", Int32]()) + "\r\n"
-        body += "# Cluster\r\ncluster_enabled:0\r\n# Replication\r\nrole:master\r\nconnected_slaves:0\r\n"
+        body += "# Cluster\r\ncluster_enabled:" + ("1" if cluster_enabled else "0") + "\r\n"
+        body += repl_section
         # gh #149 / gh #163: persistence is where an operator finds out that
         # writes stopped being durable. The old code dropped WAL entries with no
         # counter, no log line and no INFO field — 4.6 GB of acknowledged SETs
@@ -385,7 +392,7 @@ struct CommandDispatcher:
         # Redis omits the db line when the db is empty; keys are THIS worker's.
         if keys > 0:
             body += "db0:keys=" + String(keys) + ",expires=" + String(expires) + ",avg_ttl=0\r\n"
-        return "$" + String(body.byte_length()) + "\r\n" + body + "\r\n"
+        return body
 
     @always_inline
     def execute_ft_search(self) -> String:

@@ -332,11 +332,14 @@ struct FastPathHandler(Movable):
                     # for every key over 23 bytes: the keyspace removal hashed
                     # tcmalloc's free-list word instead of the key, missed, and
                     # the expired key stayed readable forever with no TTL left.
-                    var key = self.ttl_map[].keys[cursor]
+                    # The keyspace's remove now drops the TTL entry
+                    # itself, so it gets an OWNED copy of the key.
+                    var key = self.ttl_map[].keys[cursor].clone()
                     # Remove from the keyspace, freeing an aggregate's container
                     # (gh #369) rather than leaking it.
                     _ = remove_and_free(self.keyspace, key)
-                    _ = self.ttl_map[].remove_generic(key)
+                    _ = self.ttl_map[].remove_generic(key)   # a TTL whose key was already gone
+                    key.free_str_payload()
             cursor = (cursor + 1) & (cap - 1)
             scanned += 1
         self.ttl_sweep_cursor = cursor
@@ -1176,11 +1179,9 @@ struct FastPathHandler(Movable):
                     return consumed
                 elif b0_lower == 102 and cmd_len == 8: # 'f' - FUNCTION or FLUSHALL
                     var b1_lower = buffer[cmd_start + 1] | 0x20
-                    if cmd_matches_8(buffer + cmd_start, 102, 108, 117, 115, 104, 97, 108, 108): # FLUSHALL (gh #225: it RESETS the keyspace)
-                        self.keyspace[].reset()
-                        writer.append_ok_response()
-                    else: # FUNCTION → slow path (Lua engine)
-                        return consumed
+                    # FLUSHALL and FUNCTION both go to the slow path: FLUSHALL is
+                    # logged there and parses its ASYNC|SYNC argument.
+                    return consumed
                 elif b0_lower == 120 and cmd_len == 4 and (buffer[cmd_start + 1] | 0x20) == 97 and (buffer[cmd_start + 2] | 0x20) == 100 and (buffer[cmd_start + 3] | 0x20) == 100: # 'x' 'a' 'd' 'd' - XADD
                     # Route to slow path for real stream storage
                     return consumed
@@ -2261,8 +2262,9 @@ struct FastPathHandler(Movable):
                             # disagreed. Integer-valued scores still emit bare
                             # digits (Redis prints "3", not "3.0").
                             # #18: and never through Int64(), which read ±inf
-                            # back as INT64_MIN on x86.
-                            writer.append_bulk_score_response(score)
+                            # back as INT64_MIN on x86. RESP3: a double, as
+                            # Redis sends it (same bytes as before on RESP2).
+                            writer.append_score_response(score)
                             # gh #394: pop_min hands back the node's own payload; the
                             # reply above copied it, and nothing else holds it.
                             obj.free_str_payload()
@@ -2411,8 +2413,8 @@ struct FastPathHandler(Movable):
                         else:
                             # Count arg: return array of popped elements
                             var actual_count = min(spop_count, set_ptr[].size)
-                            var arr_hdr = String("*") + String(actual_count) + String("\r\n")
-                            writer.append_to_response(arr_hdr.unsafe_ptr(), arr_hdr.byte_length())
+                            # RESP3: a set, as Redis; and no String built on the fast path.
+                            writer.append_set_header(actual_count)
                             for _pi in range(actual_count):
                                 var popped = set_ptr[].pop_random(self.prng)
                                 if self.has_wal and not popped.is_none():  # gh #170
@@ -2437,7 +2439,7 @@ struct FastPathHandler(Movable):
                         if num_args == 2:
                             writer.append_null_response()
                         else:
-                            writer.append_empty_array_response()
+                            writer.append_set_header(0)   # RESP3 `~0`, RESP2 `*0`
                 elif b0_lower == 108 and cmd_len == 6 and cmd_matches_6(buffer + cmd_start, 108, 114, 97, 110, 103, 101): # LRANGE (gh #225: every byte)
                     if num_args != 4 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2985,10 +2987,15 @@ struct FastPathHandler(Movable):
                     writer.append_to_response(type_resp.unsafe_ptr(), type_resp.byte_length())
                     it_pos += key_len + 2
                 elif b0_lower == 115 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 108 and (buffer[cmd_start + 3] | 0x20) == 101 and (buffer[cmd_start + 4] | 0x20) == 99 and (buffer[cmd_start + 5] | 0x20) == 116: # SELECT
-                    var _sel_end = _bulks_end(buffer, it_pos, n, num_args - 1)
-                    if _sel_end < 0:
-                        return consumed    # split frame: answer once it is whole
-                    it_pos = _sel_end
+                    # Only `SELECT 0` is answered here. Any other index, a
+                    # non-integer or a wrong arity goes to the slow path, which
+                    # refuses it (this answered +OK to everything).
+                    if num_args != 2 or it_pos + 7 > n or buffer[it_pos] != 36 \
+                            or buffer[it_pos + 1] != 49 or buffer[it_pos + 2] != 13 \
+                            or buffer[it_pos + 3] != 10 or buffer[it_pos + 4] != 48 \
+                            or buffer[it_pos + 5] != 13 or buffer[it_pos + 6] != 10:
+                        return consumed
+                    it_pos += 7
                     writer.append_ok_response()
                 elif b0_lower == 99 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 108 and (buffer[cmd_start + 2] | 0x20) == 105 and (buffer[cmd_start + 3] | 0x20) == 101 and (buffer[cmd_start + 4] | 0x20) == 110 and (buffer[cmd_start + 5] | 0x20) == 116: # CLIENT
                     if _bulks_end(buffer, it_pos, n, num_args - 1) < 0:
@@ -3002,23 +3009,15 @@ struct FastPathHandler(Movable):
                         it_pos += 2
                         if sub_len < 0 or it_pos + sub_len + 2 > n:
                             return consumed
-                        var sub0 = buffer[it_pos] | 0x20
+                        var sub_at = it_pos
                         it_pos += sub_len + 2
-                        if sub0 == 105 and sub_len == 2:
+                        # #30: only ID and NO-EVICT / NO-TOUCH here, by their
+                        # whole names. GETNAME answered nil and SETNAME +OK
+                        # without storing anything; both now run in the slow
+                        # path, which keeps the name (as does SETINFO).
+                        if cmd_eq(buffer + sub_at, sub_len, "id"):
                             writer.append_int_response(Int64(fd))
-                        elif sub0 == 103 and sub_len == 7:
-                            writer.append_null_response()
-                        elif sub0 == 115 and sub_len == 7:
-                            for _ in range(num_args - 2):
-                                if it_pos >= n or buffer[it_pos] != 36: break
-                                it_pos += 1
-                                var al = 0
-                                while it_pos < n and buffer[it_pos] != 13:
-                                    al = al * 10 + Int(buffer[it_pos] - 48)
-                                    it_pos += 1
-                                it_pos += 2 + al + 2
-                            writer.append_ok_response()
-                        elif sub0 == 110:
+                        elif cmd_eq(buffer + sub_at, sub_len, "no-evict") or cmd_eq(buffer + sub_at, sub_len, "no-touch"):
                             if num_args >= 3 and it_pos < n and buffer[it_pos] == 36:
                                 it_pos += 1
                                 var al = 0

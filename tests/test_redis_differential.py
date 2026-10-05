@@ -231,6 +231,14 @@ def normalize(kind_val, cmd):
             else:
                 out.append(normalize(e, cmd))
         return ("xrange", out)
+    if kind == "array" and cmd[0] == "TIME":
+        # The two servers read their clocks at different instants. The reply
+        # is still checked: two bulk strings, seconds near this machine's
+        # clock and microseconds below 1,000,000.
+        ok = len(val) == 2 and all(k == "bulk" and v.isdigit() for k, v in val)
+        if ok:
+            ok = abs(int(val[0][1]) - time.time()) < 60 and int(val[1][1]) < 1_000_000
+        return ("time", ok)
     if kind in ("map", "set"):
         # RESP3 map / set: order is unspecified, the type is not.
         return (kind, sorted(repr(normalize(x, cmd)) for x in val))
@@ -274,6 +282,10 @@ def main():
     ap.add_argument("--redis-port", type=int, default=6399)
     ap.add_argument("--start-redis", action="store_true")
     ap.add_argument("--show-agreements", action="store_true")
+    ap.add_argument("--mutate", action="store_true",
+                    help="also send every keyword argument of the semantic scripts "
+                         "mangled (last letter changed, a letter appended): Redis "
+                         "refuses those, so a prefix-matching keyword parser shows up")
     ap.add_argument("--resp3", action="store_true",
                     help="speak RESP3 (HELLO 3) to both servers and compare reply TYPES too")
     args = ap.parse_args()
@@ -289,7 +301,9 @@ def main():
             print("FATAL: --start-redis needs redis-server on PATH")
             return 2
         rproc = subprocess.Popen(
-            [exe, "--port", str(args.redis_port), "--save", "", "--appendonly", "no"],
+            [exe, "--port", str(args.redis_port), "--save", "", "--appendonly", "no",
+             # Pion has one database; so does this oracle.
+             "--databases", "1"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
 
@@ -394,6 +408,14 @@ def main():
             print(f"  {name[:34]:36} {' '.join(str(x) for x in cmd)[:36]:38} "
                   f"Pion {str(rp)[:24]:26} Redis {str(rr)[:28]}")
     diffs.extend(sd)
+
+    if args.mutate:
+        md, mn = run_mutations(pion, redis)
+        print(f"\nKEYWORD MUTATIONS: {mn} mangled keywords, {mn - len(md)} agree, {len(md)} differ\n")
+        for name, cmd, rp, rr in md:
+            print(f"  {name[:34]:36} {' '.join(str(x) for x in cmd)[:44]:46} "
+                  f"Pion {str(rp)[:22]:24} Redis {str(rr)[:24]}")
+        diffs.extend(md)
 
     pion.close()
     redis.close()
@@ -1005,6 +1027,47 @@ SEMANTIC_SCRIPTS = [
         ["ZSCAN", "%K3", "0"], ["ZSCAN", "%K3", "0", "MATCH", "a*"],
         ["SSCAN", "nosuch:key", "0"], ["HSCAN", "nosuch:key", "0"]]),
 
+    # #18: sorted-set scores as Redis prints them (d2string), ±inf included,
+    # and the NaN refusals. Every reply also runs under --resp3.
+    ("zset: score formats, ±inf and NaN (#18)", [
+        ["DEL", "%K"],
+        ["ZADD", "%K", "inf", "pinf", "-inf", "minf", "1e-5", "small", "5e18", "big",
+         "9223372036854775807", "huge", "0.1", "dec", "3", "int", "1e15", "e15",
+         "1.5e-7", "tiny", "123456789.125", "frac"],
+        ["ZRANGE", "%K", "0", "-1", "WITHSCORES"],
+        ["ZRANGEBYSCORE", "%K", "-inf", "+inf", "WITHSCORES"],
+        ["ZREVRANGE", "%K", "0", "-1", "WITHSCORES"],
+        ["ZSCORE", "%K", "pinf"], ["ZSCORE", "%K", "minf"], ["ZSCORE", "%K", "small"],
+        ["ZMSCORE", "%K", "big", "huge", "nosuch"],
+        ["ZINCRBY", "%K", "-inf", "pinf"],                   # NaN: refused, unchanged
+        ["ZSCORE", "%K", "pinf"],
+        ["ZADD", "%K", "INCR", "-inf", "pinf"],
+        ["ZADD", "%K", "NX", "INCR", "-inf", "pinf"],        # NX before the NaN check
+        ["ZADD", "%K", "INCR", "0.3333333333333333", "third"],
+        ["ZADD", "%K", "NX", "XX", "1", "m"],
+        ["ZADD", "%K", "GT", "LT", "1", "m"],
+        ["ZADD", "%K", "INCR", "1", "m", "2", "n"],
+        ["ZPOPMIN", "%K"], ["ZPOPMAX", "%K"], ["ZPOPMIN", "%K", "2"], ["ZPOPMAX", "%K", "1"],
+        ["DEL", "%K2"], ["ZADD", "%K2", "inf", "m"], ["DEL", "%K3"], ["ZADD", "%K3", "-inf", "m"],
+        ["ZUNION", "2", "%K2", "%K3", "WITHSCORES"],
+        ["ZUNION", "1", "%K2", "WEIGHTS", "0", "WITHSCORES"],
+        ["ZINTER", "2", "%K2", "%K3", "WITHSCORES"]]),
+
+    # #30: ZRANK WITHSCORE, SINTER/SDIFF key types, OBJECT, CLIENT names.
+    ("rank WITHSCORE, set key types, OBJECT, CLIENT (#30)", [
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a", "2.5", "b"],
+        ["ZRANK", "%K", "b", "WITHSCORE"], ["ZREVRANK", "%K", "b", "WITHSCORE"],
+        ["ZRANK", "%K", "nosuch", "WITHSCORE"], ["ZRANK", "nosuch:key", "a", "WITHSCORE"],
+        ["ZRANK", "%K", "b", "WITHSCORES"], ["ZRANK", "%K", "b"],
+        ["DEL", "%K2"], ["SADD", "%K2", "a", "b"], ["DEL", "%K3"], ["SET", "%K3", "str"],
+        ["SINTER", "%K2", "%K3"], ["SDIFF", "%K2", "%K3"], ["SINTER", "nosuch:key", "%K3"],
+        ["SDIFF", "nosuch:key", "%K3"], ["SINTER", "%K2", "nosuch:key"],
+        ["OBJECT", "FREQ", "%K3"], ["OBJECT", "ENCODING", "nosuch:key"],
+        ["OBJECT", "REFCOUNT", "nosuch:key"],
+        ["CLIENT", "GETNAME"], ["CLIENT", "SETNAME", "dfname"], ["CLIENT", "GETNAME"],
+        ["CLIENT", "SETNAME", "has space"], ["CLIENT", "SETNAME", ""], ["CLIENT", "GETNAME"],
+        ["CLIENT", "NOSUCHSUB"], ["TIME"], ["TIME", "extra"]]),
+
     # The bitmap option surface (#31): SETBIT past the end of an
     # existing bitmap, BITPOS/BITCOUNT ranges in BYTE and BIT units, BITFIELD's
     # types, `#` offsets, OVERFLOW modes and all-or-nothing refusal, BITOP's
@@ -1074,6 +1137,168 @@ SEMANTIC_SCRIPTS = [
         ["SET", "%K", "x"], ["SET", "%K", "y"], ["SETBIT", "%K", "100", "1"], ["SET", "%K", "z"],
         ["GET", "%K"], ["DEL", "dfs:str"]]),
 
+    # A destination a command REPLACES loses its TTL; one it modifies in place
+    # keeps it.
+    ("TTL of a replaced or modified destination", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["SADD", "%K2", "a"], ["DEL", "%K3"], ["ZADD", "%K3", "1", "a"],
+        ["SET", "dfs:s1", "ab"], ["DEL", "dfs:g"], ["GEOADD", "dfs:g", "13.361389", "38.115556", "p"],
+        ["SET", "%K", "x", "EX", "100"], ["SUNIONSTORE", "%K", "%K2"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SINTERSTORE", "%K", "%K2"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SDIFFSTORE", "%K", "%K2"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SDIFFSTORE", "%K", "nosuch:key"], ["EXISTS", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["ZUNIONSTORE", "%K", "1", "%K3"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["ZINTERSTORE", "%K", "1", "%K3"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["ZDIFFSTORE", "%K", "1", "%K3"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["ZRANGESTORE", "%K", "%K3", "0", "-1"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["BITOP", "OR", "%K", "dfs:s1"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["BITOP", "OR", "%K", "nosuch:a"], ["EXISTS", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SORT", "%K2", "ALPHA", "STORE", "%K"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"],
+        ["GEOSEARCHSTORE", "%K", "dfs:g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["COPY", "dfs:s1", "%K", "REPLACE"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["RENAME", "dfs:s1", "%K"], ["TTL", "%K"], ["SET", "dfs:s1", "ab"],
+        ["SET", "%K", "x", "EX", "100"], ["SET", "%K", "y"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["GETSET", "%K", "y"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["MSET", "%K", "y"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SET", "%K", "y", "KEEPTTL"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["APPEND", "%K", "y"], ["TTL", "%K"],
+        ["SET", "%K", "1", "EX", "100"], ["INCR", "%K"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SETRANGE", "%K", "0", "y"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SETBIT", "%K", "100", "1"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["BITFIELD", "%K", "SET", "u8", "64", "1"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"],
+        ["LMOVE", "%K", "%K", "LEFT", "RIGHT"], ["TTL", "%K"],
+        ["DEL", "dfs:s1"], ["DEL", "dfs:g"]]),
+    # A key that goes away takes its TTL with it: a key created later under the
+    # same name starts without one.
+    ("a removed key leaves no TTL behind", [
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LPOP", "%K"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["RPOP", "%K", "5"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LREM", "%K", "0", "a"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LTRIM", "%K", "1", "0"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LMOVE", "%K", "%K2", "LEFT", "LEFT"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"], ["DEL", "%K2"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["RPOPLPUSH", "%K", "%K2"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"], ["DEL", "%K2"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LMPOP", "1", "%K", "LEFT"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["BLPOP", "%K", "1"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SADD", "%K", "a"], ["EXPIRE", "%K", "100"], ["SREM", "%K", "a"],
+        ["SADD", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SADD", "%K", "a"], ["EXPIRE", "%K", "100"], ["SPOP", "%K"],
+        ["SADD", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SADD", "%K", "a"], ["EXPIRE", "%K", "100"], ["SPOP", "%K", "3"],
+        ["SADD", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SADD", "%K", "a"], ["EXPIRE", "%K", "100"], ["SMOVE", "%K", "%K2", "a"],
+        ["SADD", "%K", "b"], ["TTL", "%K"], ["DEL", "%K2"],
+        ["DEL", "%K"], ["HSET", "%K", "f", "v"], ["EXPIRE", "%K", "100"], ["HDEL", "%K", "f"],
+        ["HSET", "%K", "f", "v"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZREM", "%K", "a"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZPOPMIN", "%K"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZPOPMAX", "%K", "2"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZMPOP", "1", "%K", "MIN"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZREMRANGEBYSCORE", "%K", "-inf", "+inf"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZREMRANGEBYRANK", "%K", "0", "-1"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZREMRANGEBYLEX", "%K", "-", "+"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SET", "%K", "x", "EX", "100"], ["GETDEL", "%K"], ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SET", "%K", "x", "EX", "100"], ["SDIFFSTORE", "%K", "nosuch:key"],
+        ["SADD", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SET", "%K", "x", "EX", "100"], ["RENAME", "%K", "%K2"], ["SET", "%K", "y"],
+        ["TTL", "%K"], ["TTL", "%K2"], ["RPUSH", "%K3", "z"], ["DEL", "%K3"],
+        ["SET", "%K3", "x", "EX", "100"], ["RENAME", "%K2", "%K3"], ["TTL", "%K3"], ["DEL", "%K2"],
+        ["DEL", "%K"], ["SET", "%K", "x", "EX", "100"], ["MOVE", "%K", "1"], ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SET", "%K", "x", "PX", "100000"], ["UNLINK", "%K"], ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"]]),
+    # One database, as Redis with `databases 1` (the oracle runs so).
+    ("one database: SELECT, SWAPDB, MOVE, COPY DB", [
+        ["SELECT", "0"], ["SELECT", "1"], ["SELECT", "-1"], ["SELECT", "x"], ["SELECT", "99999999999"],
+        ["SELECT"], ["SELECT", "0", "1"],
+        ["SWAPDB", "0", "0"], ["SWAPDB", "0", "1"], ["SWAPDB", "x", "0"], ["SWAPDB", "0", "x"], ["SWAPDB", "0"],
+        ["DEL", "%K"], ["DEL", "%K2"], ["SET", "%K", "v"],
+        ["MOVE", "%K", "0"], ["MOVE", "%K", "1"], ["MOVE", "%K", "x"], ["MOVE", "%K"],
+        ["COPY", "%K", "%K2", "DB", "0"], ["GET", "%K2"], ["COPY", "%K", "%K2", "DB", "1"],
+        ["COPY", "%K", "%K2", "DB", "x"], ["COPY", "%K", "%K2", "NOPE"], ["COPY", "%K", "%K2", "REPLACEX"],
+        ["COPY", "%K", "%K2", "REPLACE", "DB", "0"], ["COPY", "%K", "%K"], ["COPY", "%K", "%K", "REPLACE"],
+        ["COPY", "%K", "%K2", "DB"], ["CONFIG", "GET", "databases"], ["GET", "%K"]]),
+    ("zset lex ranges and range removal", [
+        ["DEL", "%K"], ["ZADD", "%K", "0", "a", "0", "b", "0", "c", "0", "d"],
+        ["ZRANGEBYLEX", "%K", "b", "+"], ["ZRANGEBYLEX", "%K", "", "+"], ["ZRANGEBYLEX", "%K", "-x", "+"],
+        ["ZRANGEBYLEX", "%K", "[b", "+x"], ["ZREVRANGEBYLEX", "%K", "+", "b"], ["ZLEXCOUNT", "%K", "[a", "c"],
+        ["ZRANGE", "%K", "b", "+", "BYLEX"], ["ZREMRANGEBYLEX", "%K", "b", "+"],
+        ["ZRANGEBYLEX", "%K", "(a", "[c"], ["ZREVRANGEBYLEX", "%K", "[c", "(a", "LIMIT", "0", "1"],
+        ["ZREVRANGEBYLEX", "%K", "[c", "(a", "LIMITX", "0", "1"],
+        ["ZREMRANGEBYLEX", "%K", "(a", "[c"], ["ZRANGE", "%K", "0", "-1"],
+        ["ZREMRANGEBYLEX", "%K", "-", "+"], ["EXISTS", "%K"],
+        ["ZADD", "%K", "1", "a", "2", "b", "3", "c"], ["ZREMRANGEBYRANK", "%K", "x", "1"],
+        ["ZREMRANGEBYRANK", "%K", "1", "1"], ["ZRANGE", "%K", "0", "-1"], ["ZREMRANGEBYRANK", "%K", "5", "9"],
+        ["ZREMRANGEBYRANK", "%K", "-100", "100"], ["EXISTS", "%K"],
+        ["ZADD", "%K", "1", "a", "2", "b", "3", "c"], ["ZREMRANGEBYSCORE", "%K", "(1", "2"],
+        ["ZRANGE", "%K", "0", "-1"], ["ZREMRANGEBYSCORE", "%K", "x", "2"],
+        ["ZREMRANGEBYSCORE", "%K", "-inf", "+inf"], ["EXISTS", "%K"],
+        ["SET", "%K", "s"], ["ZREMRANGEBYLEX", "%K", "x", "+"], ["ZREMRANGEBYLEX", "%K", "-", "+"],
+        ["ZLEXCOUNT", "%K", "x", "+"], ["ZRANGEBYLEX", "%K", "x", "+"],
+        ["LMPOP", "1", "%K2", "LEFT", "COUNTX", "2"], ["DEL", "%K"]]),
+    ("strings over a bitmap value", [
+        ["DEL", "%K"], ["SETBIT", "%K", "7", "1"], ["APPEND", "%K", "xy"], ["GET", "%K"],
+        ["SETRANGE", "%K", "1", "Z"], ["GET", "%K"], ["STRLEN", "%K"], ["GETRANGE", "%K", "0", "1"],
+        ["SETBIT", "%K", "7", "0"], ["GETDEL", "%K"], ["EXISTS", "%K"],
+        ["SETBIT", "%K", "7", "1"], ["INCR", "%K"], ["GETEX", "%K", "PX", "100000"], ["GETSET", "%K", "s"],
+        ["SETBIT", "%K", "3", "1"], ["SETBIT", "%K", "1", "1"], ["INCR", "%K"], ["INCRBYFLOAT", "%K", "1.5"],
+        ["SETBIT", "%K", "200", "1"], ["OBJECT", "ENCODING", "%K"], ["TYPE", "%K"],
+        ["DUMP", "nosuch:key"], ["SET", "%K", "abc"], ["SETBIT", "%K", "1", "1"],
+        ["GET", "%K"], ["SUBSTR", "%K", "0", "0"]]),
+
+    # Streams as Redis parses them: XADD/XTRIM trimming (MAXLEN/MINID, = and
+    # LIMIT, MAXLEN 0), `<ms>-*` ids, ids compared with the last id even after
+    # XDEL, exclusive `(` ranges, COUNT 0, strict XDEL.
+    ("streams: XADD / XTRIM options, ids, ranges", [
+        ["DEL", "%K"], ["XADD", "%K", "1-1", "a", "1"], ["XADD", "%K", "1-*", "b", "2"],
+        ["XADD", "%K", "2-*", "c", "3"], ["XADD", "%K", "2-1", "d", "4"], ["XADD", "%K", "1-5", "e", "5"],
+        ["XADD", "%K", "0-0", "f", "6"], ["XADD", "%K", "abc", "f", "6"], ["XADD", "%K", "1-x", "f", "6"],
+        ["XADD", "%K", "-", "f", "6"], ["XADD", "%K", "3-1", "f"], ["XADD", "%K", "3-1"],
+        ["XADD", "%K", "MAXLEN", "3-1", "f", "v"], ["XADD", "%K", "MAXLEN", "=", "4", "3-1", "f", "v"],
+        ["XLEN", "%K"], ["XADD", "%K", "MAXLEN", "-1", "4-1", "f", "v"], ["XADD", "%K", "MAXLEN", "x", "4-1", "f", "v"],
+        ["XADD", "%K", "MINID", "3-0", "4-1", "f", "v"], ["XRANGE", "%K", "-", "+"],
+        ["XADD", "%K", "MINID", "x", "5-1", "f", "v"], ["XADD", "%K", "MINID", "-", "5-1", "f", "v"],
+        ["XADD", "%K", "MAXLEN", "1", "MINID", "1", "5-1", "f", "v"],
+        ["XADD", "%K", "LIMIT", "5", "5-1", "f", "v"], ["XADD", "%K", "MAXLEN", "1", "LIMIT", "5", "5-1", "f", "v"],
+        ["XADD", "%K", "MAXLEN", "~", "1", "LIMIT", "-1", "5-1", "f", "v"],
+        ["XADD", "%K", "NOMKSTREAM", "KEEPREF", "5-1", "f", "v"], ["XLEN", "%K"],
+        ["XADD", "%K", "MAXLEN", "0", "6-1", "f", "v"], ["XLEN", "%K"], ["XADD", "%K", "6-1", "f", "v"],
+        ["XADD", "%K", "6-2", "f", "v"], ["XADD", "%K", "6-3", "f", "v"], ["XADD", "%K", "7-1", "f", "v"],
+        ["XRANGE", "%K", "(6-1", "+"], ["XRANGE", "%K", "-", "(7-1"], ["XRANGE", "%K", "6", "6"],
+        ["XRANGE", "%K", "(6", "+"], ["XREVRANGE", "%K", "+", "(6-2"], ["XREVRANGE", "%K", "(7", "-"],
+        ["XRANGE", "%K", "-", "+", "COUNT", "0"], ["XRANGE", "%K", "-", "+", "COUNT", "-5"],
+        ["XRANGE", "%K", "-", "+", "COUNT", "2"], ["XREVRANGE", "%K", "+", "-", "COUNT", "2"],
+        ["XRANGE", "%K", "-", "+", "COUNT"], ["XRANGE", "%K", "-", "+", "NOPE", "1"],
+        ["XRANGE", "%K", "(-", "+"], ["XRANGE", "%K", "x", "+"], ["XRANGE", "%K", "-", "(0-0"],
+        ["XRANGE", "%K", "(18446744073709551615-18446744073709551615", "+"],
+        ["XRANGE", "nosuch:key", "x", "+"], ["XRANGE", "%K", "01", "+"], ["XRANGE", "%K", " 6", "+"],
+        ["XRANGE", "%K", "+6", "+"],
+        ["XDEL", "%K", "6-2", "bad"], ["XLEN", "%K"], ["XDEL", "%K", "6-2", "6-3"], ["XDEL", "nosuch:key", "bad"],
+        ["XADD", "%K", "6-9", "f", "v"], ["XADD", "%K", "8-*", "f", "v"],
+        # `~` is not probed for its count: Redis trims whole internal nodes
+        # only (so a small stream keeps everything) and Pion trims exactly —
+        # both inside the "at least N kept" contract (doc/command_matrix.md).
+        ["XTRIM", "%K", "MINID", "7"], ["XRANGE", "%K", "-", "+"],
+        ["XTRIM", "%K", "MAXLEN", "=", "1"], ["XLEN", "%K"], ["XTRIM", "%K"], ["XTRIM", "%K", "LIMIT", "1"],
+        ["XTRIM", "%K", "NOPE", "1"], ["XTRIM", "%K", "MAXLEN", "1", "LIMIT", "1"],
+        ["XTRIM", "%K", "MINID", "~", "x"], ["XTRIM", "nosuch:key", "MAXLEN", "1"],
+        ["XTRIM", "nosuch:key", "NOPE"], ["XREAD", "STREAMS", "%K", ">"], ["XREAD", "STREAMS", "%K", "-"],
+        ["XREAD", "STREAMS", "%K", "01"]]),
+
     # Geo as Redis's geo.c: a geo key is a sorted set; GEOADD NX/XX/CH and
     # all-or-nothing validation; the search family's options, errors, STORE /
     # STOREDIST, WITHHASH, ANY, BYBOX, the _RO forms; coordinates printed as
@@ -1127,46 +1352,6 @@ SEMANTIC_SCRIPTS = [
         ["ZCARD", "%K3"], ["ZREM", "%K", "Null"], ["GEORADIUS", "%K", "0", "0", "10", "km"],
         ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"]]),
 
-
-    # Streams as Redis parses them: XADD/XTRIM trimming (MAXLEN/MINID, = and
-    # LIMIT, MAXLEN 0), `<ms>-*` ids, ids compared with the last id even after
-    # XDEL, exclusive `(` ranges, COUNT 0, strict XDEL.
-    ("streams: XADD / XTRIM options, ids, ranges", [
-        ["DEL", "%K"], ["XADD", "%K", "1-1", "a", "1"], ["XADD", "%K", "1-*", "b", "2"],
-        ["XADD", "%K", "2-*", "c", "3"], ["XADD", "%K", "2-1", "d", "4"], ["XADD", "%K", "1-5", "e", "5"],
-        ["XADD", "%K", "0-0", "f", "6"], ["XADD", "%K", "abc", "f", "6"], ["XADD", "%K", "1-x", "f", "6"],
-        ["XADD", "%K", "-", "f", "6"], ["XADD", "%K", "3-1", "f"], ["XADD", "%K", "3-1"],
-        ["XADD", "%K", "MAXLEN", "3-1", "f", "v"], ["XADD", "%K", "MAXLEN", "=", "4", "3-1", "f", "v"],
-        ["XLEN", "%K"], ["XADD", "%K", "MAXLEN", "-1", "4-1", "f", "v"], ["XADD", "%K", "MAXLEN", "x", "4-1", "f", "v"],
-        ["XADD", "%K", "MINID", "3-0", "4-1", "f", "v"], ["XRANGE", "%K", "-", "+"],
-        ["XADD", "%K", "MINID", "x", "5-1", "f", "v"], ["XADD", "%K", "MINID", "-", "5-1", "f", "v"],
-        ["XADD", "%K", "MAXLEN", "1", "MINID", "1", "5-1", "f", "v"],
-        ["XADD", "%K", "LIMIT", "5", "5-1", "f", "v"], ["XADD", "%K", "MAXLEN", "1", "LIMIT", "5", "5-1", "f", "v"],
-        ["XADD", "%K", "MAXLEN", "~", "1", "LIMIT", "-1", "5-1", "f", "v"],
-        ["XADD", "%K", "NOMKSTREAM", "KEEPREF", "5-1", "f", "v"], ["XLEN", "%K"],
-        ["XADD", "%K", "MAXLEN", "0", "6-1", "f", "v"], ["XLEN", "%K"], ["XADD", "%K", "6-1", "f", "v"],
-        ["XADD", "%K", "6-2", "f", "v"], ["XADD", "%K", "6-3", "f", "v"], ["XADD", "%K", "7-1", "f", "v"],
-        ["XRANGE", "%K", "(6-1", "+"], ["XRANGE", "%K", "-", "(7-1"], ["XRANGE", "%K", "6", "6"],
-        ["XRANGE", "%K", "(6", "+"], ["XREVRANGE", "%K", "+", "(6-2"], ["XREVRANGE", "%K", "(7", "-"],
-        ["XRANGE", "%K", "-", "+", "COUNT", "0"], ["XRANGE", "%K", "-", "+", "COUNT", "-5"],
-        ["XRANGE", "%K", "-", "+", "COUNT", "2"], ["XREVRANGE", "%K", "+", "-", "COUNT", "2"],
-        ["XRANGE", "%K", "-", "+", "COUNT"], ["XRANGE", "%K", "-", "+", "NOPE", "1"],
-        ["XRANGE", "%K", "(-", "+"], ["XRANGE", "%K", "x", "+"], ["XRANGE", "%K", "-", "(0-0"],
-        ["XRANGE", "%K", "(18446744073709551615-18446744073709551615", "+"],
-        ["XRANGE", "nosuch:key", "x", "+"], ["XRANGE", "%K", "01", "+"], ["XRANGE", "%K", " 6", "+"],
-        ["XRANGE", "%K", "+6", "+"],
-        ["XDEL", "%K", "6-2", "bad"], ["XLEN", "%K"], ["XDEL", "%K", "6-2", "6-3"], ["XDEL", "nosuch:key", "bad"],
-        ["XADD", "%K", "6-9", "f", "v"], ["XADD", "%K", "8-*", "f", "v"],
-        # `~` is not probed for its count: Redis trims whole internal nodes
-        # only (so a small stream keeps everything) and Pion trims exactly —
-        # both inside the "at least N kept" contract (doc/command_matrix.md).
-        ["XTRIM", "%K", "MINID", "7"], ["XRANGE", "%K", "-", "+"],
-        ["XTRIM", "%K", "MAXLEN", "=", "1"], ["XLEN", "%K"], ["XTRIM", "%K"], ["XTRIM", "%K", "LIMIT", "1"],
-        ["XTRIM", "%K", "NOPE", "1"], ["XTRIM", "%K", "MAXLEN", "1", "LIMIT", "1"],
-        ["XTRIM", "%K", "MINID", "~", "x"], ["XTRIM", "nosuch:key", "MAXLEN", "1"],
-        ["XTRIM", "nosuch:key", "NOPE"], ["XREAD", "STREAMS", "%K", ">"], ["XREAD", "STREAMS", "%K", "-"],
-        ["XREAD", "STREAMS", "%K", "01"]]),
-
     # #30, #34: XREAD lists only streams with data, parses
     # strictly, and a value past 64 KB survives.
     ("streams: XREAD shape and parsing, big values", [
@@ -1213,6 +1398,50 @@ def run_semantics(pion, redis):
             else:
                 diffs.append((name, c, rp, rr))
     return diffs, same, n
+
+
+def _is_keyword(tok):
+    """An option keyword as the scripts spell them: upper-case letters (and _),
+    two or more. Values are written in lower case, so they are left alone."""
+    return (isinstance(tok, str) and len(tok) >= 2 and not tok.startswith("%")
+            and all(c.isupper() or c == "_" for c in tok))
+
+
+def _mangled(tok):
+    last = "Z" if tok[-1] == "Q" else "Q"
+    return [tok[:-1] + last, tok + "Q"]
+
+
+def run_mutations(pion, redis):
+    """Every keyword argument of every semantic-script step, mangled. Each
+    variant runs on a fresh replay of the script up to that step, so a variant
+    one server wrongly accepted cannot leave state behind for the next.
+    Redis answers a mangled keyword with an error; a server that matches a
+    keyword by its length and first letters runs it as the real one."""
+    subst = {"%K": "dfs:k", "%K2": "dfs:k2", "%K3": "dfs:k3"}
+    diffs, n = [], 0
+    for name, script in SEMANTIC_SCRIPTS:
+        steps = [[subst.get(p, p) for p in cmd] for cmd in script]
+        for si, cmd in enumerate(steps):
+            for pos in range(1, len(cmd)):
+                if not _is_keyword(script[si][pos]):
+                    continue
+                for variant in _mangled(cmd[pos]):
+                    mutated = cmd[:pos] + [variant] + cmd[pos + 1:]
+                    n += 1
+                    try:
+                        for conn in (pion, redis):
+                            conn.cmd("FLUSHALL")
+                            for prev in steps[:si]:
+                                conn.cmd(*prev)
+                        rp = normalize(pion.cmd(*mutated), mutated)
+                        rr = normalize(redis.cmd(*mutated), mutated)
+                    except (EOFError, socket.timeout) as e:
+                        diffs.append((name, mutated, f"TRANSPORT {type(e).__name__}", "-"))
+                        return diffs, n
+                    if rp != rr:
+                        diffs.append((name, mutated, rp, rr))
+    return diffs, n
 
 
 if __name__ == "__main__":

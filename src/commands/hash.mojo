@@ -1,6 +1,7 @@
 """Hash commands: HMGET, HGETALL, HKEYS, HVALS, HLEN, HDEL, HEXISTS, HINCRBY, HINCRBYFLOAT, HRANDFIELD, HSCAN, HSETNX.
 R3: Hash field expiration: HEXPIRE, HPEXPIRE, HEXPIREAT, HPEXPIREAT, HTTL, HPTTL, HPERSIST, HEXPIRETIME, HPEXPIRETIME."""
 from src.common.container_free import remove_and_free, hash_get_live
+from std.ffi import external_call
 from src.common.ptr import is_not_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
@@ -11,7 +12,8 @@ from src.network.fast_path import _get_now_ns
 from src.network.dispatcher import CommandDispatcher
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
-from src.common.utils import rand_count, strict_atol, bytes_to_string, _glob_match, _glob_all,  format_int_to_buf, format_float_to_buf, parse_filter_float, parse_float64, parse_int64_strict, is_valid_float_arg, parse_redis_double, DOUBLE_LONG, scan_cursor, scan_count
+from src.commands.scan_opts import parse_scan_opts, scan_no_opts
+from src.common.utils import rand_count, strict_atol, bytes_to_string, _glob_match, _glob_all,  format_int_to_buf, format_float_to_buf, parse_filter_float, parse_float64, parse_int64_strict, is_valid_float_arg, parse_redis_double, DOUBLE_LONG, scan_cursor, scan_count, arg_eq
 from src.memory.object_pool import ObjectPool
 from src.io.wal import WAL
 
@@ -326,60 +328,55 @@ def handle_hincrbyfloat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int,
         var key_str = tokens[unsafe_offset=i+1].value()
         var field_str = tokens[unsafe_offset=i+2].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
-        var _hfp = parse_redis_double(tokens[unsafe_offset=i+3].ptr, tokens[unsafe_offset=i+3].length, DOUBLE_LONG)
-        if not _hfp.ok:   # gh #393: string2ld's rules, as INCRBYFLOAT
+        # Redis's hincrbyfloatCommand order: the increment (a float, and a
+        # finite one), the key's type, then the field's value. The sum is
+        # Redis's long double arithmetic and %.17Lf print (pion_ld_incr); Pion
+        # printed a Float64's shortest form, so `10.5 + 0.1` read 10.6 where
+        # Redis reads 10.59999999999999964.
+        var inc_t = tokens[unsafe_offset=i+3]
+        var inc_kind = external_call["pion_ld_kind", Int32](inc_t.ptr, Int64(inc_t.length))
+        if inc_kind == 0:
             writer.append_error_response("ERR value is not a valid float")
             return 3
-        var hfdelta = _hfp.value
+        if inc_kind == 2:
+            writer.append_error_response("ERR value is NaN or Infinity")
+            return 3
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
         if val.is_none() or val.type.value == ValueType.HASH:
-            var cur_hf: Float64 = 0.0
+            var cur_kind = 0
+            var cur_d: Float64 = 0.0
+            var cur_l = 0
+            var cbuf = alloc[UInt8](32)
+            var cur_p = cbuf
             if not val.is_none():
-                var hash_ptr = val.as_hash().unsafe_bitcast[SlabHashMap]()
-                var cur_fv2 = hash_ptr[].get(GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length))
+                var hash_ptr0 = val.as_hash().unsafe_bitcast[SlabHashMap]()
+                var cur_fv2 = hash_ptr0[].get(GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length))
                 if not cur_fv2.is_none():
-                    if cur_fv2.type.value == ValueType.FLOAT: cur_hf = cur_fv2.as_float()
-                    elif cur_fv2.type.value == ValueType.INT: cur_hf = Float64(cur_fv2.as_int())
+                    if cur_fv2.type.value == ValueType.FLOAT:
+                        cur_kind = 2
+                        cur_d = cur_fv2.as_float()
+                    elif cur_fv2.type.value == ValueType.INT:
+                        cur_kind = 1
+                        cur_l = format_int_to_buf(cbuf, 0, cur_fv2.as_int())
                     elif cur_fv2.is_string():
-                        var _sbuf = alloc[UInt8](24)
-                        var fsp = cur_fv2.as_string_safe(_sbuf)
-                        # gh #232: the hash twin of the INCRBYFLOAT bug. The
-                        # ARGUMENT is validated above but the STORED FIELD was
-                        # not, so a non-numeric field parsed as 0.0 and was then
-                        # OVERWRITTEN by the delta — `HSET h f notanumber;
-                        # HINCRBYFLOAT h f 1.5` replied 1.5 and destroyed the
-                        # field. Redis answers `hash value is not a float` and
-                        # leaves it alone.
-                        var _chp = parse_redis_double(fsp, cur_fv2.string_len(), DOUBLE_LONG)   # gh #393
-                        if not _chp.ok:
-                            _sbuf.unsafe_free()
-                            writer.append_error_response("ERR hash value is not a float")
-                            return 3
-                        cur_hf = _chp.value
-                        _sbuf.unsafe_free()
-            var new_hf = cur_hf + hfdelta
-            if new_hf != new_hf or new_hf > 1.7976931348623157e308 or new_hf < -1.7976931348623157e308:
+                        cur_kind = 1
+                        cur_p = cur_fv2.as_string_safe(cbuf)
+                        cur_l = cur_fv2.string_len()
+            var hfp = alloc[UInt8](5200)
+            var hfftrim = Int(external_call["pion_ld_incr", Int64](
+                Int32(cur_kind), cur_p, Int64(cur_l), cur_d,
+                inc_t.ptr, Int64(inc_t.length), hfp, Int64(5200)))
+            cbuf.unsafe_free()
+            if hfftrim == -1:
+                # gh #232: a non-numeric field is refused and left alone (it
+                # used to read as 0.0 and be overwritten).
+                hfp.unsafe_free()
+                writer.append_error_response("ERR hash value is not a float")
+                return 3
+            if hfftrim < 0:
+                hfp.unsafe_free()
                 writer.append_error_response("ERR increment would produce NaN or Infinity")
                 return 3
-            # Shortest round-trip repr, then Redis-style trim: "5.0" → "5".
-            # The bytes are copied out of the String IMMEDIATELY: under -O3 the
-            # temporary is destroyed after its last formal use, so a laundered
-            # pointer into its buffer dangles (release-only garbage replies,
-            # caught by test_gh179_180_181.py — dev -O0 passed by luck).
-            var hfs = String(new_hf)
-            var hfflen = hfs.byte_length()
-            var hfp = alloc[UInt8](hfflen)
-            unsafe_memcpy(dest=hfp, src=Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(hfs.unsafe_ptr())), count=hfflen)
-            var hfftrim = hfflen
-            var hff_has_dot = False
-            var hff_has_exp = False
-            for fk2 in range(hfflen):
-                if hfp[unsafe_offset=fk2] == 46: hff_has_dot = True
-                elif hfp[unsafe_offset=fk2] == 101: hff_has_exp = True; break
-            if hff_has_dot and not hff_has_exp:
-                while hfftrim > 1 and hfp[unsafe_offset=hfftrim-1] == 48:
-                    hfftrim -= 1
-                if hfftrim > 0 and hfp[unsafe_offset=hfftrim-1] == 46: hfftrim -= 1
             var hash_ptr: Pointer[SlabHashMap, MutUntrackedOrigin]
             if val.is_none():
                 # Same create path as execute_hset (pool with heap fallback).
@@ -430,7 +427,14 @@ def handle_hrandfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
             # gh #393: always a count when present (see SRANDMEMBER).
             hrf_count = rand_count(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length); extra = 2
             hrf_has_count = True
-            if i + 3 < num_tokens and tokens[unsafe_offset=i+3].length >= 4 and (tokens[unsafe_offset=i+3].ptr[unsafe_offset=0]|0x20)==119:
+            if i + 3 < num_tokens:
+                # Redis: exactly WITHVALUES after the count, nothing more. Any
+                # word of 4+ letters starting with "w" turned values on, and
+                # surplus arguments were ignored.
+                var wt = tokens[unsafe_offset=i+3]
+                if num_tokens - i > 4 or not arg_eq(wt.ptr, wt.length, "withvalues"):
+                    writer.append_error_response("ERR syntax error")
+                    return num_tokens - 1 - i
                 hrf_withvals = True; extra = 3
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered
         # identically, with an empty/zero reply. Redis distinguishes them, and
@@ -463,8 +467,10 @@ def handle_hrandfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
             var out_n = hrf_abs
             if hrf_count >= 0 and hrf_abs > hash_ptr[].size: out_n = hash_ptr[].size
             if hrf_count < 0 and hash_ptr[].size == 0: out_n = 0
-            var arr_hdr3 = String("*") + String(out_n * (2 if hrf_withvals else 1)) + String("\r\n")
-            writer.append_to_response(arr_hdr3.unsafe_ptr(), arr_hdr3.byte_length())
+            # WITHVALUES under RESP3 is a list of [field, value] pairs, as
+            # Redis sends it; RESP2 has the one flat array.
+            var hrf_pairs = hrf_withvals and writer.proto == 3
+            writer.append_array_header(out_n if hrf_pairs or not hrf_withvals else out_n * 2)
             var _hlive = List[Int]()
             for slot in range(hash_ptr[].capacity):
                 var m0 = hash_ptr[].metadata[unsafe_offset=slot]
@@ -476,6 +482,7 @@ def handle_hrandfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
             # so emitting fewer would desync the connection.
             while emitted < out_n and len(_hlive) > 0:
                 var _sl = _hlive[emitted % len(_hlive)]
+                if hrf_pairs: writer.append_array_header(2)
                 writer.append_bulk_value_response(hash_ptr[].keys[unsafe_offset=_sl])
                 if hrf_withvals: writer.append_bulk_value_response(hash_ptr[].values[unsafe_offset=_sl])
                 emitted += 1
@@ -491,32 +498,28 @@ def handle_hscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     if i + 2 < num_tokens:
         var key_str = tokens[unsafe_offset=i+1].value()
         var hs_cursor = scan_cursor(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
-        var extra = 2
-        var hs_pat_p = null_ptr[UInt8, MutUntrackedOrigin]()
-        var hs_pat_l = 0
-        # Skip optional args
-        var scan_i = i + 2
-        while scan_i + 1 < num_tokens:
-            var nxt2 = tokens[unsafe_offset=scan_i+1]; var nxtp2 = nxt2.ptr; var nxtl2 = nxt2.length
-            if nxtl2 == 5 and (nxtp2[unsafe_offset=0]|0x20)==109:
-                # gh #244: MATCH was skipped, not applied
-                if scan_i + 2 < num_tokens:
-                    hs_pat_p = tokens[unsafe_offset=scan_i+2].ptr
-                    hs_pat_l = tokens[unsafe_offset=scan_i+2].length
-                scan_i += 2; extra += 2
-            elif nxtl2 == 5 and (nxtp2[unsafe_offset=0]|0x20)==99 and (nxtp2[unsafe_offset=1]|0x20)==111:
-                if scan_i + 2 >= num_tokens: raise Error("ERR syntax error")
-                _ = scan_count(tokens[unsafe_offset=scan_i+2].ptr, tokens[unsafe_offset=scan_i+2].length)
-                scan_i += 2; extra += 2
-            else: break
+        var extra = num_tokens - 1 - i
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
-        if val.is_none() or val.type.value != ValueType.HASH or hs_cursor != 0:
+        # Redis's order: the cursor, then the key (a missing one is an empty
+        # scan whatever the options; another type is WRONGTYPE, which this
+        # answered as an empty scan), and only then the options.
+        if not val.is_none() and val.type.value != ValueType.HASH:
+            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+            return extra
+        var so = scan_no_opts()
+        if not val.is_none():
+            so = parse_scan_opts(tokens, i + 3, num_tokens, writer, False, True)
+            if not so.ok:
+                return extra
+        var hs_pat_p = so.pat_p
+        var hs_pat_l = so.pat_l
+        if val.is_none() or hs_cursor != 0:
             var hs_empty = "*2\r\n$1\r\n0\r\n*0\r\n"
             writer.append_to_response(hs_empty.unsafe_ptr(), hs_empty.byte_length())
         else:
             var hash_ptr = val.as_hash().unsafe_bitcast[SlabHashMap]()
-            var hs_all = hs_pat_l == 0 or _glob_all(hs_pat_p, hs_pat_l)
+            var hs_all = not so.has_match or _glob_all(hs_pat_p, hs_pat_l)
             var hs_mb = alloc[UInt8](24)
             var hs_count2 = 0
             for slot in range(hash_ptr[].capacity):
@@ -527,7 +530,7 @@ def handle_hscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                         var fk = hash_ptr[].keys[unsafe_offset=slot]
                         if _glob_match(hs_pat_p, hs_pat_l, 0, fk.as_string_safe(hs_mb), fk.string_len(), 0):
                             hs_count2 += 1
-            var hs_hdr = String("*2\r\n$1\r\n0\r\n*") + String(hs_count2 * 2) + String("\r\n")
+            var hs_hdr = String("*2\r\n$1\r\n0\r\n*") + String(hs_count2 if so.novalues else hs_count2 * 2) + String("\r\n")
             writer.append_to_response(hs_hdr.unsafe_ptr(), hs_hdr.byte_length())
             for slot in range(hash_ptr[].capacity):
                 var m = hash_ptr[].metadata[unsafe_offset=slot]
@@ -537,7 +540,8 @@ def handle_hscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                         if not _glob_match(hs_pat_p, hs_pat_l, 0, fk2.as_string_safe(hs_mb), fk2.string_len(), 0):
                             continue
                     writer.append_bulk_value_response(hash_ptr[].keys[unsafe_offset=slot])
-                    writer.append_bulk_value_response(hash_ptr[].values[unsafe_offset=slot])
+                    if not so.novalues:
+                        writer.append_bulk_value_response(hash_ptr[].values[unsafe_offset=slot])
             hs_mb.unsafe_free()
         return extra
     else:

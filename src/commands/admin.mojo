@@ -2,7 +2,7 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.commands.command_table import PION_COMMAND_COUNT
 from std.memory.unsafe_pointer import Pointer
-from std.collections import Array
+from std.collections import Array, List, Span, Dict
 from std.memory import alloc, unsafe_memcpy
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
@@ -10,7 +10,7 @@ from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
 from src.common.config import PionConfig
 from src.common.metrics import ValueLedger
-from src.common.utils import format_int_to_buf, parse_memory_value
+from src.common.utils import format_int_to_buf, parse_memory_value, arg_eq, parse_int64_strict, _glob_match, bytes_to_string
 # gh #257: whole-name, case-insensitive matching for CONFIG parameter names.
 # Not `| 0x20` — that maps '-' fine but mangles '_' (see gh #225), and
 # `maxmemory-policy` must match exactly.
@@ -239,12 +239,36 @@ def handle_hello(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     return extra
 
 
-@always_inline
-def handle_flushall(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut writer: ResponseWriter) -> Int:
-    """FLUSHALL — clear all keys in this worker's keyspace."""
+def _flush_args_ok(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                   mut writer: ResponseWriter) -> Bool:
+    """[ASYNC|SYNC], as Redis's getFlushCommandFlags: one optional word,
+    nothing else."""
+    var argc = num_tokens - i
+    if argc > 2 or (argc == 2 and not arg_eq(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length, "sync")
+                    and not arg_eq(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length, "async")):
+        writer.append_error_response("ERR syntax error")
+        return False
+    return True
+
+
+def _flush(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], wal: Pointer[WAL, MutUntrackedOrigin]):
+    """Empty the keyspace (its TTLs with it) and log it. A flush used to be
+    left out of the WAL, so a restart replayed the flushed keys, and replicas,
+    which follow the WAL, kept them. Record 250 is the FLUSH the replication
+    stream already sends before a resync."""
     keyspace[].reset()
-    writer.append_ok_response()
-    return 0
+    if is_not_null(wal):
+        _ = wal[].append(250, null_ptr[UInt8, MutUntrackedOrigin](), 0)
+
+
+def handle_flushall(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut writer: ResponseWriter,
+                    wal: Pointer[WAL, MutUntrackedOrigin]) -> Int:
+    """FLUSHALL [ASYNC|SYNC] — clear all keys in this worker's keyspace."""
+    if _flush_args_ok(tokens, i, num_tokens, writer):
+        _flush(keyspace, wal)
+        writer.append_ok_response()
+    return num_tokens - 1 - i
 
 
 @always_inline
@@ -275,6 +299,20 @@ def handle_bgsave(mut snapshot_engine: SnapshotEngine, keyspace: Pointer[Striped
 
 
 @always_inline
+def handle_time(mut writer: ResponseWriter):
+    """TIME -> [unix seconds, microseconds], both bulk strings, as Redis (#30).
+    It answered `-ERR unknown command`."""
+    var ts = alloc[Int64](2)
+    _ = external_call["clock_gettime", Int32](Int32(0), ts)   # CLOCK_REALTIME
+    var sec = ts[unsafe_offset=0]
+    var usec = ts[unsafe_offset=1] // 1000
+    ts.unsafe_free()
+    writer.append_array_header(2)
+    writer.append_bulk_int_response(sec)
+    writer.append_bulk_int_response(usec)
+
+
+@always_inline
 def handle_lastsave(last_save_time: Int64, mut writer: ResponseWriter) -> Int:
     """LASTSAVE — return Unix timestamp of last successful snapshot (0 = none)."""
     writer.append_int_response(last_save_time)
@@ -283,14 +321,61 @@ def handle_lastsave(last_save_time: Int64, mut writer: ResponseWriter) -> Int:
 
 @always_inline
 def handle_info(mut dispatcher: CommandDispatcher, mut writer: ResponseWriter,
-                listen_port: Int, keys: Int, expires: Int, uptime_s: Int, extra: String) -> Int:
+                listen_port: Int, keys: Int, expires: Int, uptime_s: Int, extra: String,
+                repl_section: String, cluster_enabled: Bool, sections: List[String]) -> Int:
     """INFO [section] — return server info as bulk string.
 
     gh #262: port, memory, uptime and keyspace are resolved by the caller
     from real state; `extra` is the `# Pion` value-receipt section."""
-    var resp = dispatcher.execute_info(writer.send_stalls, listen_port, keys, expires, uptime_s, extra)
-    writer.append_to_response(resp.as_bytes().unsafe_ptr().unsafe_bitcast[UInt8](), resp.byte_length())
+    var body = dispatcher.execute_info(writer.send_stalls, listen_port, keys, expires, uptime_s, extra,
+                                       repl_section, cluster_enabled)
+    var out = _info_sections(body, sections)
+    writer.append_verbatim_response(out.unsafe_ptr(), out.byte_length())
     return 0
+
+
+def _info_sections(body: String, sections: List[String]) -> String:
+    """INFO [section ...]: only the named sections, case-insensitive, as
+    Redis (#30); none, `all`, `everything` or `default` mean every section
+    (Pion has no section `default` would leave out). An unknown name adds
+    nothing, so `INFO nosuch` is empty, as in Redis. INFO ignored its
+    arguments and always sent everything."""
+    if len(sections) == 0:
+        return body
+    for k in range(len(sections)):
+        var w = sections[k].lower()
+        if w == "all" or w == "everything" or w == "default":
+            return body
+    var out = String("")
+    var keep = False
+    var bp = body.unsafe_ptr()
+    var n = body.byte_length()
+    var start = 0
+    while start < n:
+        var end = start
+        while end < n and bp[end] != 10:
+            end += 1
+        var line = String(StringSpan[MutUntrackedOrigin](
+            unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
+                unsafe_ptr=Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(bp) + start),
+                length=(end + 1 if end < n else end) - start)))
+        if end - start >= 2 and bp[start] == 35 and bp[start + 1] == 32:   # "# Name"
+            var name_end = end
+            if name_end > start and bp[name_end - 1] == 13:
+                name_end -= 1
+            var name = String(StringSpan[MutUntrackedOrigin](
+                unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
+                    unsafe_ptr=Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(bp) + start + 2),
+                    length=name_end - start - 2))).lower()
+            keep = False
+            for k in range(len(sections)):
+                if sections[k].lower() == name:
+                    keep = True
+                    break
+        if keep:
+            out += line
+        start = end + 1
+    return out
 
 
 @always_inline
@@ -352,11 +437,12 @@ def _config_known_value(p: Pointer[UInt8, MutUntrackedOrigin], plen: Int,
     returns `found = False`.
 
     A parameter belongs here only if Pion can state its value without
-    inventing anything. `databases` is deliberately ABSENT: `SELECT 5` returns
-    +OK on a server with one keyspace, so no number here would be true (that
-    lie is gh #262's). `tcp-keepalive`, `appendfsync` and friends are absent
-    for the same reason."""
+    inventing anything. `databases` is 1: SELECT refuses every other index.
+    `tcp-keepalive`, `appendfsync` and friends are absent, since
+    no value for them would be true."""
     found = True
+    if cmd_eq(p, plen, "databases"):
+        return "1"
     # gh #261: the live limit (from --maxmemory or CONFIG SET), in bytes; 0 is
     # unlimited. The policy is always noeviction: over the limit, memory-growing
     # writes are refused with -OOM and nothing is ever evicted.
@@ -381,45 +467,81 @@ def _config_known_value(p: Pointer[UInt8, MutUntrackedOrigin], plen: Int,
     return ""
 
 
+comptime _CONFIG_COUNT = 7
+
+
 @always_inline
-def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, config: PionConfig) raises -> Int:
-    """CONFIG GET|SET|REWRITE|RESETSTAT (gh #257).
+def _config_name(k: Int) -> StaticString:
+    """The parameters CONFIG GET reports, the ones whose value Pion can state
+    truthfully (see _config_known_value)."""
+    if k == 0: return "databases"
+    if k == 1: return "maxmemory"
+    if k == 2: return "maxmemory-policy"
+    if k == 3: return "appendonly"
+    if k == 4: return "save"
+    if k == 5: return "port"
+    return "timeout"
+
+
+def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                  config: PionConfig, mut stats_reset: Bool) raises -> Int:
+    """CONFIG GET|SET|RESETSTAT|REWRITE|HELP (gh #257).
 
     Both halves used to lie. `CONFIG SET anything anything` replied +OK and did
     nothing, so an operator, a Terraform module or a client library's startup
     probe believed the setting took. `CONFIG GET` answered every parameter with
     an EMPTY VALUE, which reads as "configured to nothing" rather than "I do
     not know this parameter". Same rule as gh #229's numeric parsing: a command
-    that cannot honour its contract must error, not acknowledge."""
-    if i + 1 < num_tokens:
-        var cfg_sub = tokens[unsafe_offset=i+1].ptr
-        var cfg_sub_len = tokens[unsafe_offset=i+1].length
-        var cfg_s0 = cfg_sub[unsafe_offset=0] | 0x20
-        if cfg_s0 == 103:
-            # CONFIG GET <param>.
-            # gh #172: RESP2 emits the flat `*2` array it always did; RESP3
-            # emits `%1`, which is what redis-py >= 8 indexes as a dict.
-            if i + 2 < num_tokens:
-                var pp = tokens[unsafe_offset=i+2].ptr
-                var plen = tokens[unsafe_offset=i+2].length
-                var found = False
-                var val = _config_known_value(pp, plen, config, found)
-                if not found:
-                    # Redis replies `*0` to an unknown parameter, verified
-                    # against redis-server 8.10. Note the empty ARRAY here is
-                    # correct while an empty VALUE was not: it says "no such
-                    # parameter" instead of asserting one exists and is blank.
-                    writer.append_empty_array_response()
-                    return 2
-                writer.append_map_header(1)
-                writer.append_bulk_string_response(pp, plen)
-                writer.append_bulk_string_response(val.unsafe_ptr(), val.byte_length())
-                return 2
-            else:
-                writer.append_error_response("ERR wrong number of arguments for 'config|get' command")
-                return 1
-        elif cfg_s0 == 115 and cfg_sub_len == 3 and num_tokens - i == 4 \
-             and cmd_eq(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length, "maxmemory"):
+    that cannot honour its contract must error, not acknowledge.
+
+    Subcommands are whole words (the first letter used to decide, so `CONFIG
+    GE x` was GET). GET takes one or more glob patterns, matched without
+    regard to case as Redis matches them, and answers every known parameter
+    any of them names; it read the first argument as an exact name and
+    ignored the rest. RESETSTAT sets `stats_reset` for the caller, which owns
+    the counters (PION.STATS)."""
+    if num_tokens - i < 2:
+        writer.append_error_response("ERR wrong number of arguments for 'config' command")
+        return 0
+    var sub = tokens[unsafe_offset=i+1]
+    if arg_eq(sub.ptr, sub.length, "get"):
+        if num_tokens - i < 3:
+            writer.append_error_response("ERR wrong number of arguments for 'config|get' command")
+            return num_tokens - i - 1
+        # gh #172: RESP2 emits the flat array it always did; RESP3 a map.
+        var hits = List[Int]()
+        for k in range(_CONFIG_COUNT):
+            var name = _config_name(k)
+            for j in range(i + 2, num_tokens):
+                var pt = tokens[unsafe_offset=j]
+                var low = alloc[UInt8](max(pt.length, 1))
+                for b in range(pt.length):
+                    var c = pt.ptr[unsafe_offset=b]
+                    low[unsafe_offset=b] = c | 0x20 if c >= 65 and c <= 90 else c
+                var hit = _glob_match(low, pt.length, 0,
+                                      Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(name.unsafe_ptr())),
+                                      name.byte_length(), 0)
+                low.unsafe_free()
+                if hit:
+                    hits.append(k)
+                    break
+        # Redis replies an empty map to patterns that match nothing (`*0`
+        # under RESP2): "no such parameter", not one that exists and is blank.
+        writer.append_map_header(len(hits))
+        for h in range(len(hits)):
+            var name = _config_name(hits[h])
+            var found = False
+            var val = _config_known_value(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(name.unsafe_ptr())),
+                                          name.byte_length(), config, found)
+            writer.append_bulk_string_response(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(name.unsafe_ptr())),
+                                               name.byte_length())
+            writer.append_bulk_string_response(val.unsafe_ptr(), val.byte_length())
+        return num_tokens - i - 1
+    if arg_eq(sub.ptr, sub.length, "set"):
+        if num_tokens - i < 4 or (num_tokens - i) % 2 != 0:
+            writer.append_error_response("ERR wrong number of arguments for 'config|set' command")
+            return num_tokens - i - 1
+        if num_tokens - i == 4 and cmd_eq(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length, "maxmemory"):
             # gh #261: the one runtime-settable parameter. The limit lives in C
             # and every worker reads it, so this takes effect process-wide on
             # the next check. Redis units only (1k = 1000, 1kb = 1024); the
@@ -434,30 +556,45 @@ def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             external_call["pion_set_maxmemory", NoneType](UInt64(parsed.value))
             writer.append_ok_response()
             return 3
-        elif cfg_s0 == 115 and cfg_sub_len == 3:
-            # CONFIG SET — refuse. Nothing here is settable at runtime: every
-            # knob is a CLI flag read once at startup, so acknowledging a SET
-            # would claim a change that never happens. Erroring is the whole
-            # point of the issue; a caller that gets +OK has no way to find out.
-            writer.append_error_response(
-                "ERR CONFIG SET is not supported — Pion is configured by CLI "
-                + "flags at startup (see ./pion-server --help). This command "
-                + "used to reply +OK without applying anything.")
+        # Nothing else here is settable at runtime: every knob is a CLI flag
+        # read once at startup, so acknowledging a SET would claim a change
+        # that never happens. Erroring is the whole point of gh #257.
+        writer.append_error_response(
+            "ERR CONFIG SET is not supported — Pion is configured by CLI "
+            + "flags at startup (see ./pion-server --help). This command "
+            + "used to reply +OK without applying anything.")
+        return num_tokens - i - 1
+    if arg_eq(sub.ptr, sub.length, "resetstat"):
+        if num_tokens - i != 2:
+            writer.append_error_response("ERR wrong number of arguments for 'config|resetstat' command")
             return num_tokens - i - 1
-        elif cfg_s0 == 114:
-            # CONFIG REWRITE / RESETSTAT. REWRITE has no config file to write,
-            # and RESETSTAT has no stats to reset until gh #262 lands, so both
-            # would be no-ops dressed as successes.
-            writer.append_error_response(
-                "ERR CONFIG REWRITE/RESETSTAT are not supported — Pion has no "
-                + "config file and no resettable stat counters.")
+        stats_reset = True
+        writer.append_ok_response()
+        return 1
+    if arg_eq(sub.ptr, sub.length, "rewrite"):
+        if num_tokens - i != 2:
+            writer.append_error_response("ERR wrong number of arguments for 'config|rewrite' command")
             return num_tokens - i - 1
-        else:
-            writer.append_error_response("ERR Unknown CONFIG subcommand")
-            return num_tokens - i - 1
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'config' command")
-        return 0
+        # Pion reads no config file, which is Redis's answer in that state.
+        writer.append_error_response("ERR The server is running without a config file")
+        return 1
+    if arg_eq(sub.ptr, sub.length, "help"):
+        writer.append_array_header(11)
+        writer.append_status_response("CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:")
+        writer.append_status_response("GET <pattern>")
+        writer.append_status_response("    Return parameters matching the glob-like <pattern> and their values.")
+        writer.append_status_response("SET <directive> <value>")
+        writer.append_status_response("    Set the configuration <directive> to <value>.")
+        writer.append_status_response("RESETSTAT")
+        writer.append_status_response("    Reset statistics reported by the INFO command.")
+        writer.append_status_response("REWRITE")
+        writer.append_status_response("    Rewrite the configuration file.")
+        writer.append_status_response("HELP")
+        writer.append_status_response("    Print this help.")
+        return num_tokens - i - 1
+    writer.append_error_response("ERR unknown subcommand '" + bytes_to_string(sub.ptr, sub.length)
+                                 + "'. Try CONFIG HELP.")
+    return num_tokens - i - 1
 
 
 @always_inline
@@ -525,16 +662,14 @@ def handle_auth(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     return extra
 
 
-@always_inline
-def handle_flushdb(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut writer: ResponseWriter) -> Int:
-    """FLUSHDB [ASYNC|SYNC] — clear all keys."""
-    keyspace[].reset()
-    var extra = 0
-    if i + 1 < num_tokens:
-        var _fdb_p = tokens[unsafe_offset=i+1].ptr
-        if (_fdb_p[unsafe_offset=0]|0x20) == 97 or (_fdb_p[unsafe_offset=0]|0x20) == 115: extra = 1
-    writer.append_ok_response()
-    return extra
+def handle_flushdb(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                   keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut writer: ResponseWriter,
+                   wal: Pointer[WAL, MutUntrackedOrigin]) -> Int:
+    """FLUSHDB [ASYNC|SYNC] — clear all keys (one database: FLUSHALL's effect)."""
+    if _flush_args_ok(tokens, i, num_tokens, writer):
+        _flush(keyspace, wal)
+        writer.append_ok_response()
+    return num_tokens - 1 - i
 
 
 @always_inline
@@ -547,21 +682,81 @@ def handle_dbsize(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut wri
 
 
 @always_inline
-def handle_select(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """SELECT index → +OK (always DB 0; Pion is single-database)."""
-    var extra = 0
-    if i + 1 < num_tokens: extra = 1
-    writer.append_ok_response()
-    return extra
+def handle_select(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                  mut writer: ResponseWriter, cluster_enabled: Bool = False) -> Int:
+    """SELECT index. Pion has one database per server, and answers as Redis
+    does when configured with `databases 1`: `SELECT 0` is OK and
+    any other index is refused. It used to answer +OK to anything and stay on
+    DB 0, so a client keeping data in DB 1 read, overwrote and could FLUSHDB
+    DB 0's keys."""
+    if num_tokens - i != 2:
+        writer.append_error_response("ERR wrong number of arguments for 'select' command")
+        return 0
+    var r = parse_int64_strict(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
+    if not r.ok or r.value > 2147483647 or r.value < -2147483648:
+        writer.append_error_response("ERR value is not an integer or out of range")
+    elif r.value != 0 and cluster_enabled:
+        writer.append_error_response("ERR SELECT is not allowed in cluster mode")
+    elif r.value != 0:
+        writer.append_error_response("ERR DB index is out of range")
+    else:
+        writer.append_ok_response()
+    return 0
 
 
 @always_inline
-def handle_swapdb(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """SWAPDB index1 index2 → +OK (no-op; single database)."""
-    var extra = 0
-    if i + 2 < num_tokens: extra = 2
-    writer.append_ok_response()
-    return extra
+def _db_index(t: RESP3Token, mut ok: Bool) -> Int64:
+    """getIntFromObject: an integer that fits in 32 bits."""
+    var r = parse_int64_strict(t.ptr, t.length)
+    ok = r.ok and r.value <= 2147483647 and r.value >= -2147483648
+    return r.value
+
+
+def handle_swapdb(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                  mut writer: ResponseWriter, cluster_enabled: Bool = False) -> Int:
+    """SWAPDB index1 index2, with one database: `SWAPDB 0 0` is OK,
+    any other index is out of range. It answered +OK and did nothing."""
+    if num_tokens - i != 3:
+        writer.append_error_response("ERR wrong number of arguments for 'swapdb' command")
+        return 0
+    if cluster_enabled:
+        writer.append_error_response("ERR SWAPDB is not allowed in cluster mode")
+        return 0
+    var ok = False
+    var a = _db_index(tokens[unsafe_offset=i + 1], ok)
+    if not ok:
+        writer.append_error_response("ERR invalid first DB index")
+        return 0
+    var b = _db_index(tokens[unsafe_offset=i + 2], ok)
+    if not ok:
+        writer.append_error_response("ERR invalid second DB index")
+        return 0
+    if a != 0 or b != 0:
+        writer.append_error_response("ERR DB index is out of range")
+    else:
+        writer.append_ok_response()
+    return 0
+
+
+def handle_move(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                mut writer: ResponseWriter, cluster_enabled: Bool = False) -> Int:
+    """MOVE key db, with one database: DB 0 is the source itself,
+    any other index is out of range — Redis's answers with `databases 1`."""
+    if num_tokens - i != 3:
+        writer.append_error_response("ERR wrong number of arguments for 'move' command")
+        return 0
+    if cluster_enabled:
+        writer.append_error_response("ERR MOVE is not allowed in cluster mode")
+        return 0
+    var ok = False
+    var db = _db_index(tokens[unsafe_offset=i + 2], ok)
+    if not ok:
+        writer.append_error_response("ERR value is not an integer or out of range")
+    elif db != 0:
+        writer.append_error_response("ERR DB index is out of range")
+    else:
+        writer.append_error_response("ERR source and destination objects are the same")
+    return 0
 
 
 @always_inline
@@ -734,67 +929,57 @@ def handle_reset(mut writer: ResponseWriter) -> Int:
 
 
 @always_inline
-def handle_client(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, fd: Int32, mut writer: ResponseWriter) -> Int:
-    """CLIENT ID|SETNAME|GETNAME|INFO|LIST|NO-EVICT|NO-TOUCH|SETINFO subcommands."""
-    if i + 1 < num_tokens:
-        var sub = tokens[unsafe_offset=i + 1]
-        var sp = sub.ptr
-        var sl = sub.length
-        var s0 = sp[unsafe_offset=0] | 0x20
-        if s0 == 105 and sl == 2:
-            # CLIENT ID → :fd
-            writer.append_int_response(Int64(fd))
-            return 1
-        elif s0 == 115 and sl == 7 and (sp[unsafe_offset=1] | 0x20) == 101 and (sp[unsafe_offset=2] | 0x20) == 116 and (sp[unsafe_offset=3] | 0x20) == 110:
-            # CLIENT SETNAME name → +OK (no-op; we don't track per-connection names)
-            var extra = 1
-            if i + 2 < num_tokens:
-                extra = 2
-            writer.append_ok_response()
-            return extra
-        elif s0 == 103 and sl == 7 and (sp[unsafe_offset=1] | 0x20) == 101 and (sp[unsafe_offset=2] | 0x20) == 116 and (sp[unsafe_offset=3] | 0x20) == 110:
-            # CLIENT GETNAME → $-1 (null; names not tracked)
-            writer.append_null_response()
-            return 1
-        elif s0 == 105 and sl == 4 and (sp[unsafe_offset=1] | 0x20) == 110 and (sp[unsafe_offset=2] | 0x20) == 102 and (sp[unsafe_offset=3] | 0x20) == 111:
-            # CLIENT INFO → bulk string with connection info
-            var info = String("id=") + String(Int(fd)) + " addr=127.0.0.1 fd=" + String(Int(fd)) + " name= db=0 flags=N"
-            writer.append_bulk_string_response(info.unsafe_ptr(), info.byte_length())
-            return 1
-        elif s0 == 108 and sl == 4 and (sp[unsafe_offset=1] | 0x20) == 105 and (sp[unsafe_offset=2] | 0x20) == 115 and (sp[unsafe_offset=3] | 0x20) == 116:
-            # CLIENT LIST → bulk string
-            var extra = num_tokens - i - 1
-            var info = String("id=") + String(Int(fd)) + " addr=127.0.0.1 fd=" + String(Int(fd)) + " name= db=0 flags=N\n"
-            writer.append_bulk_string_response(info.unsafe_ptr(), info.byte_length())
-            return extra
-        elif s0 == 110 and sl >= 7:
-            # CLIENT NO-EVICT on|off / CLIENT NO-TOUCH on|off → +OK
-            var extra = 1
-            if i + 2 < num_tokens:
-                extra = 2
-            writer.append_ok_response()
-            return extra
-        elif s0 == 115 and sl == 7 and (sp[unsafe_offset=1] | 0x20) == 101 and (sp[unsafe_offset=2] | 0x20) == 116 and (sp[unsafe_offset=3] | 0x20) == 105:
-            # CLIENT SETINFO LIB-NAME|LIB-VER value → +OK
-            var extra = num_tokens - i - 1
-            writer.append_ok_response()
-            return extra
-        else:
-            # Unknown CLIENT subcommand → +OK (graceful)
-            var extra = num_tokens - i - 1
-            writer.append_ok_response()
-            return extra
-    else:
+def handle_client(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, fd: Int32, mut writer: ResponseWriter,
+                  mut names: Dict[Int, String]) raises -> Int:
+    """CLIENT ID|SETNAME|GETNAME|INFO|LIST|NO-EVICT|NO-TOUCH|SETINFO.
+
+    #30: SETNAME now keeps the name (GETNAME answered nil whatever was set),
+    INFO and LIST are RESP3 verbatim strings, and a subcommand Pion does not
+    implement (KILL, PAUSE, TRACKING, REPLY, ...) is refused with Redis's
+    error. It answered +OK and did nothing: a CLIENT KILL "succeeded" without
+    killing anything."""
+    if i + 1 >= num_tokens:
         writer.append_error_response("ERR wrong number of arguments for 'client' command")
         return 0
-
-
-# BLPOP / BRPOP were here, as stubs that replied nil unconditionally. They are
-# implemented at the dispatch site in slow_path.mojo now (gh #318) because they
-# need the keyspace, which is why the stubs could never have worked: a handler
-# in admin.mojo has no way to reach a list. Deleted rather than left in place —
-# a dead handler that returns a plausible wrong answer is something the next
-# person re-wires by accident.
-
-
-# EVAL, EVALSHA, SCRIPT — now in src/commands/lua_engine.mojo
+    var sub = tokens[unsafe_offset=i + 1]
+    var sp = sub.ptr
+    var sl = sub.length
+    var extra = num_tokens - i - 1
+    if arg_eq(sp, sl, "id"):
+        writer.append_int_response(Int64(fd))
+    elif arg_eq(sp, sl, "setname"):
+        if i + 3 != num_tokens:
+            writer.append_error_response("ERR wrong number of arguments for 'client|setname' command")
+            return extra
+        var nt = tokens[unsafe_offset=i + 2]
+        for k in range(nt.length):
+            var c = nt.ptr[unsafe_offset=k]
+            if c < 33 or c > 126:
+                writer.append_error_response("ERR Client names cannot contain spaces, newlines or special characters.")
+                return extra
+        if nt.length == 0:
+            if Int(fd) in names:
+                _ = names.pop(Int(fd))
+        else:
+            names[Int(fd)] = nt.value()
+        writer.append_ok_response()
+    elif arg_eq(sp, sl, "getname"):
+        if Int(fd) in names:
+            var nm = names[Int(fd)]
+            writer.append_bulk_string_response(nm.unsafe_ptr(), nm.byte_length())
+        else:
+            writer.append_null_response()
+    elif arg_eq(sp, sl, "info") or arg_eq(sp, sl, "list"):
+        var nm = names[Int(fd)] if Int(fd) in names else String("")
+        var info = (String("id=") + String(Int(fd)) + " addr=127.0.0.1 fd=" + String(Int(fd))
+                    + " name=" + nm + " db=0 flags=N resp=" + String(Int(writer.proto)) + "\n")
+        writer.append_verbatim_response(info.unsafe_ptr(), info.byte_length())
+    elif arg_eq(sp, sl, "no-evict") or arg_eq(sp, sl, "no-touch"):
+        # Pion evicts nothing and keeps no LRU, so both are already true.
+        writer.append_ok_response()
+    elif arg_eq(sp, sl, "setinfo"):
+        writer.append_ok_response()
+    else:
+        writer.append_error_response(String("ERR unknown subcommand '") + sub.value()
+                                     + "'. Try CLIENT HELP.")
+    return extra

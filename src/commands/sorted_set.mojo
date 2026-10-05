@@ -11,6 +11,8 @@ from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
 from src.io.wal import WAL, gv_bytes
 from src.common.skip_list import SlabSkipList
+from src.commands.mpop import parse_mpop
+from src.commands.scan_opts import parse_scan_opts, scan_no_opts
 from src.memory.object_pool import ObjectPool
 
 
@@ -38,6 +40,87 @@ from src.memory.object_pool import ObjectPool
 comptime ZAGG_SUM = 0
 comptime ZAGG_MIN = 1
 comptime ZAGG_MAX = 2
+
+
+@always_inline
+def _lex_item_ok(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    """A lex range item as Redis's zslParseLexRangeItem accepts it: "-" or "+"
+    alone, or "[" / "(" then the bound. Anything else is
+    `ERR min or max not valid string range item`, which Redis checks before the
+    key; Pion answered an empty range."""
+    if n == 0:
+        return False
+    var c = p[0]
+    if c == 43 or c == 45:            # "+" "-"
+        return n == 1
+    return c == 40 or c == 91         # "(" "["
+
+
+comptime _E_LEX_RANGE = "ERR min or max not valid string range item"
+
+
+@fieldwise_init
+struct ZRangeOpts(Copyable, Movable, ImplicitlyCopyable):
+    var ok: Bool
+    var withscores: Bool
+    var offset: Int
+    var count: Int          # -1: no LIMIT
+
+
+def _zrange_legacy_opts(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], start: Int, end: Int,
+                        mut writer: ResponseWriter, ranked: Bool, bylex: Bool) -> ZRangeOpts:
+    """[WITHSCORES] [LIMIT offset count] after ZRANGEBYSCORE / ZREVRANGEBYSCORE /
+    ZRANGEBYLEX / ZREVRANGEBYLEX / ZREVRANGE, read as Redis's
+    zrangeGenericCommand reads them: in any order, anything else a syntax error,
+    then the combinations Redis refuses. Redis parses these BEFORE the range and
+    the key, so a bad option wins over a bad range or a wrong type. On error the
+    reply is written and `ok` is False. The handlers matched each keyword by its
+    length and first letter and stopped silently at anything else."""
+    var o = ZRangeOpts(False, False, 0, -1)
+    var j = start
+    while j < end:
+        var t = tokens[j]
+        if arg_eq(t.ptr, t.length, "withscores"):
+            o.withscores = True
+        elif arg_eq(t.ptr, t.length, "limit") and end - j - 1 >= 2:
+            var a = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var b = parse_int64_strict(tokens[j + 2].ptr, tokens[j + 2].length)
+            if not a.ok or not b.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return o
+            o.offset = Int(a.value)
+            o.count = Int(b.value)
+            j += 2
+        else:
+            writer.append_error_response("ERR syntax error")
+            return o
+        j += 1
+    if o.count != -1 and ranked:
+        writer.append_error_response("ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX")
+        return o
+    if o.withscores and bylex:
+        writer.append_error_response("ERR syntax error, WITHSCORES not supported in combination with BYLEX")
+        return o
+    o.ok = True
+    return o
+
+
+@always_inline
+def _lex_in(m: GenericValue, lo_c: UInt8, lo: GenericValue, hi_c: UInt8, hi: GenericValue) -> Bool:
+    """`m` within a validated lex range: lo_c / hi_c are each item's first
+    byte ("-" "+" "[" "("), lo / hi the bound after it. Byte order, shorter
+    first (GenericValue.lex_lt) — the order the set is kept in."""
+    var lo_ok: Bool
+    if lo_c == 45: lo_ok = True                     # "-"
+    elif lo_c == 43: lo_ok = False                  # "+": nothing is above +
+    elif lo_c == 91: lo_ok = not m.lex_lt(lo)       # "[": m >= lo
+    else: lo_ok = lo.lex_lt(m)                      # "(": m > lo
+    if not lo_ok:
+        return False
+    if hi_c == 43: return True                      # "+"
+    if hi_c == 45: return False                     # "-"
+    if hi_c == 91: return not hi.lex_lt(m)          # "[": m <= hi
+    return m.lex_lt(hi)                             # "(": m < hi
 
 
 @fieldwise_init
@@ -152,8 +235,13 @@ def _zsetop_accumulate(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigi
 def _zsetop_parse_opts(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
                        start: Int, num_tokens: Int, numkeys: Int,
                        mut weights: List[Float64], mut aggregate: Int,
-                       mut withscores: Bool) raises -> Int:
-    """Parse [WEIGHTS w...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES] in any order.
+                       mut withscores: Bool, allow_withscores: Bool = True) raises -> Int:
+    """Parse [WEIGHTS w...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES] in any order,
+    as Redis's zunionInterDiffGenericCommand does: WEIGHTS needs one weight per
+    key, AGGREGATE one of its three words, WITHSCORES only where a reply can
+    carry scores (not the STORE forms), and anything else is a syntax error.
+    Keywords were matched by length and first letter, an unknown AGGREGATE
+    word was SUM, and the scan stopped silently at anything it did not know.
 
     Returns the index one past the last option token. Order matters: scanning
     for WITHSCORES only at a fixed offset is what made `ZUNION ... WEIGHTS 2 3
@@ -162,33 +250,27 @@ def _zsetop_parse_opts(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
     var j = start
     while j < num_tokens:
         var tp = tokens[j].ptr; var tl = tokens[j].length
-        if tl == 7 and (tp[0]|0x20) == 119:            # WEIGHTS
+        var remaining = num_tokens - j
+        if remaining >= numkeys + 1 and arg_eq(tp, tl, "weights"):
             j += 1
+            weights.clear()                   # a second WEIGHTS replaces the first
             for _ in range(numkeys):
-                if j < num_tokens:
-                    var _wp = parse_redis_double(tokens[j].ptr, tokens[j].length, DOUBLE_VALUE)
-                    if not _wp.ok:
-                        raise Error("ERR weight value is not a float")
-                    weights.append(_wp.value); j += 1
-        elif tl == 9 and (tp[0]|0x20) == 97:           # AGGREGATE
-            j += 1
-            if j < num_tokens:
-                var ap = tokens[j].ptr; var al = tokens[j].length
-                if al == 3 and (ap[0]|0x20) == 109 and (ap[1]|0x20) == 105: aggregate = ZAGG_MIN
-                elif al == 3 and (ap[0]|0x20) == 109 and (ap[1]|0x20) == 97: aggregate = ZAGG_MAX
-                else: aggregate = ZAGG_SUM
-                j += 1
-        elif tl == 10 and (tp[0]|0x20) == 119:         # WITHSCORES
+                var _wp = parse_redis_double(tokens[j].ptr, tokens[j].length, DOUBLE_VALUE)
+                if not _wp.ok:
+                    raise Error("ERR weight value is not a float")
+                weights.append(_wp.value); j += 1
+        elif remaining >= 2 and arg_eq(tp, tl, "aggregate"):
+            var ap = tokens[j + 1].ptr; var al = tokens[j + 1].length
+            if arg_eq(ap, al, "sum"): aggregate = ZAGG_SUM
+            elif arg_eq(ap, al, "min"): aggregate = ZAGG_MIN
+            elif arg_eq(ap, al, "max"): aggregate = ZAGG_MAX
+            else: raise Error("ERR syntax error")
+            j += 2
+        elif allow_withscores and arg_eq(tp, tl, "withscores"):
             withscores = True; j += 1
         else:
-            break
+            raise Error("ERR syntax error")
     return j
-
-
-@always_inline
-def _zsetop_emit_score(mut writer: ResponseWriter, sc: Float64):
-    """Integer-valued scores print bare (`2`, not `2.0`), as ZRANGE does."""
-    writer.append_bulk_score_response(sc)
 
 
 @always_inline
@@ -246,49 +328,64 @@ def handle_zcard(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
         return 0
 
 
+def _zrank_common(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+                  mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                  reverse: Bool, name: StringLiteral) raises -> Int:
+    """ZRANK / ZREVRANK key member [WITHSCORE]. WITHSCORE (Redis 7.2) answers
+    [rank, score], or a nil array when there is no rank; it used to be ignored,
+    so the reply was the bare rank (#30). Any other trailing argument is a
+    syntax error, as in Redis."""
+    if i + 2 >= num_tokens:
+        writer.append_error_response(String("ERR wrong number of arguments for '") + name + "' command")
+        return 0
+    var with_score = False
+    if i + 3 < num_tokens:
+        if i + 4 < num_tokens or not arg_eq(tokens[i+3].ptr, tokens[i+3].length, "withscore"):
+            writer.append_error_response("ERR syntax error")
+            return num_tokens - i - 1
+        with_score = True
+    var v = keyspace[].get(tokens[i+1].value())
+    var m = GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length)
+    var found = False
+    var rank = 0
+    var score = Float64(0.0)
+    if not v.is_none() and v.type.value != ValueType.ZSET:
+        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+        return num_tokens - i - 1
+    if not v.is_none():
+        var zp = v.as_zset().bitcast[SlabSkipList]()
+        var c = zp[].head[].forward[0]
+        while is_not_null(c):
+            if c[].obj == m:
+                found = True
+                score = c[].score
+                break
+            rank += 1
+            c = c[].forward[0]
+        if found and reverse:
+            rank = zp[].length - rank - 1
+    if not found:
+        if with_score: writer.append_null_array_response()
+        else: writer.append_null_response()
+    elif with_score:
+        writer.append_array_header(2)
+        writer.append_int_response(Int64(rank))
+        writer.append_score_response(score)   # RESP3: a double
+    else:
+        writer.append_int_response(Int64(rank))
+    return num_tokens - i - 1
+
+
 @always_inline
 def handle_zrank(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """ZRANK key member -> rank (0-based) or nil."""
-    if i + 2 < num_tokens:
-        var _zrk_v = keyspace[].get(tokens[i+1].value())
-        var _zrk_m = GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length)
-        if _zrk_v.is_none(): writer.append_null_response()
-        elif _zrk_v.type.value == ValueType.ZSET:
-            var _zrk_p = _zrk_v.as_zset().bitcast[SlabSkipList]()
-            var _zrk_c = _zrk_p[].head[].forward[0]; var _zrk_r = 0; var _zrk_f = False
-            while is_not_null(_zrk_c):
-                if _zrk_c[].obj == _zrk_m: _zrk_f = True; break
-                _zrk_r += 1; _zrk_c = _zrk_c[].forward[0]
-            if _zrk_f: writer.append_int_response(Int64(_zrk_r))
-            else: writer.append_null_response()
-        else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-        return 2
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'zrank' command")
-        return 0
+    """ZRANK key member [WITHSCORE] -> rank (0-based), [rank, score] or nil."""
+    return _zrank_common(tokens, i, num_tokens, writer, keyspace, False, "zrank")
 
 
 @always_inline
 def handle_zrevrank(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
-    """ZREVRANK key member -> reverse rank or nil."""
-    if i + 2 < num_tokens:
-        var _zrv_v = keyspace[].get(tokens[i+1].value())
-        var _zrv_m = GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length)
-        if _zrv_v.is_none(): writer.append_null_response()
-        elif _zrv_v.type.value == ValueType.ZSET:
-            var _zrvp = _zrv_v.as_zset().bitcast[SlabSkipList]()
-            var _zrv_len = _zrvp[].length
-            var _zrv_c = _zrvp[].head[].forward[0]; var _zrv_r = 0; var _zrv_f = False
-            while is_not_null(_zrv_c):
-                if _zrv_c[].obj == _zrv_m: _zrv_f = True; break
-                _zrv_r += 1; _zrv_c = _zrv_c[].forward[0]
-            if _zrv_f: writer.append_int_response(Int64(_zrv_len - _zrv_r - 1))
-            else: writer.append_null_response()
-        else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-        return 2
-    else:
-        writer.append_error_response("ERR wrong number of arguments for 'zrevrank' command")
-        return 0
+    """ZREVRANK key member [WITHSCORE] -> reverse rank, [rank, score] or nil."""
+    return _zrank_common(tokens, i, num_tokens, writer, keyspace, True, "zrevrank")
 
 
 @always_inline
@@ -433,12 +530,9 @@ def _zr_emit(mut writer: ResponseWriter, objs: List[GenericValue],
         if _end > _n: _end = _n
     var _emitted = _end - _start
     if _emitted < 0: _emitted = 0
-    var _h = "*" + String(_emitted * (2 if with_scores else 1)) + "\r\n"
-    writer.append_to_response(_h.unsafe_ptr(), _h.byte_length())
+    writer.append_scored_header(_emitted, with_scores)   # RESP3: [member, score] pairs
     for _zi in range(_start, _start + _emitted):
-        writer.append_bulk_value_response(objs[_zi])
-        if with_scores:
-            writer.append_bulk_score_response(scores[_zi])
+        writer.append_scored_member(objs[_zi], scores[_zi], with_scores)
 
 
 def _zrange_index_rev(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], a_in: Int, b_in: Int, with_scores: Bool, cons: Int) raises -> Int:
@@ -477,6 +571,10 @@ def _zrange_by(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, nu
     not an error, which is why it needs saying."""
     var _lo_i = i + 3 if rev else i + 2
     var _hi_i = i + 2 if rev else i + 3
+    if bylex and (not _lex_item_ok(tokens[_lo_i].ptr, tokens[_lo_i].length)
+                  or not _lex_item_ok(tokens[_hi_i].ptr, tokens[_hi_i].length)):
+        writer.append_error_response(_E_LEX_RANGE)
+        return cons
     var _v = keyspace[].get(tokens[i+1].value())
     if not _v.is_none() and _v.type.value != ValueType.ZSET:
         writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -564,34 +662,38 @@ def handle_zrange(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
             var _op = tokens[_oi].ptr; var _ol = tokens[_oi].length
             if arg_eq(_op, _ol, "withscores"):
                 _zrng_with = True; _zrng_cons = _oi - i; _oi += 1
-            elif arg_eq(_op, _ol, "byscore"):
+            elif arg_eq(_op, _ol, "byscore") and not (_zr_byscore or _zr_bylex):
                 _zr_byscore = True; _zrng_cons = _oi - i; _oi += 1
-            elif arg_eq(_op, _ol, "bylex"):
+            elif arg_eq(_op, _ol, "bylex") and not (_zr_byscore or _zr_bylex):
                 _zr_bylex = True; _zrng_cons = _oi - i; _oi += 1
-            elif arg_eq(_op, _ol, "rev"):
+            elif arg_eq(_op, _ol, "rev") and not _zr_rev:
                 _zr_rev = True; _zrng_cons = _oi - i; _oi += 1
-            elif arg_eq(_op, _ol, "limit"):
-                if _oi + 2 >= num_tokens:
-                    _zr_bad = True; break
+            elif arg_eq(_op, _ol, "limit") and _oi + 2 < num_tokens:
+                var _la = parse_int64_strict(tokens[_oi+1].ptr, tokens[_oi+1].length)
+                var _lb = parse_int64_strict(tokens[_oi+2].ptr, tokens[_oi+2].length)
+                if not _la.ok or not _lb.ok:
+                    writer.append_error_response("ERR value is not an integer or out of range")
+                    return num_tokens - 1 - i
                 _zr_has_limit = True
-                _zr_lim_off = strict_atol(tokens[_oi+1].value())
-                _zr_lim_cnt = strict_atol(tokens[_oi+2].value())
+                _zr_lim_off = Int(_la.value)
+                _zr_lim_cnt = Int(_lb.value)
                 _oi += 3; _zrng_cons = _oi - i - 1
             else:
-                break
+                # Redis's syntax error: an unknown word, a repeated BY*/REV, or
+                # LIMIT without both numbers. These used to end the scan silently.
+                _zr_bad = True; break
         # Redis rejects these combinations rather than guessing an intent.
         # LIMIT-without-BY gets its own message because that is the one a user
         # hits by hand; the rest share the generic syntax error, as Redis does.
-        var _zr_limit_misuse = _zr_has_limit and not (_zr_byscore or _zr_bylex)
-        if _zr_byscore and _zr_bylex: _zr_bad = True
-        if _zr_limit_misuse: _zr_bad = True
-        if _zr_bylex and _zrng_with: _zr_bad = True
         if _zr_bad:
-            if _zr_limit_misuse:
-                writer.append_error_response("ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX")
-            else:
-                writer.append_error_response("ERR syntax error")
-            return _zrng_cons
+            writer.append_error_response("ERR syntax error")
+            return num_tokens - 1 - i
+        if _zr_has_limit and not (_zr_byscore or _zr_bylex):
+            writer.append_error_response("ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX")
+            return num_tokens - 1 - i
+        if _zr_bylex and _zrng_with:
+            writer.append_error_response("ERR syntax error, WITHSCORES not supported in combination with BYLEX")
+            return num_tokens - 1 - i
 
         if _zr_byscore or _zr_bylex:
             return _zrange_by(tokens, i, num_tokens, writer, keyspace,
@@ -616,15 +718,11 @@ def handle_zrange(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
             if _zrng_a > _zrng_b or _zrng_a >= _zrlen:
                 writer.append_empty_array_response()
             else:
-                var _zrn = (_zrng_b - _zrng_a + 1) * (2 if _zrng_with else 1)
-                var _zrh = "*" + String(_zrn) + "\r\n"
-                writer.append_to_response(_zrh.unsafe_ptr(), _zrh.byte_length())
+                writer.append_scored_header((_zrng_b - _zrng_a + 1), _zrng_with)   # RESP3: [member, score] pairs
                 var _zridx = 0; var _zrc = _zrp[].head[].forward[0]
                 while is_not_null(_zrc):
                     if _zridx >= _zrng_a and _zridx <= _zrng_b:
-                        writer.append_bulk_value_response(_zrc[].obj)
-                        if _zrng_with:
-                            writer.append_bulk_score_response(_zrc[].score)
+                        writer.append_scored_member(_zrc[].obj, _zrc[].score, _zrng_with)
                     if _zridx >= _zrng_b: break
                     _zridx += 1; _zrc = _zrc[].forward[0]
         else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -638,12 +736,12 @@ def handle_zrange(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
 def handle_zrevrange(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """ZREVRANGE key start stop [WITHSCORES] -> list of members in reverse order."""
     if i + 3 < num_tokens:
+        var _zo = _zrange_legacy_opts(tokens, i + 4, num_tokens, writer, True, False)
+        if not _zo.ok:
+            return 0
         var _zrv_key = tokens[i+1].value()
         var _zrva = strict_atol(tokens[i+2].value()); var _zrvb = strict_atol(tokens[i+3].value())
-        var _zrv_with = False; var _zrv_cons = 3
-        if i + 4 < num_tokens:
-            var _op = tokens[i+4].ptr; var _ol = tokens[i+4].length
-            if _ol == 10 and (_op[0]|0x20)==119: _zrv_with = True; _zrv_cons = 4
+        var _zrv_with = _zo.withscores; var _zrv_cons = num_tokens - 1 - i
         var _zrvv = keyspace[].get(_zrv_key)
         if _zrvv.is_none(): writer.append_empty_array_response()
         elif _zrvv.type.value == ValueType.ZSET:
@@ -664,14 +762,10 @@ def handle_zrevrange(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
                     _rvci = _rvci[].forward[0]
                 # Convert from reverse rank to forward rank
                 var _rev_a = _zrvlen - 1 - _zrvb; var _rev_b = _zrvlen - 1 - _zrva
-                var _zrn = (_rev_b - _rev_a + 1) * (2 if _zrv_with else 1)
-                var _zrh = "*" + String(_zrn) + "\r\n"
-                writer.append_to_response(_zrh.unsafe_ptr(), _zrh.byte_length())
+                writer.append_scored_header((_rev_b - _rev_a + 1), _zrv_with)   # RESP3: [member, score] pairs
                 # Output in reverse order
                 for _ri in range(_rev_b, _rev_a - 1, -1):
-                    writer.append_bulk_value_response(_rvoo[_ri])
-                    if _zrv_with:
-                        writer.append_bulk_score_response(_rvss[_ri])
+                    writer.append_scored_member(_rvoo[_ri], _rvss[_ri], _zrv_with)
         else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         return _zrv_cons
     else:
@@ -683,6 +777,9 @@ def handle_zrevrange(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
 def handle_zrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count] -> members in score range."""
     if i + 3 < num_tokens:
+        var _zo = _zrange_legacy_opts(tokens, i + 4, num_tokens, writer, False, False)
+        if not _zo.ok:
+            return 0
         var _zbs_key = tokens[i+1].value()
         var _zbsap = tokens[i+2].ptr; var _zbsal = tokens[i+2].length
         var _zbsbp = tokens[i+3].ptr; var _zbsbl = tokens[i+3].length
@@ -699,14 +796,8 @@ def handle_zrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], 
             raise Error("ERR min or max is not a float")
         _zbsb = _sb_zbsb.value
         _zbsb_excl = _sb_zbsb.excl
-        var _zbs_with = False; var _zbs_lim_off = 0; var _zbs_lim_cnt = -1
-        while _i + 1 < num_tokens:
-            var _op = tokens[_i+1].ptr; var _ol = tokens[_i+1].length
-            if _ol == 10 and (_op[0]|0x20)==119: _zbs_with = True; _i += 1
-            elif _ol == 5 and (_op[0]|0x20)==108:
-                _zbs_lim_off = strict_atol(tokens[_i+2].value())
-                _zbs_lim_cnt = strict_atol(tokens[_i+3].value()); _i += 3
-            else: break
+        var _zbs_with = _zo.withscores; var _zbs_lim_off = _zo.offset; var _zbs_lim_cnt = _zo.count
+        _i = num_tokens - 1
         var _zbsv = keyspace[].get(_zbs_key)
         # gh #232: wrong type answered like an empty container. Every
         # call site ignores this return and sets i = cmd_end_tok - 1
@@ -732,13 +823,9 @@ def handle_zrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], 
                         if _zbs_lim_cnt > 0 and len(_zbs_res) >= _zbs_lim_cnt: break
                 if _s > _zbsb: break
                 _zbsc = _zbsc[].forward[0]
-        var _zbs_n = len(_zbs_roo) * (2 if _zbs_with else 1)
-        var _zbs_h = "*" + String(_zbs_n) + "\r\n"
-        writer.append_to_response(_zbs_h.unsafe_ptr(), _zbs_h.byte_length())
+        writer.append_scored_header(len(_zbs_roo), _zbs_with)   # RESP3: [member, score] pairs
         for _zi in range(len(_zbs_roo)):
-            writer.append_bulk_value_response(_zbs_roo[_zi])
-            if _zbs_with:
-                writer.append_bulk_score_response(_zbs_res[_zi])
+            writer.append_scored_member(_zbs_roo[_zi], _zbs_res[_zi], _zbs_with)
         return _i - i
     else:
         writer.append_error_response("ERR wrong number of arguments for 'zrangebyscore' command")
@@ -749,6 +836,9 @@ def handle_zrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], 
 def handle_zrevrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """ZREVRANGEBYSCORE key max min [WITHSCORES] [LIMIT offset count] -> members in reverse score range."""
     if i + 3 < num_tokens:
+        var _zo = _zrange_legacy_opts(tokens, i + 4, num_tokens, writer, False, False)
+        if not _zo.ok:
+            return 0
         var _zrvbs_key = tokens[i+1].value()
         var _zrvbsbp = tokens[i+2].ptr; var _zrvbsbl = tokens[i+2].length  # max
         var _zrvbsap = tokens[i+3].ptr; var _zrvbsal = tokens[i+3].length  # min
@@ -765,14 +855,8 @@ def handle_zrevrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin
             raise Error("ERR min or max is not a float")
         _zrvbsb = _sb_zrvbsb.value
         _zrvbsb_excl = _sb_zrvbsb.excl
-        var _zrvbs_with = False; var _zrvbs_lim_off = 0; var _zrvbs_lim_cnt = -1
-        while _i + 1 < num_tokens:
-            var _op = tokens[_i+1].ptr; var _ol = tokens[_i+1].length
-            if _ol == 10 and (_op[0]|0x20)==119: _zrvbs_with = True; _i += 1
-            elif _ol == 5 and (_op[0]|0x20)==108:
-                _zrvbs_lim_off = strict_atol(tokens[_i+2].value())
-                _zrvbs_lim_cnt = strict_atol(tokens[_i+3].value()); _i += 3
-            else: break
+        var _zrvbs_with = _zo.withscores; var _zrvbs_lim_off = _zo.offset; var _zrvbs_lim_cnt = _zo.count
+        _i = num_tokens - 1
         var _zrvbsv = keyspace[].get(_zrvbs_key)
         var _zrvbs_res = List[Float64](); var _zrvbs_roo = List[GenericValue]()
         if _zrvbs_lim_off >= 0 and _zrvbs_lim_cnt != 0 and not _zrvbsv.is_none() and _zrvbsv.type.value == ValueType.ZSET:
@@ -793,13 +877,9 @@ def handle_zrevrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin
                 if _skip > 0: _skip -= 1; continue
                 _zrvbs_res.append(_all_ss[_ri]); _zrvbs_roo.append(_all_oo[_ri])
                 if _zrvbs_lim_cnt > 0 and len(_zrvbs_res) >= _zrvbs_lim_cnt: break
-        var _zrvbs_n = len(_zrvbs_roo) * (2 if _zrvbs_with else 1)
-        var _zrvbs_h = "*" + String(_zrvbs_n) + "\r\n"
-        writer.append_to_response(_zrvbs_h.unsafe_ptr(), _zrvbs_h.byte_length())
+        writer.append_scored_header(len(_zrvbs_roo), _zrvbs_with)   # RESP3: [member, score] pairs
         for _zi in range(len(_zrvbs_roo)):
-            writer.append_bulk_value_response(_zrvbs_roo[_zi])
-            if _zrvbs_with:
-                writer.append_bulk_score_response(_zrvbs_res[_zi])
+            writer.append_scored_member(_zrvbs_roo[_zi], _zrvbs_res[_zi], _zrvbs_with)
         return _i - i
     else:
         writer.append_error_response("ERR wrong number of arguments for 'zrevrangebyscore' command")
@@ -841,12 +921,10 @@ def handle_zunion(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
         # Redis's order and matches ZRANGE by construction.
         var _sl = alloc[SlabSkipList](1); _sl.unsafe_write(SlabSkipList(16))
         for _zi in range(len(_mm)): _sl[].insert(_ss[_zi], _mm[_zi])
-        var _zu_h = "*" + String(len(_mm) * (2 if _with else 1)) + "\r\n"
-        writer.append_to_response(_zu_h.unsafe_ptr(), _zu_h.byte_length())
+        writer.append_scored_header(len(_mm), _with)   # RESP3: [member, score] pairs
         var _c = _sl[].head[].forward[0]
         while is_not_null(_c):
-            writer.append_bulk_value_response(_c[].obj)
-            if _with: _zsetop_emit_score(writer, _c[].score)
+            writer.append_scored_member(_c[].obj, _c[].score, _with)
             _c = _c[].forward[0]
         _sl[].release_borrowed()   # temp list of BORROWED members: unmap slabs only
         _sl.unsafe_deinit_pointee(); _sl.free()
@@ -895,12 +973,10 @@ def handle_zinter(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
         for _zi in range(len(_mm)):
             if _hh[_zi] == len(_zikeys):
                 _sl[].insert(_ss2[_zi], _mm[_zi]); _n_out += 1
-        var _zi_h = "*" + String(_n_out * (2 if _with else 1)) + "\r\n"
-        writer.append_to_response(_zi_h.unsafe_ptr(), _zi_h.byte_length())
+        writer.append_scored_header(_n_out, _with)   # RESP3: [member, score] pairs
         var _c = _sl[].head[].forward[0]
         while is_not_null(_c):
-            writer.append_bulk_value_response(_c[].obj)
-            if _with: _zsetop_emit_score(writer, _c[].score)
+            writer.append_scored_member(_c[].obj, _c[].score, _with)
             _c = _c[].forward[0]
         _sl[].release_borrowed()   # temp list of BORROWED members: unmap slabs only
         _sl.unsafe_deinit_pointee(); _sl.free()
@@ -938,7 +1014,7 @@ def handle_zunionstore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i:
                 return _i - i
         var _wsc = False
         var _wts = List[Float64](); var _agg = ZAGG_SUM
-        _i = _zsetop_parse_opts(tokens, _i + 1, num_tokens, _nk, _wts, _agg, _wsc) - 1
+        _i = _zsetop_parse_opts(tokens, _i + 1, num_tokens, _nk, _wts, _agg, _wsc, False) - 1
         var _zus_oo = List[GenericValue](); var _zus_ss = List[Float64]()
         var _hh = List[Int]()
         _zsetop_accumulate(keyspace, _zukeys, _wts, _agg, _zus_oo, _zus_ss, _hh)
@@ -991,7 +1067,7 @@ def handle_zinterstore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i:
                 return _i - i
         var _wsc = False
         var _wts = List[Float64](); var _agg = ZAGG_SUM
-        _i = _zsetop_parse_opts(tokens, _i + 1, num_tokens, _nk, _wts, _agg, _wsc) - 1
+        _i = _zsetop_parse_opts(tokens, _i + 1, num_tokens, _nk, _wts, _agg, _wsc, False) - 1
         var _mm = List[GenericValue](); var _all_ss = List[Float64](); var _hh = List[Int]()
         _zsetop_accumulate(keyspace, _zikeys, _wts, _agg, _mm, _all_ss, _hh)
         var _zi_ss = List[Float64](); var _zi_oo = List[GenericValue]()
@@ -1022,6 +1098,10 @@ def handle_zinterstore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i:
 def handle_zlexcount(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """ZLEXCOUNT key min max -> count of members in lex range."""
     if i + 3 < num_tokens:
+        if not _lex_item_ok(tokens[i+2].ptr, tokens[i+2].length) \
+                or not _lex_item_ok(tokens[i+3].ptr, tokens[i+3].length):
+            writer.append_error_response(_E_LEX_RANGE)
+            return 0
         var _zlv = keyspace[].get(tokens[i+1].value())
         # gh #232: wrong type answered like an empty container. Every
         # call site ignores this return and sets i = cmd_end_tok - 1
@@ -1064,9 +1144,15 @@ def handle_zlexcount(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
 def handle_zrangebylex(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """ZRANGEBYLEX key min max [LIMIT offset count] -> members in lex range."""
     if i + 3 < num_tokens:
+        var _zo = _zrange_legacy_opts(tokens, i + 4, num_tokens, writer, False, True)
+        if not _zo.ok:
+            return 0
         var _zbl_key = tokens[i+1].value()
         var _zbla_p = tokens[i+2].ptr; var _zbla_l = tokens[i+2].length
         var _zblb_p = tokens[i+3].ptr; var _zblb_l = tokens[i+3].length
+        if not _lex_item_ok(_zbla_p, _zbla_l) or not _lex_item_ok(_zblb_p, _zblb_l):
+            writer.append_error_response(_E_LEX_RANGE)
+            return 0
         var _i = i + 3
         var _zbla_min = (_zbla_l == 1 and _zbla_p[0] == 45)
         var _zbla_max = (_zbla_l == 1 and _zbla_p[0] == 43)
@@ -1079,13 +1165,8 @@ def handle_zrangebylex(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i:
         _zbla_str += bytes_to_string(_zbla_p + 1, _zbla_l - 1)
         var _zblb_str = String("")
         _zblb_str += bytes_to_string(_zblb_p + 1, _zblb_l - 1)
-        var _zbl_lim_off = 0; var _zbl_lim_cnt = -1
-        if _i + 1 < num_tokens:
-            var _op = tokens[_i+1].ptr; var _ol = tokens[_i+1].length
-            if _ol == 5 and (_op[0]|0x20)==108:
-                _zbl_lim_off = strict_atol(tokens[_i+2].value())
-                _zbl_lim_cnt = strict_atol(tokens[_i+3].value())
-                _i += 3
+        var _zbl_lim_off = _zo.offset; var _zbl_lim_cnt = _zo.count
+        _i = num_tokens - 1
         var _zblv = keyspace[].get(_zbl_key)
         # gh #232: wrong type answered like an empty container. Every
         # call site ignores this return and sets i = cmd_end_tok - 1
@@ -1120,9 +1201,15 @@ def handle_zrangebylex(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i:
 def handle_zrevrangebylex(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """ZREVRANGEBYLEX key max min [LIMIT offset count] -> members in reverse lex range."""
     if i + 3 < num_tokens:
+        var _zo = _zrange_legacy_opts(tokens, i + 4, num_tokens, writer, False, True)
+        if not _zo.ok:
+            return 0
         var _zrvlk = tokens[i+1].value()
         var _zrvbp = tokens[i+2].ptr; var _zrvbl = tokens[i+2].length  # max (hi)
         var _zrvap = tokens[i+3].ptr; var _zrval = tokens[i+3].length  # min (lo)
+        if not _lex_item_ok(_zrvbp, _zrvbl) or not _lex_item_ok(_zrvap, _zrval):
+            writer.append_error_response(_E_LEX_RANGE)
+            return 0
         var _i = i + 3
         var _zrvla_min = (_zrval == 1 and _zrvap[0] == 45); var _zrvla_max = (_zrval == 1 and _zrvap[0] == 43)
         var _zrvlb_max = (_zrvbl == 1 and _zrvbp[0] == 43)
@@ -1134,12 +1221,8 @@ def handle_zrevrangebylex(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
         _zrvla_str += bytes_to_string(_zrvap + 1, _zrval - 1)
         var _zrvlb_str = String("")
         _zrvlb_str += bytes_to_string(_zrvbp + 1, _zrvbl - 1)
-        # LIMIT was never parsed here, so every window answered the whole range.
-        var _zrvl_lim_off = 0; var _zrvl_lim_cnt = -1
-        if _i + 3 < num_tokens and tokens[_i+1].length == 5 and (tokens[_i+1].ptr[0]|0x20) == 108:
-            _zrvl_lim_off = strict_atol(tokens[_i+2].value())
-            _zrvl_lim_cnt = strict_atol(tokens[_i+3].value())
-            _i += 3
+        var _zrvl_lim_off = _zo.offset; var _zrvl_lim_cnt = _zo.count
+        _i = num_tokens - 1
         var _zrvlv = keyspace[].get(_zrvlk)
         var _zrvl_res = List[GenericValue]()
         if _zrvl_lim_off >= 0 and _zrvl_lim_cnt != 0 and not _zrvlv.is_none() and _zrvlv.type.value == ValueType.ZSET:
@@ -1180,25 +1263,14 @@ def handle_zmpop(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
     if i + 3 >= num_tokens:
         writer.append_error_response("ERR wrong number of arguments for 'zmpop' command")
         return 0
-    var _nk = strict_atol(tokens[i+1].value())
-    if _nk <= 0 or i + 1 + _nk >= num_tokens:
-        writer.append_error_response("ERR numkeys should be greater than 0")
+    var _mp = parse_mpop(tokens, i + 1, num_tokens, True)
+    if _mp.error.byte_length() > 0:
+        writer.append_error_response(_mp.error)
         return num_tokens - 1 - i
-    var _di = i + 2 + _nk                      # MIN|MAX
-    if _di >= num_tokens:
-        writer.append_error_response("ERR syntax error")
-        return num_tokens - 1 - i
-    var _from_min = arg_eq(tokens[_di].ptr, tokens[_di].length, "min")
-    if not _from_min and not arg_eq(tokens[_di].ptr, tokens[_di].length, "max"):
-        writer.append_error_response("ERR syntax error")
-        return num_tokens - 1 - i
-    var _ci = _di
-    var _count = 1
-    if _ci + 2 < num_tokens and arg_eq(tokens[_ci+1].ptr, tokens[_ci+1].length, "count"):
-        _count = strict_atol(tokens[_ci+2].value()); _ci += 2
-    if _count <= 0:
-        writer.append_error_response("ERR count should be greater than 0")
-        return _ci - i
+    var _nk = _mp.numkeys
+    var _from_min = _mp.first
+    var _count = _mp.count
+    var _ci = num_tokens - 1
 
     for _ki in range(_nk):
         var _kt = i + 2 + _ki
@@ -1230,7 +1302,7 @@ def handle_zmpop(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             var _pair = "*2\r\n"
             writer.append_to_response(_pair.unsafe_ptr(), _pair.byte_length())
             writer.append_bulk_value_response(_r.obj)
-            writer.append_bulk_score_response(_r.score)
+            writer.append_score_response(_r.score)   # RESP3: a double, as Redis
             # gh #170: log the RESOLVED effect (a ZREM per popped member).
             if is_not_null(wal):
                 var _wl = 0
@@ -1246,7 +1318,7 @@ def handle_zmpop(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
                 _ = wal[].append(2, tokens[_kt].ptr, tokens[_kt].length)
         return _ci - i
 
-    writer.append_null_response()
+    writer.append_null_array_response()   # Redis: a null ARRAY when nothing popped
     return _ci - i
 
 
@@ -1275,15 +1347,23 @@ def handle_zpopmax(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int
                 # gh #394: pop_max is O(log n) per member. This used to copy
                 # every node out, reset() the set and re-insert the survivors —
                 # O(n) per ZPOPMAX — and never freed a popped member.
-                var _out_h = "*" + String(_popc * 2) + "\r\n"
-                writer.append_to_response(_out_h.unsafe_ptr(), _out_h.byte_length())
+                # RESP3, as Redis: [member, score] without a count, a list
+                # of such pairs with one. RESP2: one flat array either way.
+                var _zpm_pairs = _zpm_cons == 2
+                if _zpm_pairs:
+                    writer.append_scored_header(_popc, True)
+                else:
+                    writer.append_array_header(2)
                 var _wb = alloc[UInt8](64)
                 for _ in range(_popc):
                     var _r = _zpmp[].pop_max()
                     if not _r.valid:
                         break
-                    writer.append_bulk_value_response(_r.obj)
-                    writer.append_bulk_score_response(_r.score)
+                    if _zpm_pairs:
+                        writer.append_scored_member(_r.obj, _r.score, True)
+                    else:
+                        writer.append_bulk_value_response(_r.obj)
+                        writer.append_score_response(_r.score)
                     var _wl = 0
                     var _wp = gv_bytes(_r.obj, _wb, _wl)
                     _ = wal[].append_kv(12, tokens[i+1].ptr, tokens[i+1].length, _wp, _wl)
@@ -1313,8 +1393,11 @@ def handle_zrandmember(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i:
         if i + 2 < num_tokens:   # gh #393: always a count when present (see SRANDMEMBER)
             _zrm_cnt = rand_count(tokens[i+2].ptr, tokens[i+2].length); _zrm_as_arr = True; _zrm_cons = 2
             if i + 3 < num_tokens:
-                var _op = tokens[i+3].ptr; var _ol = tokens[i+3].length
-                if _ol == 10 and (_op[0]|0x20)==119: _zrm_with = True; _zrm_cons = 3
+                # Redis: exactly WITHSCORES after the count, nothing more.
+                if num_tokens - i > 4 or not arg_eq(tokens[i+3].ptr, tokens[i+3].length, "withscores"):
+                    writer.append_error_response("ERR syntax error")
+                    return num_tokens - 1 - i
+                _zrm_with = True; _zrm_cons = 3
         var _zrmv = keyspace[].get(_zrm_key)
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered
         # identically, with an empty/zero reply. Redis distinguishes them, and
@@ -1332,17 +1415,14 @@ def handle_zrandmember(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i:
             var _abs_cnt = _zrm_cnt if _zrm_cnt >= 0 else -_zrm_cnt
             var _out_n = min(_abs_cnt, _zrm_len) if _zrm_cnt >= 0 else _abs_cnt
             if _zrm_as_arr:
-                var _rh = "*" + String(_out_n * (2 if _zrm_with else 1)) + "\r\n"
-                writer.append_to_response(_rh.unsafe_ptr(), _rh.byte_length())
+                writer.append_scored_header(_out_n, _zrm_with)   # RESP3: [member, score] pairs
                 var _emitted = 0; var _rc = _zrmp[].head[].forward[0]
                 # The header declares _out_n, and for a negative count _out_n can
                 # EXCEED the set size — the walk must cycle back to the head or
                 # the body emits fewer elements than declared and desyncs.
                 while _emitted < _out_n and is_not_null(_zrmp[].head[].forward[0]):
                     if is_null(_rc): _rc = _zrmp[].head[].forward[0]
-                    writer.append_bulk_value_response(_rc[].obj)
-                    if _zrm_with:
-                        writer.append_bulk_score_response(_rc[].score)
+                    writer.append_scored_member(_rc[].obj, _rc[].score, _zrm_with)
                     _emitted += 1; _rc = _rc[].forward[0]
             else:
                 var _rc = _zrmp[].head[].forward[0]
@@ -1388,7 +1468,7 @@ def handle_zmscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int
                 var _zsc = _zsp[].head[].forward[0]; var _zf = False
                 while is_not_null(_zsc):
                     if _zsc[].obj == _mem:
-                        writer.append_bulk_score_response(_zsc[].score)
+                        writer.append_score_response(_zsc[].score)   # RESP3: a double
                         _zf = True; break
                     _zsc = _zsc[].forward[0]
                 if not _zf: writer.append_null_response()
@@ -1404,26 +1484,14 @@ def handle_zscan(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
     if i + 2 < num_tokens:
         var _zsv = keyspace[].get(tokens[i+1].value())
         _ = scan_cursor(tokens[i+2].ptr, tokens[i+2].length)   # gh #393: it was never read
-        var _i = i + 2  # key + cursor
-        var zs_pat_p = null_ptr[UInt8, MutUntrackedOrigin]()
-        var zs_pat_l = 0
-        while _i + 1 < num_tokens and (tokens[_i+1].length == 5 or tokens[_i+1].length == 3):
-            var _op = tokens[_i+1].ptr; var _ol = tokens[_i+1].length
-            if _ol == 5 and (_op[0]|0x20)==109:
-                if _i + 2 < num_tokens:                        # gh #244
-                    zs_pat_p = tokens[_i+2].ptr
-                    zs_pat_l = tokens[_i+2].length
-                _i += 2
-            elif _ol == 5 and (_op[0]|0x20)==99:   # COUNT count (gh #393: validated)
-                if _i + 2 >= num_tokens: raise Error("ERR syntax error")
-                _ = scan_count(tokens[_i+2].ptr, tokens[_i+2].length)
-                _i += 2
-            else: break
-        # gh #232: a MISSING key and a key of the WRONG TYPE were answered
-        # identically, with an empty/zero reply. Redis distinguishes them, and
-        # the conflation runs in the dangerous direction: a caller who stored
-        # the WRONG KIND of value here is told the container is empty, so the
-        # bug looks like missing data instead of a type error at the call site.
+        var _i = num_tokens - 1
+        var so = scan_no_opts()
+        if not _zsv.is_none() and _zsv.type.value == ValueType.ZSET:
+            so = parse_scan_opts(tokens, i + 3, num_tokens, writer, False, False)
+            if not so.ok:
+                return _i - i
+        var zs_pat_p = so.pat_p
+        var zs_pat_l = so.pat_l
         if not _zsv.is_none() and _zsv.type.value != ValueType.ZSET:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         elif _zsv.is_none() or _zsv.type.value != ValueType.ZSET:
@@ -1436,7 +1504,7 @@ def handle_zscan(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             # the reply half the declared length's worth of pairs, so a client
             # walking it two-at-a-time read the NEXT MEMBER as the current
             # member's score. HSCAN and SSCAN were checked and are correct.
-            var zs_all = zs_pat_l == 0 or _glob_all(zs_pat_p, zs_pat_l)
+            var zs_all = not so.has_match or _glob_all(zs_pat_p, zs_pat_l)
             var zs_mb = alloc[UInt8](24)
             var zs_n = 0
             var _zsq = _zsp[].head[].forward[0]
@@ -1571,9 +1639,11 @@ def handle_zdiff(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             _i += 1
         _i -= 1
         var _with = False
-        if _i + 1 < num_tokens:
-            var _op = tokens[_i+1].ptr; var _ol = tokens[_i+1].length
-            if _ol == 10 and (_op[0]|0x20)==119: _with = True; _i += 1
+        # ZDIFF takes WITHSCORES and nothing else (no WEIGHTS/AGGREGATE).
+        while _i + 1 < num_tokens:
+            if not arg_eq(tokens[_i+1].ptr, tokens[_i+1].length, "withscores"):
+                raise Error("ERR syntax error")
+            _with = True; _i += 1
         if len(_keys) == 0:
             writer.append_empty_array_response()
         else:
@@ -1613,12 +1683,10 @@ def handle_zdiff(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
                         _sl[].insert(_dss[_di], _doo[_di]); _dn_out += 1
                 _excl[].forget_borrowed()   # borrowed members
                 _excl.unsafe_deinit_pointee(); _excl.free()
-                var _dh = "*" + String(_dn_out * (2 if _with else 1)) + "\r\n"
-                writer.append_to_response(_dh.unsafe_ptr(), _dh.byte_length())
+                writer.append_scored_header(_dn_out, _with)   # RESP3: [member, score] pairs
                 var _c = _sl[].head[].forward[0]
                 while is_not_null(_c):
-                    writer.append_bulk_value_response(_c[].obj)
-                    if _with: _zsetop_emit_score(writer, _c[].score)
+                    writer.append_scored_member(_c[].obj, _c[].score, _with)
                     _c = _c[].forward[0]
                 _sl[].release_borrowed()   # temp list of BORROWED members: unmap slabs only
                 _sl.unsafe_deinit_pointee(); _sl.free()
@@ -1644,6 +1712,8 @@ def handle_zdiffstore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: 
             if _i < num_tokens: _zdkeys.append(tokens[_i].value())
             _i += 1
         _i -= 1
+        if _i + 1 < num_tokens:          # ZDIFFSTORE takes no options at all
+            raise Error("ERR syntax error")
         # gh #232: same two-accumulator shape as ZDIFF, so a SET participates
         # on either side and the stored scores come from the first key.
         var _zd_ss = List[Float64](); var _zd_oo = List[GenericValue]()
@@ -1686,53 +1756,62 @@ def handle_zdiffstore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: 
         return 0
 
 
+def _zrem_collected(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                    wal: UnsafePointer[WAL, MutUntrackedOrigin],
+                    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], key_tok: Int,
+                    zp: UnsafePointer[SlabSkipList, MutUntrackedOrigin],
+                    mut doomed: List[GenericValue]) -> Int:
+    """Remove `doomed` (owned copies of members) from the sorted set, logging
+    each ZREM, and drop the key when that empties it (gh #234). The copies are
+    freed here. The ZREMRANGEBY* commands used to rebuild the whole set and
+    leak every removed member, and an emptied set stayed as a husk: EXISTS
+    answered 1, and its TTL outlived it."""
+    var removed = 0
+    var wb = alloc[UInt8](64)
+    for j in range(len(doomed)):
+        if zp[].remove(doomed[j]):
+            removed += 1
+            if is_not_null(wal):
+                var wl = 0
+                var wp = gv_bytes(doomed[j], wb, wl)
+                _ = wal[].append_kv(12, tokens[key_tok].ptr, tokens[key_tok].length, wp, wl)
+        doomed[j].free_str_payload()
+    wb.free()
+    if zp[].length == 0:
+        _ = remove_and_free(keyspace, GenericValue.borrow(tokens[key_tok].ptr, tokens[key_tok].length))
+        if is_not_null(wal):
+            _ = wal[].append(2, tokens[key_tok].ptr, tokens[key_tok].length)
+    return removed
+
+
 @always_inline
 def handle_zremrangebylex(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], wal: UnsafePointer[WAL, MutUntrackedOrigin]) raises -> Int:
     """ZREMRANGEBYLEX key min max -> number of removed members."""
     if i + 3 < num_tokens:
-        var _zrlk = tokens[i+1].value()
-        var _zrlap = tokens[i+2].ptr; var _zrlal = tokens[i+2].length
-        var _zrlbp = tokens[i+3].ptr; var _zrlbl = tokens[i+3].length
-        var _zrla_min = (_zrlal == 1 and _zrlap[0] == 45); var _zrla_max = (_zrlal == 1 and _zrlap[0] == 43)
-        var _zrlb_max = (_zrlbl == 1 and _zrlbp[0] == 43)
-        var _zrla_incl = (not _zrla_min and not _zrla_max and _zrlal > 0 and _zrlap[0] == 91)
-        var _zrla_excl = (not _zrla_min and not _zrla_max and _zrlal > 0 and _zrlap[0] == 40)
-        var _zrlb_incl = (not _zrlb_max and _zrlbl > 0 and _zrlbp[0] == 91)
-        var _zrlb_excl = (not _zrlb_max and _zrlbl > 0 and _zrlbp[0] == 40)
-        var _zrla_str = String("")
-        _zrla_str += bytes_to_string(_zrlap + 1, _zrlal - 1)
-        var _zrlb_str = String("")
-        _zrlb_str += bytes_to_string(_zrlbp + 1, _zrlbl - 1)
-        var _zrlv = keyspace[].get(_zrlk)
-        # gh #232: wrong type answered like an empty container. Every
-        # call site ignores this return and sets i = cmd_end_tok - 1
-        # itself, so returning 0 here consumes the frame correctly.
-        if not _zrlv.is_none() and _zrlv.type.value != ValueType.ZSET:
+        var lop = tokens[i+2].ptr
+        var lol = tokens[i+2].length
+        var hip = tokens[i+3].ptr
+        var hil = tokens[i+3].length
+        if not _lex_item_ok(lop, lol) or not _lex_item_ok(hip, hil):
+            writer.append_error_response(_E_LEX_RANGE)
+            return 3
+        var v = keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+        if not v.is_none() and v.type.value != ValueType.ZSET:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            return 0
-        var _zrl_cnt = 0
-        if not _zrlv.is_none() and _zrlv.type.value == ValueType.ZSET:
-            var _zrlp = _zrlv.as_zset().bitcast[SlabSkipList]()
-            var _zrl_ss = List[Float64](); var _zrl_oo = List[GenericValue](); var _zrl_keep = List[Bool]()
-            var _zrlc = _zrlp[].head[].forward[0]
-            while is_not_null(_zrlc):
-                var _ms = _zrlc[].obj.__str__()
-                var _lo_ok = _zrla_min or (_zrla_incl and _ms >= _zrla_str) or (_zrla_excl and _ms > _zrla_str)
-                var _hi_ok = _zrlb_max or (_zrlb_incl and _ms <= _zrlb_str) or (_zrlb_excl and _ms < _zrlb_str)
-                _zrl_ss.append(_zrlc[].score); _zrl_oo.append(_zrlc[].obj)
-                _zrl_keep.append(not (_lo_ok and _hi_ok))
-                if _lo_ok and _hi_ok: _zrl_cnt += 1
-                _zrlc = _zrlc[].forward[0]
-            _zrlp[].reset()
-            var _wb = alloc[UInt8](64)
-            for _ji in range(len(_zrl_ss)):
-                if _zrl_keep[_ji]: _zrlp[].insert(_zrl_ss[_ji], _zrl_oo[_ji])
-                else:
-                    var _wl = 0
-                    var _wp = gv_bytes(_zrl_oo[_ji], _wb, _wl)
-                    _ = wal[].append_kv(12, tokens[i+1].ptr, tokens[i+1].length, _wp, _wl)
-            _wb.free()
-        writer.append_int_response(Int64(_zrl_cnt))
+            return 3
+        var removed = 0
+        if not v.is_none():
+            var zp = v.as_zset().bitcast[SlabSkipList]()
+            var lo = GenericValue.borrow(lop.unsafe_offset(1), lol - 1)
+            var hi = GenericValue.borrow(hip.unsafe_offset(1), hil - 1)
+            var doomed = List[GenericValue]()
+            var c = zp[].head[].forward[0]
+            while is_not_null(c):
+                if _lex_in(c[].obj, lop[0], lo, hip[0], hi):
+                    doomed.append(c[].obj.clone())
+                c = c[].forward[0]
+            removed = _zrem_collected(keyspace, wal, tokens, i + 1, zp, doomed)
+        writer.append_int_response(Int64(removed))
         return 3
     else:
         writer.append_error_response("ERR wrong number of arguments for 'zremrangebylex' command")
@@ -1743,40 +1822,34 @@ def handle_zremrangebylex(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
 def handle_zremrangebyrank(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], wal: UnsafePointer[WAL, MutUntrackedOrigin]) raises -> Int:
     """ZREMRANGEBYRANK key start stop -> number of removed members."""
     if i + 3 < num_tokens:
-        var _zrrk = tokens[i+1].value()
-        var _zrra = strict_atol(tokens[i+2].value()); var _zrrb = strict_atol(tokens[i+3].value())
-        var _zrrv = keyspace[].get(_zrrk)
-        # gh #232: wrong type answered like an empty container. Every
-        # call site ignores this return and sets i = cmd_end_tok - 1
-        # itself, so returning 0 here consumes the frame correctly.
-        if not _zrrv.is_none() and _zrrv.type.value != ValueType.ZSET:
+        var a = parse_int64_strict(tokens[i+2].ptr, tokens[i+2].length)
+        var b = parse_int64_strict(tokens[i+3].ptr, tokens[i+3].length)
+        if not a.ok or not b.ok:
+            writer.append_error_response("ERR value is not an integer or out of range")
+            return 3
+        var v = keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+        if not v.is_none() and v.type.value != ValueType.ZSET:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            return 0
-        var _zrr_cnt = 0
-        if not _zrrv.is_none() and _zrrv.type.value == ValueType.ZSET:
-            var _zrrp = _zrrv.as_zset().bitcast[SlabSkipList]()
-            var _zrr_len = _zrrp[].length
-            if _zrra < 0: _zrra = max(0, _zrr_len + _zrra)
-            if _zrrb < 0: _zrrb = _zrr_len + _zrrb
-            if _zrrb >= _zrr_len: _zrrb = _zrr_len - 1
-            var _zrr_ss = List[Float64](); var _zrr_oo = List[GenericValue](); var _zrr_keep = List[Bool]()
-            var _zrrc = _zrrp[].head[].forward[0]; var _idx = 0
-            while is_not_null(_zrrc):
-                _zrr_ss.append(_zrrc[].score); _zrr_oo.append(_zrrc[].obj)
-                var _in_range = _idx >= _zrra and _idx <= _zrrb
-                _zrr_keep.append(not _in_range)
-                if _in_range: _zrr_cnt += 1
-                _idx += 1; _zrrc = _zrrc[].forward[0]
-            _zrrp[].reset()
-            var _wb = alloc[UInt8](64)
-            for _ji in range(len(_zrr_ss)):
-                if _zrr_keep[_ji]: _zrrp[].insert(_zrr_ss[_ji], _zrr_oo[_ji])
-                else:
-                    var _wl = 0
-                    var _wp = gv_bytes(_zrr_oo[_ji], _wb, _wl)
-                    _ = wal[].append_kv(12, tokens[i+1].ptr, tokens[i+1].length, _wp, _wl)
-            _wb.free()
-        writer.append_int_response(Int64(_zrr_cnt))
+            return 3
+        var removed = 0
+        if not v.is_none():
+            var zp = v.as_zset().bitcast[SlabSkipList]()
+            var n = zp[].length
+            var start = Int(a.value)
+            var stop = Int(b.value)
+            if start < 0: start = max(0, n + start)
+            if stop < 0: stop = n + stop
+            if stop >= n: stop = n - 1
+            var doomed = List[GenericValue]()
+            var c = zp[].head[].forward[0]
+            var idx = 0
+            while is_not_null(c) and idx <= stop:
+                if idx >= start:
+                    doomed.append(c[].obj.clone())
+                idx += 1
+                c = c[].forward[0]
+            removed = _zrem_collected(keyspace, wal, tokens, i + 1, zp, doomed)
+        writer.append_int_response(Int64(removed))
         return 3
     else:
         writer.append_error_response("ERR wrong number of arguments for 'zremrangebyrank' command")
@@ -1787,51 +1860,31 @@ def handle_zremrangebyrank(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin]
 def handle_zremrangebyscore(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], wal: UnsafePointer[WAL, MutUntrackedOrigin]) raises -> Int:
     """ZREMRANGEBYSCORE key min max -> number of removed members."""
     if i + 3 < num_tokens:
-        var _zrbs_key = tokens[i+1].value()
-        var _zrbsap = tokens[i+2].ptr; var _zrbsal = tokens[i+2].length
-        var _zrbsbp = tokens[i+3].ptr; var _zrbsbl = tokens[i+3].length
-        var _zrbsa_excl = False; var _zrbsb_excl = False
-        var _zrbsa: Float64; var _zrbsb: Float64
-        var _sb_zrbsa = _score_bound(_zrbsap, _zrbsal)   # gh #393: zslParseRange's rules
-        if not _sb_zrbsa.ok:
-            raise Error("ERR min or max is not a float")
-        _zrbsa = _sb_zrbsa.value
-        _zrbsa_excl = _sb_zrbsa.excl
-        var _sb_zrbsb = _score_bound(_zrbsbp, _zrbsbl)   # gh #393: zslParseRange's rules
-        if not _sb_zrbsb.ok:
-            raise Error("ERR min or max is not a float")
-        _zrbsb = _sb_zrbsb.value
-        _zrbsb_excl = _sb_zrbsb.excl
-        var _zrbsv = keyspace[].get(_zrbs_key)
-        # gh #232: wrong type answered like an empty container. Every
-        # call site ignores this return and sets i = cmd_end_tok - 1
-        # itself, so returning 0 here consumes the frame correctly.
-        if not _zrbsv.is_none() and _zrbsv.type.value != ValueType.ZSET:
+        var lo = _score_bound(tokens[i+2].ptr, tokens[i+2].length)   # gh #393: zslParseRange's rules
+        var hi = _score_bound(tokens[i+3].ptr, tokens[i+3].length)
+        if not lo.ok or not hi.ok:
+            writer.append_error_response("ERR min or max is not a float")
+            return 3
+        var v = keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+        if not v.is_none() and v.type.value != ValueType.ZSET:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-            return 0
-        var _zrbs_cnt = 0
-        if not _zrbsv.is_none() and _zrbsv.type.value == ValueType.ZSET:
-            var _zrbsp = _zrbsv.as_zset().bitcast[SlabSkipList]()
-            var _zrbs_ss = List[Float64](); var _zrbs_oo = List[GenericValue](); var _zrbs_keep = List[Bool]()
-            var _zrbsc = _zrbsp[].head[].forward[0]
-            while is_not_null(_zrbsc):
-                var _s = _zrbsc[].score
-                var _lo = (_zrbsa_excl and _s > _zrbsa) or (not _zrbsa_excl and _s >= _zrbsa)
-                var _hi = (_zrbsb_excl and _s < _zrbsb) or (not _zrbsb_excl and _s <= _zrbsb)
-                _zrbs_ss.append(_s); _zrbs_oo.append(_zrbsc[].obj)
-                _zrbs_keep.append(not (_lo and _hi))
-                if _lo and _hi: _zrbs_cnt += 1
-                _zrbsc = _zrbsc[].forward[0]
-            _zrbsp[].reset()
-            var _wb = alloc[UInt8](64)
-            for _ji in range(len(_zrbs_ss)):
-                if _zrbs_keep[_ji]: _zrbsp[].insert(_zrbs_ss[_ji], _zrbs_oo[_ji])
-                else:
-                    var _wl = 0
-                    var _wp = gv_bytes(_zrbs_oo[_ji], _wb, _wl)
-                    _ = wal[].append_kv(12, tokens[i+1].ptr, tokens[i+1].length, _wp, _wl)
-            _wb.free()
-        writer.append_int_response(Int64(_zrbs_cnt))
+            return 3
+        var removed = 0
+        if not v.is_none():
+            var zp = v.as_zset().bitcast[SlabSkipList]()
+            var doomed = List[GenericValue]()
+            var c = zp[].head[].forward[0]
+            while is_not_null(c):
+                var sc = c[].score
+                var lo_ok = sc > lo.value if lo.excl else sc >= lo.value
+                var hi_ok = sc < hi.value if hi.excl else sc <= hi.value
+                if lo_ok and hi_ok:
+                    doomed.append(c[].obj.clone())
+                elif not hi_ok:
+                    break                     # nodes are in score order
+                c = c[].forward[0]
+            removed = _zrem_collected(keyspace, wal, tokens, i + 1, zp, doomed)
+        writer.append_int_response(Int64(removed))
         return 3
     else:
         writer.append_error_response("ERR wrong number of arguments for 'zremrangebyscore' command")

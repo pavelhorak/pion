@@ -8,7 +8,7 @@ from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.value import GenericValue
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
-from std.collections import Array
+from std.collections import Array, Dict
 from std.memory import unsafe_memcpy, unsafe_memset
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
@@ -88,6 +88,9 @@ struct TransactionState(Movable):
     # to 2 in cleanup_fd so a reused fd never inherits the previous session's
     # protocol and start answering RESP3 to a RESP2 client.
     var resp_proto: Pointer[UInt8, MutUntrackedOrigin]     # [MAX_TX_FDS]
+    # #30: CLIENT SETNAME's name per fd (absent = none). SETNAME answered +OK
+    # and kept nothing, so CLIENT GETNAME was nil whatever was set.
+    var client_names: Dict[Int, String]
 
     def __init__(out self):
         self.in_multi = alloc[UInt8](MAX_TX_FDS)
@@ -115,6 +118,7 @@ struct TransactionState(Movable):
         unsafe_memset(self.tenant_id.unsafe_bitcast[UInt8](), 0xFF, MAX_TX_FDS * 2)
         self.resp_proto = alloc[UInt8](MAX_TX_FDS)
         unsafe_memset(self.resp_proto, 2, MAX_TX_FDS)
+        self.client_names = Dict[Int, String]()
 
     def is_multi(self, fd: Int32) -> Bool:
         return self.in_multi[unsafe_offset=Int(fd)] == 1
@@ -216,6 +220,11 @@ struct TransactionState(Movable):
         self.tenant_id[unsafe_offset=Int(fd)] = -1
         # gh #172: back to RESP2 so a reused fd never inherits RESP3.
         self.resp_proto[unsafe_offset=Int(fd)] = 2
+        if Int(fd) in self.client_names:
+            try:
+                _ = self.client_names.pop(Int(fd))
+            except:
+                pass
 
     # ── Key version tracking ──
 

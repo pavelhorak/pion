@@ -192,7 +192,63 @@ int pion_parse_double(const char* p, int64_t n, int mode, double* out) {
     return 1;
 }
 
+/* INCRBYFLOAT / HINCRBYFLOAT in Redis's own arithmetic: long double.
+
+   Redis reads the current value and the increment with string2ld (strtold),
+   adds them in long double, and prints the sum with ld2string(LD_STR_HUMAN):
+   "%.17Lf", trailing zeros and a bare '.' removed, "-0" as "0". long double
+   is the platform's — 80-bit on x86-64 Linux, 128-bit on AArch64 Linux, a
+   double on Apple silicon — so doing the same here gives the same reply as
+   the Redis built for that platform, range included: on Linux `1e400` is a
+   number. Pion added Float64s, which differed in range on Linux and in the
+   digits wherever long double is wider than a double.
+
+   pion_ld_kind: 0 not a float (string2ld's refusals), 1 finite, 2 infinite.
+   pion_ld_incr: cur_kind 0 = no current value (0), 1 = text in cur/curlen,
+   2 = the double cur_d. Returns the length written to out, or -1 (current
+   value not a float), -2 (increment not a float), -3 (NaN or infinite
+   result), -4 (out too small). */
 #include <stdio.h>
+
+static int pion_string2ld(const char* p, int64_t n, long double* out) {
+    char buf[5 * 1024];                  /* MAX_LONG_DOUBLE_CHARS */
+    if (n <= 0 || n >= (int64_t)sizeof(buf)) return 0;
+    memcpy(buf, p, (size_t)n);
+    buf[n] = '\0';
+    char* end = NULL;
+    errno = 0;
+    long double v = strtold(buf, &end);
+    if (isspace((unsigned char)buf[0]) || *end != '\0' || isnan(v)) return 0;
+    if (errno == ERANGE && (v == HUGE_VALL || v == -HUGE_VALL || fpclassify(v) == FP_ZERO)) return 0;
+    if (errno == EINVAL) return 0;
+    *out = v;
+    return 1;
+}
+
+int pion_ld_kind(const char* p, int64_t n) {
+    long double v;
+    if (!pion_string2ld(p, n, &v)) return 0;
+    return isinf(v) ? 2 : 1;
+}
+
+int64_t pion_ld_incr(int cur_kind, const char* cur, int64_t curlen, double cur_d,
+                     const char* inc, int64_t inclen, char* out, int64_t cap) {
+    long double a = 0, b;
+    if (cur_kind == 1 && !pion_string2ld(cur, curlen, &a)) return -1;
+    if (cur_kind == 2) a = (long double)cur_d;
+    if (!pion_string2ld(inc, inclen, &b)) return -2;
+    long double v = a + b;
+    if (isnan(v) || isinf(v)) return -3;
+    int l = snprintf(out, (size_t)cap, "%.17Lf", v);
+    if (l < 0 || (int64_t)l + 1 > cap) return -4;
+    if (strchr(out, '.') != NULL) {
+        char* q = out + l - 1;
+        while (*q == '0') { q--; l--; }
+        if (*q == '.') l--;
+    }
+    if (l == 2 && out[0] == '-' && out[1] == '0') { out[0] = '0'; l = 1; }
+    return l;
+}
 
 /* snprintf("%.*f") — Redis's "%f" in error messages (GEO's "invalid
    longitude,latitude pair %f,%f"). Returns the length or -1. */

@@ -14,7 +14,7 @@ from src.network.v_store import VStoreIndex, VStoreDirectory, MAX_DIR_ENTRIES
 from src.network.attention_index import AttentionIndex
 from src.vector.hnsw_types import SharedHNSWView
 from src.io.wal import WAL
-from src.common.utils import strict_atol, bytes_to_string, format_int_to_buf
+from src.common.utils import strict_atol, bytes_to_string, format_int_to_buf, arg_eq
 from std.ffi import external_call
 
 
@@ -531,7 +531,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 var action_tok = tokens[unsafe_offset=i + 3]
                 var act_p = action_tok.ptr; var act_l = action_tok.length
                 consumed += 2
-                if act_l == 9 and (act_p[unsafe_offset=0]|0x20)==105:  # IMPORTING
+                if arg_eq(act_p, act_l, "importing"):
                     if i + 4 < num_tokens:
                         consumed += 1  # consume node-id
                         # Find peer by node-id
@@ -546,7 +546,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                             if match2: peer_idx = pi2; break
                         cluster[].set_slot_importing(_ss_slot, peer_idx)
                     writer.append_ok_response()
-                elif act_l == 9 and (act_p[unsafe_offset=0]|0x20)==109:  # MIGRATING
+                elif arg_eq(act_p, act_l, "migrating"):
                     if i + 4 < num_tokens:
                         consumed += 1
                         var nid_tok = tokens[unsafe_offset=i + 4]
@@ -560,12 +560,12 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                             if match2: peer_idx = pi2; break
                         cluster[].set_slot_migrating(_ss_slot, peer_idx)
                     writer.append_ok_response()
-                elif act_l == 4 and (act_p[unsafe_offset=0]|0x20)==110:  # NODE
+                elif arg_eq(act_p, act_l, "node"):
                     if i + 4 < num_tokens:
                         consumed += 1
                         cluster[].assign_slot_to_node(_ss_slot, tokens[unsafe_offset=i + 4].ptr)
                     writer.append_ok_response()
-                elif act_l == 6 and (act_p[unsafe_offset=0]|0x20)==115 and (act_p[unsafe_offset=1]|0x20)==116:  # STABLE
+                elif arg_eq(act_p, act_l, "stable"):
                     cluster[].clear_slot_state(_ss_slot)
                     writer.append_ok_response()
                 else:

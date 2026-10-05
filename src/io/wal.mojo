@@ -1758,6 +1758,11 @@ struct WAL(Movable):
             elif cmd_id == 2:  # DEL
                 _ = remove_and_free(keyspace, GenericValue.borrow(data.unsafe_offset(key_off), Int(kl)))
                 replayed += 1
+            elif cmd_id == 250:  # FLUSHALL / FLUSHDB: everything before it goes
+                keyspace[].reset()
+                if is_not_null(ttl_map):
+                    ttl_map[].reset()
+                replayed += 1
             elif cmd_id == 4 and vl == 24 and is_not_null(blobs):
                 # gh #163: pointer record into the blob arena. ptr_at bounds-checks
                 # against the mapped segment, so a stale or truncated record drops
