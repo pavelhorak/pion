@@ -73,10 +73,15 @@ def graph_from_file(path):
     with open(path, "rb") as f:
         h = np.frombuffer(f.read(256), dtype=np.uint64)
         n, m, entry, maxl = int(h[2]), int(h[4]), int(h[6]), int(h[7])
-        pool_per, maxe, stride = int(h[9]), int(h[10]), int(h[20])
-        f.seek(256 + n * stride + maxe * 8)
+        pool_per, maxe, stride, version = int(h[9]), int(h[10]), int(h[20]), int(h[1])
+        f.seek(256 + n * stride)
+        # v4: node_map holds the ids in use (count first) and the pool only the
+        # index's nodes; v3 wrote both for every element of the server
+        map_ids = int(np.frombuffer(f.read(8), dtype=np.uint64)[0]) if version >= 4 else maxe
+        f.seek(map_ids * 8, 1)
         l0 = np.frombuffer(f.read(n * 33 * 4), dtype=np.uint32).reshape(n, 33)
-        pool = np.frombuffer(f.read(maxe * pool_per * 4), dtype=np.uint32).reshape(maxe, pool_per)[:n]
+        rows = n if version >= 4 else maxe
+        pool = np.frombuffer(f.read(rows * pool_per * 4), dtype=np.uint32).reshape(rows, pool_per)[:n]
         lv = np.frombuffer(f.read(n * 16), dtype=np.int64).reshape(n, 2)[:, 1]
     return dict(n=n, m=m, entry=entry, maxl=maxl, l0=l0, pool=pool, lv=lv)
 

@@ -146,6 +146,19 @@ def main() -> int:
             rc = 1
             return rc
 
+        # The index file follows the index's size, not the server's capacity.
+        # It used to hold the node map and neighbor lists for every element
+        # the server could take: 329 MB for these 100 vectors, written on
+        # every FT.OPTIMIZE — ~400 ms a cycle, and cycles of 3 s on a busy
+        # disk, which tripped the ceiling above about one tier run in two.
+        hnsw_file = os.path.join(PROJECT_ROOT, "pion.hnsw.0")
+        size = os.path.getsize(hnsw_file) if os.path.exists(hnsw_file) else -1
+        if not (0 < size <= 64 * 1024 * args.n_vectors):
+            print(f"FAIL: pion.hnsw.0 is {size} bytes for {args.n_vectors} vectors "
+                  f"(at most {64 * 1024 * args.n_vectors} expected)")
+            rc = 1
+            return rc
+
         # Final sanity: PING.
         if not r.ping():
             print("FAIL: PING returned False after drop cycles")

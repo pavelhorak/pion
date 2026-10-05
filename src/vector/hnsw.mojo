@@ -1017,7 +1017,7 @@ struct HNSWGraph(Movable):
         # resolution tier misses after restart and FT.SEARCH emits raw slot
         # numbers: the silent recall ≈ 0.002). v2 files are refused loudly —
         # they reproduce exactly that bug.
-        hdr[1] = UInt64(3)                   # version
+        hdr[1] = UInt64(4)                   # version (v4: node_map and pool trimmed to the index)
         hdr[2] = UInt64(self.num_nodes)
         hdr[3] = UInt64(self.dim)
         hdr[4] = UInt64(self.M)
@@ -1086,13 +1086,27 @@ struct HNSWGraph(Movable):
         var compact_bytes = self.num_nodes * self.compact_stride
         self._pion_write_all(fd, self.compact_buffer.bitcast[UInt8](), compact_bytes)
 
-        var node_map_bytes = self.max_elements * 8
-        self._pion_write_all(fd, self.node_map.bitcast[UInt8](), node_map_bytes)
+        # v4: node_map up to the highest external id the index holds (its
+        # count first), and the neighbor blocks of its num_nodes nodes. v3
+        # wrote both for the server's whole capacity: 329 MB for a 100-vector
+        # index at the default 1M elements, every FT.OPTIMIZE — ~400 ms a
+        # build, and multi-second stalls on a busy disk.
+        var map_ids = 0
+        for i in range(self.num_nodes):
+            if self.nodes[i].id + 1 > map_ids:
+                map_ids = self.nodes[i].id + 1
+        if map_ids > self.max_elements:
+            map_ids = self.max_elements
+        var map_count = alloc[UInt64](1)
+        map_count[0] = UInt64(map_ids)
+        self._pion_write_all(fd, map_count.bitcast[UInt8](), 8)
+        map_count.free()
+        self._pion_write_all(fd, self.node_map.bitcast[UInt8](), map_ids * 8)
 
         var l0_bytes = self.num_nodes * 33 * 4
         self._pion_write_all(fd, self.l0_compact.bitcast[UInt8](), l0_bytes)
 
-        var pool_bytes = self.max_elements * self.neighbor_pool_per_node * 4
+        var pool_bytes = self.num_nodes * self.neighbor_pool_per_node * 4
         self._pion_write_all(fd, self.neighbor_pool.bitcast[UInt8](), pool_bytes)
 
         # Node id+level array (2×Int per node = 16 bytes per node)
@@ -1204,11 +1218,12 @@ struct HNSWGraph(Movable):
             hdr.free(); return False
         if hdr[0] != UInt64(0x574E534E4F494E50):  # magic check
             hdr.free(); return False
-        if hdr[1] != UInt64(3):  # version check (v3 = group calibration + slot→key map)
+        var version = Int(hdr[1])
+        if version != 3 and version != 4:  # v3 = group calibration + slot→key map; v4 = trimmed sections
             # v1 files were tail-corrupt; v2 files lack the slot→key map, so a
             # warm restart serves recall ≈ 0.002 silently (gh #211) — refuse
             # both loudly rather than load an index that returns wrong keys.
-            print("HNSW snapshot version " + String(hdr[1]) + " unsupported (want 3) — cold rebuild (re-ingest + FT.OPTIMIZE)")
+            print("HNSW snapshot version " + String(hdr[1]) + " unsupported (want 3 or 4) — cold rebuild (re-ingest + FT.OPTIMIZE)")
             hdr.free(); return False
         var saved_stride = Int(hdr[20])
         var saved_slot_hdr = Int(hdr[21])
@@ -1276,9 +1291,21 @@ struct HNSWGraph(Movable):
         if not self._pion_read_all(fd, self.compact_buffer.bitcast[UInt8](), saved_num_nodes * saved_stride):
             return False
 
-        # node_map
-        if not self._pion_read_all(fd, self.node_map.bitcast[UInt8](), self.max_elements * 8):
+        # node_map: v3 holds every element, v4 the ids up to the highest one
+        # the index holds (the rest are -1, as a fresh graph has them)
+        var map_ids = self.max_elements
+        if version >= 4:
+            var map_count = alloc[UInt64](1)
+            if not self._pion_read_all(fd, map_count.bitcast[UInt8](), 8):
+                map_count.free(); return False
+            map_ids = Int(map_count[0])
+            map_count.free()
+            if map_ids < 0 or map_ids > self.max_elements:
+                return False
+        if not self._pion_read_all(fd, self.node_map.bitcast[UInt8](), map_ids * 8):
             return False
+        for i in range(map_ids, self.max_elements):
+            self.node_map[i] = -1
 
         # l0_compact
         if is_not_null(self.l0_compact):
@@ -1287,8 +1314,9 @@ struct HNSWGraph(Movable):
         if not self._pion_read_all(fd, self.l0_compact.bitcast[UInt8](), saved_num_nodes * 33 * 4):
             return False
 
-        # neighbor_pool
-        if not self._pion_read_all(fd, self.neighbor_pool.bitcast[UInt8](), self.max_elements * saved_pool_per * 4):
+        # neighbor_pool: v3 holds every element's block, v4 the index's nodes'
+        if not self._pion_read_all(fd, self.neighbor_pool.bitcast[UInt8](),
+                                   (self.max_elements if version < 4 else saved_num_nodes) * saved_pool_per * 4):
             return False
 
         # Node id+level
