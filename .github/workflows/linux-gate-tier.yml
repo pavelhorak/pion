@@ -1,0 +1,101 @@
+name: Linux gate tier
+
+# The full gate-tier suite (tests/run_all.py --tier gate) on Linux, started by
+# hand. CI's correctness job runs seven of these files per push. The first full
+# run on Linux (an EPYC 8124P, 2026-10-05) failed 23 of 133, with the native
+# and the portable binary alike, so this is how those get reproduced and how
+# their fixes get checked, without a rented machine. Every test's output and
+# server log is uploaded, failures included.
+#
+#   gh workflow run "Linux gate tier" --ref <branch> [-f legs=linux-x86_64] [-f only="gh211 gh259"]
+
+on:
+  workflow_dispatch:
+    inputs:
+      legs:
+        description: Linux legs to run
+        type: choice
+        default: both
+        options: [both, linux-x86_64, linux-arm64]
+      only:
+        description: Space-separated run_all --only filters; empty runs the whole gate tier
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  gate-tier:
+    name: ${{ matrix.leg }}
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(inputs.legs == 'both' && '["linux-x86_64", "linux-arm64"]' || format('["{0}"]', inputs.legs)) }}
+    runs-on: ${{ matrix.leg == 'linux-arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    env:
+      # The binary each leg ships, as in ci.yml and release.yml: x86-64 is the
+      # portable build (x86-64-v2, GPU-free, written as pion-server-dev).
+      BUILD_TASK: ${{ matrix.leg == 'linux-x86_64' && 'build-portable' || 'build' }}
+      BINARY: ${{ matrix.leg == 'linux-x86_64' && 'pion-server-dev' || 'pion-server' }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
+          cache-key: pixi-${{ matrix.leg }}-${{ hashFiles('pixi.lock') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build
+        run: pixi run ${{ env.BUILD_TASK }}
+
+      - name: Put the binary where the runner looks for it
+        run: |
+          if [ "$BINARY" != pion-server ]; then mv "$BINARY" pion-server; fi
+          ./pion-server --version
+
+      - name: Redis 8.10.2, the differential tests' oracle
+        # The version the Mac gate runs. The first Linux run used 8.6.2 and
+        # differed from the Mac on 8 numeric probes (PSETEX overflow, LSET index
+        # truncation, hex and leading-space range bounds), so pin the exact tag.
+        run: |
+          git clone -q --depth 1 --branch 8.10.2 https://github.com/redis/redis.git "$RUNNER_TEMP/redis"
+          make -C "$RUNNER_TEMP/redis" -j"$(nproc)" BUILD_TLS=no > /dev/null
+          echo "$RUNNER_TEMP/redis/src" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/redis/src/redis-server" --version
+
+      - name: Python modules the tests import
+        # redis 4.6.0 as on the Mac: redis-py 5+ speaks RESP3 by default, and
+        # three tests read RESP2 reply shapes (the first Linux run had 8.1.0).
+        run: python3 -m pip install -q 'redis==4.6.0' numpy requests pyarrow pyyaml flask
+
+      - name: Inference sidecar packages
+        # The server starts its sidecar with the pixi env's python, which a
+        # fresh checkout lacks torch and transformers in.
+        run: pixi run install-inference
+
+      - name: Gate tier
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          set -o pipefail
+          if [ -n "$ONLY" ]; then
+            python3 tests/run_all.py --tier gate --report build/gate-tests.json --only $ONLY
+          else
+            python3 tests/run_all.py --tier gate --report build/gate-tests.json
+          fi
+
+      - name: Upload every test's output and server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-tier-${{ matrix.leg }}
+          path: |
+            build/test-logs/
+            build/gate-tests.json
+          retention-days: 14
