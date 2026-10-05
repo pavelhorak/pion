@@ -219,7 +219,7 @@ def _known_flags() -> List[String]:
         "--iouring", "--epoll", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
         "--tenant", "--moe-cache", "--moe-cache-mib", "--dim", "--max-elements", "--crash-log",
         "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory",
-        "--lua-time-limit", "--lua-memory-limit",
+        "--lua-time-limit", "--lua-memory-limit", "--enable-debug-command",
         "--help", "-h", "--version", "-v",
     ]
 
@@ -235,6 +235,7 @@ def _value_flags() -> List[String]:
         "--requirepass", "--requirepass-file", "--bind", "--tenant", "--moe-cache",
         "--moe-cache-mib", "--dim", "--max-elements", "--crash-log", "--status-file",
         "--rss-warn-pct", "--maxmemory", "--lua-time-limit", "--lua-memory-limit",
+        "--enable-debug-command",
     ]
 
 
@@ -338,6 +339,7 @@ def _print_help():
     print("      --lua-time-limit MS   stop a script that runs longer without writing (default 5000;")
     print("                            0 = never). A worker cannot answer SCRIPT KILL mid-script.")
     print("      --lua-memory-limit SIZE  Lua heap cap per worker state (default 1gb; 0 = none)")
+    print("      --enable-debug-command no|yes|local  allow DEBUG (default no; local = loopback only)")
     print("      (supervised serving with auto-restart: scripts/pion-supervise.sh -- <server args>)")
     print("")
     print("I/O backend")
@@ -790,6 +792,18 @@ def main():
                 config.server.rss_warn_pct = atol(args[i + 1])
             except:
                 _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]))   # gh #372
+            i += 2
+        elif args[i] == "--enable-debug-command" and i + 1 < len(args):
+            # #45: Redis's option, and its default
+            var _edc = String(args[i + 1]).lower()
+            if _edc == "no":
+                config.server.enable_debug_command = 0
+            elif _edc == "yes":
+                config.server.enable_debug_command = 1
+            elif _edc == "local":
+                config.server.enable_debug_command = 2
+            else:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]) + " (no, yes or local):")
             i += 2
         elif args[i] == "--lua-time-limit" and i + 1 < len(args):
             # #36: milliseconds; 0 = never stop a script
@@ -1620,6 +1634,11 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                 worker_config.server.ns_prefix = args[j + 1]
             elif args[j] == "--requirepass" and j + 1 < len(args):
                 worker_config.server.requirepass = args[j + 1]  # gh #100 (C2)
+            elif args[j] == "--enable-debug-command" and j + 1 < len(args):
+                # #45: main() validated the value; this loop builds the
+                # worker's own config from argv, as for --requirepass
+                var _edc = String(args[j + 1]).lower()
+                worker_config.server.enable_debug_command = 1 if _edc == "yes" else (2 if _edc == "local" else 0)
             elif args[j] == "--requirepass-file" and j + 1 < len(args):
                 # gh #258: this parse loop is SEPARATE from main()'s and builds
                 # each worker's own config from argv. Handling the flag only in

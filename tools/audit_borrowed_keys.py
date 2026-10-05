@@ -52,6 +52,8 @@ MAP_METHODS = {
     # gh #392 per-field TTL methods on SlabHashMap / StripedHashMap: map calls inside
     "field_deadline", "set_field_deadline", "clear_field_deadline", "expire_field",
     "note_field_ttl",
+    # #45: StripedHashMap's TTL reads (a ttl_map get; keep nothing)
+    "deadline", "is_expired",
 }
 # Read-only methods on the value itself.
 READ_METHODS = {

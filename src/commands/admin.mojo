@@ -511,11 +511,15 @@ def _config_known_value(p: Pointer[UInt8, MutUntrackedOrigin], plen: Int,
     # Pion never closes an idle client, which is what timeout 0 means.
     if cmd_eq(p, plen, "timeout"):
         return "0"
+    # #45: --enable-debug-command
+    if cmd_eq(p, plen, "enable-debug-command"):
+        var m = config.server.enable_debug_command
+        return "yes" if m == 1 else ("local" if m == 2 else "no")
     found = False
     return ""
 
 
-comptime _CONFIG_COUNT = 7
+comptime _CONFIG_COUNT = 8
 
 
 @always_inline
@@ -536,7 +540,8 @@ def _config_name(k: Int) -> StaticString:
     if k == 3: return "appendonly"
     if k == 4: return "save"
     if k == 5: return "port"
-    return "timeout"
+    if k == 6: return "timeout"
+    return "enable-debug-command"
 
 
 def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
@@ -851,11 +856,57 @@ def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
 
 
 @always_inline
-def handle_debug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter) -> Int:
-    """DEBUG sleep|object|reload|... → +OK (stub)."""
-    var extra = num_tokens - i - 1
-    writer.append_ok_response()
-    return extra
+def handle_debug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                 keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mode: Int, fd: Int32) -> Int:
+    """DEBUG, as far as Pion has it (#45): HELP, SET-ACTIVE-EXPIRE, SLEEP.
+    Any other subcommand gets Redis's unknown-subcommand error; it answered
+    +OK to every subcommand, run or not.
+
+    Refused unless --enable-debug-command allows it (`mode` 0 no, the
+    default, 1 yes, 2 local: loopback connections only), as Redis 7 and later
+    refuse it."""
+    if mode == 0 or (mode == 2 and external_call["pion_peer_is_local", Int32](fd) == 0):
+        writer.append_error_response("ERR DEBUG command not allowed. If the enable-debug-command option is set to "
+                                     + "\"local\", you can run it from a local connection, otherwise you need to set "
+                                     + "this option in the configuration file, and then restart the server.")
+        return 0
+    var argc = num_tokens - i
+    if argc < 2:
+        writer.append_error_response("ERR wrong number of arguments for 'debug' command")
+        return 0
+    var sub = tokens[i + 1]
+    if argc == 2 and arg_eq(sub.ptr, sub.length, "help"):
+        var lines = List[String]()
+        lines.append("DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:")
+        lines.append("SET-ACTIVE-EXPIRE <0|1>")
+        lines.append("    Setting it to 0 disables expiring keys in background when they are not")
+        lines.append("    accessed (otherwise the Redis behavior). Setting it to 1 reenables back the")
+        lines.append("    default.")
+        lines.append("SLEEP <seconds>")
+        lines.append("    Stop the server for <seconds>. Decimals allowed.")
+        lines.append("HELP")
+        lines.append("    Print this help.")
+        writer.append_array_header(len(lines))
+        for k in range(len(lines)):
+            writer.append_status_response(lines[k])
+    elif argc == 3 and arg_eq(sub.ptr, sub.length, "set-active-expire"):
+        # atoi, as Redis reads it: anything not starting with a non-zero
+        # number turns the sweep off
+        var v = tokens[i + 2].text_value() + "\0"
+        keyspace[].active_expire = external_call["atoi", Int32](v.unsafe_ptr()) != 0
+        _ = v^
+        writer.append_ok_response()
+    elif argc == 3 and arg_eq(sub.ptr, sub.length, "sleep"):
+        var v = tokens[i + 2].text_value() + "\0"
+        var secs = external_call["strtod", Float64](v.unsafe_ptr(), null_ptr[UInt8, MutUntrackedOrigin]())
+        _ = v^
+        if secs > 0:
+            _ = external_call["usleep", Int32](UInt32(Int64(secs * 1_000_000.0)))
+        writer.append_ok_response()
+    else:
+        writer.append_error_response("ERR unknown subcommand or wrong number of arguments for '" + sub.text_value()
+                                     + "'. Try DEBUG HELP.")
+    return 0
 
 
 @always_inline

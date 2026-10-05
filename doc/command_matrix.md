@@ -54,7 +54,7 @@
 | PEXPIREAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Unix timestamp milliseconds |
 | TTL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns -1 (no TTL), -2 (not found) |
 | PTTL | ✅ | ✅ | ✅ | **SLOW** | ✅ | Millisecond precision |
-| PERSIST | ✅ | ✅ | ✅ | **SLOW** | ✅ | Removes TTL |
+| PERSIST | ✅ | ✅ | ✅ | **SLOW** | ✅ | Removes TTL; 0 for an expired key (#45) |
 | EXPIRETIME | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns absolute expiry time |
 | PEXPIRETIME | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | UNLINK | ✅ | ✅ | ✅ | **SLOW** | ✅ | Async DEL (falls back to DEL in Redis < 7) |
@@ -70,13 +70,15 @@
 | SORT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Lists, sets and sorted sets; BY/LIMIT/GET/ASC/DESC/ALPHA/STORE |
 | SORT_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | SORT without STORE |
 | SCAN | ✅ | ✅ | ✅ | **SLOW** | ✅ | MATCH/COUNT/TYPE; single sweep (cursor 0 returns every key, cursor "0" back) |
-| KEYS | ✅ | ✅ | ✅ | **SLOW** | ✅ | O(N), not safe for production use |
-| RANDOMKEY | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
+| KEYS | ✅ | ✅ | ✅ | **SLOW** | ✅ | O(N), not safe for production use; skips expired keys (#45) |
+| RANDOMKEY | ✅ | ✅ | ✅ | **SLOW** | ✅ | A random key, never an expired one (#45; it returned the first key in shard order) |
 | TOUCH | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
 | DUMP | ✅ | ✅ | ✅ | **SLOW** | ❌ | Every type, any size (#41). The payload is Pion's records with Redis's footer (format version + CRC-64): Redis refuses it, and Pion refuses Redis's, each with `DUMP payload version or checksum are wrong` |
 | RESTORE | ✅ | ✅ | ✅ | **SLOW** | ❌ | As Redis: `REPLACE`, `ABSTTL`, `IDLETIME`/`FREQ` (checked; Pion keeps no LRU/LFU data), the TTL argument, and Redis's errors in Redis's order. Logged, so a restored key survives a restart (#41) |
 | WAIT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Counts replicas that reached the offset; parks the client. 0 on a single node |
 | WAITAOF | ✅ | ✅ | ✅ | **SLOW** | ✅ | `[0, 0]` on a single node |
+
+**Expiry (#45).** As in Redis, a key past its deadline is gone for every command, read or write. Each lookup compares the key's deadline with one clock per dispatch batch (Redis's command time snapshot), and removes the key when the deadline has passed. A background sweep removes keys nobody reads (`DEBUG SET-ACTIVE-EXPIRE 0` turns it off). Both log the removal as a DEL in the WAL, so a key created again after it expired survives a restart as the new key. On a replica an expired key is hidden, never removed: the primary's DEL removes it, as on a Redis replica. `DBSIZE` and `INFO`'s key count include expired keys until they are removed, as Redis's do.
 
 ---
 
@@ -361,7 +363,7 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | MULTI | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Per-connection tx state (`tx_in_multi[fd]`): queues commands, validates names at QUEUE time against the generated command table, and answers EXEC with -EXECABORT on an unknown one |
 | EXEC | ✅ | ✅ | ✅ | **SLOW** | ✅ | Runs the queued commands atomically and returns their replies as an array; `-EXECABORT` if any was rejected at QUEUE time |
 | DISCARD | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns +OK |
-| WATCH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Monitors keys for changes between WATCH and EXEC; EXEC returns null if any watched key was modified. Per-fd version tracking via key_versions[65536] array, bumped by SET/DEL/HSET in fast path |
+| WATCH | ✅ | ✅ | ✅ | **SLOW** | ✅ | Monitors keys for changes between WATCH and EXEC; EXEC returns null if any watched key was modified or has expired since (#45, as Redis 7). Per-fd version tracking via key_versions[65536] array, bumped by SET/DEL/HSET in fast path |
 | UNWATCH | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns +OK |
 
 ---
@@ -391,7 +393,7 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | COMMAND COUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Returns the generated command count (351) |
 | COMMAND DOCS | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns *0 (no docs stored) |
 | COMMAND INFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns *0 |
-| DEBUG | ✅ | ✅ | 🟡 | **SLOW** | ❌ | Returns +OK (stub; no debug state) |
+| DEBUG | ✅ | ✅ | 🟡 | **SLOW** | ❌ | Refused unless `--enable-debug-command yes\|local` (default no, as Redis 7). Has HELP, SET-ACTIVE-EXPIRE and SLEEP; any other subcommand is refused (#45; it answered +OK to everything) |
 | SLOWLOG | ✅ | ✅ | 🟡 | **SLOW** | ✅ | GET→*0, LEN→:0, RESET→+OK |
 | LATENCY | ✅ | ✅ | 🟡 | **SLOW** | ✅ | LATEST/HISTORY→*0, RESET→+OK |
 | MEMORY USAGE | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Returns approximate byte estimate for key |

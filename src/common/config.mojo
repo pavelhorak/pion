@@ -100,6 +100,9 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # default ConnectionPool included). `-w N` for N > 1 is refused unless this
     # flag is also passed, so nobody reaches that semantics by accident.
     var independent_workers: Bool
+    # #45: DEBUG, as Redis's enable-debug-command: 0 no (the default, as
+    # Redis 7 and later), 1 yes, 2 local (loopback connections only).
+    var enable_debug_command: Int
     # gh #258: the interface to bind every listener to (RESP, port+1 binary lane,
     # port+10000 replication, gossip/Raft). Empty means "decide from the security
     # posture at parse time": loopback when no password is set, all interfaces
@@ -148,6 +151,7 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         self.status_file = ""
         self.rss_warn_pct = 70
         self.independent_workers = False
+        self.enable_debug_command = 0
         self.bind_addr = ""
         self.maxmemory = 0
 

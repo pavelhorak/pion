@@ -270,12 +270,12 @@ def handle_hincrby(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         if not val.is_none() and val.type.value != ValueType.HASH:
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         elif val.is_none() or val.type.value != ValueType.HASH:
-            # Create hash via dispatcher (handles pool internally)
-            var ibuf_hd = alloc[UInt8](32)
-            var ilen_hd = format_int_to_buf(ibuf_hd, 0, hdelta)
-            ibuf_hd[unsafe_offset=ilen_hd] = 0
-            _ = dispatcher.execute_hset(key_str, field_str, String(ibuf_hd, ilen_hd))
-            ibuf_hd.unsafe_free()
+            # Create hash via dispatcher (handles pool internally). The value is
+            # the delta's decimal text: `String(ibuf, len)` here was Mojo's
+            # String(*args), which writes the POINTER and then the length, so
+            # a new hash's counter read back as "0x13dc3bbe01" and the next
+            # HINCRBY refused it (gh #181's pitfall, #45 found it).
+            _ = dispatcher.execute_hset(key_str, field_str, String(hdelta))
             writer.append_int_response(hdelta)
         else:
             var hash_ptr = val.as_hash().unsafe_bitcast[SlabHashMap]()

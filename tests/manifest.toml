@@ -1391,6 +1391,14 @@ server = "self"
 tier = "gate"
 timeout = 300
 
+# #45: a key past its deadline is gone for every command (against Redis, both
+# with active expiry off), expiry is logged, RANDOMKEY/KEYS/SCAN, DEBUG.
+[[test]]
+file = "tests/test_lazy_expiry.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
 # Every keyword argument of the differential's scripts, mangled: a parser that
 # matches a keyword by its first letters, or ignores an unknown one, shows up
 # as a divergence from Redis (#32).

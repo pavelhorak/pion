@@ -521,6 +521,8 @@ def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
                     var m = sp[].metadata[unsafe_offset=slot]
                     if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
                         continue
+                    if keyspace[].expire_stored_if_due(sp[].keys[unsafe_offset=slot]):
+                        continue              # #45: an expired key is removed, as Redis's SCAN does
                     var klen = _key_ns_match(sp[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
                     if klen < 0:
                         continue
@@ -572,7 +574,8 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         var sp2 = keyspace[].shards.unsafe_offset(shard_i)
         for slot in range(sp2[].capacity):
             var m = sp2[].metadata[unsafe_offset=slot]
-            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
+            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
+                    and not keyspace[].is_expired(sp2[].keys[unsafe_offset=slot]):     # #45
                 var kl0 = _key_ns_match(sp2[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
                 if kl0 >= 0:
                     if match_all:
@@ -587,7 +590,8 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         var sp2 = keyspace[].shards.unsafe_offset(shard_i)
         for slot in range(sp2[].capacity):
             var m = sp2[].metadata[unsafe_offset=slot]
-            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
+            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
+                    and not keyspace[].is_expired(sp2[].keys[unsafe_offset=slot]):     # #45: as above
                 var klen = _key_ns_match(sp2[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
                 if klen < 0:
                     continue
@@ -610,17 +614,48 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 
 @always_inline
 def handle_randomkey(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
-    """RANDOMKEY — return a random key from the keyspace."""
-    var found_rk = False
+    """RANDOMKEY — a random key that has not expired (#45), nil when there is
+    none. It returned the first key in shard order, every time. A shard is
+    picked in proportion to its size, then the first live key from a random
+    slot; after 100 picks that found only expired keys, the first live key in
+    order (Redis also stops sampling after 100)."""
+    var total = 0
     for shard_i in range(8):
-        if found_rk: break
+        total += keyspace[].shards[unsafe_offset=shard_i].size
+    if total == 0:
+        writer.append_null_response()
+        return 0
+    for _ in range(100):
+        var r = Int(external_call["random", Int64]()) % total
+        var shard_i = 0
+        while shard_i < 7 and r >= keyspace[].shards[unsafe_offset=shard_i].size:
+            r -= keyspace[].shards[unsafe_offset=shard_i].size
+            shard_i += 1
+        var sp = keyspace[].shards.unsafe_offset(shard_i)
+        var cap = sp[].capacity
+        if cap == 0 or sp[].size == 0:
+            continue
+        var slot = Int(external_call["random", Int64]()) % cap
+        var occupied = False
+        for _step in range(cap):
+            var m = sp[].metadata[unsafe_offset=slot]
+            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
+                occupied = True
+                break
+            slot = (slot + 1) % cap
+        if not occupied or keyspace[].expire_stored_if_due(sp[].keys[unsafe_offset=slot]):
+            continue                 # #45: removed, as Redis's RANDOMKEY does
+        writer.append_bulk_value_response(sp[].keys[unsafe_offset=slot])
+        return 0
+    for shard_i in range(8):
         var sp3 = keyspace[].shards.unsafe_offset(shard_i)
         for slot in range(sp3[].capacity):
             var m = sp3[].metadata[unsafe_offset=slot]
-            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
+            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
+                    and not keyspace[].is_expired(sp3[].keys[unsafe_offset=slot]):
                 writer.append_bulk_value_response(sp3[].keys[unsafe_offset=slot])
-                found_rk = True; break
-    if not found_rk: writer.append_null_response()
+                return 0
+    writer.append_null_response()
     return 0
 
 

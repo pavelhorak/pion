@@ -2265,7 +2265,7 @@ struct SlowPathHandler:
                         _ = handle_pttl(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
                         i = cmd_end_tok - 1
                     elif tl == 7 and cmd_matches_7(tp, 112, 101, 114, 115, 105, 115, 116):
-                        _ = handle_persist(tokens, i, cmd_end_tok, writer, self.ttl_map, self.dispatcher.wal)
+                        _ = handle_persist(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── INFO ──
                     elif tl == 4 and cmd_matches_4(tp, 105, 110, 102, 111):
@@ -3563,7 +3563,7 @@ struct SlowPathHandler:
                                 "EXECABORT Transaction discarded because of: " + "OOM command not allowed when used memory > 'maxmemory'.")
                             exec_replay_count = -1
                         else:
-                            exec_replay_count = handle_exec_start(fd, self.tx_state, writer)
+                            exec_replay_count = handle_exec_start(fd, self.tx_state, writer, self._expiry_now())
                         if exec_replay_count > 0:
                             exec_replay_q = self.tx_state.queues[Int(fd)]
                             exec_replay_qi = 0
@@ -3589,7 +3589,7 @@ struct SlowPathHandler:
                         _ = handle_discard(fd, self.tx_state, writer)
                         i = cmd_end_tok - 1
                     elif tl == 5 and cmd_matches_5(tp, 119, 97, 116, 99, 104):
-                        _ = handle_watch(tokens, i, cmd_end_tok, fd, self.tx_state, writer)
+                        _ = handle_watch(tokens, i, cmd_end_tok, fd, self.tx_state, writer, self.keyspace, self._expiry_now())
                         i = cmd_end_tok - 1
                     elif tl == 7 and cmd_matches_7(tp, 117, 110, 119, 97, 116, 99, 104):
                         _ = handle_unwatch(fd, self.tx_state, writer)
@@ -3631,7 +3631,8 @@ struct SlowPathHandler:
                         _ = handle_command(tokens, i, cmd_end_tok, writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "debug"):
-                        _ = handle_debug(tokens, i, cmd_end_tok, writer)
+                        _ = handle_debug(tokens, i, cmd_end_tok, writer, self.keyspace,
+                                         config.server.enable_debug_command, fd)   # #45
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "slowlog"):
                         _ = handle_slowlog(tokens, i, cmd_end_tok, writer)
@@ -4080,6 +4081,13 @@ struct SlowPathHandler:
                 if skip_to > 0 and skip_to <= n:
                     return skip_to
             return n
+
+    @always_inline
+    def _expiry_now(self) -> Int64:
+        """#45: the time a deadline is compared with: the batch clock, or the
+        wall clock when no key has a TTL (the clock is then off)."""
+        var c = self.keyspace[].clock_ns
+        return c if c != 0 else Int64(_get_now_ns())
 
     @always_inline
     def _host(mut self) -> UnsafePointer[NoneType, MutUntrackedOrigin]:

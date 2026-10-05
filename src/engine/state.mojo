@@ -212,6 +212,12 @@ struct Pion:
                 print("Blob tier: compaction re-index FAILED (snapshot error) — "
                       + "the WAL still names pre-compaction offsets")
 
+        # #45: from here on, a key removed as expired is logged as a DEL ahead
+        # of the next record (replay above ran with lazy expiry off).
+        if is_not_null(self.wal[].map):
+            self.keyspace[].enable_expiry_log()
+            self.wal[].expired_q = self.keyspace[].expired_log
+
         # === Phase 6: HNSW load from disk (skips FT.OPTIMIZE on warm restart) ===
         # gh #211: thread the shared slot→key buffer through the load so the
         # persisted map lands in the cross-worker resolver, and publish the

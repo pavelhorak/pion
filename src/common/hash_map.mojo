@@ -877,10 +877,33 @@ struct StripedHashMap(Movable):
     # destination) left the entry behind, and the next key of that name expired
     # at the old deadline. Null for a keyspace that keeps no TTLs.
     var ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]
+    # #45: lazy expiry. The time this dispatch batch compares deadlines with
+    # (Redis's command time snapshot), set by the engine before each batch
+    # while any key has a TTL, so a key cannot expire in the middle of a
+    # command. 0 turns lazy expiry off: WAL replay and snapshot load see every
+    # key as stored. A lookup that finds a key past its deadline removes it, as
+    # the sweep would, and reports it missing: no command reads an expired
+    # value or writes into one.
+    var clock_ns: Int64
+    # #45: keys removed as expired and not yet logged, as [u32 len][key]
+    # records. The WAL logs a DEL for each before its next record
+    # (WAL.log_expired), so a key that expired and was created again replays
+    # as the new key, not as the old value under the old deadline. Null when
+    # no WAL is attached (--no-wal): nothing is queued.
+    var expired_log: Pointer[List[UInt8], MutUntrackedOrigin]
+    # #45: the active sweep's switch (DEBUG SET-ACTIVE-EXPIRE 0|1).
+    var active_expire: Bool
+    # #45: on a replica, a lookup reports an expired key missing without
+    # removing it; the primary's DEL does that, as on a Redis replica.
+    var expire_hides_only: Bool
 
     def __init__(out self, initial_capacity: Int):
         var shard_cap = max(16, initial_capacity // 8)
         self.ttl_map = null_ptr[SlabHashMap, MutUntrackedOrigin]()
+        self.clock_ns = 0
+        self.expired_log = null_ptr[List[UInt8], MutUntrackedOrigin]()
+        self.active_expire = True
+        self.expire_hides_only = False
         self.graveyard = alloc[List[GenericValue]](1)
         self.graveyard.unsafe_write(List[GenericValue]())
         self.field_ttl_index = alloc[SlabHashMap](1)
@@ -895,6 +918,10 @@ struct StripedHashMap(Movable):
         self.graveyard = take.graveyard
         self.field_ttl_index = take.field_ttl_index
         self.ttl_map = take.ttl_map
+        self.clock_ns = take.clock_ns
+        self.expired_log = take.expired_log
+        self.active_expire = take.active_expire
+        self.expire_hides_only = take.expire_hides_only
 
     def __del__(deinit self):
         if Int(self.shards) != 0:
@@ -907,15 +934,99 @@ struct StripedHashMap(Movable):
         if Int(self.field_ttl_index) != 0:
             self.field_ttl_index.unsafe_deinit_pointee()
             self.field_ttl_index.unsafe_free()
+        if Int(self.expired_log) != 0:
+            self.expired_log.unsafe_deinit_pointee()
+            self.expired_log.unsafe_free()
 
     @always_inline
     def _shard(self, h: UInt64) -> Int:
         return Int(h & 7)
 
+    # ── #45: expiry ──────────────────────────────────────────────────────────
+
+    def enable_expiry_log(mut self):
+        """Queue expired keys for the WAL (state.mojo, when a WAL is open)."""
+        if Int(self.expired_log) == 0:
+            self.expired_log = alloc[List[UInt8]](1)
+            self.expired_log.unsafe_write(List[UInt8]())
+
+    def deadline(self, key: GenericValue) -> Int64:
+        """The key's TTL deadline in ns, or -1 when it has none."""
+        if Int(self.ttl_map) == 0 or self.ttl_map[].size == 0:
+            return -1
+        var d = self.ttl_map[].get(key)
+        if d.is_none():
+            return -1
+        return Int64(d.as_int())
+
+    def is_expired(self, key: GenericValue) -> Bool:
+        """True when `key` is past its deadline at this batch's clock, without
+        removing it: for a caller walking the shards (KEYS, SCAN, RANDOMKEY),
+        whose keys are the map's own stored keys."""
+        if self.clock_ns == 0:
+            return False
+        var d = self.deadline(key)
+        return d >= 0 and d < self.clock_ns
+
+    def expire_stored_if_due(self, key: GenericValue) -> Bool:
+        """For a caller walking the shards (SCAN, RANDOMKEY): True when the
+        stored key `key` is past its deadline, and then removed (except on a
+        replica), as Redis's SCAN and RANDOMKEY remove the expired keys they
+        meet. The removal frees `key`: the caller must not use it after a
+        True."""
+        if not self.is_expired(key):
+            return False
+        if not self.expire_hides_only:
+            _ = self.expire_key(key, UInt64(key.__hash__()), True)
+        return True
+
+    @no_inline
+    def _expire_if_due(self, key: GenericValue, h: UInt64) -> Bool:
+        """Lazy expiry: remove `key` (just found) when it is past its deadline
+        at the batch clock. True when it was removed. Redis's rule: expired
+        once the clock is past the deadline."""
+        var d = self.deadline(key)
+        if d < 0 or d >= self.clock_ns:
+            return False
+        if not self.expire_hides_only:
+            _ = self.expire_key(key, h, True)
+        return True
+
+    def expire_key(self, key: GenericValue, h: UInt64, park: Bool) -> GenericValue:
+        """Remove `key` as expired, for lazy expiry and for the sweep: queue its
+        WAL DEL, drop its TTL, remove it. An aggregate's value is parked in the
+        graveyard (`park`: freed after the batch's replies are written) or
+        handed back for the caller to free. `key` must not be one of this
+        map's stored keys unless the caller is done with it: the removal
+        frees the stored key."""
+        if Int(self.expired_log) != 0:
+            var buf = alloc[UInt8](24)
+            var kl = key.string_len()
+            var kp = key.as_string_safe(buf)
+            var log = self.expired_log
+            log[].append(UInt8(kl & 0xFF))
+            log[].append(UInt8((kl >> 8) & 0xFF))
+            log[].append(UInt8((kl >> 16) & 0xFF))
+            log[].append(UInt8((kl >> 24) & 0xFF))
+            for b in range(kl):
+                log[].append(kp[b])
+            buf.unsafe_free()
+        if Int(self.ttl_map) != 0:
+            _ = self.ttl_map[].remove_generic(key)
+        var taken = GenericValue()
+        _ = self.shards[unsafe_offset=self._shard(h)].remove_generic_with_hash_taking(key, h, taken)
+        if park and taken.type.value != ValueType.NONE:
+            self.graveyard[].append(taken)
+            return GenericValue()
+        return taken
+
     @always_inline
     def get(self, key: GenericValue) -> GenericValue:
         var h = UInt64(key.__hash__())
-        return self.shards[unsafe_offset=self._shard(h)].get_with_hash(key, h)
+        var v = self.shards[unsafe_offset=self._shard(h)].get_with_hash(key, h)
+        if self.clock_ns != 0 and v.type.value != ValueType.NONE and self._expire_if_due(key, h):
+            return GenericValue()
+        return v
 
     @always_inline
     def get(self, key_str: String) -> GenericValue:
@@ -924,7 +1035,10 @@ struct StripedHashMap(Movable):
 
     @always_inline
     def get_with_hash(self, key: GenericValue, h: UInt64) -> GenericValue:
-        return self.shards[unsafe_offset=self._shard(h)].get_with_hash(key, h)
+        var v = self.shards[unsafe_offset=self._shard(h)].get_with_hash(key, h)
+        if self.clock_ns != 0 and v.type.value != ValueType.NONE and self._expire_if_due(key, h):
+            return GenericValue()
+        return v
 
     @always_inline
     def get_with_ptr(self, ptr: Pointer[UInt8, MutUntrackedOrigin], length: Int) -> GenericValue:
@@ -933,7 +1047,11 @@ struct StripedHashMap(Movable):
         if length <= 23:
             var packed = GenericValue.hash_and_pack_sso(ptr, length)
             var h = packed[0]
-            return self.shards[unsafe_offset=self._shard(h)].get_with_sso(h, packed[1], packed[2], packed[3])
+            var v = self.shards[unsafe_offset=self._shard(h)].get_with_sso(h, packed[1], packed[2], packed[3])
+            if self.clock_ns != 0 and v.type.value != ValueType.NONE \
+                    and self._expire_if_due(GenericValue.borrow(ptr, length), h):
+                return GenericValue()
+            return v
         else:
             # gh #394: borrow, don't copy — the copy was never freed.
             return self.get(GenericValue.borrow(ptr, length))
@@ -941,6 +1059,8 @@ struct StripedHashMap(Movable):
     @always_inline
     def set(mut self, key: GenericValue, var value: GenericValue):
         var h = UInt64(key.__hash__())
+        if self.clock_ns != 0:
+            _ = self._expire_if_due(key, h)   # #45: never store over an expired value
         self.shards[unsafe_offset=self._shard(h)].set_with_hash(key, value^, h)
 
     @always_inline
@@ -949,6 +1069,8 @@ struct StripedHashMap(Movable):
 
         MSET needs the hash a second time — for the WATCH version slot — so
         computing it here as well would mean hashing every key twice."""
+        if self.clock_ns != 0:
+            _ = self._expire_if_due(key, h)   # #45: as in set()
         self.shards[unsafe_offset=self._shard(h)].set_with_hash(key, value^, h)
 
     @always_inline
@@ -958,6 +1080,8 @@ struct StripedHashMap(Movable):
         """gh #175: SET-from-raw-bytes with in-place payload reuse — see
         SlabHashMap.set_str_reuse_with_hash."""
         var h = UInt64(key.__hash__())
+        if self.clock_ns != 0:
+            _ = self._expire_if_due(key, h)   # #45: as in set()
         self.shards[unsafe_offset=self._shard(h)].set_str_reuse_with_hash(key, h, val_ptr, val_len)
 
     @always_inline
@@ -976,15 +1100,22 @@ struct StripedHashMap(Movable):
 
     @always_inline
     def remove_generic(mut self, key: GenericValue) -> Bool:
-        self._drop_ttl(key)
+        """Remove `key`; False when it was missing. An expired key counts as
+        missing (#45): it is removed as expired, and DEL answers 0 for it."""
         var h = UInt64(key.__hash__())
+        if self.clock_ns != 0 and self._expire_if_due(key, h):
+            return False
+        self._drop_ttl(key)
         return self.shards[unsafe_offset=self._shard(h)].remove_generic_with_hash(key, h)
 
     def remove_generic_taking(mut self, key: GenericValue, mut taken: GenericValue) -> Bool:
         """gh #369: remove, and hand back an aggregate value so its container
-        can be freed (see container_free.mojo). One probe, like remove_generic."""
-        self._drop_ttl(key)
+        can be freed (see container_free.mojo). One probe, like remove_generic.
+        An expired key counts as missing (#45), as in remove_generic."""
         var h = UInt64(key.__hash__())
+        if self.clock_ns != 0 and self._expire_if_due(key, h):
+            return False
+        self._drop_ttl(key)
         return self.shards[unsafe_offset=self._shard(h)].remove_generic_with_hash_taking(key, h, taken)
 
     @always_inline
@@ -998,9 +1129,12 @@ struct StripedHashMap(Movable):
     @always_inline
     def get_value_ptr(mut self, key: GenericValue) -> Pointer[GenericValue, MutUntrackedOrigin]:
         """Return pointer to value slot for in-place mutation (e.g. INCR).
-        Returns null pointer if key not found."""
+        Returns null pointer if key not found (or found expired, #45)."""
         var h = UInt64(key.__hash__())
-        return self.shards[unsafe_offset=self._shard(h)].get_value_ptr(key)
+        var p = self.shards[unsafe_offset=self._shard(h)].get_value_ptr(key)
+        if self.clock_ns != 0 and Int(p) != 0 and self._expire_if_due(key, h):
+            return null_ptr[GenericValue, MutUntrackedOrigin]()
+        return p
 
     def reset(mut self):
         for i in range(8):

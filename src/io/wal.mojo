@@ -897,6 +897,11 @@ struct WAL(Movable):
     # before the mapping or its offsets change, and reattach after. Last field
     # on purpose (new fields go at the END of hot structs).
     var repl_handle: Pointer[NoneType, MutUntrackedOrigin]
+    # #45: the keyspace's queue of keys it removed as expired
+    # (StripedHashMap.expired_log). Each becomes a DEL record ahead of this
+    # log's next record, so replay never gives a key created again after it
+    # expired the old value or the old deadline. Null when not attached.
+    var expired_q: Pointer[List[UInt8], MutUntrackedOrigin]
 
     def __init__(out self, path: String, worker_id: Int = 0,
                  file_size: Int = WAL_FILE_SIZE,
@@ -921,6 +926,7 @@ struct WAL(Movable):
         self.seq = 0
         self.map = null_ptr[UInt8, MutUntrackedOrigin]()
         self.repl_handle = null_ptr[NoneType, MutUntrackedOrigin]()
+        self.expired_q = null_ptr[List[UInt8], MutUntrackedOrigin]()
 
         # --no-wal (gh #394): no file, no mapping. Every append already returns
         # False on a null map, so this is the whole switch. It used to gate only
@@ -1008,10 +1014,35 @@ struct WAL(Movable):
         self.durability_lost = take.durability_lost
         self.refuse_when_full = take.refuse_when_full
         self.repl_handle = take.repl_handle
+        self.expired_q = take.expired_q
         self.compaction_threshold = take.compaction_threshold
         self.current_size = take.current_size
 
     # ── Entry append (hot path, zero syscalls) ─────────────────────────────
+
+    @always_inline
+    def _expired_queued(self) -> Bool:
+        return Int(self.expired_q) != 0 and len(self.expired_q[]) != 0
+
+    @no_inline
+    def log_expired(mut self):
+        """#45: a DEL record for each key the keyspace removed as expired since
+        the last record. Every appender calls this first, and the engine's
+        housekeeping too, for a keyspace that only reads."""
+        if not self._expired_queued():
+            return
+        var q = self.expired_q[].copy()
+        self.expired_q[].clear()        # before appending: append calls back here
+        var p = q.unsafe_ptr()
+        var n = len(q)
+        var off = 0
+        while off + 4 <= n:
+            var kl = Int(p[off]) | (Int(p[off + 1]) << 8) | (Int(p[off + 2]) << 16) | (Int(p[off + 3]) << 24)
+            if off + 4 + kl > n:
+                break
+            _ = self.append(2, p + (off + 4), kl)
+            off += 4 + kl
+        _ = q^
 
     @always_inline
     def append(mut self, cmd_id: UInt8,
@@ -1019,6 +1050,8 @@ struct WAL(Movable):
         """Append with no value (DEL, INCR without value). False = not logged."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len   # 4+1+4+key+4
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
             if not self._make_room(entry_size):
@@ -1039,6 +1072,8 @@ struct WAL(Movable):
         """Append with value (SET). False = not logged (see gh #149)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
             if not self._make_room(entry_size):
@@ -1066,6 +1101,8 @@ struct WAL(Movable):
         deferring past it would stamp the header of the wrong segment."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len + val_len
         var rotated = False
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1103,8 +1140,10 @@ struct WAL(Movable):
 
     @always_inline
     def batch_fits(self, upper_bound: Int) -> Bool:
-        """True when `upper_bound` bytes are guaranteed to fit without rotating."""
-        if is_null(self.map):
+        """True when `upper_bound` bytes are guaranteed to fit without rotating.
+        False while expired keys wait to be logged (#45): the caller's
+        per-record path logs their DELs first."""
+        if is_null(self.map) or self._expired_queued():
             return False
         return self.tail_offset + UInt64(upper_bound) <= UInt64(self.data_size)
 
@@ -1187,6 +1226,8 @@ struct WAL(Movable):
         """gh #163: log a SET whose payload went to the blob arena. 24-byte value."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len + 24
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
             if not self._make_room(entry_size):
@@ -1225,6 +1266,8 @@ struct WAL(Movable):
         """Two-part value record: val = [4B f_len][f][4B v_len][v] (HSET, LINSERT pivot+elem)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 8 + f_len + v_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1252,6 +1295,8 @@ struct WAL(Movable):
         """Scored-member record: val = [8B f64 score][member] (ZADD, GEOADD)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 8 + m_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1277,6 +1322,8 @@ struct WAL(Movable):
         """u64-prefixed record: val = [8B n][bytes] (LSET index, LREM count, SETBIT offset+bit)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 8 + v_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1303,6 +1350,8 @@ struct WAL(Movable):
         Serves XADD ([id_ms][id_seq][packed pairs]) and XDEL ([id_ms][id_seq])."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 16 + v_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1328,6 +1377,8 @@ struct WAL(Movable):
         """cmd 22: val = [4B p_len | BEFORE<<31][pivot][4B v_len][element]. Cold path."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 8 + p_len + v_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1357,6 +1408,8 @@ struct WAL(Movable):
         """Two-u64 record: val = [8B a][8B b] (LTRIM resolved range)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len + 16
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
             if not self._make_room(entry_size):
@@ -1805,6 +1858,11 @@ struct WAL(Movable):
         a full log tells the operator to SAVE."""
         if is_null(self.map):
             return
+        # #45: the snapshot holds none of the keys still waiting for their
+        # DEL, and a key created again since was logged (its record logged
+        # the DELs first), so the queue is moot from here on.
+        if Int(self.expired_q) != 0:
+            self.expired_q[].clear()
         self._repl_detach()   # gh #390: every stream offset is about to reset
         for n in range(1, self.sealed + 1):
             var seg = self._segment_path(n)

@@ -240,6 +240,18 @@ struct NetworkEngine:
         self.writer.pending_offsets[unsafe_offset=ci] = 0
 
     @always_inline
+    @always_inline
+    def _set_expiry_clock(mut self):
+        """#45: set the keyspace's lazy-expiry clock for the coming batch."""
+        var ks = self.fast_path.keyspace
+        var tm = self.fast_path.ttl_map
+        if is_not_null(tm) and tm[].size > 0:
+            ks[].clock_ns = _get_now_ns()
+            var cl = self.slow_path.cluster
+            ks[].expire_hides_only = is_not_null(cl) and cl[].enabled and cl[].is_replica
+        else:
+            ks[].clock_ns = 0
+
     def _dispatch_recv_buffer(
         mut self,
         fd: Int32,
@@ -302,6 +314,12 @@ struct NetworkEngine:
                     self.rcu_epoch_ptr, UInt64(0))
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.SEQUENTIAL](
                 _rcu_slot, (_rcu_ep << 1) | UInt64(1))
+
+        # #45: the batch's clock for lazy expiry, Redis's command time
+        # snapshot: one read per recv buffer while any key has a TTL, 0 (off)
+        # otherwise. A replica only hides an expired key (it refuses writes,
+        # and the primary's DEL removes it), as a Redis replica does.
+        self._set_expiry_clock()
 
         # Binary protocol connections: route to process_binary_request()
         # instead of the RESP fast_path/slow_path. Binary handler sends
@@ -527,7 +545,12 @@ struct NetworkEngine:
         var total = carry + n
         if total == 0:
             return
+        # #45: the primary's records apply to what it had: no lazy expiry here
+        # (a key this replica's clock calls expired may still be live there).
+        var _clk = self.fast_path.keyspace[].clock_ns
+        self.fast_path.keyspace[].clock_ns = 0
         var used = apply_wal_entries(self.fast_path.keyspace, buf, total, self.fast_path.ttl_map)
+        self.fast_path.keyspace[].clock_ns = _clk
         if used > 0:
             free_graveyard(self.fast_path.keyspace)   # gh #394: a replicated SET over an aggregate
             external_call["pion_repl_replica_applied", NoneType](
@@ -651,6 +674,11 @@ struct NetworkEngine:
         # Worst-case latency to notice is 64 ticks, bounded well under the
         # SIGALRM grace period. Each worker flushes its OWN WAL — they are
         # shared-nothing, so there is nothing to coordinate.
+        # #45: log the DELs of keys that expired with no write behind them (a
+        # write logs them itself, ahead of its own record).
+        if is_not_null(self.fast_path.wal):
+            self.fast_path.wal[].log_expired()
+
         if not self.shutting_down:
             if external_call["pion_shutdown_requested", Int32]() != 0:
                 if is_not_null(self.fast_path.wal):

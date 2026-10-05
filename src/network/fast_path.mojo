@@ -311,8 +311,10 @@ struct FastPathHandler(Movable):
         plain key containing `::` into a phantom field deletion, leaving the
         key alive for good); they are in each hash, found via the keyspace's
         field_ttl_index."""
+        if not self.keyspace[].active_expire or self.keyspace[].expire_hides_only:
+            return     # DEBUG SET-ACTIVE-EXPIRE 0, or a replica: the primary expires (#45)
         self._sweep_field_ttls(max_scan)
-        if is_null(self.ttl_map):
+        if is_null(self.ttl_map) or self.ttl_map[].size == 0:
             return
         var cap = self.ttl_map[].capacity
         if cap == 0:
@@ -336,8 +338,12 @@ struct FastPathHandler(Movable):
                     # itself, so it gets an OWNED copy of the key.
                     var key = self.ttl_map[].keys[cursor].clone()
                     # Remove from the keyspace, freeing an aggregate's container
-                    # (gh #369) rather than leaking it.
-                    _ = remove_and_free(self.keyspace, key)
+                    # (gh #369) rather than leaking it, and log the deletion
+                    # (#45): replay must not revive the key, or give a key
+                    # created again under its name the old deadline.
+                    var gone = self.keyspace[].expire_key(key, UInt64(key.__hash__()), False)
+                    if gone.type.value != ValueType.NONE:
+                        free_container(gone)
                     _ = self.ttl_map[].remove_generic(key)   # a TTL whose key was already gone
                     key.free_str_payload()
             cursor = (cursor + 1) & (cap - 1)
@@ -1045,20 +1051,9 @@ struct FastPathHandler(Movable):
                         consumed = it_pos
                         continue
                     # gh #85b: P2 cross-worker routing removed (shared-nothing, gh #48).
+                    # #45: the lookup applies the key's TTL (the keyspace's
+                    # lazy expiry), as every other lookup does.
                     var val = self.keyspace[].get_with_ptr(buffer + it_pos, key_len)
-                    # TTL: lazy expiry check (skip when ttl_map is empty — no keys have TTL)
-                    if self.has_ttl and self.ttl_map[].size > 0 and not val.is_none():
-                        var key_val = GenericValue.borrow_buf(buffer + it_pos, key_len)
-                        var exp_v = self.ttl_map[].get(key_val)
-                        if not exp_v.is_none():
-                            var now_ns = _get_now_ns()
-                            if now_ns > exp_v.as_int():
-                                _ = self.keyspace[].remove_generic(key_val)
-                                _ = self.ttl_map[].remove_generic(key_val)
-                                writer.append_null_response()
-                                it_pos += key_len + 2
-                                consumed = it_pos
-                                continue
                     # A6: values >512B use writev (bypasses 4MB response buffer for LMCache blobs)
                     writer.append_large_value_response_writev(fd, val)
                     it_pos += key_len + 2

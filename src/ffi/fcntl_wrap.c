@@ -295,6 +295,27 @@ int64_t pion_fmt_fixed(double v, int decimals, char* out, int64_t cap) {
 #include <sys/time.h>
 #include <netdb.h>
 
+/* #45: true when the peer is this machine (loopback, or a Unix socket), as
+   Redis's islocalClient decides for enable-debug-command "local". */
+int pion_peer_is_local(int fd) {
+    struct sockaddr_storage sa;
+    socklen_t salen = sizeof(sa);
+    if (getpeername(fd, (struct sockaddr *)&sa, &salen) != 0) return 0;
+    if (sa.ss_family == AF_UNIX) return 1;
+    if (sa.ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in *)&sa;
+        return ntohl(s->sin_addr.s_addr) == 0x7f000001u;
+    }
+    if (sa.ss_family == AF_INET6) {
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *)&sa;
+        if (IN6_IS_ADDR_LOOPBACK(&s->sin6_addr)) return 1;
+        if (IN6_IS_ADDR_V4MAPPED(&s->sin6_addr))
+            return s->sin6_addr.s6_addr[12] == 127 && s->sin6_addr.s6_addr[13] == 0
+                && s->sin6_addr.s6_addr[14] == 0 && s->sin6_addr.s6_addr[15] == 1;
+    }
+    return 0;
+}
+
 int64_t pion_peer_id(int fd, char *buf, int64_t cap) {
     struct sockaddr_storage sa;
     socklen_t salen = sizeof(sa);
