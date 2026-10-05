@@ -17,9 +17,19 @@ HINCRBYFLOAT auto-create + Float64 precision + trim + WRONGTYPE, GEO
 round-trips (GEOPOS/GEODIST/GEOHASH), multi-member GEOADD, and GEO/zset
 survival across a WAL-replay restart.
 """
-import os, socket, subprocess, sys, time, shutil
+import os, platform, socket, subprocess, sys, time, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from resp_strict import reader, wait_ready_pid, wait_port_free  # noqa: E402  (strict one-reply reads)
+
+# HINCRBYFLOAT adds in long double and prints %.17Lf, as Redis does (#35). On
+# Apple silicon long double is a double, so `4.5 + 0.1` prints
+# 4.59999999999999964; where it is wider (x86-64 and AArch64 Linux) the same
+# sums print as the decimal they were written as.
+_LD_IS_DOUBLE = platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+def ld(value, written):
+    return ("%.17f" % value).rstrip("0").rstrip(".") if _LD_IS_DOUBLE else written
 
 BINARY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server")
 PORT = 1981
@@ -152,16 +162,17 @@ def main():
         r = send(s, "HINCRBYFLOAT", "h", "f", "4.5")
         check(bulk_payload(r) == "4.5", "180: missing key auto-creates", f"got {r!r}")
         r = send(s, "HINCRBYFLOAT", "h", "f", "0.1")
-        check(bulk_payload(r) == "4.6", "180: increment accumulates", f"got {r!r}")
+        check(bulk_payload(r) == ld(4.5 + 0.1, "4.6"), "180: increment accumulates", f"got {r!r}")
         r = send(s, "HGET", "h", "f")
-        check(bulk_payload(r) == "4.6", "180: HGET sees stored value", f"got {r!r}")
+        check(bulk_payload(r) == ld(4.5 + 0.1, "4.6"), "180: HGET sees stored value", f"got {r!r}")
         r = send(s, "HINCRBYFLOAT", "h2", "f", "5.0")
         check(bulk_payload(r) == "5", "180: integer result trims .0", f"got {r!r}")
-        r = send(s, "HINCRBYFLOAT", "h3", "g", "3006.999999")
-        check(bulk_payload(r) == "3006.999999", "180: Float64 precision (Float32 gave 3007)", f"got {r!r}")
+        # 2^24 + 1: exact in a double and a long double, not in a Float32
+        r = send(s, "HINCRBYFLOAT", "h3", "g", "16777217")
+        check(bulk_payload(r) == "16777217", "180: no Float32 rounding (it gave 16777216)", f"got {r!r}")
         send(s, "HSET", "h4", "f", "10.5")
         r = send(s, "HINCRBYFLOAT", "h4", "f", "0.1")
-        check(bulk_payload(r) == "10.6", "180: string-field increment", f"got {r!r}")
+        check(bulk_payload(r) == ld(10.5 + 0.1, "10.6"), "180: string-field increment", f"got {r!r}")
         send(s, "HSET", "h5", "other", "1")
         r = send(s, "HINCRBYFLOAT", "h5", "f", "2.5")
         check(bulk_payload(r) == "2.5", "180: missing field on existing hash", f"got {r!r}")
@@ -234,7 +245,7 @@ def main():
         r = send(s, "GEOPOS", "geo2", "pb")
         check("$-1" not in r and "15.08" in r, "replay: multi-added member survives", f"got {r!r}")
         r = send(s, "HGET", "h", "f")
-        check(bulk_payload(r) == "4.6", "replay: HINCRBYFLOAT value survives", f"got {r!r}")
+        check(bulk_payload(r) == ld(4.5 + 0.1, "4.6"), "replay: HINCRBYFLOAT value survives", f"got {r!r}")
         s.close()
     finally:
         proc.terminate()
