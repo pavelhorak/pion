@@ -1,0 +1,76 @@
+Json file /home/ubuntu/peak/raw/april_pion_w32_t16c50_d256_r3.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 3%,   0 secs] 16 threads 50 conns:    10042011 ops, 10050101 (avg: 10050101) ops/sec, 684.23MB/sec (avg: 684.23MB/sec),  3.95 (avg:  3.95) msec latency[RUN #1 7%,   1 secs] 16 threads 50 conns:    23454469 ops, 13407309 (avg: 11729703) ops/sec, 1.09GB/sec (avg: 901.66MB/sec),  2.96 (avg:  3.39) msec latency
+warning: high CPU on thread 0: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 1: 99.8% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 2: 99.8% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 3: 99.6% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 4: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 5: 99.9% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 6: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 7: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 8: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 9: 99.9% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 10: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 11: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 12: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 13: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 14: 100.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 15: 100.0% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 10%,   2 secs] 16 threads 50 conns:    35969606 ops, 12510220 (avg: 11989980) ops/sec, 1.18GB/sec (avg: 1004.31MB/sec),  3.18 (avg:  3.31) msec latency[RUN #1 13%,   4 secs] 16 threads 50 conns:    47770892 ops, 11797687 (avg: 11941896) ops/sec, 1.24GB/sec (avg: 1.05GB/sec),  3.37 (avg:  3.33) msec latency[RUN #1 17%,   5 secs] 16 threads 50 conns:    59390991 ops, 11615882 (avg: 11876677) ops/sec, 1.36GB/sec (avg: 1.11GB/sec),  3.43 (avg:  3.35) msec latency[RUN #1 20%,   6 secs] 16 threads 50 conns:    70878260 ops, 11483559 (avg: 11811147) ops/sec, 1.45GB/sec (avg: 1.17GB/sec),  3.47 (avg:  3.37) msec latency[RUN #1 23%,   7 secs] 16 threads 50 conns:    81798474 ops, 10914549 (avg: 11683022) ops/sec, 1.48GB/sec (avg: 1.21GB/sec),  3.65 (avg:  3.40) msec latency[RUN #1 27%,   8 secs] 16 threads 50 conns:    92316678 ops, 10515322 (avg: 11537052) ops/sec, 1.50GB/sec (avg: 1.25GB/sec),  3.79 (avg:  3.45) msec latency[RUN #1 30%,   9 secs] 16 threads 50 conns:   102610652 ops, 10291215 (avg: 11398620) ops/sec, 1.55GB/sec (avg: 1.28GB/sec),  3.87 (avg:  3.49) msec latency[RUN #1 33%,  10 secs] 16 threads 50 conns:   112561309 ops, 9948050 (avg: 11253558) ops/sec, 1.56GB/sec (avg: 1.31GB/sec),  4.01 (avg:  3.54) msec latency[RUN #1 37%,  11 secs] 16 threads 50 conns:   122501873 ops, 9937870 (avg: 11133945) ops/sec, 1.62GB/sec (avg: 1.34GB/sec),  4.01 (avg:  3.57) msec latency[RUN #1 40%,  12 secs] 16 threads 50 conns:   132019495 ops, 9514815 (avg: 10999010) ops/sec, 1.55GB/sec (avg: 1.35GB/sec),  4.19 (avg:  3.62) msec latency[RUN #1 43%,  13 secs] 16 threads 50 conns:   141489830 ops, 9465592 (avg: 10881026) ops/sec, 1.60GB/sec (avg: 1.37GB/sec),  4.21 (avg:  3.66) msec latency[RUN #1 47%,  14 secs] 16 threads 50 conns:   150995223 ops, 9502276 (avg: 10782538) ops/sec, 1.65GB/sec (avg: 1.39GB/sec),  4.20 (avg:  3.69) msec latency[RUN #1 50%,  15 secs] 16 threads 50 conns:   160327309 ops, 9329399 (avg: 10685659) ops/sec, 1.66GB/sec (avg: 1.41GB/sec),  4.28 (avg:  3.73) msec latency[RUN #1 53%,  16 secs] 16 threads 50 conns:   169708864 ops, 9378985 (avg: 10603991) ops/sec, 1.69GB/sec (avg: 1.43GB/sec),  4.25 (avg:  3.76) msec latency[RUN #1 57%,  17 secs] 16 threads 50 conns:   179126912 ops, 9415176 (avg: 10534059) ops/sec, 1.73GB/sec (avg: 1.45GB/sec),  4.24 (avg:  3.78) msec latency[RUN #1 60%,  18 secs] 16 threads 50 conns:   188402870 ops, 9270451 (avg: 10463836) ops/sec, 1.74GB/sec (avg: 1.46GB/sec),  4.30 (avg:  3.81) msec latency[RUN #1 63%,  19 secs] 16 threads 50 conns:   197415478 ops, 9010031 (avg: 10387320) ops/sec, 1.71GB/sec (avg: 1.48GB/sec),  4.43 (avg:  3.83) msec latency[RUN #1 67%,  20 secs] 16 threads 50 conns:   206579438 ops, 9161248 (avg: 10326016) ops/sec, 1.77GB/sec (avg: 1.49GB/sec),  4.36 (avg:  3.86) msec latency[RUN #1 70%,  21 secs] 16 threads 50 conns:   215605676 ops, 9023711 (avg: 10264002) ops/sec, 1.76GB/sec (avg: 1.50GB/sec),  4.42 (avg:  3.88) msec latency[RUN #1 73%,  22 secs] 16 threads 50 conns:   224486213 ops, 8877891 (avg: 10200996) ops/sec, 1.75GB/sec (avg: 1.51GB/sec),  4.49 (avg:  3.91) msec latency[RUN #1 77%,  23 secs] 16 threads 50 conns:   233327877 ops, 8839047 (avg: 10141780) ops/sec, 1.77GB/sec (avg: 1.53GB/sec),  4.52 (avg:  3.93) msec latency[RUN #1 80%,  24 secs] 16 threads 50 conns:   242295016 ops, 8956158 (avg: 10092335) ops/sec, 1.81GB/sec (avg: 1.54GB/sec),  4.46 (avg:  3.95) msec latency[RUN #1 83%,  25 secs] 16 threads 50 conns:   251216435 ops, 8918814 (avg: 10045396) ops/sec, 1.82GB/sec (avg: 1.55GB/sec),  4.47 (avg:  3.97) msec latency[RUN #1 87%,  26 secs] 16 threads 50 conns:   260296720 ops, 9077652 (avg: 10008176) ops/sec, 1.88GB/sec (avg: 1.56GB/sec),  4.40 (avg:  3.98) msec latency[RUN #1 90%,  27 secs] 16 threads 50 conns:   269200197 ops, 8893587 (avg: 9966864) ops/sec, 1.85GB/sec (avg: 1.57GB/sec),  4.49 (avg:  4.00) msec latency[RUN #1 93%,  28 secs] 16 threads 50 conns:   278153051 ops, 8949166 (avg: 9930515) ops/sec, 1.88GB/sec (avg: 1.58GB/sec),  4.46 (avg:  4.01) msec latency[RUN #1 97%,  29 secs] 16 threads 50 conns:   287128073 ops, 8972509 (avg: 9897483) ops/sec, 1.90GB/sec (avg: 1.59GB/sec),  4.45 (avg:  4.03) msec latency[RUN #1 100%,  30 secs] 11 threads 50 conns:   295979160 ops, 8972509 (avg: 9864644) ops/sec, 1.90GB/sec (avg: 1.60GB/sec),  4.45 (avg:  4.04) msec latency[RUN #1 100%,  30 secs]  0 threads 50 conns:   295986360 ops, 8972509 (avg: 9864884) ops/sec, 1.90GB/sec (avg: 1.60GB/sec),  4.45 (avg:  4.04) msec latency
+
+warning: GET miss rate 52.54% above target 1.00% (141364061 misses / 269078131 ops)
+
+CPU Utilization Summary
+  Total CPU time:   475.292s  (user 291.964s, sys 183.329s)
+  Wall time:        30.018s
+  Cores used:       15.833   (avg 98.9% across 16 worker threads)
+  Peak utilization: 1600.0%
+warning: thread 0 averaged 99.0% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 1 averaged 98.8% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 2 averaged 98.7% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 3 averaged 98.5% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 4 averaged 99.0% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 5 averaged 98.9% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 6 averaged 99.1% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 7 averaged 99.1% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 8 averaged 99.0% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 9 averaged 99.1% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 10 averaged 99.1% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 11 averaged 99.1% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 12 averaged 99.0% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 13 averaged 99.0% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 14 averaged 99.0% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 15 averaged 99.0% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+Saving JSON output file: /home/ubuntu/peak/raw/april_pion_w32_t16c50_d256_r3.json
+Json file closed.
+16        Threads
+50        Connections per thread
+30        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets       896775.21          ---          ---         4.03074         3.71100         8.25500        15.80700    265257.08 
+Gets      8967611.84   4256131.86   4711479.98         4.04305         3.71100         8.31900        15.74300   1417068.83 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals    9864387.05   4256131.86   4711479.98         4.04193         3.71100         8.25500        15.74300   1682325.91 

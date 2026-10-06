@@ -1,0 +1,1 @@
+REPS=3 TEST_TIME=30 COMMON=--protocol=redis --ratio=1:10 --key-pattern=R:R --key-minimum=1 --key-maximum=1000000 --test-time=30 --hide-histogram --distinct-client-seed --pipeline=50

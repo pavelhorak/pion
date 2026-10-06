@@ -1,0 +1,50 @@
+Json file /home/ubuntu/peak/raw/sym_pion_w32_t32c25_d256_r2.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 3%,   1 secs] 32 threads 25 conns:    12452735 ops, 12431837 (avg: 12431837) ops/sec, 866.61MB/sec (avg: 866.61MB/sec),  3.18 (avg:  3.18) msec latency[RUN #1 7%,   2 secs] 32 threads 25 conns:    28161270 ops, 15701814 (avg: 14065802) ops/sec, 1.34GB/sec (avg: 1.09GB/sec),  2.52 (avg:  2.81) msec latency[RUN #1 10%,   3 secs] 32 threads 25 conns:    42871400 ops, 14705100 (avg: 14278800) ops/sec, 1.47GB/sec (avg: 1.22GB/sec),  2.69 (avg:  2.77) msec latency
+warning: high CPU on thread 29: 95.8% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 30: 98.5% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 31: 98.2% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 13%,   4 secs] 32 threads 25 conns:    56755455 ops, 13879183 (avg: 14178931) ops/sec, 1.54GB/sec (avg: 1.30GB/sec),  2.86 (avg:  2.79) msec latency
+warning: high CPU on thread 26: 96.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 27: 98.5% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 28: 97.7% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 17%,   5 secs] 32 threads 25 conns:    70179401 ops, 13406517 (avg: 14024374) ops/sec, 1.63GB/sec (avg: 1.37GB/sec),  2.96 (avg:  2.82) msec latency[RUN #1 20%,   6 secs] 32 threads 25 conns:    83228522 ops, 13044698 (avg: 13861160) ops/sec, 1.71GB/sec (avg: 1.42GB/sec),  3.04 (avg:  2.86) msec latency[RUN #1 23%,   7 secs] 32 threads 25 conns:    95907238 ops, 12673127 (avg: 13691485) ops/sec, 1.77GB/sec (avg: 1.47GB/sec),  3.14 (avg:  2.90) msec latency[RUN #1 27%,   8 secs] 32 threads 25 conns:   108307676 ops, 12392271 (avg: 13529088) ops/sec, 1.83GB/sec (avg: 1.52GB/sec),  3.21 (avg:  2.93) msec latency[RUN #1 30%,   9 secs] 32 threads 25 conns:   120425857 ops, 12104333 (avg: 13370719) ops/sec, 1.88GB/sec (avg: 1.56GB/sec),  3.29 (avg:  2.97) msec latency[RUN #1 33%,  10 secs] 32 threads 25 conns:   132311664 ops, 11881874 (avg: 13221889) ops/sec, 1.92GB/sec (avg: 1.59GB/sec),  3.35 (avg:  3.00) msec latency
+warning: high CPU on thread 25: 96.8% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 37%,  11 secs] 32 threads 25 conns:   143923573 ops, 11608089 (avg: 13075230) ops/sec, 1.95GB/sec (avg: 1.62GB/sec),  3.43 (avg:  3.04) msec latency[RUN #1 40%,  12 secs] 32 threads 25 conns:   155301587 ops, 11369236 (avg: 12933050) ops/sec, 1.96GB/sec (avg: 1.65GB/sec),  3.50 (avg:  3.07) msec latency[RUN #1 43%,  13 secs] 32 threads 25 conns:   166425256 ops, 11114743 (avg: 12793164) ops/sec, 1.97GB/sec (avg: 1.68GB/sec),  3.58 (avg:  3.10) msec latency[RUN #1 47%,  14 secs] 32 threads 25 conns:   177401124 ops, 10956485 (avg: 12661841) ops/sec, 2.00GB/sec (avg: 1.70GB/sec),  3.64 (avg:  3.14) msec latency[RUN #1 50%,  15 secs] 32 threads 25 conns:   188210720 ops, 10806138 (avg: 12538179) ops/sec, 2.02GB/sec (avg: 1.72GB/sec),  3.68 (avg:  3.17) msec latency[RUN #1 53%,  16 secs] 32 threads 25 conns:   198934910 ops, 10720716 (avg: 12424631) ops/sec, 2.05GB/sec (avg: 1.74GB/sec),  3.72 (avg:  3.20) msec latency[RUN #1 57%,  17 secs] 32 threads 25 conns:   209526989 ops, 10588447 (avg: 12316657) ops/sec, 2.06GB/sec (avg: 1.76GB/sec),  3.76 (avg:  3.23) msec latency[RUN #1 60%,  18 secs] 32 threads 25 conns:   220035827 ops, 10502242 (avg: 12215862) ops/sec, 2.09GB/sec (avg: 1.78GB/sec),  3.79 (avg:  3.25) msec latency[RUN #1 63%,  19 secs] 32 threads 25 conns:   230546902 ops, 10496631 (avg: 12125317) ops/sec, 2.12GB/sec (avg: 1.80GB/sec),  3.80 (avg:  3.28) msec latency[RUN #1 67%,  20 secs] 32 threads 25 conns:   240916096 ops, 10365876 (avg: 12037378) ops/sec, 2.12GB/sec (avg: 1.81GB/sec),  3.84 (avg:  3.30) msec latency[RUN #1 70%,  21 secs] 32 threads 25 conns:   251277108 ops, 10357656 (avg: 11957420) ops/sec, 2.16GB/sec (avg: 1.83GB/sec),  3.85 (avg:  3.32) msec latency
+warning: high CPU on thread 24: 95.2% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 73%,  22 secs] 32 threads 25 conns:   261561684 ops, 10275677 (avg: 11880964) ops/sec, 2.17GB/sec (avg: 1.85GB/sec),  3.88 (avg:  3.35) msec latency[RUN #1 77%,  23 secs] 32 threads 25 conns:   271791346 ops, 10222158 (avg: 11808839) ops/sec, 2.18GB/sec (avg: 1.86GB/sec),  3.90 (avg:  3.37) msec latency[RUN #1 80%,  24 secs] 32 threads 25 conns:   281941476 ops, 10139686 (avg: 11739268) ops/sec, 2.20GB/sec (avg: 1.87GB/sec),  3.93 (avg:  3.39) msec latency[RUN #1 83%,  25 secs] 32 threads 25 conns:   292132721 ops, 10174944 (avg: 11676641) ops/sec, 2.23GB/sec (avg: 1.89GB/sec),  3.92 (avg:  3.41) msec latency[RUN #1 87%,  26 secs] 32 threads 25 conns:   302239965 ops, 10081395 (avg: 11615178) ops/sec, 2.23GB/sec (avg: 1.90GB/sec),  3.95 (avg:  3.42) msec latency[RUN #1 90%,  27 secs] 32 threads 25 conns:   312356972 ops, 10110455 (avg: 11559457) ops/sec, 2.26GB/sec (avg: 1.91GB/sec),  3.94 (avg:  3.44) msec latency[RUN #1 93%,  28 secs] 32 threads 25 conns:   322402728 ops, 10042522 (avg: 11505306) ops/sec, 2.27GB/sec (avg: 1.93GB/sec),  3.97 (avg:  3.46) msec latency[RUN #1 97%,  29 secs] 32 threads 25 conns:   332423470 ops, 10004834 (avg: 11453525) ops/sec, 2.28GB/sec (avg: 1.94GB/sec),  3.99 (avg:  3.47) msec latency[RUN #1 100%,  30 secs]  0 threads 25 conns:   342199158 ops, 10004834 (avg: 11405284) ops/sec, 2.28GB/sec (avg: 1.95GB/sec),  3.99 (avg:  3.49) msec latency
+
+warning: GET miss rate 48.71% above target 1.00% (151518823 misses / 311089780 ops)
+
+CPU Utilization Summary
+  Total CPU time:   617.436s  (user 384.516s, sys 232.920s)
+  Wall time:        30.014s
+  Cores used:       20.571   (avg 64.3% across 32 worker threads)
+  Peak utilization: 2164.5%
+warning: thread 26 averaged 95.2% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 27 averaged 96.5% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 28 averaged 96.5% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 29 averaged 96.7% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 30 averaged 97.1% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 31 averaged 96.2% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+Saving JSON output file: /home/ubuntu/peak/raw/sym_pion_w32_t32c25_d256_r2.json
+Json file closed.
+32        Threads
+25        Connections per thread
+30        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets      1036821.60          ---          ---         3.48428         2.62300        12.54300        18.55900    306681.30 
+Gets     10368076.01   5317960.96   5050115.05         3.49019         2.62300        12.54300        18.55900   1738822.88 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals   11404897.61   5317960.96   5050115.05         3.48965         2.62300        12.54300        18.55900   2045504.18 
