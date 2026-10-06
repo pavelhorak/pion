@@ -1,0 +1,13 @@
+shape: H=8 N=2048 d_head=128
+warmup=20 iters=100
+
+correctness: cosine(cpu, pion-msl) = 1.0000000
+
+Pion ATTEND.PREFIX.QUERY (Mojo→C→Metal→C→Mojo→TCP→Python):
+  warm-cache, same Q                         median=0.441 ms  p95=0.446 ms  min=0.420 ms
+  fresh Q each iter                          median=0.441 ms  p95=0.458 ms  min=0.423 ms
+
+MLX raw compute (no wire, no Pion — same shape):
+  MLX naive matmul + softmax                 median=0.520 ms  p95=0.621 ms  min=0.436 ms
+  MLX fast.scaled_dot_product_attention      median=0.456 ms  p95=0.531 ms  min=0.400 ms
+rc=0 for metal_attention

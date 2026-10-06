@@ -8,7 +8,7 @@ Pion's networking layer provides five event loop configurations plus a zero-copy
 
 | Tier | Flag | Syscall model | Best for | Platforms |
 |---|---|---|---|---|
-| **XDP/AF_XDP** | `--xdp --xdp-iface eth0` | Kernel bypass: NIC→BPF→AF_XDP→UMEM | io_uring's throughput at P=1 with a 29% lower p99, multi-worker ready | Linux 5.4+, CAP_NET_ADMIN |
+| **XDP/AF_XDP** | `--xdp --xdp-iface eth0` | Kernel bypass: NIC→BPF→AF_XDP→UMEM | Tail latency at P=1 over a real NIC (needs flow steering), multi-worker ready | Linux 5.4+, CAP_NET_ADMIN |
 | **io_uring SQPOLL** | `--sqpoll` | Kernel SQ polling thread (no enter() on hot path) | Experimental — hangs under load | Linux 5.11+, root/CAP_SYS_NICE |
 | **io_uring** | `--iouring` (default on Linux) | Batched enter(): 2 syscalls per batch regardless of K fds | Multi-connection production (memtier, P>=10) | Linux 5.4+ |
 | **epoll** | `--epoll` | epoll_wait + read + send per fd: 2K+1 syscalls per batch of K ready fds | Per-command P=1 benchmarks (w=1) | Linux 2.6+ |
@@ -22,7 +22,6 @@ Pion's networking layer provides five event loop configurations plus a zero-copy
 
 `run_server_kqueue()` in `engine.mojo` — default on macOS. Uses `kevent()` per tick with `EVFILT_READ` for accept/recv and `EVFILT_WRITE` for EAGAIN flush. Stack-allocated `KEvent` via `stack_allocation[1, KEvent]()`.
 
-P=1 macOS localhost ceiling: ~250K RPS (TCP/kevent limit, not Pion compute).
 
 ---
 
@@ -61,20 +60,14 @@ This is Pion's key networking design tradeoff on Linux:
 - **io_uring** batches syscalls: 2 per batch (1 enter for submit + 1 enter for CQE wait) regardless of how many fds are ready. Wins at high concurrency.
 - **epoll** uses per-fd syscalls: 2K+1 per batch of K ready fds. Simpler path per fd wins when K=1.
 
-**P=1 w=1 (single fd per wake):** epoll 96K vs io_uring 70K — epoll wins by 35%.
-**P>=10:** Both crush Redis. io_uring's batching advantage grows with connection count.
+Which one wins at P=1 depends on the CPU, so measure both on yours. At pipeline depth,
+io_uring's batching advantage grows with the number of ready connections.
 
-### Measured Throughput (memtier_benchmark, mixed SET/GET)
+### Measured throughput
 
-| Configuration | Ops/sec |
-|---|:---:|
-| epoll w=16 P=50 | 6.23M |
-| io_uring w=16 P=50 | 5.81M |
-| io_uring w=32 P=50 d=256 | **14.0M** (peak) |
-
-### P=1
-
-At P=1 the Linux localhost TCP path caps every engine at ~96K RPS. Pion with `--epoll` runs at parity with Redis there (91-96K vs 95-96K), not above it; its advantage is at pipeline depth P>=10.
+The published head-to-head against Redis (io_uring, one machine, raw memtier output) is in
+[`benchmarks/results/`](../benchmarks/results/README.md) and summarized in the
+[README](../README.md#the-engine-underneath). No epoll-vs-io_uring comparison is published yet.
 
 ---
 
@@ -159,21 +152,21 @@ Opcodes (from the `comptime CMD_*` block in `src/network/binary_protocol.mojo`):
 | Byte | Command | Description |
 |:---:|---|---|
 | 0x01 | KV.STORE | Store a KV-prefix blob |
-| 0x02 | KV.FETCH | Fetch a KV-prefix blob (~50us latency) |
+| 0x02 | KV.FETCH | Fetch a KV-prefix blob |
 | 0x10 | LAYER.STORE | Store per-layer tensor blob |
 | 0x11 | LAYER.FETCH | Fetch per-layer tensor blob |
 | 0x12 | LAYER.FETCH_BATCH | Fetch several layers in one frame |
 | 0x13 | LAYER.EXTEND | Append tokens to a stored layer |
 | 0x20 | ATTEND.CREATE | Create attention session (key_dim, value_dim) |
-| 0x21 | ATTEND.STORE | Stage token KV pairs (3.67M tok/s at 128d) |
-| 0x22 | ATTEND.FINALIZE | Batch build HNSW index from staged keys (1.0s for 128K tokens) |
-| 0x23 | ATTEND.QUERY | Top-k HNSW search (86us per layer at 128K tokens) |
+| 0x21 | ATTEND.STORE | Stage token KV pairs |
+| 0x22 | ATTEND.FINALIZE | Batch build HNSW index from staged keys |
+| 0x23 | ATTEND.QUERY | Top-k HNSW search |
 | 0x24 | ATTEND.PREFIX.QUERY_FUSED | Fused sparse-mask prefix query |
 | 0x31–0x36 | MOE.EXPERT.{FETCH,PREFETCH,PIN,UNPIN,INFO,STATS} | MoE expert paging |
 | 0x37 | AUTH | Authenticate the binary connection (under `--requirepass`) |
 | 0xFF | PING | Binary keepalive |
 
-Connections on port 1975 are routed to the binary handler via `local_affinity[fd] == 2`. The binary protocol avoids RESP parsing overhead entirely, enabling 3.67M tok/s store throughput for bulk attention data.
+Connections on port 1975 are routed to the binary handler via `local_affinity[fd] == 2`. The binary protocol avoids RESP parsing overhead entirely for bulk attention data.
 
 RESP-based equivalents (KV.STORE, KV.FETCH, KV.INFO, ATTEND.*) are also available on port 1974 for compatibility.
 

@@ -20,7 +20,7 @@ There is no config file. Only `maxmemory` can be changed at runtime with `CONFIG
 | `use_sqpoll` | `false` | io_uring SQPOLL: kernel-side SQ polling (Linux 5.11+, root, experimental) |
 | `use_xdp` | `false` | XDP/AF_XDP kernel bypass (Linux 5.4+, CAP_NET_ADMIN) |
 | `xdp_interface` | `"eth0"` | NIC interface for XDP attach |
-| `use_huge_pages` | `false` | 2MB mmap pages (Linux; ignored on macOS) |
+| `use_huge_pages` | `false` | 2MB pages: `MAP_HUGETLB` on Linux (`--huge-pages`, needs reserved pages), superpages on macOS (on in the desktop and cloud smart profiles) |
 | `strict_affinity` | `false` | Pin each worker to a dedicated P-core |
 | `enable_sharding` | `false` | HNSW worker sharding (Linux only; macOS kqueue cost too high) |
 | `independent_workers` | `false` | `--independent-workers`: acknowledges that N workers are N keyspaces, and lets `-w N > 1` start |
@@ -116,20 +116,25 @@ embeddings (pass `--no-auto-detect --no-auto-embed` for a multi-worker test).
 Override the smart profile with a deployment-specific configuration:
 
 ```bash
-./pion-server --profile kv       # KV-only: ~50MB/worker (no HNSW, no AI)
+./pion-server --profile kv       # KV-only (no HNSW, no AI)
 ./pion-server --profile vector   # KV + HNSW vector search (no AI)
 ./pion-server --profile ai       # KV + HNSW + AI features (single worker)
 ./pion-server --profile full     # Everything enabled
 ```
 
-| Profile | HNSW | AI/Embedding/LLM | Workers | RAM/Worker | Use Case |
+| Profile | HNSW | AI/Embedding/LLM | Workers | Idle RSS, 1 worker | Use Case |
 |---|:---:|:---:|:---:|:---:|---|
-| `kv` | Stub (1 element) | Disabled | 1, or N with `--independent-workers` | ~50 MB | Redis replacement, caching, sessions |
-| `vector` | Full (600K) | Disabled | 1, or N with `--independent-workers` | ~700 MB | Semantic search, RAG knowledge base |
-| `ai` | Full (600K) | Enabled | 1 (forced) | ~780 MB | AI agent memory, semantic cache |
-| `full` | Full (600K) | Enabled | 1, or N with `--independent-workers` | ~920 MB | Everything |
+| `kv` | Stub (1 element) | Disabled | 1, or N with `--independent-workers` | 76 MiB | Redis replacement, caching, sessions |
+| `vector` | Full (600K) | Disabled | 1, or N with `--independent-workers` | 103 MiB | Semantic search, RAG knowledge base |
+| `ai` | Full (600K) | Enabled | 1 (forced) | 103 MiB | AI agent memory, semantic cache |
+| `full` | Full (600K) | Enabled | 1, or N with `--independent-workers` | 103 MiB | Everything |
 
-The `kv` profile saves ~650MB/worker by allocating a minimal 1-element HNSW stub instead of the full 600K-element graph. Startup is near-instant vs 10-15s for vector profiles.
+Idle RSS is `pion-server`'s resident memory 20 s after it answers PING, with no
+data and `--no-auto-embed` (an embedding sidecar is a separate process), on an M4
+Mac mini: [`profile_rss.txt`](../benchmarks/results/2026-10-06-mac-m4/profile_rss.txt).
+Memory then grows with what you store. The `kv` profile allocates a 1-element
+HNSW stub instead of the full 600K-element graph, so the graph's arrays are never
+reserved.
 
 `--profile` sets its defaults at its position in argv; a later flag overrides them (so `--profile kv -w 4 --independent-workers -p 6379` runs 4 workers). The one exception is the `ai` profile's single-worker cap, which is enforced after the whole command line is parsed, so it holds regardless of flag order.
 

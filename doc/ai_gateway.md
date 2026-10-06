@@ -43,11 +43,11 @@ One-command cache-augmented generation: checks the semantic cache, returns the c
 
 ```bash
 redis-cli AI.COMPLETE "What is the capital of France?" TOKENS 100 THRESHOLD 0.92
-# Cache hit (≥ threshold cosine similarity): returns cached response in <1ms
+# Cache hit (≥ threshold cosine similarity): returns the cached response
 # Cache miss: calls LLM, stores result, returns LLM response
 ```
 
-Cache hit performance: **275× faster** than a live LLM call (see `examples/pion_vs_ollama_demo.py`).
+`examples/pion_vs_ollama_demo.py` times a cache hit against a live Ollama call on your own machine; no result of it is published, so this page quotes no speedup.
 
 ---
 
@@ -266,7 +266,7 @@ Client → FLARE Gateway (:8080) → Ollama / vLLM / OpenAI (:11434)
 1. Generate `N` tokens (chunk) from the upstream LLM with `logprobs=true`
 2. Compute `min_prob = min(exp(logprob) for logprob in chunk)`
 3. If `min_prob < τ` (uncertain): use `(context + uncertain_chunk)` as Pion query
-4. Retrieve top-k facts from Pion in 1.28ms
+4. Retrieve top-k facts from Pion
 5. Prepend facts as context and regenerate the uncertain chunk
 6. Accept confident chunks without retrieval
 
@@ -332,7 +332,7 @@ stateless HTTP APIs. When you run more than one of them, you immediately need:
 ### How Pion Addresses Each Problem
 
 **1. Semantic Deduplication** — `AI.COMPLETE` in front of any inference cluster. Any node's answer
-is cached; threshold-similar future queries return in 15ms.
+is cached; threshold-similar future queries are answered from the cache.
 
 **2. Session Affinity** — HSET/HGET to route multi-turn conversations to the node holding the KV cache:
 ```
@@ -350,7 +350,7 @@ See `examples/coalescing_proxy.py`.
 
 **5. Cross-Node Prefix Cache Routing** — Hash the system prompt, store warm node in Pion, route
 subsequent requests there. Requests sharing a common system prompt hit the replica already warmed
-for those KV pages, cutting TTFT by ~30–60% for common prompts (coding assistants, support bots).
+for those KV pages, so it skips the prefill that replica already did.
 See `examples/prefix_routing_demo.py`.
 
 **6. Capacity-Aware Load Balancing** — Each node updates its score via `ZADD inference_fleet
@@ -374,8 +374,8 @@ in a single Pion instance. Each inference node reads/writes via standard Redis c
 **Pattern C — Pion as Speculative Corpus**
 
 FT.SEARCHTEXT retrieves likely token continuations from the HNSW corpus; exo/vllm-mlx validates
-draft tokens in parallel. Acceptance rate ≥20% in grounded conditions (document in context).
-See `examples/step7_rest_pion_drafter.py`.
+draft tokens in parallel. See `examples/step7_rest_pion_drafter.py`; no acceptance rate is
+published with it yet.
 
 ### Per-Tool Integration Notes
 
@@ -404,7 +404,7 @@ provider that pion-context defaults to. See `mcp/README.md`.
 
 ## Externalized Attention
 
-Replaces O(N^2) transformer attention with O(N log k) HNSW retrieval. Instead of computing full attention over all past tokens, the inference engine stores KV pairs in Pion's per-layer HNSW indices. At query time, top-k nearest keys are retrieved in 86us (vs milliseconds for full attention at 128K context).
+Replaces O(N^2) transformer attention with O(N log k) HNSW retrieval. Instead of computing full attention over all past tokens, the inference engine stores KV pairs in Pion's per-layer HNSW indices. At query time, the top-k nearest keys are retrieved from the index instead of attending over every past token.
 
 ### How it works
 
@@ -416,8 +416,7 @@ INGEST (once per prompt):
 
 QUERY (per new token):
   New token's Q vector → ATTEND.QUERY(session, layer, k=64, query_fp32)
-                       → Returns top-k V vectors (cosine 1.0 vs full attention)
-                       → 86us per layer, 3.4ms for 40 layers at 128K tokens
+                       → Returns top-k V vectors
 ```
 
 ### Commands
@@ -430,23 +429,25 @@ QUERY (per new token):
 | `KV.FETCH` ⚠️ | `KV.FETCH <embedding_fp32> [THRESHOLD <cosine>] [MODEL <name>]` | Fetch nearest cached tensor by cosine similarity. **Experimental — MODEL arg silently ignored; capacity-capped at 1000 entries with append-only-on-overflow (no LRU).** |
 | `KV.INFO` | `KV.INFO` | KV cache store statistics |
 | `ATTEND.CREATE` | `ATTEND.CREATE <session_id> <key_dim> <value_dim>` | Create attention session |
-| `ATTEND.STORE` | `ATTEND.STORE <session_id> <layer_id> <num_tokens> <keys_fp32> <values_fp32>` | Stage token KV pairs (3.67M tok/s via binary protocol) |
+| `ATTEND.STORE` | `ATTEND.STORE <session_id> <layer_id> <num_tokens> <keys_fp32> <values_fp32>` | Stage token KV pairs |
 | `ATTEND.FINALIZE` | `ATTEND.FINALIZE <session_id> <layer_id>` | Batch build HNSW index from staged keys |
 | `ATTEND.QUERY` | `ATTEND.QUERY <session_id> <layer_id> <k> <query_fp32>` | Top-k HNSW search; returns the top-k value rows, best first, as one bulk string of `min(k, stored) × value_dim` FP32s; `*0` for an empty layer |
 | `ATTEND.INFO` | `ATTEND.INFO` | Index statistics (sessions, tokens, queries) |
 
 **Binary protocol (port 1975, 0xCA5E framing):** ATTEND commands available as 0x20-0x23 for maximum throughput. See [Networking](networking.md) for wire format.
 
-### Performance (binary protocol, 128K tokens, 128d keys)
+### Performance (`tests/test_attend_128k.py`, RESP, one layer, 128K tokens, 128-d keys)
 
 | Metric | Value |
 |---|---|
-| Store throughput | 3,667,377 tok/s |
-| Query latency (per layer, 128K) | 86us |
-| 40-layer query total | 3.4ms |
-| Build time (finalize, 128K) | 1.0s |
-| Memory (40 layers, 128K) | ~2.5 GB (staging freed after finalize) |
-| Quality (k=64 vs full attention) | cosine 1.0 |
+| Store throughput | 222,473 tok/s |
+| Query latency (client round trip, one layer) | 1.54 ms |
+| Build time (finalize, 128K) | 11.3 s |
+| Memory (one layer, 128K) | ~125 MB |
+
+M4 Mac mini, 2026-10-06; raw output in
+[`benchmarks/results/2026-10-06-mac-m4/attend_128k.txt`](../benchmarks/results/2026-10-06-mac-m4/attend_128k.txt).
+The test runs over RESP; the binary lane on port+1 is not measured here.
 
 ### Enabling
 
@@ -494,11 +495,7 @@ FP32 brute-force cosine for <=16 nodes (zero recall loss); HNSW O(log N) for >16
 
 ### Results
 
-| Metric | Value |
-|---|---|
-| Routing accuracy | 88% (7/8 queries to correct domain) |
-| Latency per route | 0.14ms |
-| QPS | 7,176 |
+No accuracy or latency result is published with a harness yet.
 
 ### Mojo modules
 
@@ -545,12 +542,10 @@ Each query:
 | `RAG.QUERY` | `RAG.QUERY <session_id> <query_embedding_fp32>` | Query with speculation: check cache first, predict next queries |
 | `RAG.SPECULATE.INFO` | `RAG.SPECULATE.INFO [session_id]` | Per-session stats: hit rate, trajectory length, predictions |
 
-### Results
+### Parameters
 
-| Metric | Value |
+| Parameter | Value |
 |---|---|
-| Hit rate (linear trajectory) | 75% (6/8 queries) |
-| Prediction latency | 0.2ms |
 | Predictions per query | 3 (alpha = 0.5, 1.0, 1.5) |
 | Match threshold | cosine > 0.9 |
 

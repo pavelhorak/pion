@@ -1,0 +1,1 @@
+pixi run build-portable (x86-64-v2 target, closed libpion_vector; the release's linux-x86_64 build)

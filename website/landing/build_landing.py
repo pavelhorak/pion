@@ -110,10 +110,6 @@ def build(out_dir: Path) -> Path:
             continue
         numbers_rows += (f"<tr><td>{inline(r[0])}</td><td class=\"num\">{inline(r[1])}</td>"
                          f"<td class=\"num\">{inline(r[2])}</td><td class=\"x\">{inline(r[3])}</td></tr>\n")
-    r64 = [r for r in table_rows(S.region(readme, "two-numbers")) if "64K" in r[0]]
-    if r64:
-        numbers_rows += (f"<tr><td>{inline(r64[0][0])} — 100% needle recall attending <strong>0.78%</strong> of the prefix</td>"
-                         f"<td class=\"num\">{inline(r64[0][1])}</td><td class=\"num\">{inline(r64[0][2])}</td><td class=\"x\">{inline(r64[0][3])}<small>NIAH-class only</small></td></tr>\n")
     numbers_note = md("\n\n".join(p for p in re.split(r"\n\s*\n", two) if not p.startswith("|")), "website/landing")
 
     # ── where it does not help ──

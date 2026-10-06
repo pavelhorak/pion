@@ -6,8 +6,8 @@
 - ✅ Full support
 - 🟡 Partial (notable limitations noted)
 - ❌ Not implemented
-- **FAST** = Pion fast path (zero-alloc, `fast_path.mojo`) — typically < 1µs dispatch
-- **SLOW** = Pion slow path (`slow_path.mojo`) — RESP3 parsed, ~2–5µs additional overhead
+- **FAST** = Pion fast path (zero-alloc, `fast_path.mojo`)
+- **SLOW** = Pion slow path (`slow_path.mojo`) — RESP3 parsed into a token table first
 - **GLIDE** = Valkey GLIDE 1.x client support (Java/Python/Node/Go/Rust/C# SDK)
 
 ---
@@ -491,13 +491,13 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | AI.KNN_LM.CREATE | **SLOW** | ❌ | Allocate token-id-tagged kNN datastore: `<ds_id> <dim> [<max_entries>]` (default max=100K). Up to 16 datastores per worker. Substrate enabled when `--kvcache` or `--inference` is on. |
 | AI.KNN_LM.STORE | **SLOW** | ❌ | Append one (token_id, embedding) pair: `<ds_id> <next_token_id> <emb_blob>`. Auto-builds HNSW once count crosses 5000. |
 | AI.KNN_LM.STOREBATCH | **SLOW** | ❌ | Bulk append: `<ds_id> <n> <ids_blob> <emb_blob>` (ids: n × Int32 LE; emb: n × dim × Float32 LE). |
-| AI.KNN_LM.QUERY | **SLOW** | ❌ | Top-k kNN: `<ds_id> <k> <emb_blob>`. Returns `k × 8 bytes` packed as `<Int32 LE token_id><Float32 LE distance>`. Brute-force scan below 5K, focused FP32 HNSW above. Sub-linear scaling, ~0.94 ms median at 30K entries. |
+| AI.KNN_LM.QUERY | **SLOW** | ❌ | Top-k kNN: `<ds_id> <k> <emb_blob>`. Returns `k × 8 bytes` packed as `<Int32 LE token_id><Float32 LE distance>`. Brute-force scan below 5K, focused FP32 HNSW above. |
 | AI.KNN_LM.INFO | **SLOW** | ❌ | `count=N dim=D max_entries=M` |
 | AI.KNN_LM.DROP | **SLOW** | ❌ | Free datastore + HNSW graph buffers |
 | NEURON.PKM.CREATE | **SLOW** | ❌ | Allocate a product-key memory table: `<table> <dim> <n_slots> [VDIM <v>] [VALTYPE F32\|F16]`. `n_slots` must be a perfect square S² (S ≤ 4096); dim must be even. Up to 8 tables per worker. Enabled by `--kvcache` / `--inference`. |
 | NEURON.PKM.SETKEYS | **SLOW** | ❌ | Load codebook half 0 or 1: `<table> <half> <blob>` — S × (dim/2) Float32 LE. Builds the INT8 mirror. Both halves required before QUERY. |
 | NEURON.PKM.SETVALS | **SLOW** | ❌ | Write value rows: `<table> <off> <n> <blob>` — n × vdim in VALTYPE. Value matrix is allocated on the first call. |
-| NEURON.PKM.QUERY | **SLOW** | ❌ | **Exact** top-k over all n_slots: `<table> <k> <q_blob> [FAST]`. `nq = len(q_blob)/(dim·4)` heads share one codebook pass. Returns `nq·k × 8 bytes` as `<Int32 LE slot_id><Float32 LE score>`, descending, padded `(-1, -inf)`. dim=896 k=32 1M slots: **0.073 ms** (vs 5.13 ms for AI.KNN_LM.QUERY at the same shape). |
+| NEURON.PKM.QUERY | **SLOW** | ❌ | **Exact** top-k over all n_slots: `<table> <k> <q_blob> [FAST]`. `nq = len(q_blob)/(dim·4)` heads share one codebook pass. Returns `nq·k × 8 bytes` as `<Int32 LE slot_id><Float32 LE score>`, descending, padded `(-1, -inf)`. dim=896 k=32 1M slots: **0.075 ms** p50 (vs 5.13 ms for kNN-LM HNSW at the same shape; `tests/test_neuron_pkm.py --bench`, M4 Mac mini, [raw](../benchmarks/results/2026-10-06-mac-m4/neuron_pkm_bench.txt)). |
 | NEURON.PKM.FFN | **SLOW** | ❌ | Fused lookup + softmax-weighted value read: `<table> <k> <q_blob> [FAST] [TEMP <t>]` → `nq × vdim × 4 bytes` Float32 LE. Value rows never cross the wire. |
 | NEURON.PKM.INFO | **SLOW** | ❌ | `dim=D half=H s_rows=S n_slots=N d_pad=P keys_ready=0\|1 vdim=V valtype=f32\|f16 val_rows=R queries=Q` |
 | NEURON.PKM.DROP | **SLOW** | ❌ | Free codebooks, value matrix, and query scratch |
@@ -518,7 +518,7 @@ rather than a plausible empty result.
 | Command | Pion path | Reply | Notes |
 |---|:---:|---|---|
 | MOE.EXPERT.LOAD `<model_id> <dir>` | **SLOW** | `+OK` / `-UNAVAILABLE` | Loads a manifest and opens the tier |
-| MOE.EXPERT.FETCH `<model_id> <layer> <expert>` | **SLOW** | bulk blob / `-UNAVAILABLE` | ~5 ms on a cache hit regardless of backing tier |
+| MOE.EXPERT.FETCH `<model_id> <layer> <expert>` | **SLOW** | bulk blob / `-UNAVAILABLE` | Served from the RAM LRU, SSD or network tier, whichever holds it |
 | MOE.EXPERT.PREFETCH `<model_id> <layer> <expert>...` | **SLOW** | `+OK` | Asynchronous warm; returns before the fetch completes |
 | MOE.EXPERT.PIN `<model_id> <layer> <expert>` | **SLOW** | `+OK` | Protects an expert from LRU eviction |
 | MOE.EXPERT.UNPIN `<model_id> <layer> <expert>` | **SLOW** | `+OK` | |
@@ -568,7 +568,7 @@ RESP commands on port 1974:
 | V.INFO | **SLOW** | ❌ | Per-session or global V-store statistics |
 | ATTEND.PREFIX.STORE | **SLOW** | ❌ | Push K/V to native Metal SDPA session cache; resident until DROP / LRU eviction. Body: `<session_id> <layer_id> <H> <N> <D> <K_blob> <V_blob>`. See `doc/shared_kv_cache.md` Stage 2. |
 | ATTEND.PREFIX.LOOKUP | **SLOW** | ❌ | Probe the Metal session cache for `(sid, layer_id)`. Returns `+HIT` if slot exists with non-nil K/V, `+MISS` otherwise. Symmetric to `KV.PREFIX.LOOKUP` for V-store state. Required for stage-2-aware client `PionPromptCache.lookup` to avoid stale V-store hits causing skipped `_stage2_push_cold`. |
-| ATTEND.PREFIX.QUERY | **SLOW** | ❌ | Run M=1 single-query attention on cached K/V (Q-only on wire). Body: `<session_id> <layer_id> <H> <D> <top_k> <Q_blob>`. Returns `H*D` float32. Native Metal SDPA path (sdpa_q1_fp32/fp16); supports D ∈ {32,64,96,128,160,192,256,**512**}. 146× faster than ATTEND.QUERYBATCH at H=8 N=2048. |
+| ATTEND.PREFIX.QUERY | **SLOW** | ❌ | Run M=1 single-query attention on cached K/V (Q-only on wire). Body: `<session_id> <layer_id> <H> <D> <top_k> <Q_blob>`. Returns `H*D` float32. Native Metal SDPA path (sdpa_q1_fp32/fp16); supports D ∈ {32,64,96,128,160,192,256,**512**}. |
 | ATTEND.PREFIX.QUERY_FUSED | **SLOW** | ❌ | M>=1 fused suffix-SDPA + prefix-merge in one dispatch. Body: `<sid> <layer> <H_q> <D> <S_suf> <H_kv> <Q> <K_suf> <V_suf> <head_map> [<fa_window>]`. GQA-aware. Returns merged attention `H_q*M*D*4` bytes; no LSE trailer (merge fused). |
 | ATTEND.PREFIX.QUERY_SPARSE | **SLOW** | ❌ | Sparse-mask M=1 attention with caller-supplied per-head indices. Body: `<sid> <layer> <H> <D> <K_sparse_max> <Q> <indices> <counts> [<fa_window>]`. For learned-router v2 consumers. Output `H*D*4` bytes. |
 | ATTEND.PREFIX.QUERY_SPARSE_AUTO | **SLOW** | ❌ | Sparse-mask M=1 with server-side block-mean top-K selection. Body: `<sid> <layer> <H_q> <D> <B> <K_top> <H_kv> <Q> <head_map> [<fa_window>]`. K_mean cached server-side per slot. GQA-aware. Output `H_q*D*4` bytes. |
@@ -577,9 +577,9 @@ RESP commands on port 1974:
 | SSM.PREFIX.FETCH | **SLOW** | ❌ | Retrieve previously-stored blob for `(sid, layer_id)`. Returns bulk string or `$-1` (miss). |
 | SSM.PREFIX.DROP | **SLOW** | ❌ | Drop stored blob. Body: `<session_id> [<layer_id>]`. Layer omitted = drop all layers for the session. Idempotent. |
 | ATTEND.CREATE | **SLOW** | ❌ | Create attention session with key_dim and value_dim |
-| ATTEND.STORE | **SLOW** | ❌ | Stage token KV pairs (FP32 memcpy); 3.67M tok/s via binary protocol |
+| ATTEND.STORE | **SLOW** | ❌ | Stage token KV pairs (FP32 memcpy) |
 | ATTEND.FINALIZE | **SLOW** | ❌ | Batch build HNSW index from staged keys |
-| ATTEND.QUERY | **SLOW** | ❌ | Top-k HNSW search over attention keys; 86us per layer at 128K tokens |
+| ATTEND.QUERY | **SLOW** | ❌ | Top-k HNSW search over attention keys |
 | ATTEND.INFO | **SLOW** | ❌ | Index statistics (sessions, tokens, queries) |
 
 Binary protocol commands on port 1975 (0xCA5E framing):
@@ -590,9 +590,9 @@ Binary protocol commands on port 1975 (0xCA5E framing):
 | 0x02 | LAYER.FETCH | Fetch per-layer tensor |
 | 0x03 | PING | Binary keepalive |
 | 0x20 | ATTEND.CREATE | Create attention session (binary) |
-| 0x21 | ATTEND.STORE | Stage token KV pairs (3.67M tok/s) |
+| 0x21 | ATTEND.STORE | Stage token KV pairs |
 | 0x22 | ATTEND.FINALIZE | Batch build HNSW from staged keys |
-| 0x23 | ATTEND.QUERY | Top-k HNSW query (86us at 128K) |
+| 0x23 | ATTEND.QUERY | Top-k HNSW query |
 
 Requires `--kvcache` flag. Python client: `vllm-pion/` package (`PionKVClient`, `PionAttentionClient`, `ExternalizedAttentionLayer`).
 
@@ -604,11 +604,11 @@ Requires `--kvcache` flag. Python client: `vllm-pion/` package (`PionKVClient`, 
 |---|:---:|:---:|---|
 | AI.ROUTE.REGISTER | **SLOW** | ❌ | Register inference node with semantic centroid embedding + optional CAPACITY |
 | AI.ROUTE.UPDATE | **SLOW** | ❌ | Update a node's centroid embedding (as KV cache evolves) |
-| AI.ROUTE | **SLOW** | ❌ | Route query embedding to best node by cosine similarity; 0.14ms, 7K QPS |
+| AI.ROUTE | **SLOW** | ❌ | Route query embedding to best node by cosine similarity |
 | AI.ROUTE.REMOVE | **SLOW** | ❌ | Remove node from routing table |
 | AI.ROUTE.INFO | **SLOW** | ❌ | Per-node stats: routed count, capacity, endpoint |
 
-Routing strategy: FP32 brute-force cosine for <=16 nodes (perfect accuracy); HNSW O(log N) for >16 nodes. 88% routing accuracy with Ollama embeddings (7 of 8 test queries).
+Routing strategy: FP32 brute-force cosine for <=16 nodes (perfect accuracy); HNSW O(log N) for >16 nodes. No routing accuracy is published with a harness yet.
 
 Requires `--kvcache` flag.
 
@@ -622,7 +622,7 @@ Requires `--kvcache` flag.
 | RAG.QUERY | **SLOW** | ❌ | Query with speculation: check pre-computed cache first (cosine > 0.9), fall back to live HNSW search |
 | RAG.SPECULATE.INFO | **SLOW** | ❌ | Per-session stats: hit rate, trajectory length, predictions outstanding |
 
-Prediction model: `predicted = current + alpha * (current - previous)`, alpha in [0.5, 1.0, 1.5] (3 predictions per query). 75% hit rate on linear trajectory, 0.2ms prediction+lookup latency.
+Prediction model: `predicted = current + alpha * (current - previous)`, alpha in [0.5, 1.0, 1.5] (3 predictions per query). No hit rate is published with a harness yet.
 
 Requires `--kvcache` flag.
 
@@ -652,37 +652,33 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 
 ## Summary Statistics
 
-| Product | Commands FAST | Commands SLOW | Total supported (fast+slow) | Total Redis 8 commands |
-|---|:---:|:---:|:---:|:---:|
-| **Pion** | 32 | ~195 | ~227 (+36 Pion-native) | ~280 |
-| **Redis 8** | — | — | ~280 | 280 |
-| **Valkey 8** | — | — | ~275 | — |
+Pion dispatches 354 command names (`PION_COMMAND_COUNT` in the generated
+`src/commands/command_table.mojo`), and `tests/test_dispatch_sweep.py` sends
+every one of them in five argument shapes. The counts below are of the rows in
+this document; ✅ and 🟡 both count as supported, and a 🟡 row's notes say
+what is missing.
 
-*Note: "Total supported" counts all commands with ✅ or 🟡 status. Pion-native AI commands (sections 16-19) have no Redis equivalent and are counted separately.*
+| Category | Rows in this document | Supported in Pion | Of which partial (🟡) |
+|---|:---:|:---:|:---:|
+| String | 23 | 23 | 0 |
+| Key / Expiry | 31 | 31 | 1 |
+| Hash | 25 | 25 | 1 |
+| List | 22 | 22 | 0 |
+| Set | 17 | 17 | 0 |
+| Sorted Set | 35 | 35 | 0 |
+| Bitmap | 7 | 7 | 0 |
+| HyperLogLog | 5 | 5 | 1 |
+| Geo | 10 | 10 | 0 |
+| Streams | 20 | 19 | 0 |
+| Pub/Sub | 9 | 9 | 0 |
+| Scripting & Functions | 19 | 19 | 1 |
+| Transactions | 5 | 5 | 3 |
+| Server / Admin | 47 | 46 | 10 |
+| Cluster | 21 | 20 | 2 |
+| Vector sets (VSET) | 13 | 12 | 0 |
 
-### Pion Fast Path (33 commands, zero-alloc dispatch)
-`GET` `SET` `MGET` `MSET` `INCR` `DECR` `HSET` `HGET` `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` `LLEN` `DEL` `EXISTS` `SADD` `SPOP` `ZADD` `ZPOPMIN` `PING` `FUNCTION LOAD` `FCALL` `GETBIT` `SETBIT` `BITCOUNT`(no-arg) `PFADD` `PFCOUNT`(single-key) `ECHO` `TYPE` `SELECT` `DBSIZE` `QUIT` (30 commands total; CLIENT and COMMAND go to the slow path (#47); RESET goes to the slow path, which resets the connection)
-
-### Pion Coverage by Category
-
-| Category | Supported / Total Redis | Coverage |
-|---|:---:|:---:|
-| String | 21 / 21 | 100% |
-| Key / Expiry | 23 / 26 | 88% |
-| Hash | 13 / 16 | 81% |
-| List | 10 / 14 | 71% |
-| Set | 17 / 17 | 100% |
-| Sorted Set | 29 / 32 | 91% |
-| Bitmap | 7 / 7 | 100% |
-| HyperLogLog | 3 / 3 | 100% |
-| Geo | 8 / 8 | 100% |
-| Streams | 19 / 22 | Redis 7's streams and consumer groups and Redis 8.2's XDELEX / XACKDEL, durable; XNACK, XCFGSET, XIDMPRECORD not implemented |
-| Pub/Sub | 9 / 9 | delivery works; cross-worker is the only limit (`-w 1` default) |
-| Scripting | 2 / 16 | 13% |
-| Transactions | 5 / 5 | 100% |
-| Server/Admin | 31 / 31 | 100% (a few, e.g. DEBUG, are accepted no-ops) |
-| Cluster | 13 / 13 | 100% |
-| **AI (Pion-native)** | **23 / 23** | **100%** |
+### Pion Fast Path (zero-alloc dispatch)
+`GET` `SET` `MGET` `MSET` `INCR` `DECR` `HSET` `HGET` `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` `LLEN` `DEL` `EXISTS` `SADD` `SPOP` `ZADD` `ZPOPMIN` `PING` `FUNCTION LOAD` `FCALL` `GETBIT` `SETBIT` `BITCOUNT`(no-arg) `PFADD` `PFCOUNT`(single-key) `ECHO` `TYPE` `SELECT` `DBSIZE` `QUIT`. CLIENT and COMMAND go to the slow path (#47); RESET goes to the slow path, which resets the connection.
 
 ---
 

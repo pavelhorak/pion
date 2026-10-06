@@ -14,17 +14,18 @@ per token, per layer, D = kv_dim
   [biases  fp16  x D/32]
 ```
 
-640 B/token at D=1024 against fp16's 2048 — **3.2x** — which is what puts an
-86,580-token cartridge for a 4B model inside a 16 GB machine (fp16: 12.5 GB).
+640 B/token at D=1024 against fp16's 2048 — **3.2×** smaller, which
+`tests/test_gh148_mlx4g32_tier.py` asserts. At that ratio, K/V that takes 12 GB
+in fp16 takes under 4 GB.
 
 Both parameters are measured, not conventional:
 
 - **group 32, not 64.** g64 corrupted recalled facts at digit grain in real
   generations (`"2430-04-22"` for `"2030-04-22"`). Knowledge held as KV is
   bits-fragile the same way weight-held knowledge is.
-- **affine, not symmetric.** Storing a per-group scale *and* bias beat symmetric
-  by 2.92 pp on K, and K's error dominates the end-to-end result — measured
-  here as 0.038 mean abs error against `turbo4`'s 0.047 on the same input.
+- **affine, not symmetric.** Storing a per-group scale *and* bias reconstructs
+  more accurately than symmetric int4 (`tests/test_gh148_mlx4g32_tier.py`
+  asserts it), and K's error dominates the end-to-end result.
 
 The scale is round-tripped through fp16 *before* the codes are chosen, so the
 quantizer targets the scale the reader will actually see.
@@ -35,13 +36,15 @@ quantizer targets the scale the reader will actually see.
 
 | Model | Cold TTFT | Warm TTFT | Reduction | Throughput | First-token |
 |---|---:|---:|---:|---:|:---:|
-| Llama-3.2-1B-Instruct-4bit | 612 ms | **84 ms** | **86.3%** (7.30×) | 7.25× | 100% (50/50) |
+| Llama-3.2-1B-Instruct-4bit | 765 ms | **83 ms** | **89.2%** (9.21×) | 6.49× | 100% (50/50) |
 
-Measured 2026-10-02 on an M4 Mac mini against Pion 0.9.1, with the cold side
-prefilled the way mlx-lm's `generate_step` does. Until then this table read
-846 → 91 ms (9.26×) for 1B and 2,075 → 278 ms (7.47×) for 3B, against a cold
+Measured 2026-10-06 on an M4 Mac mini with `tests/test_kv_prefix_workload.py
+--queries 30 --prompt-repeats 8`
+([raw output](../benchmarks/results/2026-10-06-mac-m4/kv_prefix_workload_q30_r8.txt)),
+mean TTFT over all 150 requests, each prompt's cold first one included, with the
+cold side prefilled the way mlx-lm's `generate_step` does. Earlier versions of this table timed a cold
 side that also computed logits at every prompt position, which no generation
-does. The 3B row is not re-measured yet, so it is not shown.
+does; the changelog has the correction. A 3B row is not measured, so none is shown.
 
 Cross-instance verified: a fresh second client (separate socket, separate model object) sees `+HIT` before any local work, fetches K/V the first client stored, and produces a **bit-identical 50-token greedy completion (BLEU 1.0000)**.
 
@@ -88,14 +91,10 @@ print(generate(model, tok, prompt=tok.encode(" How do I reset my password?", add
 pc = PionPromptCache(model, vquant="fp8", boundary_protect=2)
 ```
 
-Measured on Llama-3.2-1B-Instruct-4bit, 3 prompts × 5 queries (Apple Silicon, single worker):
-
-| Config | TTFT speedup | Throughput speedup | First-token agreement |
-|---|---:|---:|---:|
-| Uniform fp16 | 2.75× | 2.74× | 14/15 |
-| **`vquant=fp8, boundary_protect=2`** | **2.88×** | **2.87×** | **15/15** |
-
-Faster AND more accurate than uniform fp16 on this workload — fp8 V on middle layers carries less wire data per layer; the fp16 boundary layers protect routing.
+fp8 V on the middle layers carries less wire data per layer, and the fp16
+boundary layers protect routing. No comparison against uniform fp16 is published
+with raw output yet, so measure it on your own workload
+(`pion-vllm-mlx/tests/test_prompt_cache_workload.py --vquant fp8 --boundary-protect 2`).
 
 Trade-off: the SCHEMA path skips `KV.PREFIX.REGISTER`'s cross-worker directory publish (single-worker visibility only). A future `KV.PREFIX.REGISTER.SCHEMA` server command would lift this.
 
@@ -111,7 +110,7 @@ Three production wrapper commands, plus the underlying V-store path (`V.STOREBAT
 
 Creates two V-store sessions, `<ns_key>_pk` (keys) and `<ns_key>_pv` (values), with the given quantization format. After `REGISTER`, standard `V.STOREBATCH` and `V.FETCH ... RANGE` work against the derived sids.
 
-`vquant` ∈ `{int8, turbo4, turbo3, turbo2, fp16, fp8, mlx4g32}` (mlx4g32 = int4 group-32 affine). fp16 is the production default (BLEU 1.0 cross-instance, 0.969 vs standalone).
+`vquant` ∈ `{int8, turbo4, turbo3, turbo2, fp16, fp8, mlx4g32}` (mlx4g32 = int4 group-32 affine). fp16 is the production default (BLEU 1.0000 cross-instance, a mean of 0.969 over 20 questions against standalone).
 
 ```
 > KV.PREFIX.REGISTER my_app|v1|llama|fp16|prompt_a 512 fp16
@@ -163,7 +162,7 @@ The router supplies the block hashes it's looking for (in any order); the server
 
 Returns `+UNKNOWN\r\n` when no block table is registered or the namespace doesn't exist. Cross-worker rebound matches `KV.PREFIX.BLOCKS`.
 
-Server-side compute is O(K log N) via binary search over a sorted parallel copy of the registered hashes (built once at `REGISTER` time). Measured at **125 µs p50 / 270 µs p99 e2e over loopback for K=N=1,562 on Apple Silicon** (server-side compute well under its 100 µs target — most of the latency is loopback RTT for the 12.5 KB request).
+Server-side compute is O(K log N) via binary search over a sorted parallel copy of the registered hashes (built once at `REGISTER` time). Measured end to end over loopback for K=N=1,562 (a 12.5 KB request) on an M4 Mac mini: **128.6 µs p50 / 161.0 µs p99** (`tests/test_kv_prefix_blocks.py`, which fails above 400 µs p50; [raw output](../benchmarks/results/2026-10-06-mac-m4/kv_prefix_blocks.txt)).
 
 ```python
 probe_blob = struct.pack("<" + "Q" * len(probe_hashes), *probe_hashes)
@@ -200,7 +199,7 @@ Server-side rehydrate of the Metal SDPA session cache from V-store. Walks both `
 
 The optional 4th arg overrides the ATTEND-side session id; default = `<ns_key>`. The production consumer (`PionPromptCache._attend_session`) stores ATTEND state under `<namespace>_attn` and passes that here.
 
-Call this after **ATTEND.PREFIX.QUERY** returns `-COLDMISS ...`, or proactively before a hot batch of queries against a namespace that may have been evicted. Cost ≈ 50–200 ms depending on prefix length (one V-store dequant + one CPU transpose + one Metal copy per layer).
+Call this after **ATTEND.PREFIX.QUERY** returns `-COLDMISS ...`, or proactively before a hot batch of queries against a namespace that may have been evicted. Its cost grows with the prefix length: one V-store dequant, one CPU transpose and one Metal copy per layer.
 
 ```
 > KV.PREFIX.WARM my_app|v1|llama|fp16|prompt_a 8 64 my_app|v1|llama|fp16|prompt_a_attn
@@ -221,8 +220,8 @@ Three states per `(session_id, layer_id)`:
 
 | State | Where it lives | Wire signal | Cost to query |
 |---|---|---|---:|
-| **WARM** | Metal SDPA slot (live K_buf/V_buf) | `+HIT` from `ATTEND.PREFIX.LOOKUP` | sub-ms (M=1 ~0.4 ms) |
-| **COLD** | Per-worker cold registry (metadata only); K/V on disk in V-store | `+COLD` from `ATTEND.PREFIX.LOOKUP`; `-COLDMISS …` from `QUERY*` | 50–200 ms after WARM, then sub-ms |
+| **WARM** | Metal SDPA slot (live K_buf/V_buf) | `+HIT` from `ATTEND.PREFIX.LOOKUP` | sub-ms (0.44 ms at H=8, N=2048, D=128) |
+| **COLD** | Per-worker cold registry (metadata only); K/V on disk in V-store | `+COLD` from `ATTEND.PREFIX.LOOKUP`; `-COLDMISS …` from `QUERY*` | one `KV.PREFIX.WARM`, then sub-ms |
 | **MISSING** | Nowhere | `+MISS` from `LOOKUP`; `-ERR session not found` from `QUERY*` | full cold prefill needed |
 
 Eviction triggers when the per-worker WARM slot table (256 slots) fills. The LRU slot is picked by `last_access_ns` (mach_absolute_time), its Metal `K_buf`/`V_buf` are released, and `(key, H, N, D, last_access_ns)` move to the cold registry (`SDPA_COLD_SLOTS=1024` per worker). A subsequent `ATTEND.PREFIX.QUERY` short-circuits via `session_state(...)==2` and returns `-COLDMISS …`. The consumer issues `KV.PREFIX.WARM` and retries; the warm path stamps `last_access_ns` so the rehydrated session is now the *most-recent*, not the next eviction victim.
@@ -258,9 +257,8 @@ cold prefill and sends it as `KV.PREFIX.REGISTER ... PREFILL_MS <ms>`; every
 later hit on that prefix is credited exactly that time — a receipt, not an
 estimate. A prefix registered without `PREFILL_MS` (a hand-rolled client, or a
 server restart, since the reported time is deliberately not persisted) is
-credited `tokens × 555 µs`, the per-token cost measured on
-Llama-3.2-1B-Instruct-4bit on an M-series Mac (2,022 tokens: 1,218 ms cold,
-95 ms warm). Larger models cost more per token, so the estimate is conservative
+credited `tokens × 555 µs` (`LEDGER_EST_PREFILL_US_PER_TOKEN`), a per-token
+cost derived once from Llama-3.2-1B-Instruct-4bit on an M-series Mac. Larger models cost more per token, so the estimate is conservative
 for them, and it is labelled an estimate wherever it appears.
 
 The counters are **per worker** — they live in the worker that answered — so a
@@ -305,7 +303,7 @@ Warm path (every subsequent request on the same namespace):
   client → mlx_lm.forward(suffix only, cache=rebuilt) → output
 ```
 
-Pion's V-store stores per-token, per-layer values indexed by token ID. K is treated as just another value array — the wire format is the same. Boundary-layer FP16 protection is exposed via `PionPromptCache(..., boundary_protect=N)` — first/last N layers stay FP16 while middle layers go to the chosen `vquant`. Reduces drift on int8 by ~33%, on turbo4 by ~42%.
+Pion's V-store stores per-token, per-layer values indexed by token ID. K is treated as just another value array — the wire format is the same. Boundary-layer FP16 protection is exposed via `PionPromptCache(..., boundary_protect=N)` — first/last N layers stay FP16 while middle layers go to the chosen `vquant`, which reduces drift on the quantized formats (no drift measurement is published with raw output yet).
 
 ---
 
@@ -330,24 +328,28 @@ ATTEND.PREFIX.QUERY_SPARSE_AUTO_FUSED
        <Q> <K_suf> <V_suf> <head_map> [<fa_window>]                       → bulk H_q*D fp32 (sparse-prefix + dense-suffix + merge, single dispatch)
 ```
 
-Native Metal SDPA via `src/ffi/metal_compute.metal` + `src/ffi/metal_wrap.m`, selected by `--metal-attention` (or `--metal-attention-fp16` for vanilla mlx-lm precision parity). No Python, no Unix socket. **D ∈ {32, 64, 96, 128, 160, 192, 256, 512}** (D=512 is for Gemma 4 full-attention layers; dynamic threadgroup memory scales `s_o` per-PSO). Six kernels per D-PSO: `sdpa_q1_fp32/fp16`, `sdpa_batched_q_fp32/fp16`, `sdpa_batched_q_fused_fp32/fp16`, `sdpa_q1_sparse_fp32/fp16`, `sdpa_q1_sparse_fused_fp32/fp16`. Multi-worker (per-worker session caches with linear probing + tombstones). End-to-end M=1 ATTEND.PREFIX.QUERY median **0.441 ms** at H=8/N=2048/d=128, faster than MLX raw compute (0.489 ms). Bit-equivalent to vanilla mlx-lm on `tests/test_mlx_lm_patch.py` (20/20 token agreement).
+Native Metal SDPA via `src/ffi/metal_compute.metal` + `src/ffi/metal_wrap.m`, selected by `--metal-attention` (or `--metal-attention-fp16` for vanilla mlx-lm precision parity). No Python, no Unix socket. **D ∈ {32, 64, 96, 128, 160, 192, 256, 512}** (D=512 is for Gemma 4 full-attention layers; dynamic threadgroup memory scales `s_o` per-PSO). Six kernels per D-PSO: `sdpa_q1_fp32/fp16`, `sdpa_batched_q_fp32/fp16`, `sdpa_batched_q_fused_fp32/fp16`, `sdpa_q1_sparse_fp32/fp16`, `sdpa_q1_sparse_fused_fp32/fp16`. Multi-worker (per-worker session caches with linear probing + tombstones). End-to-end M=1 ATTEND.PREFIX.QUERY median **0.441 ms** at H=8/N=2048/d=128, against 0.456 ms for MLX's own `scaled_dot_product_attention` on the same shape (`tests/bench_pion_metal_attention.py`, [raw output](../benchmarks/results/2026-10-06-mac-m4/metal_attention.txt)). Bit-equivalent to vanilla mlx-lm on `tests/test_mlx_lm_patch.py` (20/20 token agreement).
 
-**Sparse-mask path:** server picks block-mean top-K from resident K/V (block size B, K_top blocks), runs sparse SDPA over the picked indices. Optional fused variant also merges a caller-supplied dense suffix in the same dispatch — the "wire-mode sparse" consumer in `pion-vllm-mlx/pion_vllm_mlx/mlx_lm_patch.py` uses it. 100% NIAH at 64K on Gemma-4-E2B-4bit (in-proc lane, sparse on full layers, K_block=64 K_blocks=8, 326× warm TTFT vs vanilla). Wire-lane consumer end-to-end on Llama-3.2-1B (GQA): same magic-number answers as vanilla. Validation gates: `tests/test_attend_sparse_kernel.py`, `tests/test_attend_d512.py`, `tests/test_attend_sparse_auto.py`, `tests/test_attend_sparse_auto_fused.py`, `tests/test_wire_sparse_consumer.py`.
+**Sparse-mask path:** server picks block-mean top-K from resident K/V (block size B, K_top blocks), runs sparse SDPA over the picked indices. Optional fused variant also merges a caller-supplied dense suffix in the same dispatch — the "wire-mode sparse" consumer in `pion-vllm-mlx/pion_vllm_mlx/mlx_lm_patch.py` uses it. `examples/sparse_mask_64k_niah.py` runs single-needle NIAH at 64K on Gemma-4-E2B-it-4bit through this path (in-proc lane, sparse on full layers, K_block=64, K_blocks=8); on 2026-10-06, with mlx-lm 0.31.3, neither vanilla mlx-lm nor this path found the needle ([raw output](../benchmarks/results/2026-10-06-mac-m4/sparse_mask_64k_niah_full.txt)), so the run checks nothing and no recall or speedup is claimed for it. Wire-lane consumer end-to-end on Llama-3.2-1B (GQA): same magic-number answers as vanilla. Validation gates: `tests/test_attend_sparse_kernel.py`, `tests/test_attend_d512.py`, `tests/test_attend_sparse_auto.py`, `tests/test_attend_sparse_auto_fused.py`, `tests/test_wire_sparse_consumer.py`.
 
 ### Why this matters
 
-A single-shot `ATTEND.QUERYBATCH H N D top_k Q K V` marshals 16+ MB of K/V on every call. At H=8, N=2048, D=64 that overhead dominates GPU compute by 3 orders of magnitude. The two-phase pattern uploads K/V once and keeps Q-only on the wire, so subsequent queries are 1.3 ms median vs 194 ms.
+A single-shot `ATTEND.QUERYBATCH H N D top_k Q K V` marshals the whole K/V on
+every call: 8 MB at H=8, N=2048, D=64 in fp32. The two-phase pattern uploads
+K/V once and keeps only Q on the wire.
 
-### Measured (Llama-class shape: H=8 N=2048 D=64, top_k=2048)
+### Measured (Llama-class shape: H=8 N=2048 D=64, top_k=2048, `--metal-attention`)
 
-| Path | Median latency | Throughput | Notes |
-|---|---:|---:|---|
-| `ATTEND.QUERYBATCH` (Q+K+V every call) | 194.0 ms | 5 q/s | Wire dominates |
-| `ATTEND.PREFIX.STORE + 10× QUERY` | **1.33 ms** | **752 q/s** | Q-only after first push |
-| **Speedup** | | **146×** | |
-| Numerical agreement vs CPU softmax(QK^T)·V | cosine **1.0000** | | |
+| Step | Result |
+|---|---|
+| `ATTEND.PREFIX.STORE` (the 8 MB push, once) | 4.0 ms |
+| `ATTEND.PREFIX.QUERY`, Q only, median of 10 | **0.47 ms** (2,143 q/s) |
+| Agreement with CPU softmax(QK^T)·V | cosine **1.0000** |
 
-With native Metal SDPA: `STORE` 4.6 ms (8 MB push), `QUERY` median **0.65 ms / 1,546 q/s**, cosine 1.0000 vs CPU; Pion-patched mlx-lm produces 20/20 identical tokens vs vanilla on Llama-3.2-1B-Instruct-4bit.
+`tests/test_attend_prefix.py` on an M4 Mac mini, 2026-10-06
+([raw output](../benchmarks/results/2026-10-06-mac-m4/attend_prefix.txt)); the test
+fails below cosine 0.99 or 100 q/s. No published harness times
+`ATTEND.QUERYBATCH`, which re-sends K/V on every call.
 
 Test: `tests/test_attend_prefix.py`. Validated via `pion-server --kvcache --metal-attention -w 1`. End-to-end head-to-head bench (Pion-Metal vs MLX raw): `tests/bench_pion_metal_attention.py`.
 
@@ -380,13 +382,13 @@ cache = make_pion_prompt_cache(model, ns, pc, len(prompt_ids))
 out = model(suffix_ids, cache=cache)                      # attention runs on sidecar
 ```
 
-#### Measured TTFT win (warm path, median of 10 runs; 2026-10-02, M4 Mac mini, Pion 0.9.1)
+#### Measured TTFT win (warm path, median of 10 runs; 2026-10-06, M4 Mac mini)
 
 | Model | Prompt | Vanilla cold | Stage 1 rebuild (B) | Stage 2, wire lane (C) | Stage 2, in-process (D) |
 |---|---:|---:|---:|---:|---:|
-| Llama-3.2-1B-4bit | 256  | 155.3 ms | 14.7 ms (10.6×) | 26.2 ms (5.9×) | 10.1 ms (15.5×) |
-| Llama-3.2-1B-4bit | 1024 | 603.3 ms | 32.7 ms (18.5×) | 28.5 ms (21.2×) | 11.0 ms (54.7×) |
-| Llama-3.2-1B-4bit | 2048 | 1,219.7 ms | 43.8 ms (27.8×) | 42.6 ms (28.6×) | **14.1 ms (86×)** |
+| Llama-3.2-1B-4bit | 256  | 148.6 ms | 12.4 ms (12.0×) | 19.6 ms (7.6×) | 8.5 ms (17.6×) |
+| Llama-3.2-1B-4bit | 1024 | 570.1 ms | 22.7 ms (25.2×) | 20.6 ms (27.7×) | 9.3 ms (61.4×) |
+| Llama-3.2-1B-4bit | 2048 | 1,170.9 ms | 37.3 ms (31.4×) | 23.9 ms (48.9×) | **11.3 ms (104×)** |
 
 Every warm path restores all prompt tokens but the last, then runs the last
 one, and every path reproduces vanilla's first token. A one-token suffix is
@@ -394,15 +396,13 @@ the best case for a cache. A real question adds its own prefill: with a
 16-token question the in-process lane takes 61.9 ms at 2,049 tokens
 (`cross_process_ttft.py --same`).
 
-Above ~1K tokens, Stage 1 and Stage 2's wire lane are close; in April Stage 1's
-rebuild took 83.8 ms at 2K. Below that, the wire lane's per-layer round trips
+At 1,024 tokens Stage 1 and Stage 2's wire lane are close; at 2,048 the wire
+lane is 1.56× faster. Below ~1K, the wire lane's per-layer round trips
 cost more than the transfer, and Stage 1 wins. The in-process lane wins at every
 length because it moves nothing, but only the process that prefilled has it.
 
-`tests/bench_ttft.py --runs 11` reproduces the table. It used to show one
-"Stage-2 patch" column at 50.63× (2K). That column was the wire lane, timed
-against a vanilla side that computed logits at every prompt position. Its 3B
-row is not re-measured.
+`tests/bench_ttft.py --runs 11` reproduces the table ([raw output](../benchmarks/results/2026-10-06-mac-m4/), `ttft_r11_*.txt`). Earlier versions timed a vanilla side that computed logits at every prompt
+position; the changelog has the correction.
 
 #### Wire-protocol details (for clients implementing their own consumer)
 
@@ -412,9 +412,9 @@ the LSE trailer is required by online-softmax merge. M=1 callers see no
 wire-format change (no LSE trailer). See `tests/test_attend_prefix_lse.py`
 for the end-to-end verification.
 
-For decode (M=1), the per-layer round-trip dominates. For TTFT (M=large),
-batched-Q is **22.9 ms wire vs 754 ms unbatched** at Llama-3.2-3B shape
-— 32.9× faster. The monkey-patch uses M=1 in the simple case shipped here;
+For decode (M=1), the per-layer round-trip dominates. For TTFT (M large),
+batched-Q sends one query block per layer instead of one per token. The
+monkey-patch uses M=1 in the simple case shipped here;
 TTFT-batched M>1 is the optimization that closes the small-N regime.
 
 #### When to use Stage 1 vs Stage 2
@@ -450,23 +450,20 @@ or to validate cross-process behavior on a single machine.
 
 | Config | TTFT mean | **TTFT p50** | wire calls/req | speedup vs vanilla |
 |---|---:|---:|---:|---:|
-| RESP (legacy) | 127.6 ms | 130.9 ms | 32 (0.85 ms ea) | 1.68× |
-| Binary lane | 122.6 ms | 127.3 ms | 32 (0.79 ms ea) | 1.75× |
-| **In-process fast lane** | **43.5 ms** | **35.2 ms** | **0** | **4.83×** |
+| RESP (legacy) | 108.3 ms | 127.5 ms | 32 (0.70 ms ea) | 1.85× |
+| Binary lane | 103.0 ms | 98.4 ms | 32 (0.64 ms ea) | 1.94× |
+| **In-process fast lane** | **41.9 ms** | **34.5 ms** | **0** | **4.79×** |
 
-Measured 2026-10-02 on an M4 Mac mini against Pion 0.9.1: ~316-token
-prefixes, vanilla ~210 ms a request, 100% first-token agreement with
-vanilla mlx-lm (50/50) on every lane. The wire lanes make 32 calls a
-request because mlx-lm runs the suffix in two passes (all but its last
-token, then the last) and each pass queries every layer. Speedups are
-mean against mean.
-
-Until 2026-10-02 this table read 108.6 / 92.1 / 28.2 ms p50 and 2.39× /
-2.81× / 6.51×. Its vanilla side evaluated logits at every prompt position,
-which no generation computes, and its wire lanes ran the suffix in one
-pass, which mlx-lm does not. The sentence that followed compared the
-in-process lane with "a vanilla MLX `KVCache` upper bound (26.8 ms p50
-measured standalone)"; no harness for that number exists, so it is gone.
+Measured 2026-10-06 on an M4 Mac mini: ~316-token prefixes, vanilla ~200 ms a
+request, 100% first-token agreement with vanilla mlx-lm (50/50) on every lane.
+The wire lanes are forced with `PION_PROMPT_CACHE_NO_INPROC=1` (binary) and
+also `PION_PROMPT_CACHE_NO_BINARY=1` (RESP). They make 32 calls a request
+because mlx-lm runs the suffix in two passes (all but its last token, then the
+last) and each pass queries every layer. Speedups are mean against mean. Raw
+output: [`benchmarks/results/2026-10-06-mac-m4/`](../benchmarks/results/2026-10-06-mac-m4/)
+(`w1_stage2*.txt`). Earlier versions of this table timed a vanilla side that
+evaluated logits at every prompt position, and read higher; the changelog has
+the correction.
 
 #### Mental model — why the wire path was paying so much
 
@@ -482,7 +479,7 @@ of the forward drains everything in parallel.
 For cross-process consumers the wire is still the right path — no
 shared MLX context means no choice. The binary fast lane
 is the optimization for that case (RESP framing → 0xCA5E binary on
-`port+1`, single sendmsg scatter-gather, ~30% per-call wire cost cut).
+`port+1`, single sendmsg scatter-gather: 0.64 ms a call against RESP's 0.70 ms in the table above).
 
 ### SSM.PREFIX.* — recurrent-state companion
 
@@ -509,7 +506,7 @@ for each array:
 This keeps the substrate **model-family-agnostic**: Mamba (size=2 `[conv_state, ssm_state]`), RWKV-7 (size=3), and future RetNet / Hedgehog / GLA all serialize differently but the server never parses. Adding a new family is ~1-2 days of consumer-side (de)serializer work.
 
 **Validation:**
-- **Drift check** (reproduced by `tests/test_ssm_prefix_roundtrip.py`): bit-perfect state hydration across Mamba-130M-f32 (2048 decode tokens), Mamba-370M-f16 (1024 decode tokens), and RWKV-7 168M (512 decode tokens). All show **token agreement 100%, max-abs-diff = 0.000e+00** vs no-snapshot baseline. Deterministic-recurrence property holds.
+- **Drift check** (reproduced by `tests/test_ssm_prefix_roundtrip.py`): bit-perfect state hydration across Mamba-130M-f32 (2048 decode tokens), Mamba-370M-f16 (1024 decode tokens), and RWKV-7 (168M parameters, 512 decode tokens). All show **token agreement 100%, max-abs-diff = 0.000e+00** vs no-snapshot baseline. Deterministic-recurrence property holds.
 - **Wire round-trip** (`tests/test_ssm_prefix_roundtrip.py`): end-to-end through pion-server. 64/64 bit-perfect Mamba-130M, 64/64 bit-perfect RWKV-7. 1 MB random blob round-trip + overwrite + multi-layer drop all OK.
 
 **Pickup cost for new families:** each new family needs its own (de)serializer in `tests/test_ssm_prefix_roundtrip.py`'s `serialize_arrays_cache` / `deserialize_arrays_cache`. The RWKV-7 serializer is the reference implementation.
@@ -525,16 +522,15 @@ This keeps the substrate **model-family-agnostic**: Mamba (size=2 `[conv_state, 
 Measured 2026-10-02 on an M4 Mac mini against Pion 0.9.1, vanilla prefilled the
 way mlx-lm's `generate_step` does. Each cell is the mean over three queries, and
 the speedup is the mean of the per-query ratios
-(`benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`). Warm TTFT grows with the bytes shipped: 118.6 MB
-at 2K and 320 MB at 8K, with a 33.55 MB largest layer. The 8K mean holds one
-1,657 ms first query; the other two took ~575 ms. Token agreement misses one
-token in 18 at 4K, greedy-argmax noise present on both paths.
+(`benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`, raw output in
+[`stage1_qwen3_5_prefix_sweep_2026_10_02.json`](../benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_02.json)).
+Warm TTFT grows with the bytes shipped: 118.6 MB at 2K and 320 MB at 8K, with a
+33.55 MB largest layer. Token agreement misses one token in 18 at 4K,
+greedy-argmax noise present on both paths. Earlier versions of this table timed
+a vanilla side that computed logits at every prompt position, and read
+differently; the changelog has the correction.
 
-Until 2026-10-02 this table read 3.3× / 24.77× / 32.7× / 11.6×, with a peak at
-4K. Its vanilla side also computed logits at every prompt position, and its 8K
-warm fetch took 2,373 ms.
-
-18/18 layers bit-perfect across the cleanly-typed split path (24 GatedDeltaNet via `SSM.PREFIX.*`, 8 Qwen3NextAttention via `KV.PREFIX.*` + `V.STOREBATCH`). `PionPromptCache` is hybrid-aware — `_classify_cache` walks the cache list and routes per-slot. Drop-in for mixed-cache models: `pc = PionPromptCache(model, vquant="fp16", port=1974); cache = pc.get_or_prefill(prefix_ids, namespace=ns)`. Reproducer: `benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`. Practical ceiling on the current wire is L=8192 (max layer 33.55 MB at 64 MB CLIENT_BUF_SIZE); past 8K needs streaming `SSM.PREFIX.FETCH` / `V.FETCH RANGE`.
+18/18 layers bit-perfect across the cleanly-typed split path (24 GatedDeltaNet via `SSM.PREFIX.*`, 8 Qwen3NextAttention via `KV.PREFIX.*` + `V.STOREBATCH`). `PionPromptCache` is hybrid-aware — `_classify_cache` walks the cache list and routes per-slot. Drop-in for mixed-cache models: `pc = PionPromptCache(model, vquant="fp16", port=1974); cache = pc.get_or_prefill(prefix_ids, namespace=ns)`. Reproducer: `benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`. A layer's K/V has to fit in one request (`CLIENT_BUF_SIZE`, 256 MB); the largest layer at 8K is 33.55 MB, and lengths past 8K are not measured.
 
 ### Hybrid Retrieval Cache — RAG K/V hydration
 
@@ -562,21 +558,26 @@ cache, suffix = hr.prepare("eiffel_passage", tok.encode("How tall?\nAnswer:"))
 | Backend | K/V live | Precision | Server | Best for |
 |---|---|---|---|---|
 | `inproc` (default) | MLX arrays in a process-local dict | bit-perfect (state-setter pickling) | not required | single-process RAG |
-| `pion` | `KV.PREFIX.REGISTER` + `V.STOREBATCH/V.FETCH BATCH` | fp16 (BLEU ~0.97 inherited from Stage 1) | `--kvcache --metal-attention -w 1` | cross-process / cross-host |
+| `pion` | `KV.PREFIX.REGISTER` + `V.STOREBATCH/V.FETCH BATCH` | fp16 (Stage 1's mean BLEU, 0.969 in the table below) | `--kvcache --metal-attention -w 1` | cross-process / cross-host |
 
-#### Measured (Llama-3.2-1B-Instruct-4bit, 3 RAG cases)
+#### Measured (Llama-3.2-1B-Instruct-4bit, 100 SQuAD v2 queries)
 
-| Backend | Quality | TTFT savings vs text-RAG (mean / range) |
-|---|---|---:|
-| inproc | 100% token agreement | **55% / 37–73%** |
-| pion | functional answer-match parity | 46% / 29–61% |
+| Backend | p50 TTFT | vs text-RAG (123.1 ms) | Token agreement | Answer found |
+|---|---:|:---:|:---:|:---:|
+| inproc | 41.3 ms | **3.0×** | 98.3% | 0.68 (text-RAG: 0.68) |
+| pion | 45.6 ms | 2.7× | 98.3% | 0.68 |
+
+`benchmarks/reproducers/stage1_hybrid_recall_bench.py`, cache hydration inside the
+clock; raw output in
+[`stage1_hybrid_results_2026_10_02.json`](../benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json)
+(M4 Mac mini, 2026-10-02).
 
 Test: `pion-vllm-mlx/tests/test_hybrid_retrieval.py`.
 First experiment: `benchmarks/reproducers/stage0_hybrid_kv_injection.py`.
 
 #### Storage cost
 
-INT4 K/V per token at single layer:
+INT4 K and V per token, summed over the model's layers:
 
 | Model | K-vec dim per layer | Per-token bytes | Per 256-token chunk |
 |---|---|---|---|
@@ -584,8 +585,7 @@ INT4 K/V per token at single layer:
 | Llama-3-8B-class (32 layers, 8 KV heads × 128) | 1024 | ~32 KB | ~8 MB |
 | Llama-3-70B (80 layers, 8 KV heads × 128) | 1024 | ~80 KB | ~20 MB |
 
-Multiplies by N if multiple layers are cached. The hybrid pattern is
-worth it when the same chunks are retrieved repeatedly (FAQ, knowledge
+The hybrid pattern is worth it when the same chunks are retrieved repeatedly (FAQ, knowledge
 bases, doc search); the storage blowup over a single 768-dim embedding
 is amortized by the prefill saved per hit.
 
@@ -617,8 +617,14 @@ Measured on a 20-question / 50-token-greedy BLEU eval against the standalone ref
 | Format | Storage vs FP16 | Mean BLEU | First-token | Notes |
 |---|---:|---:|:---:|---|
 | **fp16** | 1.00× | **0.969** | 100% (20/20) | Bit-identical on 17/20, brief late drift on 3/20. **Production default.** |
-| int8 | 2.00× | partial | 95%+ | Single-step argmax safe. Multi-token decode drifts; not benchmarked end-to-end here. |
-| turbo4 | 3.51× | 0.538 | 90% (18/20) | Argmax preserved on first token, but compounds catastrophically over greedy decode. **Single-step / classification only.** |
+| int8 | ~2× | 0.677 | 95% (19/20) | First token right on 19 of 20, but greedy decode drifts within the 50 tokens. |
+| turbo4 | 3.51× | 0.538 | 90% (18/20) | Argmax preserved on most first tokens, but compounds badly over greedy decode. **Single-step / classification only.** |
+
+`tests/test_kv_prefix_bleu.py --vquant {fp16,int8,turbo4}` on an M4 Mac mini, 2026-10-06
+([raw output](../benchmarks/results/2026-10-06-mac-m4/), `kv_prefix_bleu*.txt`; the
+test's own gate is a mean BLEU of 0.95, which only fp16 passes). Storage is per
+token at the 1B model's 512-wide K/V rows: int8 is one byte an element against
+fp16's two, and turbo4 packs 32 elements into 18 bytes plus a 4-byte row header.
 
 **Recommendation:** ship `vquant=fp16`. Document `int8` and `turbo4` as opt-ins for greedy-tolerant single-step workloads (function-calling tool selection, classification, single-token routing) where the storage win matters more than multi-token fidelity.
 
@@ -626,9 +632,9 @@ Measured on a 20-question / 50-token-greedy BLEU eval against the standalone ref
 
 ## Use Cases
 
-Concrete fits for this build (single-instance, MLX, Apple Silicon, ≥95% hit rate, prefix-dominated):
+Concrete fits for this build (single-instance, MLX, Apple Silicon, a high hit rate, prefix-dominated):
 
-1. **Multi-tenant SaaS with a fixed system prompt.** The 7.3× warm-TTFT measurement (5 prompts × 30 queries, 96.7% hit rate) is exactly this shape.
+1. **Multi-tenant SaaS with a fixed system prompt.** The Stage-1 workload measurement at the top of this page (5 prompts × 30 queries, 96.7% hit rate, 9.21× mean TTFT) is exactly this shape.
 2. **Local LLM apps on Apple Silicon (Mac/iOS).** An embedded engine; chat with a reused system prompt.
 3. **Mac cluster inference (exo, vllm-mlx).** Cross-instance verified — multiple Macs share one Pion via TCP.
 4. **RAG with a fixed document corpus, contiguous order.** Cache `[system + chunks_in_canonical_order]`. Arbitrary chunk recomposition is **not** safe (causal attention — chunk B's K is rotated for positions it will not occupy).
@@ -700,7 +706,7 @@ KV-cache traffic — it's no longer required.
 | `tests/test_attend_prefix_batched.py` | Batched-Q `(H, M, D)` cosine 1.0 vs CPU softmax; M=1 backward-compat |
 | `tests/test_attend_prefix_lse.py` | LSE trailer end-to-end; merge of two attention halves matches reference |
 | `tests/test_attend_prefix_merge.py` | Online softmax merge math (numpy-only proof) |
-| `tests/test_mlx_lm_patch.py` | Monkey-patch correctness — Llama-3.2-1B 90% token agreement at 30 tokens |
+| `tests/test_mlx_lm_patch.py` | Monkey-patch correctness — Llama-3.2-1B: the first token equal to vanilla's and at least half of 20 greedy tokens (it prints the agreement) |
 | `tests/bench_ttft.py` | TTFT A/B/C — Stage-2 wins quantified |
 | `tests/bench_bleu_3b_stage2.py` | 3B BLEU comparison — Stage-2 vs cache-rebuild |
 
@@ -719,13 +725,15 @@ KV-cache traffic — it's no longer required.
 
 To reproduce the headlines:
 
-**Stage 1 (cache-rebuild) — 86% TTFT reduction at 1B:**
+**Stage 1 (cache-rebuild) through the public API — 8.77× mean TTFT at 1B**
+([raw output](../benchmarks/results/2026-10-06-mac-m4/prompt_cache_workload_q30_r8.txt)):
 
 ```bash
 ./pion-server --kvcache -w 1 &
 python3 pion-vllm-mlx/tests/test_prompt_cache_workload.py \
     --vquant fp16 --prompts 5 --queries 30 --prompt-repeats 8   # with pion-vllm-mlx[mlx] installed
-# Measured 2026-10-02, M4 Mac mini: TTFT 612 → 84 ms (86.3%), throughput 7.3×, first-token 100%
+# Measured 2026-10-06, M4 Mac mini: mean TTFT 576 → 66 ms (8.77×), throughput 8.73×,
+# hit rate 96.7%, first-token agreement 100%
 ```
 
 **Stage 2 (mlx-lm monkey-patch): both lanes against vanilla and Stage 1:**
@@ -733,11 +741,11 @@ python3 pion-vllm-mlx/tests/test_prompt_cache_workload.py \
 ```bash
 ./pion-server --kvcache --metal-attention -w 1 &  # Metal handles both decode (M=1) and batched-Q (M>1) TTFT
 python3 tests/bench_ttft.py --prompt-tokens 2048 --runs 11   # with pion-vllm-mlx[mlx] installed
-# Measured 2026-10-02, Llama-3.2-1B/2K, M4 Mac mini (warm TTFT median, one-token suffix):
-#   Path A vanilla cold:                1220 ms
-#   Path B cache-rebuild (Stage 1):       44 ms  (28×)
-#   Path C Stage 2, wire lane:            43 ms  (29×)
-#   Path D Stage 2, in-process lane:      14 ms  (86×)
+# Measured 2026-10-06, Llama-3.2-1B/2K, M4 Mac mini (warm TTFT median, one-token suffix):
+#   Path A vanilla cold:                1171 ms
+#   Path B cache-rebuild (Stage 1):       37 ms  (31×)
+#   Path C Stage 2, wire lane:            24 ms  (49×)
+#   Path D Stage 2, in-process lane:      11 ms  (104×)
 ```
 
 **Cross-worker (`-w 4`) without auto-cap:**

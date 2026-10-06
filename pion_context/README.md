@@ -41,10 +41,9 @@ pion-context index --dir .
 pion-context install-hooks
 ```
 
-Measured on an M4 Mac mini with Ollama `nomic-embed-text` (2026-10-06): Django's
-`django/` package, 818 files and 8,627 chunks, indexes in 194 s (44 chunks a second,
-embedding 64 chunks per request). A search takes about 13 ms, most of it embedding the
-query.
+Indexing time is dominated by embedding the chunks, which go to Ollama 64 per
+request; a search embeds one query and runs one `FT.SEARCH`. No timing is published
+with raw output yet, so measure on your own repository.
 
 ## Usage
 
@@ -76,9 +75,8 @@ them rather than adding copies. The hooks run the Python that ran `install-hooks
 use the environment pion-context is installed in.
 
 - **SessionStart** queries the index for project-level context and adds it to the session.
-- **PostToolUse** (Edit, Write, MultiEdit) re-indexes the edited file. On the Django index
-  above, re-indexing `django/db/models/query.py` after an edit took 3.2 s, process start
-  included. It runs asynchronously, so the edit does not wait for it.
+- **PostToolUse** (Edit, Write, MultiEdit) re-indexes the edited file. It runs
+  asynchronously, so the edit does not wait for it.
 
 ### MCP tools
 

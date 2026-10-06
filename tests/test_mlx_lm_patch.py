@@ -8,7 +8,7 @@ Compares two generation paths on Llama-3.2-1B-Instruct-4bit:
 
 Asserts:
   1. Both paths produce identical first token (logit argmax).
-  2. Output token agreement ≥ 90% across 30 generated tokens.
+  2. Output token agreement ≥ 50% across the generated tokens (--max-tokens, default 20).
   3. Online softmax merge at every layer (sidecar LSE path) doesn't
      numerically diverge from the reference.
 

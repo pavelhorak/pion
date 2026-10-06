@@ -79,7 +79,7 @@ Equality for SSO values is a 3-word comparison (`_data0 == _data0 && _data1 == _
 
 Source: `src/common/hash_map.mojo`
 
-Used for the main keyspace (10M slots per worker), per-key hashes, and sets.
+Used for the main keyspace (as the 8 shards of a `StripedHashMap`, 65,536 slots to start per worker), per-key hashes, and sets.
 
 ### Structure
 
@@ -108,7 +108,7 @@ Triggers at 70% fill (`size * 100 > capacity * 70`). Doubles capacity, re-insert
 
 | Use case | Initial capacity |
 |---|---|
-| Main keyspace | 10M slots per worker |
+| Main keyspace | 65,536 slots per worker (8 shards of 8,192), doubling on demand |
 | Per-key hash (HSET) | 16 slots (from `ObjectPool`) |
 | Per-key set (SADD) | 16 slots (from `ObjectPool`) |
 

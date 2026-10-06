@@ -1,0 +1,4 @@
+profile=kv workers=1 rss_kb=77888
+profile=vector workers=1 rss_kb=105552
+profile=ai workers=1 rss_kb=105552
+profile=full workers=1 rss_kb=105536

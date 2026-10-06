@@ -1,0 +1,15 @@
+Stage 2 ATTEND.PREFIX.* H=8 N=2048 D=64 top_k=2048
+
+[store] ATTEND.PREFIX.STORE — push K/V once
+  store_ms=4.0  bytes=8388608
+[query] ATTEND.PREFIX.QUERY — 10 queries, Q-only on the wire
+  median=0.47ms  mean=0.47ms  throughput=2143 q/s
+
+──────── Stage 2 G2 sub-gate ────────
+  PREFIX.STORE+QUERY median 0.47ms  (2143 q/s)
+  numerical cosine vs CPU   1.0000  (target ≥ 0.99)
+
+  cosine ≥ 0.99      PASS
+  throughput ≥ 100q/s PASS
+  STAGE 2 PROTOTYPE  PASS
+rc=0 for attend_prefix

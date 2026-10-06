@@ -20,20 +20,14 @@ fully OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`).
 Traditional pre-generation RAG retrieves once before generating. FLARE retrieves *during* generation,
 triggered only when the model becomes uncertain mid-sentence — the token logprob `min(chunk) < τ`.
 
-This requires retrieval to be nearly free. Network-bound vector stores add 50–200ms per retrieval —
-a visible stutter in streaming UIs. Pion's in-process retrieval costs **1.28ms** (embed + HNSW search),
-which is **imperceptible** at generation speeds of 8–17 tokens/second.
+This needs retrieval to be cheap next to decoding a token, or a streaming UI stutters while it
+waits. Pion answers the retrieval on the same machine, with no network hop to a hosted vector
+store; its latency is not yet published with a harness.
 
-**Experimental results (HotpotQA 20 questions):**
-
-| Setup | F1 | Correct |
-|---|:---:|:---:|
-| 1B baseline | 0.15 | 7/20 |
-| 1B + FLARE | **0.37** | **7/20** (better partial credit) |
-| 8B few-shot | 0.29 | — |
-| 8B few-shot + FLARE | **0.35** | **10/20** |
-
-FLARE fires on average 0.6–1.3 retrievals per question, only when genuinely uncertain.
+The HotpotQA experiments behind this gateway are
+[`examples/step6_flare.py`](../examples/step6_flare.py) and
+[`examples/step6b_flare_fewshot.py`](../examples/step6b_flare_fewshot.py). Their results
+are not published with raw output yet, so this README quotes none.
 
 ---
 
@@ -103,7 +97,7 @@ OPENAI_API_KEY=sk-... python flare_gateway/gateway.py --upstream-type openai
 |---|:---:|---|---|
 | `mock` | 1536 | none | Smoke tests — deterministic hash-based vectors |
 | `openai` | 1536 | `OPENAI_API_KEY` | Production — `text-embedding-3-small` |
-| `onnx` | 384 | `onnxruntime`, `transformers` | Local MiniLM, ~1.2ms in-process |
+| `onnx` | 384 | `onnxruntime`, `transformers` | Local MiniLM, in-process |
 
 ```bash
 # Smoke test — no API keys, no model downloads
@@ -197,9 +191,8 @@ Returns gateway health payload with upstream and Pion targets.
 **Retrieval fallback**: when fewer than 8 documents are loaded (HNSW batch-8 kernel requires ≥8 nodes),
 `pion_retrieve()` falls back to Python cosine similarity over all documents.
 
-**Key insight** (Experiment 12b): few-shot prompting alone improved
-8B baseline F1 from 0.06 to 0.29. FLARE adds +0.06 on top. The right production setup is:
-`8B + few-shot prompt + FLARE` — no fine-tuning required.
+The setup the experiments point to is `8B + few-shot prompt + FLARE`, with no fine-tuning; the
+few-shot prompt mattered more than FLARE did. Measure both on your own questions before relying on it.
 
 ## License
 

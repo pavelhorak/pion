@@ -29,7 +29,7 @@ client → pion-serve :8321 ──┬──► L1 semantic cache    (Pion's auto
   prior responses. Designed to recombine fragments when neither L1
   nor L3 hits cleanly. (Hypothesis untested at scale; ships behind
   the same `--distill` flag.)
-- **Intent router** classifies every L1/L3 miss in <1 ms by cosine
+- **Intent router** classifies every L1/L3 miss by cosine
   against pre-computed simple/complex centroids and dispatches to
   a tier-specific backend+model: simple → cheap (Haiku / Flash /
   smollm), medium → mid (Sonnet / gemma4), complex → top (Opus /
@@ -95,12 +95,11 @@ repetitive (FAQ bots, customer support, internal tooling).
 
 **Workload sensitivity.** L3 hit rate is bounded by
 the *embedding-similarity ceiling* of the corpus, not by the substrate.
-On a codebase-QA dataset (100 unique technical questions,
-MiniLM-L6-v2), max causal pairwise top-1
-similarity is **0.875** — below the L1 threshold (0.92) and the L3 direct
-threshold (0.90). Default thresholds give 0.0% L1 / 0.0% L3-direct /
-0.0% L3-composite-strict on this dataset. Templated FAQ workloads cluster much tighter in embedding space; codebase-style "every
-question targets a different subsystem" workloads do not. Plan capacity
+On a codebase-QA set where every question targets a different subsystem,
+no pair of questions was similar enough to clear the default thresholds,
+so nothing hit (an internal run, not published with a harness). Templated
+FAQ workloads cluster much tighter in embedding space; codebase-style
+workloads do not. Plan capacity
 based on your corpus's pairwise similarity distribution, not on default
 projections.
 
@@ -315,8 +314,8 @@ fraction of requests that did NOT call the backend.
 It depends on how tightly your queries cluster in embedding space, so
 measure it on your own traffic (`/v1/stats` reports it). Templated FAQ
 workloads cluster tightly and hit often; questions that each target a
-different subject — codebase Q&A is the example above — can hit the
-default thresholds 0% of the time. L1 is the layer that matters;
+different subject — codebase Q&A is the example above — can miss the
+default thresholds entirely. L1 is the layer that matters;
 L3/L3b ride along behind `--distill` and only contribute on workloads
 where the same intent comes back as a meaningfully different sentence.
 

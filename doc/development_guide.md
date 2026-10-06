@@ -33,17 +33,17 @@ Two build profiles. Use `build-dev` for iteration; reserve `build` for benchmark
 
 | task | flags | time | binary | when to use |
 |---|---|---:|---|---|
-| `pixi run build` | `-O3` (default), full LLVM optimization, monomorphization, SIMD codegen | ~290 s | `pion-server` (~4 MB) | benchmarks, the perf gate, before push |
-| `pixi run build-dev` | `-O0`, no optimization, no DCE | ~15 s | `pion-server-dev` (~28 MB) | "does it compile + raw tests pass" iteration |
+| `pixi run build` | `-O3` (default), full LLVM optimization, monomorphization, SIMD codegen | minutes | `pion-server` | benchmarks, the perf gate, before push |
+| `pixi run build-dev` | `-O0`, no optimization, no DCE | seconds | `pion-server-dev` | "does it compile + raw tests pass" iteration |
 
-`build-dev` is **19× faster** but the binary skips vectorization, inlining, loop unrolling, and SIMD codegen — never benchmark a `pion-server-dev` build, the perf numbers depend on `-O3`. The dev binary passes the correctness tests (`test_raw.py`), so it's safe for "did my change break anything?" loops; for the actual perf gates run a release build.
+`build-dev` compiles in a fraction of the time, but the binary skips vectorization, inlining, loop unrolling, and SIMD codegen — never benchmark a `pion-server-dev` build, the perf numbers depend on `-O3`. The dev binary passes the correctness tests (`test_raw.py`), so it's safe for "did my change break anything?" loops; for the actual perf gates run a release build.
 
 The dev path links `src/ffi/dev_macos_stubs.c` (no-op stubs for Linux-only `__errno_location` + `epoll_*`) so `-O0` doesn't fail to link from un-DCE'd Linux paths. `xdp_wrap.c` is also compiled on macOS now (its `#else /* !__linux__ */` block emits matching stubs); both stubs are linked into the release build too but get DCE'd at `-O3` — same final behavior.
 
 ### Building (macOS)
 ```bash
 pixi run build           # release
-pixi run build-dev       # dev iteration (-O0, 19× faster)
+pixi run build-dev       # dev iteration (-O0, compiles fast, runs slow)
 ```
 
 ### Building (Linux)

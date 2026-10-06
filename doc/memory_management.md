@@ -8,7 +8,6 @@ The fundamental rule governing Pion's memory architecture: **no `alloc[T]` calls
 
 Pre-allocated resources per worker:
 - `response_buffer` (4 MB) for response formatting
-- `SlabAllocator[ListNode]` (10M initial) for list node storage
 - `ObjectPool[SlabHashMap]` for SADD/HSET new-key allocation
 - `stack_allocation[1, KEvent]()` for kevent changes (never `alloc[KEvent](1)`)
 
@@ -18,7 +17,7 @@ The **Slab Allocator** (`src/memory/slab_allocator.mojo`) is the fundamental bui
 
 ### Key Features
 - **Deterministic Latency**: Allocations and deallocations are $O(1)$ operations (bump pointer or free-list pop/push).
-- **Huge Pages (2MB Superpages)**: In `cloud` and `desktop` profiles, Pion allocates slabs using 2MB superpages (via `VM_FLAGS_SUPERPAGE_SIZE_2MB` on macOS). This dramatically reduces TLB (Translation Lookaside Buffer) misses during random memory access in massive vector graphs.
+- **Huge Pages (2MB)**: with `use_huge_pages` set, slabs use 2MB pages — superpages (`VM_FLAGS_SUPERPAGE_SIZE_2MB`) on macOS, where the desktop and cloud smart profiles turn it on, and `MAP_HUGETLB` on Linux, where `--huge-pages` opts in because the pages must be reserved by the administrator. Larger pages mean fewer TLB misses on random access into large graphs; the effect is not measured here.
 - **Minimal Fragmentation**: Memory is allocated in large "slabs" and divided into fixed-size "chunks".
 - **Object Re-use**: A `free_list` tracks deallocated chunks, which are immediately available for the next allocation.
 - **Shared-Nothing Per-Worker**: Each worker owns its own `SlabAllocator` instances (initialized inside the worker task after `set_thread_affinity(i)` pins the worker to a CPU core). There is no explicit NUMA pinning -- core affinity provides implicit locality on NUMA systems, but Pion does not call `mbind()` or `set_mempolicy()`.
@@ -29,11 +28,11 @@ The **Slab Allocator** (`src/memory/slab_allocator.mojo`) is the fundamental bui
 Callers must call `.deallocate(ptr)` explicitly -- there is no garbage collector.
 
 ```mojo
-# Example: Creating a Slab Allocator for ListNodes (10M initial capacity)
-var list_node_allocator = SlabAllocator[ListNode](10_000_000)
-var node_ptr = list_node_allocator.allocate()
+# Example: a slab allocator for fixed-size nodes
+var allocator = SlabAllocator[Node](1024)
+var node_ptr = allocator.allocate()
 # ... use node_ptr ...
-list_node_allocator.deallocate(node_ptr)
+allocator.deallocate(node_ptr)
 ```
 
 ## Object Pool

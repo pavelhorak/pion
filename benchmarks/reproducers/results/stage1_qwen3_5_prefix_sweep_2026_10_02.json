@@ -1,0 +1,32 @@
+{
+  "2048": {
+    "vanilla_ms": 4971.5,
+    "pion_ms": 354.9,
+    "speedup": 14.03,
+    "agreement": "18/18",
+    "setup_ms": 5385.7,
+    "shipped_mb": 118.6,
+    "max_layer_mb": 8.39,
+    "actual_prefix_tokens": 2048
+  },
+  "4096": {
+    "vanilla_ms": 10244.8,
+    "pion_ms": 407.0,
+    "speedup": 25.25,
+    "agreement": "17/18",
+    "setup_ms": 10704.1,
+    "shipped_mb": 185.7,
+    "max_layer_mb": 16.78,
+    "actual_prefix_tokens": 4096
+  },
+  "8192": {
+    "vanilla_ms": 21328.4,
+    "pion_ms": 936.3,
+    "speedup": 29.04,
+    "agreement": "18/18",
+    "setup_ms": 22441.2,
+    "shipped_mb": 320.0,
+    "max_layer_mb": 33.55,
+    "actual_prefix_tokens": 8192
+  }
+}

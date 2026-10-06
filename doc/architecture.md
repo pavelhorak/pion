@@ -12,11 +12,10 @@ main()
   └── pion_spawn_workers(N) → pthreads  # N workers (16 MB stacks), each pinned to a CPU core (capped at 4 on macOS Apple Silicon)
         └── worker_task(i)
               ├── set_thread_affinity(i)
-              ├── SlabAllocator[ListNode](10M)
               ├── Pion.__init__()
               │     ├── Step 1: NetworkEngine.__init__() + server.listen(shared_fd)
               │     │            ← Socket is LIVE before heavy init
-              │     └── Step 2: SlabHashMap(10M) + HNSWGraph + WAL + RaftNode
+              │     └── Step 2: StripedHashMap(65,536 slots, grows) + HNSWGraph + WAL + RaftNode
               └── Pion.run_server()
                     └── NetworkEngine.run_server_kqueue()   # macOS: kqueue event loop
                         NetworkEngine.run_server_epoll()    # Linux --epoll: best for P=1 w=1
@@ -25,9 +24,8 @@ main()
 ```
 
 Each worker owns **privately**:
-- `SlabHashMap` (10M slots) — the keyspace
+- `StripedHashMap` — the keyspace: 8 `SlabHashMap` shards, 65,536 slots to start, each shard doubling as it fills
 - `HNSWGraph` — the vector index (or borrows from `SharedHNSWView` after FT.OPTIMIZE)
-- `SlabAllocator[ListNode]` — list node slab
 - `ObjectPool[SlabHashMap/SlabSkipList/SlabList]` — recycled data structure instances
 - `WAL`, `RaftNode` — persistence and replication state
 - `KVCacheStore`, `LayerStore`, `AttentionIndex` — externalized attention state (when `--kvcache`)
@@ -71,10 +69,10 @@ Four backends are available on Linux, selected by CLI flag:
 
 | Backend | Flag | Syscalls per batch (K fds) | Best for |
 |---|---|---|---|
-| **epoll** | `--epoll` | 2K+1 | P=1 w=1 (91-96K RPS, Redis parity) |
+| **epoll** | `--epoll` | 2K+1 | P=1 per-command benchmarks (w=1) |
 | **io_uring** | `--iouring` (default) | 2 | Multi-connection production |
 | **io_uring SQPOLL** | `--sqpoll` | 0-1 | Experimental (hangs under load) |
-| **XDP/AF_XDP** | `--xdp` | 0 (kernel bypass) | +13% vs io_uring at P=1 (154K over real NIC); multi-worker + P>1 ready |
+| **XDP/AF_XDP** | `--xdp` | 0 (kernel bypass) | Tail latency at P=1 over a real NIC (needs flow steering); multi-worker + P>1 ready |
 
 ### One event loop per worker
 
@@ -82,11 +80,11 @@ Each worker runs `NetworkEngine.run_server_*()` directly on its own pthread;
 there is no inner task scheduler. Mojo green threads do not yield at OS
 syscalls, so a second task per worker would block the event loop.
 
-### Throughput anchors
+### Throughput
 
-- **14.0M ops/sec** peak (io_uring w=32 P=50 d=256) -- 10.2x Redis
-- **6.23M ops/sec** (epoll w=16 P=50) -- 4.7x Redis
-- **P=1 parity with Redis** via `--epoll`: 91-96K vs 95-96K, wins LRANGE (+1-4%)
+Measured throughput against Redis, on one machine with the raw runs published, is in the
+[README](../README.md#the-engine-underneath) and
+[`benchmarks/results/`](../benchmarks/results/README.md).
 
 ---
 
@@ -134,9 +132,9 @@ Vector data is an exception: after `FT.OPTIMIZE`, the index-building worker publ
 | EVFILT_READ registered immediately on accept | Prevents data loss if client sends before next `kevent_batch()` |
 | 4 MB shared response buffer per worker | Pre-allocated; no `alloc` on hot path |
 | Ziplist (≤1024 entries) + Quicklist (>1024) for lists | Contiguous memory for small lists; two-sided 256-element segmented arrays for large lists |
-| Generation-counter visited-set in HNSW | O(1) mark/check without clearing 50K-entry array between queries |
+| Generation-counter visited-set in HNSW | O(1) mark/check without clearing the `max_elements`-entry array between queries |
 | INT8-INT8 batch-8 search kernel | Graph build and search use the same metric; no dequantization per neighbor |
-| Binary protocol on port+1 | 0xCA5E framing avoids RESP parsing overhead for bulk tensor ops (3.67M tok/s ATTEND.STORE) |
+| Binary protocol on port+1 | 0xCA5E framing avoids RESP parsing overhead for bulk tensor ops |
 
 ---
 
@@ -158,18 +156,18 @@ When `--kvcache` is enabled, the following modules are activated:
 Inference engine (vLLM/MLX) → PionAttentionClient (vllm-pion/)
     │
     ├── ATTEND.CREATE session_id key_dim value_dim
-    ├── ATTEND.STORE session_id layer_id num_tokens keys_fp32 values_fp32  (3.67M tok/s binary)
-    ├── ATTEND.FINALIZE session_id layer_id  (builds HNSW, 1.0s for 128K tokens)
-    └── ATTEND.QUERY session_id layer_id k query_fp32  (86us per layer at 128K)
-         └── Returns top-k values (cosine 1.0 vs full attention at k=64)
+    ├── ATTEND.STORE session_id layer_id num_tokens keys_fp32 values_fp32
+    ├── ATTEND.FINALIZE session_id layer_id  (builds the layer's HNSW)
+    └── ATTEND.QUERY session_id layer_id k query_fp32
+         └── Returns the top-k value rows
 ```
 
-**Performance (binary protocol, 128K tokens, 128d keys):**
-- Store: 3,667,377 tok/s
-- Query: 86us per layer at 128K tokens
-- 40-layer total: 3.4ms
-- Build: 1.0s for 128K tokens (finalize)
-- Memory: ~2.5 GB for 40 layers at 128K (staging freed after finalize)
+**Performance** (`tests/test_attend_128k.py` over RESP, one layer, 128K tokens, 128-d keys, M4 Mac mini, 2026-10-06,
+[raw output](../benchmarks/results/2026-10-06-mac-m4/attend_128k.txt)):
+- Store: 222,473 tok/s
+- Query: 1.54 ms client round trip per layer
+- Build: 11.3 s for 128K tokens (finalize)
+- Memory: ~125 MB per layer at 128K
 
 ---
 
@@ -182,7 +180,7 @@ When `--kvcache` is enabled, the semantic routing modules are activated:
 | SemanticRouter | `src/network/semantic_router.mojo` | HNSW/FP32 routing table indexed by node centroid embeddings |
 | route commands | `src/commands/route.mojo` | AI.ROUTE.REGISTER, AI.ROUTE.UPDATE, AI.ROUTE, AI.ROUTE.REMOVE, AI.ROUTE.INFO handlers |
 
-**Routing strategy:** FP32 brute-force cosine similarity for <=16 nodes (zero recall loss); HNSW O(log N) for >16 nodes. Per-node capacity limits, exclude filters. 88% routing accuracy (7 of 8 test queries), 0.14ms/route, 7K QPS.
+**Routing strategy:** FP32 brute-force cosine similarity for <=16 nodes (zero recall loss); HNSW O(log N) for >16 nodes. Per-node capacity limits, exclude filters. No accuracy or latency result is published with a harness yet.
 
 ---
 
@@ -203,10 +201,9 @@ RAG.SPECULATE.ENABLE session_id
 RAG.QUERY session_id query_embedding
     ├── Append embedding to trajectory ring buffer
     ├── Check speculative cache (cosine > 0.9 match against predictions)
-    │     └── HIT: return pre-computed HNSW results (0.2ms)
+    │     └── HIT: return pre-computed HNSW results
     ├── MISS: execute live HNSW search
     ├── Generate 3 predictions: current + alpha * (current - previous), alpha=[0.5, 1.0, 1.5]
     └── Pre-execute HNSW search for each prediction → store in speculative cache
 ```
 
-**Performance:** 75% hit rate on linear query trajectories (6/8 queries), 0.2ms prediction+lookup latency.

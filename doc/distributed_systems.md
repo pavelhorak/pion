@@ -182,8 +182,8 @@ Pion uses lightweight TCP-based health probing (not SWIM UDP) via a background C
 **Mechanism:**
 
 1. Every `gossip_ping_ms` (default 1000ms), the gossip thread iterates all peers
-2. For each peer: opens a TCP connection to `peer_host:peer_port`, sends `PING\r\n`,
-   expects `+PONG` within 250ms
+2. For each peer (SWIM, the default): sends a direct probe and waits 100 ms for the
+   ack; without one, asks other peers to probe it and waits up to 200 ms more
 3. On success: `peer_health[i] = 0` (online), resets consecutive fail counter
 4. On failure: increments consecutive fail counter
    - `>= pfail_threshold` consecutive failures (default 5) → `peer_health[i] = 1` (pfail)
@@ -211,9 +211,12 @@ failures, default 15 = ~15 seconds of unreachability).
 3. The replica clears `is_replica`, increments `cluster_epoch`, and begins accepting writes
 4. Gossip continues monitoring — if the old primary recovers, it must be manually reconfigured
 
-**Performance:** Measured failover time is **463ms** from primary failure detection to replica
-accepting writes (tested in `tests/test_failover.py`). The ~5s detection window is dominated
-by the gossip `fail_threshold` (15 consecutive 1-second PINGs). Timing may vary on different hardware.
+**Performance:** `tests/test_failover.py` kills the primary and sends `CLUSTER FAILOVER FORCE`
+to the replica; the promotion completed in 350 ms on an M4 Mac mini (2026-10-06,
+[raw output](../benchmarks/results/2026-10-06-mac-m4/failover.txt)). That is the forced path.
+Automatic promotion first waits for gossip to mark the primary `FAIL` (`fail_threshold`
+consecutive failed PINGs at the gossip interval, about 15 s at the defaults), and no test
+times it yet.
 
 **Testing:**
 

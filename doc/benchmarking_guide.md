@@ -19,7 +19,7 @@ run with `--gate` calls it.
 
 The rules it encodes:
 
-- **Leaked servers cost ~30% on write-heavy rows** and almost nothing on reads.
+- **Leaked servers slow the write-heavy rows** far more than the reads.
   A write-row miss with healthy read rows means a resident process, not a slow
   disk. Stop leftover servers by exact name (`pkill -x pion-server`, then
   `pgrep -x pion-server` to confirm).
@@ -80,7 +80,7 @@ or read a standalone `-t mset` against the floor.
   concurrency (P>=10). Which one wins at P=1 depends on the CPU generation, so
   measure both on a new machine.
 
-**P=1 ceiling:** ~250K RPS on macOS localhost, ~96K on Linux localhost.
+**P=1:** a single-threaded server is bound by a syscall per request. On the published Linux run, `pion-server -w 1` measured 112,019 ops/sec and single-threaded Redis 107,896, while Redis with `io-threads 8` reached 388,405 ([raw output](../benchmarks/results/2026-10-06-linux-epyc-8124p/README.md)).
 
 ---
 
@@ -109,8 +109,8 @@ names the task.
 | Workers | 10 (`-w 10 --independent-workers`) |
 | Quantization | INT8 |
 
-Vector QPS on a laptop is noisy: identical binaries have measured anywhere in
-a ~15% band, and the first run of a series is usually the low one. Recall
+Vector QPS on a laptop is noisy: identical binaries measure noticeably different
+QPS from run to run, and the first run of a series is usually the low one. Recall
 varies by a few tenths of a point between runs because the graph build is
 randomized, and an occasional single run dips further; check whether a low
 number reproduces before reading anything into it.
@@ -129,8 +129,8 @@ Checks Redis protocol compatibility across ~45 command families.
 
 ## Notes
 
-- **Startup wait:** a multi-worker Pion takes several seconds to initialise its
-  10M-slot hash maps; the harnesses wait for it.
+- **Startup wait:** a server is listening before it can serve; the harnesses
+  wait for a real `+PONG`.
 - **Linux io_uring** requires `--security-opt seccomp=unconfined` in Docker.
 - **Linux build:** `gcc -c src/ffi/uring_wrap.c -o src/ffi/uring_wrap.o` before
   `pixi run build`.
