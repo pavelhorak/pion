@@ -51,6 +51,18 @@ enumerated — there were roughly 1,100 of them.
   PING with a large argument, a pipeline of LRANGEs of small lists, and
   cluster redirects.
 
+### Removed
+
+- **The site no longer recommends Pion as an MCP server for Claude Code.** The
+  landing page's MCP chip, the pion-mcp and pion-context reference pages and the
+  codebase-search guide are gone, and both packages' READMEs are marked
+  experimental, with their known limitations. Several statements in them were
+  wrong: re-indexing an edited file (the PostToolUse hook, `index-file`) removes
+  it from search instead of refreshing it; directories named `models`, Django's
+  ORM among them, were never indexed; agent memory and codebase search replace
+  each other's index on one server; the hooks were not configured automatically;
+  and "70-86% of repeated queries hit cache" had no measurement behind it.
+
 ## [0.9.5] — 2026-10-06
 
 Linux fixes from the first run of the whole gate tier there, Redis

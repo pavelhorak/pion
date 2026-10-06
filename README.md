@@ -617,11 +617,13 @@ numbers beside them suggest, so read each caveat as part of the entry.
 - **RAG.SPECULATE** — predict next query via embedding momentum, 75% hit rate on linear-trajectory query streams.
 - **AI.KNN_LM.\*** — token-id-tagged kNN datastore substrate for client-side kNN-LM augmentation (CREATE / STORE / STOREBATCH / QUERY / INFO / DROP). Up to 16 named datastores per worker. Brute-force scan below 5K entries; **per-vector SQ8 + asymmetric INT8 SIMD HNSW** above (M=32, heap-based PQ + per-vec batch-4 distance kernel + lazy reciprocal pruning). **dim=768, n=30K, k=10: 0.90 recall, 1.94 ms median latency, 36 s bulk-build.** Use cases: code completion, log generation, in-domain text infill.
 
-### MCP Server — 38 Tools for AI Agents
-```bash
-claude mcp add pion -- uvx --from ./mcp pion-mcp
-```
-`agent_remember/recall/forget`, `vector_search`, `kv_*`, `hash_*`, `semantic_cache_*`, `cluster_info`. Pion as agent long-term memory.
+### MCP server (experimental)
+
+`mcp/` holds an MCP server whose tools wrap Pion: agent memory, vector search, KV, the
+semantic cache and codebase search. It is experimental. Pion serves one FT index at a
+time, so agent memory, the semantic cache and codebase search replace one another on a
+server, and no benefit to coding agents has been measured. Known limitations:
+[`mcp/README.md`](mcp/README.md).
 
 ### Cluster
 
@@ -771,7 +773,7 @@ pion-exo/                         # exo attention hook (Mac cluster)
 pion-vllm-mlx/                    # vllm-mlx attention backend
 pion-{langgraph,autogen,llamaindex}/  # framework integrations
 vllm-pion/                        # Python attention client
-mcp/pion_mcp/                     # MCP server (38 tools)
+mcp/pion_mcp/                     # MCP server (experimental)
 flare_gateway/                    # FLARE OpenAI-compat proxy
 benchmarks/                       # KV + vector benchmark harnesses
 tests/                            # correctness + parity + AI gateway
@@ -801,7 +803,6 @@ doc/                              # technical reference
 | AI features | semantic cache + externalized attention (shipped); RAG, FLARE, speculative RAG, `AI.CHAT`/`AI.COMPLETE` are in the box but not launch claims |
 | Mac cluster | exo / vllm-mlx hooks, MLX GPU attention sidecar. *Pion side done; the exo hook has no upstream API yet and the vllm-pion v1 connector is unmerged* |
 | Integrations | LangGraph, AutoGen, LlamaIndex, RedisVL, LangChain, LMCache |
-| MCP | 38 tools for AI agents |
 | License | Apache-2.0 · tuned 1536-dim vector kernels a free closed library (`libpion_vector`) — [table](#license) |
 
 ---

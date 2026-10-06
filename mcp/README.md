@@ -1,13 +1,15 @@
 # pion-mcp
 
 MCP server for [Pion](https://github.com/pavelhorak/pion) — the Redis-compatible vector database
-built in Mojo. Exposes Pion's semantic search and key-value store as tools for Claude Code, Cursor,
-GitHub Copilot, and any MCP-compatible agent.
+built in Mojo. Exposes Pion's semantic search and key-value store as MCP tools.
+
+**Status: experimental.** Read the [known limitations](#known-limitations) before relying on
+it. No benefit to coding agents has been measured.
 
 ## Quickstart
 
 ```bash
-# Add to Claude Code (one line)
+# Register with an MCP client (Claude Code shown)
 claude mcp add pion -- uvx --from ./mcp pion-mcp
 
 # Or with explicit host/port
@@ -143,30 +145,32 @@ Counter:     "__mem_seq__"  (sequential ID), "__mem_count__"  (optimize trigger)
 # In your LLM application, use pion-mcp to cache responses:
 cached = semantic_cache_get("What is the capital of France?", threshold=0.95)
 if cached:
-    return cached  # 70-86% of repeated queries hit cache
+    return cached
 
 response = call_llm("What is the capital of France?")
 semantic_cache_set("What is the capital of France?", response)
 return response
 ```
 
+## Known limitations
+
+- **One FT index per server.** Pion serves one FT index at a time; building one replaces
+  the one before. `agent_remember` builds `__agent_memory__` (FT.OPTIMIZE every 50
+  memories), `semantic_cache_set` builds `__semantic_cache__` (every 100 entries) and
+  `codebase_index` builds `__codebase__`, so on one server they replace one another: after
+  50 memories, `codebase_search` returns nothing. Give each its own server.
+- **Two embedding configurations share one variable.** pion-mcp reads `PION_EMBED_PROVIDER`
+  as `openai | max | mock` (default `openai`); its codebase tools call pion-context, which
+  reads it as `ollama | openai | mock` (default `ollama`). Set to `ollama`, pion-mcp's own
+  tools raise `ValueError`; left unset, the two embed with different models.
+- **Codebase search** inherits pion-context's limitations: see
+  [`pion_context/README.md`](../pion_context/README.md#known-limitations).
+
 ## Performance
 
-Pion at ef=150, 50K vectors, 1536 dimensions (VectorDBBench Performance1536D50K,
-head-to-head on same machine — Linux Colima 8-CPU, 2026-03-23):
-
-| Metric | Redis VSET (Redis 8.0) | **Pion V37** | Advantage |
-|---|---|---|---|
-| Peak QPS (c=10) | 5,441 | **10,283** | **+89%** |
-| P99 latency | 0.9ms | **0.9ms** | equal |
-| Recall@100 | 0.9197 | **0.9371** | **+1.7pp** |
-| Load time | 40.5s | **17.6s** | **2.3× faster** |
-
-macOS (M-series): 8,134 QPS mean (3-run stable), recall 0.9371, load ~16.5s vs Redis 50.4s.
-
-These figures are from an earlier build (spring 2026). The build as of
-2026-09-30 measures ~9.4K QPS at recall 0.960 on an M4 Mac mini, at the same
-gate configuration (50K × 1536-d, ef=150).
+pion-mcp adds a tool call and, for the search tools, an embedding request in front of
+Pion's vector search. For how that search compares with Redis on one machine, see the
+main README's vector table.
 
 ## License
 
