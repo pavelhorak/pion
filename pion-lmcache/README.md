@@ -30,9 +30,10 @@ remote_url: resp://localhost:1974
 ```
 
 Pion's RESP path handles LMCache's `RESPConnector` traffic (GET/SET/EXISTS/DEL
-on SHA256-keyed blobs) up to 16 MB per blob. See `tests/test_lmcache_compat.py`
-for the wire-level acceptance test (8 sections covering every command LMCache
-uses, including 8 MB chunks for 70B models).
+on SHA256-keyed blobs). A request may be up to 256 MB (the per-connection buffer,
+`CLIENT_BUF_SIZE`). See `tests/test_lmcache_compat.py` for the wire-level
+acceptance test (8 sections covering every command LMCache uses, including an
+8 MB blob standing in for a 70B model's chunk).
 
 **Pros:** zero code change for LMCache users. WAL-durable persistence comes
 for free (Pion's regular KV-string WAL covers SET/DEL).

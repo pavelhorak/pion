@@ -37,6 +37,10 @@ pion.snapshot.*
 # pages.yml) installs website/requirements.txt, which *.txt swallowed — so both
 # public workflows failed on the first run and the docs site never deployed.
 !website/requirements.txt
+# Fifth instance (2026-10-06): the raw benchmark output under benchmarks/results/
+# is the evidence tools/check_doc_claims.py checks the docs' numbers against. Ignored,
+# it passed locally and would have failed every clean checkout.
+!benchmarks/results/**/*.txt
 # Fourth instance, found seeding the public repo (2026-10-01): the FLARE
 # gateway's install file. export_public.sh step 3c now fails on any shipped
 # file a rule here would drop, so the next one is caught before a push.

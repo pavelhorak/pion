@@ -1,0 +1,1617 @@
+# Evidence for every measured number in the published docs.
+# Checked by tools/check_doc_claims.py (gate: tests/test_doc_claims.py).
+# kind: result | test | code | external | arithmetic — see the checker's docstring.
+
+[[claim]]
+file = "README.md"
+where = "The process that stored the prefix, asking again"
+numbers = ["1,242 ms", "61.9 ms", "20×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+
+[[claim]]
+file = "README.md"
+where = "A separate process, over the wire"
+numbers = ["1,242 ms", "73.9 ms", "17×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8"]
+
+[[claim]]
+file = "README.md"
+where = "A shorter prefix saves less: from a separate process"
+numbers = ["11×", "4.5×", "1.5×", "16 ms", "1.000"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json", "benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
+expect = ["\"ratio\": 11.24", "\"ratio\": 4.51", "\"ratio\": 1.5,", "\"cold_median_ms\": 47.2", "\"hit_median_ms\": 31.4", "B BLEU vs ref (50 tokens)        1.0000"]
+note = "16 ms = 47.2 - 31.4 at 34 tokens"
+
+[[claim]]
+file = "README.md"
+where = "About 3 MB compressed"
+numbers = ["3 MB", "2.9 MB"]
+kind = "external"
+evidence = ["https://github.com/pavelhorak/pion/releases/tag/v0.9.5"]
+note = "pion-0.9.5-macos-arm64.tar.gz is 2,931,707 bytes"
+
+[[claim]]
+file = "README.md"
+where = "In-process fast lane (default same-process consumer)"
+numbers = ["34.5 ms", "41.9 ms", "4.8×", "61.9 ms", "1,242 ms", "20×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2.txt", "benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["TTFT mean=   41.9 ms  p50=   34.5", "TTFT mean speedup       4.79×", "\"same_median_ms\": 61.9"]
+
+[[claim]]
+file = "README.md"
+where = "Binary fast lane on"
+numbers = ["98.4 ms", "0.64 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2_binary_lane.txt"]
+expect = ["TTFT mean=  103.0 ms  p50=   98.4", "0.64 ms/call"]
+
+[[claim]]
+file = "README.md"
+where = "RESP fallback** for older servers"
+numbers = ["127.5 ms", "0.441 ms", "0.456 ms", "0.441", "0.456"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2_resp_lane.txt", "benchmarks/results/2026-10-06-mac-m4/metal_attention.txt"]
+expect = ["TTFT mean=  108.3 ms  p50=  127.5", "0.70 ms/call", "median=0.441 ms", "fast.scaled_dot_product_attention      median=0.456 ms"]
+
+[[claim]]
+file = "README.md"
+where = "A mixed workload"
+numbers = ["3.8×", "90%", "4.8×", "100%", "17×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_workload_q10.txt", "benchmarks/results/2026-10-06-mac-m4/w1_stage2.txt", "benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["TTFT mean speedup       3.79×", "cache hit rate     90.0%", "first-token agreement   100.0% (50/50)", "4.79×", "\"ratio\": 16.8"]
+
+[[claim]]
+file = "README.md"
+where = "on a 100-query SQuAD v2 run"
+numbers = ["3.0×", "98.3%", "2.7×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
+expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825"]
+note = "123.1/41.3 = 2.98; 123.1/45.6 = 2.70"
+
+[[claim]]
+file = "README.md"
+where = "on a 100-query SQuAD v2 run"
+numbers = ["8 KB", "32 KB", "80 KB"]
+kind = "arithmetic"
+note = "layers x KV heads x head dim x 2 (K and V) x 0.5 byte: 16x8x64, 32x8x128, 80x8x128"
+
+[[claim]]
+file = "README.md"
+where = "MiniLM-L6-v2 (384-dim, ~90 MB download"
+numbers = ["90 MB"]
+kind = "external"
+evidence = ["https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/tree/main"]
+note = "model.safetensors is 90.9 MB"
+
+[[claim]]
+file = "README.md"
+where = "failover"
+numbers = ["350 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/failover.txt"]
+expect = ["failover completed in 350ms"]
+
+[[claim]]
+file = "README.md"
+where = "4 MB response buffer per worker"
+numbers = ["4 MB"]
+kind = "code"
+evidence = ["src/network/response_writer.mojo"]
+expect = ["comptime RESP_BUF_SIZE = 4 * 1024 * 1024"]
+
+[[claim]]
+file = "README.md"
+where = "fill rehash"
+numbers = ["70 %"]
+kind = "code"
+evidence = ["src/common/hash_map.mojo"]
+expect = ["* 100 > self.capacity * 70"]
+
+[[claim]]
+file = "README.md"
+where = "| Headline |"
+numbers = ["1,242 ms", "61.9 ms", "20×", "73.9 ms", "17×", "1.000"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json", "benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08", "\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8", "B BLEU vs ref (50 tokens)        1.0000"]
+
+[[claim]]
+file = "README.md"
+where = "| Cluster |"
+numbers = ["350 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/failover.txt"]
+expect = ["failover completed in 350ms"]
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "2,049-token prefix, **same process**"
+numbers = ["1,242 ms", "61.9 ms", "20×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "**from a separate process**, over the wire"
+numbers = ["1,242 ms", "73.9 ms", "17×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8"]
+
+[[claim]]
+file = "doc/index.md"
+where = "2,049-token prefix, **same process**"
+numbers = ["1,242 ms", "61.9 ms", "20×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+
+[[claim]]
+file = "doc/index.md"
+where = "**from a separate process**, over the wire"
+numbers = ["1,242 ms", "73.9 ms", "17×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8"]
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "Both rows answer the same 16-token question"
+numbers = ["1.000"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
+expect = ["B BLEU vs ref (50 tokens)        1.0000"]
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "A third number used to sit here"
+numbers = ["1%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/sparse_mask_64k_niah.txt"]
+expect = ["0.80% of prefix", "MISSED"]
+note = "the withdrawn claim's budget, as the run printed it"
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "A 34-token prefix saves"
+numbers = ["1.5×", "16 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"ratio\": 11.24", "\"ratio\": 4.51", "\"ratio\": 1.5,", "\"cold_median_ms\": 47.2", "\"hit_median_ms\": 31.4"]
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "The reuse has to be real, and the prefix has to be long"
+numbers = ["1.5×", "4.5×", "11×", "17×", "16 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"ratio\": 11.24", "\"ratio\": 4.51", "\"ratio\": 1.5,", "\"cold_median_ms\": 47.2", "\"hit_median_ms\": 31.4", "\"ratio\": 16.8"]
+
+[[claim]]
+file = "pion-vllm-mlx/README.md"
+where = "Time to first token on Llama-3.2-1B-4bit with a 2,049-token prefix"
+numbers = ["1,242 ms", "61.9 ms", "20×", "73.9 ms", "17×", "11×", "4.5×", "1.5×", "16 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08", "\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8", "\"ratio\": 11.24", "\"ratio\": 4.51", "\"ratio\": 1.5,", "\"cold_median_ms\": 47.2", "\"hit_median_ms\": 31.4"]
+
+[[claim]]
+file = "pion-vllm-mlx/README.md"
+where = "vanilla ~200 ms)"
+numbers = ["200 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2.txt", "benchmarks/results/2026-10-06-mac-m4/w1_stage2_binary_lane.txt", "benchmarks/results/2026-10-06-mac-m4/w1_stage2_resp_lane.txt"]
+expect = ["TTFT mean=  200.6 ms", "TTFT mean=  199.9 ms", "TTFT mean=  200.2 ms"]
+
+[[claim]]
+file = "pion-vllm-mlx/README.md"
+where = "1. **In-process**"
+numbers = ["34.5 ms", "4.8×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2.txt"]
+expect = ["TTFT mean=   41.9 ms  p50=   34.5", "TTFT mean speedup       4.79×"]
+
+[[claim]]
+file = "pion-vllm-mlx/README.md"
+where = "2. **Binary fast lane**"
+numbers = ["98.4 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2_binary_lane.txt"]
+expect = ["TTFT mean=  103.0 ms  p50=   98.4", "0.64 ms/call"]
+
+[[claim]]
+file = "pion-vllm-mlx/README.md"
+where = "3. **RESP fallback**"
+numbers = ["127.5 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2_resp_lane.txt"]
+expect = ["TTFT mean=  108.3 ms  p50=  127.5", "0.70 ms/call"]
+
+[[claim]]
+file = "pion-vllm-mlx/README.md"
+where = "chunk-id-keyed K/V hydration"
+numbers = ["3.0×", "98.3%"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
+expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825"]
+
+[[claim]]
+file = "pion-vllm-mlx/README.md"
+where = "the 61.9 ms / 20× same-process row"
+numbers = ["61.9 ms", "20×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+
+[[claim]]
+file = "benchmarks/reproducers/README.md"
+where = "Llama-3.2-1B time to first token from a **separate process**"
+numbers = ["17×", "73.9 ms", "1.5×", "61.9 ms", "20×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08", "\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8", "\"ratio\": 1.5,"]
+
+[[claim]]
+file = "benchmarks/reproducers/README.md"
+where = "Qwen3.5-4B hybrid warm TTFT"
+numbers = ["14.0×", "25.3×", "29.0×", "2K", "4K"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_02.json"]
+expect = ["\"speedup\": 14.03", "\"speedup\": 25.25", "\"speedup\": 29.04", "\"actual_prefix_tokens\": 2048", "\"actual_prefix_tokens\": 4096"]
+
+[[claim]]
+file = "pion-lmcache/README.md"
+where = "A request may be up to 256 MB"
+numbers = ["256 MB"]
+kind = "code"
+evidence = ["src/network/engine.mojo"]
+expect = ["comptime CLIENT_BUF_SIZE = 256 * 1024 * 1024"]
+
+[[claim]]
+file = "pion-lmcache/README.md"
+where = "A request may be up to 256 MB"
+numbers = ["8 MB"]
+kind = "test"
+evidence = ["tests/test_lmcache_compat.py"]
+expect = ["8 * 1024 * 1024"]
+
+[[claim]]
+file = "pion-lmcache/README.md"
+where = "for the 8 MB blob path"
+numbers = ["8 MB"]
+kind = "test"
+evidence = ["tests/test_lmcache_compat.py"]
+expect = ["8 * 1024 * 1024"]
+
+[[claim]]
+file = "pion_context/README.md"
+where = "Files over 512 KB are skipped"
+numbers = ["512 KB"]
+kind = "code"
+evidence = ["pion_context/pion_context/indexer.py"]
+expect = ["MAX_FILE_SIZE = 512 * 1024"]
+
+[[claim]]
+file = "examples/cag_legal_demo/README.md"
+where = "Pure CAG dominates pure RAG"
+numbers = ["17.7 pp", "16.7 pp"]
+kind = "result"
+evidence = ["examples/cag_legal_demo/calibration_state.json"]
+expect = ["\"f1\": 0.5290074740074739", "\"f1\": 0.7058914193696803", "\"found\": 0.7333333333333333", "\"found\": 0.9,"]
+note = "0.706 - 0.529 and 0.900 - 0.733"
+
+[[claim]]
+file = "examples/cag_legal_demo/README.md"
+where = "The streaming TTFT win is only"
+numbers = ["1.2×"]
+kind = "result"
+evidence = ["examples/cag_legal_demo/calibration_state.json"]
+expect = ["\"speedup_vs_rag\": 1.1975958775891216"]
+
+[[claim]]
+file = "examples/cag_legal_demo/README.md"
+where = "Cascade correctly picks pure CAG"
+numbers = ["0.54×"]
+kind = "result"
+evidence = ["examples/cag_legal_demo/calibration_state.json"]
+expect = ["\"speedup\": 0.536642989191833"]
+
+[[claim]]
+file = "examples/cag_legal_demo/README.md"
+where = "The whole onboarding flow takes"
+numbers = ["5 min"]
+kind = "result"
+evidence = ["examples/cag_legal_demo/calibration_state.json"]
+expect = ["\"wall_s\": 291.5"]
+
+[[claim]]
+file = "website/pages/reference/commands/rag-knn-pkm.md"
+where = "Product-key memory"
+numbers = ["0.075 ms", "5.13 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/neuron_pkm_bench.txt"]
+expect = ["1048576  1024    0.075", "5.13"]
+
+[[claim]]
+file = "doc/ai_gateway.md"
+where = "receive buffer; reads until server closes"
+numbers = ["1MB"]
+kind = "code"
+evidence = ["src/network/llm_client.mojo"]
+expect = ["var buf_size = 1024 * 1024"]
+
+[[claim]]
+file = "doc/ai_gateway.md"
+where = "| Store throughput |"
+numbers = ["222,473 tok/s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/ai_gateway.md"
+where = "| Query latency (client round trip, one layer) |"
+numbers = ["1.54 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/ai_gateway.md"
+where = "| Build time (finalize, 128K) |"
+numbers = ["11.3 s", "128K"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/ai_gateway.md"
+where = "| Memory (one layer, 128K) |"
+numbers = ["125 MB", "128K"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/architecture.md"
+where = "4 MB shared response buffer per worker"
+numbers = ["4 MB"]
+kind = "code"
+evidence = ["src/network/response_writer.mojo"]
+expect = ["comptime RESP_BUF_SIZE = 4 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/architecture.md"
+where = "- Store:"
+numbers = ["222,473 tok/s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/architecture.md"
+where = "- Query:"
+numbers = ["1.54 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/architecture.md"
+where = "- Build:"
+numbers = ["11.3 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/architecture.md"
+where = "- Memory:"
+numbers = ["125 MB", "128K"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/command_matrix.md"
+where = "including the 512 MB limit on its table"
+numbers = ["512 MB"]
+kind = "code"
+evidence = ["src/ffi/redis_ports.c"]
+expect = ["lcsalloc > 512ULL * 1024 * 1024"]
+
+[[claim]]
+file = "doc/command_matrix.md"
+where = "a list is listpack while its elements fit"
+numbers = ["8 KB"]
+kind = "code"
+evidence = ["src/commands/key_mgmt.mojo"]
+expect = ["if bytes <= 8192:"]
+
+[[claim]]
+file = "doc/command_matrix.md"
+where = "Delivery goes through each subscriber's output buffer"
+numbers = ["32 MB"]
+kind = "code"
+evidence = ["src/network/response_writer.mojo"]
+expect = ["comptime OUT_DELIVER_LIMIT = 32 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/command_matrix.md"
+where = "| SLOWLOG |"
+numbers = ["10 ms", "1 ms"]
+kind = "code"
+evidence = ["src/ffi/fcntl_wrap.c"]
+expect = ["static int64_t pion_slowlog_slower_than = 10000;"]
+
+[[claim]]
+file = "doc/command_matrix.md"
+where = "Brute-force scan below 5K"
+numbers = ["5K"]
+kind = "code"
+evidence = ["src/network/knn_lm.mojo"]
+expect = ["comptime KNN_HNSW_BUILD_THRESHOLD = 5_000"]
+
+[[claim]]
+file = "doc/command_matrix.md"
+where = "| NEURON.PKM.QUERY |"
+numbers = ["0.075 ms", "5.13 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/neuron_pkm_bench.txt"]
+expect = ["1048576  1024    0.075", "5.13"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "needs reserved pages), superpages on macOS"
+numbers = ["2MB"]
+kind = "code"
+evidence = ["src/memory/slab_allocator.mojo"]
+expect = ["VM_FLAGS_SUPERPAGE_SIZE_2MB = 0x10000"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "| Stub (1 element) |"
+numbers = ["76 MiB"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/profile_rss.txt"]
+expect = ["profile=kv workers=1 rss_kb=77888"]
+note = "77,888 KiB = 76.1 MiB"
+
+[[claim]]
+file = "doc/configuration.md"
+where = "Semantic search, RAG knowledge base"
+numbers = ["103 MiB"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/profile_rss.txt"]
+expect = ["profile=vector workers=1 rss_kb=105552"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "AI agent memory, semantic cache"
+numbers = ["103 MiB"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/profile_rss.txt"]
+expect = ["profile=ai workers=1 rss_kb=105552"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "| Everything |"
+numbers = ["103 MiB"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/profile_rss.txt"]
+expect = ["profile=full workers=1 rss_kb=105536"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "Idle RSS is"
+numbers = ["20 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/README.md"]
+expect = ["20 s after PING answers"]
+
+[[claim]]
+file = "doc/data_types.md"
+where = "| HLL |"
+numbers = ["16 KB"]
+kind = "code"
+evidence = ["src/common/hll.mojo"]
+expect = ["comptime HLL_P = 14"]
+note = "2^14 one-byte registers"
+
+[[claim]]
+file = "doc/data_types.md"
+where = "16384 registers, 14-bit precision"
+numbers = ["16 KB"]
+kind = "code"
+evidence = ["src/common/hll.mojo"]
+expect = ["comptime HLL_P = 14"]
+
+[[claim]]
+file = "doc/data_types.md"
+where = "Triggers at 70% fill"
+numbers = ["70%"]
+kind = "code"
+evidence = ["src/common/hash_map.mojo"]
+expect = ["* 100 > self.capacity * 70"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "the gossip thread iterates all peers"
+numbers = ["1000ms"]
+kind = "code"
+evidence = ["src/network/gossip.mojo"]
+expect = ["ping_ms: Int = 1000,"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "sends a direct probe and waits"
+numbers = ["100 ms", "200 ms"]
+kind = "code"
+evidence = ["src/ffi/uring_wrap.c"]
+expect = [".tv_nsec = 100000000L"]
+note = "the indirect probe's 200 ms wait is the next timeout in the same function"
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "Worker 0 monitors gossip health state"
+numbers = ["15 seconds"]
+kind = "code"
+evidence = ["src/network/gossip.mojo"]
+expect = ["fail_threshold: Int = 15,", "ping_ms: Int = 1000,"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "kills the primary and sends"
+numbers = ["350 ms", "15 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/failover.txt", "src/network/gossip.mojo"]
+expect = ["failover completed in 350ms", "fail_threshold: Int = 15,"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "and streams new bytes to each replica"
+numbers = ["1ms"]
+kind = "code"
+evidence = ["src/ffi/uring_wrap.c"]
+expect = [".tv_nsec = 1000000L"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "Receives WAL bytes into a"
+numbers = ["4MB"]
+kind = "code"
+evidence = ["src/ffi/uring_wrap.c"]
+expect = ["#define PION_REPL_RING_SIZE    (4 * 1024 * 1024)"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "Replica receiver thread +"
+numbers = ["4MB"]
+kind = "code"
+evidence = ["src/ffi/uring_wrap.c"]
+expect = ["#define PION_REPL_RING_SIZE    (4 * 1024 * 1024)"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "leader sends AppendEntries every"
+numbers = ["50ms"]
+kind = "code"
+evidence = ["src/ffi/uring_wrap.c"]
+expect = ["heartbeat_ms = 50;"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "via per-worker ring buffers"
+numbers = ["4MB"]
+kind = "code"
+evidence = ["src/ffi/uring_wrap.c"]
+expect = ["#define WAL_AGG_RING_SIZE (4 * 1024 * 1024)"]
+
+[[claim]]
+file = "doc/distributed_systems.md"
+where = "**Ring buffer:**"
+numbers = ["4MB"]
+kind = "code"
+evidence = ["src/ffi/uring_wrap.c"]
+expect = ["#define WAL_AGG_RING_SIZE (4 * 1024 * 1024)"]
+
+[[claim]]
+file = "doc/embeddings.md"
+where = "MiniLM-L6-v2** (384 dimensions"
+numbers = ["90 MB"]
+kind = "external"
+evidence = ["https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/tree/main"]
+
+[[claim]]
+file = "doc/embeddings.md"
+where = "768-dim, ~620 MB"
+numbers = ["620 MB"]
+kind = "external"
+evidence = ["https://ollama.com/library/embeddinggemma"]
+note = "622 MB on ollama.com"
+
+[[claim]]
+file = "doc/embeddings.md"
+where = "(1536 floats"
+numbers = ["6KB"]
+kind = "arithmetic"
+note = "1536 x 4 bytes"
+
+[[claim]]
+file = "doc/embeddings.md"
+where = "(384-dim, ~90 MB download on first run)"
+numbers = ["90 MB"]
+kind = "external"
+evidence = ["https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/tree/main"]
+
+[[claim]]
+file = "doc/embeddings.md"
+where = "**Semantic cache threshold:** 0.85"
+numbers = ["0.85", "0.95"]
+kind = "code"
+evidence = ["src/main.mojo"]
+expect = ["0.85", "0.95"]
+
+[[claim]]
+file = "doc/embeddings.md"
+where = "768 floats x 4 bytes"
+numbers = ["3KB"]
+kind = "arithmetic"
+note = "768 x 4 bytes"
+
+[[claim]]
+file = "doc/memory_management.md"
+where = "for response formatting"
+numbers = ["4 MB"]
+kind = "code"
+evidence = ["src/network/response_writer.mojo"]
+expect = ["comptime RESP_BUF_SIZE = 4 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/memory_management.md"
+where = "Huge Pages"
+numbers = ["2MB"]
+kind = "code"
+evidence = ["src/memory/slab_allocator.mojo"]
+expect = ["VM_FLAGS_SUPERPAGE_SIZE_2MB = 0x10000"]
+
+[[claim]]
+file = "doc/memory_management.md"
+where = "Adaptive Slab Doubling"
+numbers = ["10M"]
+kind = "code"
+evidence = ["src/memory/slab_allocator.mojo"]
+expect = ["if self.items_per_slab < 10000000:"]
+
+[[claim]]
+file = "doc/memory_management.md"
+where = "Each worker pre-allocates a"
+numbers = ["4 MB"]
+kind = "code"
+evidence = ["src/network/response_writer.mojo"]
+expect = ["comptime RESP_BUF_SIZE = 4 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/memory_management.md"
+where = "A connection that the socket cannot keep up with"
+numbers = ["4 MB", "32 MB"]
+kind = "code"
+evidence = ["src/network/response_writer.mojo"]
+expect = ["comptime OUT_BLOCK = RESP_BUF_SIZE", "comptime OUT_DELIVER_LIMIT = 32 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/multi_tenant.md"
+where = "cheap to run"
+numbers = ["76 MiB"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/profile_rss.txt"]
+expect = ["profile=kv workers=1 rss_kb=77888"]
+
+[[claim]]
+file = "doc/networking.md"
+where = "UMEM setup"
+numbers = ["16MB", "4096×", "4KB"]
+kind = "code"
+evidence = ["src/ffi/xdp_wrap.c"]
+expect = ["#define PION_XDP_UMEM_SIZE"]
+
+[[claim]]
+file = "doc/networking.md"
+where = "Pre-allocated 4 MB response buffer per worker"
+numbers = ["4 MB", "32 MB"]
+kind = "code"
+evidence = ["src/network/response_writer.mojo"]
+expect = ["comptime RESP_BUF_SIZE = 4 * 1024 * 1024", "comptime OUT_DELIVER_LIMIT = 32 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/operations.md"
+where = "initial backoff, doubles to"
+numbers = ["60 s"]
+kind = "code"
+evidence = ["scripts/pion-supervise.sh"]
+expect = ["backoff=60"]
+
+[[claim]]
+file = "doc/operations.md"
+where = "the FP32 re-rank buffer"
+numbers = ["300 MB", "50K"]
+kind = "arithmetic"
+note = "50,000 x 1536 x 4 bytes = 307 MB"
+
+[[claim]]
+file = "doc/operations.md"
+where = "| Large values |"
+numbers = ["1 MiB", "1 GiB"]
+kind = "code"
+evidence = ["src/common/config.mojo", "src/io/blob_store.mojo"]
+expect = ["self.blob_threshold = 1024 * 1024", "comptime BLOB_SEG_SIZE     = 1024 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/operations.md"
+where = "The arena reclaims at startup, not in place"
+numbers = ["256 MB"]
+kind = "code"
+evidence = ["src/io/blob_store.mojo"]
+expect = ["comptime BLOB_COMPACT_MIN_BYTES = 256 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/operations.md"
+where = "A long-running write-heavy process still grows"
+numbers = ["64 GiB"]
+kind = "code"
+evidence = ["src/io/blob_store.mojo"]
+expect = ["comptime BLOB_MAX_SEGMENTS = 64"]
+
+[[claim]]
+file = "doc/operations.md"
+where = "Segment files are sparse"
+numbers = ["1 GiB"]
+kind = "code"
+evidence = ["src/io/blob_store.mojo"]
+expect = ["comptime BLOB_SEG_SIZE     = 1024 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/persistence.md"
+where = "Each worker owns a private WAL"
+numbers = ["256 MB"]
+kind = "code"
+evidence = ["src/common/config.mojo"]
+expect = ["self.wal_size_mb = 256"]
+
+[[claim]]
+file = "doc/pion_serve.md"
+where = "Threshold 0.85 default"
+numbers = ["0.85"]
+kind = "code"
+evidence = ["pion-serve/serve.py"]
+expect = ["default=0.85"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "Semantic search, RAG knowledge base"
+numbers = ["600K"]
+kind = "code"
+evidence = ["src/common/config.mojo"]
+expect = ["self.max_elements = 600000"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "AI agent memory, semantic cache"
+numbers = ["600K"]
+kind = "code"
+evidence = ["src/common/config.mojo"]
+expect = ["self.max_elements = 600000"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "| Everything |"
+numbers = ["600K"]
+kind = "code"
+evidence = ["src/common/config.mojo"]
+expect = ["self.max_elements = 600000"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "Idle RSS is"
+numbers = ["600K"]
+kind = "code"
+evidence = ["src/common/config.mojo"]
+expect = ["self.max_elements = 600000"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "640 B/token at D=1024"
+numbers = ["3.2×"]
+kind = "test"
+evidence = ["tests/test_gh148_mlx4g32_tier.py"]
+expect = ["3.2x smaller per token than fp16"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "640 B/token at D=1024"
+numbers = ["12 GB", "4 GB"]
+kind = "arithmetic"
+note = "12 / 3.2 = 3.75"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Cross-instance verified: a fresh second client"
+numbers = ["1.0000"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
+expect = ["B BLEU vs ref (50 tokens)        1.0000"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "This row is this harness's own workload"
+numbers = ["17×", "20×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08", "\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "fp16 is the production default"
+numbers = ["1.0000", "0.969"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt", "benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu.txt"]
+expect = ["B BLEU vs ref (50 tokens)        1.0000", "mean BLEU        0.9688"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Also reported:"
+numbers = ["2×"]
+kind = "arithmetic"
+note = "a buffer that doubles when full is at most twice what it holds"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| **WARM** |"
+numbers = ["0.44 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/metal_attention.txt"]
+expect = ["median=0.441 ms"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Native Metal SDPA via"
+numbers = ["0.441 ms", "0.456 ms", "0.441", "0.456"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/metal_attention.txt"]
+expect = ["median=0.441 ms", "fast.scaled_dot_product_attention      median=0.456 ms"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| RESP (legacy) |"
+numbers = ["108.3 ms", "127.5 ms", "0.70 ms", "1.85×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2_resp_lane.txt"]
+expect = ["TTFT mean=  108.3 ms  p50=  127.5", "0.70 ms/call", "TTFT mean speedup       1.85×"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Binary lane |"
+numbers = ["103.0 ms", "98.4 ms", "0.64 ms", "1.94×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2_binary_lane.txt"]
+expect = ["TTFT mean=  103.0 ms  p50=   98.4", "0.64 ms/call", "TTFT mean speedup       1.94×"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| **In-process fast lane** |"
+numbers = ["41.9 ms", "34.5 ms", "4.79×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2.txt"]
+expect = ["TTFT mean=   41.9 ms  p50=   34.5", "TTFT mean speedup       4.79×"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "~316-token prefixes, vanilla ~200 ms a"
+numbers = ["200 ms", "100%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2.txt", "benchmarks/results/2026-10-06-mac-m4/w1_stage2_binary_lane.txt", "benchmarks/results/2026-10-06-mac-m4/w1_stage2_resp_lane.txt"]
+expect = ["TTFT mean=  200.6 ms", "TTFT mean=  199.9 ms", "TTFT mean=  200.2 ms", "first-token agreement   100.0% (50/50)"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "For cross-process consumers the wire is still the right path"
+numbers = ["0.64 ms", "0.70 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/w1_stage2_binary_lane.txt", "benchmarks/results/2026-10-06-mac-m4/w1_stage2_resp_lane.txt"]
+expect = ["0.64 ms/call", "0.70 ms/call"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "**Drift check**"
+numbers = ["100%"]
+kind = "test"
+evidence = ["tests/test_ssm_prefix_roundtrip.py"]
+expect = ["if n_match != n_total:"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "**Wire round-trip**"
+numbers = ["1 MB"]
+kind = "test"
+evidence = ["tests/test_ssm_prefix_roundtrip.py"]
+expect = ["np.random.bytes(1024 * 1024)"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| 2,048 tokens |"
+numbers = ["4,972 ms", "355 ms", "14.0×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_02.json"]
+expect = ["\"vanilla_ms\": 4971.5", "\"pion_ms\": 354.9", "\"speedup\": 14.03"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| 4,096 tokens |"
+numbers = ["10,245 ms", "407 ms", "25.3×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_02.json"]
+expect = ["\"vanilla_ms\": 10244.8", "\"pion_ms\": 407.0", "\"speedup\": 25.25"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| 8,192 tokens |"
+numbers = ["21,328 ms", "936 ms", "29.0×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_02.json"]
+expect = ["\"vanilla_ms\": 21328.4", "\"pion_ms\": 936.3", "\"speedup\": 29.04"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Warm TTFT grows with the bytes shipped"
+numbers = ["118.6 MB", "320 MB", "33.55 MB", "2K", "8K", "4K"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_02.json"]
+expect = ["\"shipped_mb\": 118.6", "\"shipped_mb\": 320.0", "\"max_layer_mb\": 33.55", "\"actual_prefix_tokens\": 4096"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "18/18 layers bit-perfect across the cleanly-typed split path"
+numbers = ["256 MB"]
+kind = "code"
+evidence = ["src/network/engine.mojo"]
+expect = ["comptime CLIENT_BUF_SIZE = 256 * 1024 * 1024"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "18/18 layers bit-perfect across the cleanly-typed split path"
+numbers = ["33.55 MB", "8K"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_02.json"]
+expect = ["\"max_layer_mb\": 33.55"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "fp16 (Stage 1's mean BLEU"
+numbers = ["0.969"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu.txt"]
+expect = ["mean BLEU        0.9688"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Backend | p50 TTFT | vs text-RAG"
+numbers = ["123.1 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
+expect = ["\"ttft_p50_ms\": 123.10266611166298"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| inproc | 41.3 ms |"
+numbers = ["41.3 ms", "3.0×", "98.3%", "0.68"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
+expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825", "\"answer_found_rate\": 0.68"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| pion | 45.6 ms |"
+numbers = ["45.6 ms", "2.7×", "98.3%", "0.68"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
+expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825", "\"answer_found_rate\": 0.68"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Llama-3.2-1B (16 layers"
+numbers = ["8 KB", "2 MB"]
+kind = "arithmetic"
+note = "16 x 512 x 2 x 0.5 B per token; x 256 tokens"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Llama-3-8B-class (32 layers"
+numbers = ["32 KB", "8 MB"]
+kind = "arithmetic"
+note = "32 x 1024 x 2 x 0.5 B per token; x 256 tokens"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Llama-3-70B (80 layers"
+numbers = ["80 KB", "20 MB"]
+kind = "arithmetic"
+note = "80 x 1024 x 2 x 0.5 B per token; x 256 tokens"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "**Sparse-mask path:**"
+numbers = ["64K"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/sparse_mask_64k_niah.txt"]
+expect = ["context=64,000 tokens", "MISSED"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Every warm path restores all prompt tokens but the last"
+numbers = ["61.9 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
+expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "4× compression vs FP32"
+numbers = ["4×"]
+kind = "arithmetic"
+note = "6144 / 1536"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "oversampling (retrieves 4x candidates"
+numbers = ["4×"]
+kind = "code"
+evidence = ["src/commands/vector.mojo"]
+expect = ["_k * 4"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Filtering is applied to KNN candidates"
+numbers = ["4×", "16×"]
+kind = "code"
+evidence = ["src/commands/vector.mojo"]
+expect = ["comptime FT_FILTER_MAX_CANDIDATES = 16384", "sk *= 4"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Every quant variant also keeps an FP32 re-rank copy"
+numbers = ["6 KB"]
+kind = "arithmetic"
+note = "1536 x 4 bytes"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Total per vector:"
+numbers = ["43%"]
+kind = "arithmetic"
+note = "1 - 868 / 1536 = 0.435"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Memory savings:"
+numbers = ["30.72 GB"]
+kind = "arithmetic"
+note = "5,000,000 x 1536 x 4 bytes"
+
+[[claim]]
+file = "README.md"
+where = "**KV throughput** (memtier, 256-byte values"
+numbers = ["30 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/settings.txt"]
+expect = ["--test-time=30"]
+
+[[claim]]
+file = "README.md"
+where = "| P=1 | 107,896 |"
+numbers = ["107896", "388405", "112019"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P1 | 3 | 107,896 |", "| single_redis_io8_P1 | 3 | 388,405 |", "| single_pion_w1_P1 | 3 | 112,019 |"]
+
+[[claim]]
+file = "README.md"
+where = "| P=10 | 643,517 |"
+numbers = ["643517", "1655550", "877766"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P10 | 3 | 643,517 |", "| single_redis_io8_P10 | 3 | 1,655,550 |", "| single_pion_w1_P10 | 3 | 877,766 |"]
+
+[[claim]]
+file = "README.md"
+where = "| P=50 | 987,970 |"
+numbers = ["987970", "1376680", "1712725"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P50 | 3 | 987,970 |", "| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |"]
+
+[[claim]]
+file = "README.md"
+where = "| P=10 | **7,178,453** |"
+numbers = ["7178453", "6097719"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| shard_redis_x16_P10 | 3 | 7,178,453 |", "| shard_pion_w16_P10 | 3 | 6,097,719 |"]
+
+[[claim]]
+file = "README.md"
+where = "| P=50 | **11,128,400** |"
+numbers = ["11128400", "9848658"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| shard_redis_x16_P50 | 3 | 11,128,400 |", "| shard_pion_w16_P50 | 3 | 9,848,658 |"]
+
+[[claim]]
+file = "README.md"
+where = "On one keyspace, Redis with I/O threads is faster"
+numbers = ["24%", "1,213,746 ops/sec", "43%", "18%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |", "| durable_redis_io4_aof_P10 | 3 | 1,213,746 |", "| durable_pion_w1_wal_P10 | 3 | 847,249 |", "| shard_redis_x16_P10 | 3 | 7,178,453 |", "| shard_pion_w16_P10 | 3 | 6,097,719 |"]
+note = "1,712,725/1,376,680 = 1.244; 1,213,746/847,249 = 1.433; 7,178,453/6,097,719 = 1.177"
+
+[[claim]]
+file = "README.md"
+where = "On one keyspace, Redis with I/O threads is faster"
+numbers = ["14.0M ops/sec", "10.2×", "14.0M"]
+kind = "arithmetic"
+note = "the withdrawn headline, quoted to say it is withdrawn"
+
+[[claim]]
+file = "README.md"
+where = "**Vector search** (VectorDBBench Performance1536D50K"
+numbers = ["5 s", "50K"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt"]
+expect = ["concurrency_duration=5", "Performance1536D50K", "c=10: 40376 queries in 5.0s"]
+
+[[claim]]
+file = "README.md"
+where = "| **QPS** (10 clients, the peak for both) |"
+numbers = ["8039", "7339", "-9%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt"]
+expect = ["qps=7339.098", "qps=7406.638", "qps=6873.306", "8073.5 QPS", "8010.1 QPS", "8039.3 QPS"]
+note = "medians; 7,339/8,039 = 0.913"
+
+[[claim]]
+file = "README.md"
+where = "| **Recall@100** | 0.920 |"
+numbers = ["0.920", "0.960", "4.0 pp"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt"]
+expect = ["recall=np.float64(0.9602", "Recall@100:  0.9196", "Recall@100:  0.9197", "Recall@100:  0.9195"]
+
+[[claim]]
+file = "README.md"
+where = "| **P99 latency**, one client |"
+numbers = ["1.75 ms", "1.4 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt"]
+expect = ["serial_latency_p99=np.float64(0.0014", "serial_latency_p99=np.float64(0.0013", "P99: 1.75ms", "P99: 1.78ms", "P99: 1.72ms"]
+
+[[claim]]
+file = "README.md"
+where = "| **Load until searchable** |"
+numbers = ["51.8 s", "26.4 s", "2.0×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt"]
+expect = ["load_duration=26.9564", "load_duration=25.9721", "load_duration=26.4089", "Ingest: 51.86s", "Ingest: 51.75s", "Ingest: 51.66s"]
+
+[[claim]]
+file = "README.md"
+where = "Pion serves one index from"
+numbers = ["10.7 s", "15.5 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt"]
+expect = ["insert_duration=11.4326", "insert_duration=10.5776", "insert_duration=10.7107", "optimize_duration=15.5238", "optimize_duration=15.3944", "optimize_duration=15.6982"]
+
+[[claim]]
+file = "README.md"
+where = "| Peak KV throughput |"
+numbers = ["1.71M ops/sec", "1.71M", "1.38M", "9.85M", "11.1M"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |", "| shard_redis_x16_P50 | 3 | 11,128,400 |", "| shard_pion_w16_P50 | 3 | 9,848,658 |"]
+
+[[claim]]
+file = "README.md"
+where = "| Vector QPS |"
+numbers = ["7339", "0.960", "8544", "0.939", "8039", "0.920", "8729"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt", "benchmarks/results/2026-10-06-mac-m4/vec/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/iso/results.txt"]
+expect = ["qps=7339.098", "8039.3 QPS", "| int8 | 8,728.9 | 6,449.6 |", "RESULT ef=100  qps=8718.268 recall=np.float64(0.9391", "Recall@100:  0.9196"]
+
+[[claim]]
+file = "README.md"
+where = "| Recall@100 | 0.960 at that QPS"
+numbers = ["0.960", "0.920"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt"]
+expect = ["recall=np.float64(0.9602", "Recall@100:  0.9196"]
+
+[[claim]]
+file = "README.md"
+where = "| P99 latency |"
+numbers = ["1.4 ms", "0.6 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["serial_latency_p99=np.float64(0.0014", "| 4 | int8 | closed | 8,728.9 | 0.9599 | 0.6 ms |"]
+
+[[claim]]
+file = "doc/benchmarking_guide.md"
+where = "a single-threaded server is bound by a syscall per request"
+numbers = ["112,019 ops/sec"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P1 | 3 | 107,896 |", "| single_redis_io8_P1 | 3 | 388,405 |", "| single_pion_w1_P1 | 3 | 112,019 |"]
+
+[[claim]]
+file = "doc/persistence.md"
+where = "What the WAL costs at P=10"
+numbers = ["847,249 ops/sec", "-3.5%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| durable_pion_w1_wal_P10 | 3 | 847,249 |", "| single_pion_w1_P10 | 3 | 877,766 |"]
+
+[[claim]]
+file = "README.md"
+where = "**Pion is open source under Apache-2.0"
+numbers = ["26%", "40%", "55%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["| int8 | 8,728.9 | 6,449.6 | -24.2%, -26.1%, -26.1% | -26.1% |", "| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |", "| polarquant | 7,732.0 | 4,873.8 | -36.7%, -41.8%, -31.5% | -36.7% |", "RESULT run=1 arm=closed  qps=7653.0231", "RESULT run=6 arm=closed  qps=7502.1279", "RESULT run=8 arm=closed  qps=7143.459", "RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339"]
+note = "Linux: 4,467 / 7,502 = 0.595 (medians)"
+
+[[claim]]
+file = "doc/licensing.md"
+where = "You can build without it."
+numbers = ["26%", "40%", "55%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["| int8 | 8,728.9 | 6,449.6 | -24.2%, -26.1%, -26.1% | -26.1% |", "| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |", "| polarquant | 7,732.0 | 4,873.8 | -36.7%, -41.8%, -31.5% | -36.7% |", "RESULT run=1 arm=closed  qps=7653.0231", "RESULT run=6 arm=closed  qps=7502.1279", "RESULT run=8 arm=closed  qps=7143.459", "RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| INT8 (default) | 8,729 | 6,450 |"
+numbers = ["-26.1%", "0.960", "8729", "6450"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| int8 | 8,728.9 | 6,449.6 | -24.2%, -26.1%, -26.1% | -26.1% |", "| 4 | int8 | closed | 8,728.9 | 0.9599"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| PolarQuant (INT4) | 7,732 | 4,874 |"
+numbers = ["-36.7%", "0.964", "0.968", "7732", "4874"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| polarquant | 7,732.0 | 4,873.8 | -36.7%, -41.8%, -31.5% | -36.7% |", "0.9639", "0.9681"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| TurboQuant (INT3 + QJL) | 6,419 | 4,248 |"
+numbers = ["-35.5%", "0.953", "6419", "4248"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| turboquant | 6,418.9 | 4,248.4 | -35.5%, -37.4%, -32.5% | -35.5% |", "0.9529"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| NanoQuant (INT2) | 7,385 | 3,449 |"
+numbers = ["-55.3%", "0.463", "7385", "3449"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |", "0.4632"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| INT8 (default) | 8,729 | 0.960 | 1,600 |"
+numbers = ["0.960", "8729"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| int8 | 8,728.9 | 6,449.6 | -24.2%, -26.1%, -26.1% | -26.1% |"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| INT8 (default) | 8,729 | 0.960 | 1,600 |"
+numbers = ["1600"]
+kind = "code"
+evidence = ["src/vector/hnsw.mojo"]
+expect = ["(1544 → 1600 for"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| PolarQuant (INT4) | 7,732 | 0.968 | 868 |"
+numbers = ["0.968", "7732"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| polarquant | 7,732.0 | 4,873.8 | -36.7%, -41.8%, -31.5% | -36.7% |", "0.9680"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| PolarQuant (INT4) | 7,732 | 0.968 | 868 |"
+numbers = ["868"]
+kind = "code"
+evidence = ["src/vector/kernels.mojo"]
+expect = ["comptime VEC_BYTES_1536 = 868"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| TurboQuant (INT3+QJL) | 6,419 | 0.953 |"
+numbers = ["0.953", "6419"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| turboquant | 6,418.9 | 4,248.4 | -35.5%, -37.4%, -32.5% | -35.5% |"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| TurboQuant (INT3+QJL) | 6,419 | 0.953 |"
+numbers = ["676", "192"]
+kind = "code"
+evidence = ["src/vector/kernels.mojo"]
+expect = ["comptime INT3_VEC_BYTES_1536 = 676", "comptime QJL_BYTES_1536 = 192"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| NanoQuant (INT2) | 7,385 |"
+numbers = ["0.463", "7385"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| NanoQuant (INT2) | 7,385 |"
+numbers = ["484"]
+kind = "code"
+evidence = ["src/vector/kernels.mojo"]
+expect = ["comptime INT2_VEC_BYTES_1536 = 484"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Every quant variant also keeps an FP32 re-rank copy"
+numbers = ["0.463"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
+expect = ["| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "**Measured — Stage-1 workload harness"
+numbers = ["96.7%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_workload_q30_r8.txt"]
+expect = ["cache hit rate     96.7%"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Llama-3.2-1B-Instruct-4bit | 765 ms |"
+numbers = ["765 ms", "83 ms", "89.2%", "9.21×", "6.49×", "100%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_workload_q30_r8.txt"]
+expect = ["TTFT mean=  765.1 ms", "TTFT mean=   83.0 ms", "TTFT mean speedup       9.21×", "throughput speedup      6.49×", "first-token agreement   100.0% (50/50)"]
+note = "1 - 83.0/765.1 = 0.892"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Server-side compute is O(K log N)"
+numbers = ["128.6 µs", "161.0 µs"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_blocks.txt"]
+expect = ["p50=128.6us  p99=161.0us"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Server-side compute is O(K log N)"
+numbers = ["400 µs"]
+kind = "test"
+evidence = ["tests/test_kv_prefix_blocks.py"]
+expect = ["if p50_us > 400:"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "marshals the whole K/V on every"
+numbers = ["8 MB"]
+kind = "arithmetic"
+note = "8 heads x 2048 x 64 x 4 bytes x 2 (K and V)"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "(the 8 MB push, once)"
+numbers = ["8 MB", "4.0 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_prefix.txt"]
+expect = ["store_ms=4.0  bytes=8388608"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Q only, median of 10"
+numbers = ["0.47 ms", "2143 q/s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_prefix.txt"]
+expect = ["median=0.47ms  mean=0.47ms  throughput=2143 q/s"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Agreement with CPU softmax"
+numbers = ["1.0000"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_prefix.txt"]
+expect = ["numerical cosine vs CPU   1.0000"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "the test fails below cosine 0.99"
+numbers = ["100 q/s", "0.99"]
+kind = "test"
+evidence = ["tests/test_attend_prefix.py"]
+expect = ["(target ≥ 0.99)", "throughput ≥ 100q/s"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Llama-3.2-1B-4bit | 256  |"
+numbers = ["148.6 ms", "12.4 ms", "12.0×", "19.6 ms", "7.6×", "8.5 ms", "17.6×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/ttft_r11_256.txt"]
+expect = ["Path A vanilla cold:          148.6 ms", "12.4 ms  (11.95× vs A)", "19.6 ms  (7.57× vs A)", "8.5 ms  (17.55× vs A)"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Llama-3.2-1B-4bit | 1024 |"
+numbers = ["570.1 ms", "22.7 ms", "25.2×", "20.6 ms", "27.7×", "9.3 ms", "61.4×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/ttft_r11_1024.txt"]
+expect = ["Path A vanilla cold:          570.1 ms", "22.7 ms  (25.16× vs A)", "20.6 ms  (27.69× vs A)", "9.3 ms  (61.37× vs A)"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| Llama-3.2-1B-4bit | 2048 |"
+numbers = ["1,170.9 ms", "37.3 ms", "31.4×", "23.9 ms", "48.9×", "11.3 ms", "104×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/ttft_r11_2048.txt"]
+expect = ["Path A vanilla cold:         1170.9 ms", "37.3 ms  (31.41× vs A)", "23.9 ms  (48.94× vs A)", "11.3 ms  (103.53× vs A)"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "At 1,024 tokens Stage 1 and Stage 2's wire lane are close"
+numbers = ["1.56×", "1K"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/ttft_r11_2048.txt"]
+expect = ["Stage-2 wins: 1.56× faster than cache-rebuild."]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| **fp16** | 1.00× |"
+numbers = ["1.00×", "100%", "1.00", "0.969"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu.txt"]
+expect = ["mean BLEU        0.9688", "first-token match20/20"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| int8 | ~2× | 0.677 |"
+numbers = ["0.677", "95%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu_int8.txt"]
+expect = ["mean BLEU        0.6774", "first-token match19/20"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| int8 | ~2× | 0.677 |"
+numbers = ["2×"]
+kind = "arithmetic"
+note = "one byte an element against fp16's two"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| turbo4 | 3.51× | 0.538 |"
+numbers = ["0.538", "90%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu_turbo4.txt"]
+expect = ["mean BLEU        0.5376", "first-token match18/20"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "| turbo4 | 3.51× | 0.538 |"
+numbers = ["3.51×"]
+kind = "code"
+evidence = ["src/network/attention_index.mojo"]
+expect = ["return 4 + num_blocks * 18"]
+note = "fp16 512-wide row = 1,024 B; turbo4 = 4 + 16 x 18 = 292 B; 1024/292 = 3.51"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "the test's own gate is a mean BLEU of"
+numbers = ["0.95"]
+kind = "test"
+evidence = ["tests/test_kv_prefix_bleu.py"]
+expect = ["pass_bleu = mean_bleu >= 0.95"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "1. **Multi-tenant SaaS with a fixed system prompt.**"
+numbers = ["96.7%", "9.21×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_workload_q30_r8.txt"]
+expect = ["cache hit rate     96.7%", "TTFT mean speedup       9.21×"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "through the public API"
+numbers = ["8.77×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/prompt_cache_workload_q30_r8.txt"]
+expect = ["TTFT mean speedup       8.77×"]
+
+[[claim]]
+file = "doc/ai_gateway.md"
+where = "| Store throughput |"
+numbers = ["222"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
+expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "VNNI kernels (the default on this CPU)"
+numbers = ["7502", "-40.5%", "0.960"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["RESULT run=1 arm=closed  qps=7653.0231", "RESULT run=6 arm=closed  qps=7502.1279", "RESULT run=8 arm=closed  qps=7143.459", "RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339", "recall=np.float64(0.9602"]
+note = "medians: closed 7,502, open 4,467"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "x86-64-v2 kernels"
+numbers = ["5481", "-18.5%", "0.960"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["RESULT run=3 arm=closed-v2  qps=5480.8923", "RESULT run=5 arm=closed-v2  qps=5764.1336", "RESULT run=7 arm=closed-v2  qps=5259.7235", "RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339"]
+note = "4,467 / 5,481 = 0.815"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| open build | 4,467 |"
+numbers = ["4467", "0.960"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Here it was 36.9% faster than"
+numbers = ["36.9%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["RESULT run=1 arm=closed  qps=7653.0231", "RESULT run=6 arm=closed  qps=7502.1279", "RESULT run=8 arm=closed  qps=7143.459", "RESULT run=3 arm=closed-v2  qps=5480.8923", "RESULT run=5 arm=closed-v2  qps=5764.1336", "RESULT run=7 arm=closed-v2  qps=5259.7235"]
+note = "7,502 / 5,481 = 1.369"
+
+[[claim]]
+file = "README.md"
+where = "At equal or better recall, Pion is the faster of the two."
+numbers = ["8,544 QPS", "0.939", "8039", "0.920", "0.960"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/iso/results.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt"]
+expect = ["RESULT ef=32  qps=8461.865 recall=np.float64(0.9394", "RESULT ef=48  qps=8481.6228 recall=np.float64(0.9393", "RESULT ef=64  qps=8607.3715 recall=np.float64(0.9394", "RESULT ef=100  qps=8718.268 recall=np.float64(0.9391", "8039.3 QPS", "Recall@100:  0.9196"]
+note = "median of the four ef<=100 runs, which FT.SEARCH runs at ef=k=100"
+
+[[claim]]
+file = "README.md"
+where = "At equal or better recall, Pion is the faster of the two."
+numbers = ["100"]
+kind = "code"
+evidence = ["src/commands/vector.mojo"]
+expect = ["if ef_query < k: ef_query = k"]

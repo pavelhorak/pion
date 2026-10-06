@@ -7,7 +7,7 @@ Two operating modes:
 | Mode | What it does | When to use |
 |---|---|---|
 | `v_offload` | Offloads the V tensor of every attention layer to Pion's V-store (INT8 / turbo4 / fp16). Frees Mac unified memory for activations + KVQ. | Long-context generation on a single Mac, or 4-tier shared corpora across a small cluster. |
-| `gpu_attention` | All of `v_offload`, plus the warm forward runs Metal SDPA directly via [pion-vllm-mlx](../pion-vllm-mlx/)'s `PionPromptCache` Stage-2 path. | Production cluster serving with cross-host prefix sharing and the 326×-warm-TTFT (Gemma-4-E2B 64K NIAH) substrate. |
+| `gpu_attention` | All of `v_offload`, plus the warm forward runs Metal SDPA directly via [pion-vllm-mlx](../pion-vllm-mlx/)'s `PionPromptCache` Stage-2 path. | Production cluster serving with cross-host prefix sharing and the sparse long-context selectors (the Gemma-4-E2B 64K NIAH example). |
 
 ## Install
 

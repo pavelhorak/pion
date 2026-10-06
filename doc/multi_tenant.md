@@ -20,7 +20,7 @@ In other words, `--ns-prefix` guards against *accidental* cross-namespace access
 
 ## The isolation model: one process per tenant
 
-Pion is shared-nothing per worker and cheap to run (`--profile kv` ≈ 50 MB/worker). The supported way to isolate tenants is to give each tenant its own process:
+Pion is shared-nothing per worker and cheap to run (`--profile kv` idles at 76 MiB resident with one worker; [measured](../benchmarks/results/2026-10-06-mac-m4/profile_rss.txt)). The supported way to isolate tenants is to give each tenant its own process:
 
 ```bash
 pion-server -p 1974 --requirepass "$TENANT_A_PW" --profile kv -w 4 --independent-workers   # tenant A
@@ -46,7 +46,7 @@ pion-server -w 4 --independent-workers --requirepass "$ADMIN_PW" \
 - **Transparent namespacing.** Every key a tenant connection touches is invisibly prefixed with `acme:` — clients need no changes. Tenant names are restricted to `[A-Za-z0-9_-]{1,64}`, so `:` can never appear in a name and the name→prefix map is *prefix-free*: tenant A cannot forge a key in tenant B's namespace even by sending a key that literally contains `B:` (it becomes `A:B:...`).
 - **Deny-by-default allowlist.** Tenant connections may run the keyed KV / hash / list / set / zset / bitmap / stream(XADD-family) / geo / HLL families, `KEYS`/`SCAN` (filtered to the tenant's namespace, prefix stripped), TTL commands, `MULTI`/`EXEC`/`WATCH`, and connection-scope commands (`PING`, `ECHO`, `INFO`, `CLIENT`, ...). Everything else — `EVAL*`/`SCRIPT`/`FUNCTION` (runtime-computed keys can't be gated), `FLUSHALL`/`FLUSHDB`, `CONFIG`/`DEBUG`/`SAVE`/`CLUSTER`, `FT.*`/vector/`AI.*`/`KV.*` (ANN neighbor sets are prefix-blind; vector isolation needs per-tenant indexes), `SUBSCRIBE`/`PUBLISH` (channels are a separate namespace), `SORT`, `XREAD`, stream consumer groups (`XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`, `XCLAIM`, `XAUTOCLAIM`, `XINFO`, `XSETID`, `XDELEX`, `XACKDEL`: group reads name their keys after `STREAMS`, as `XREAD` does), numkeys-form multi-key commands (`ZUNIONSTORE`, `BITOP`, `LMPOP`, ...) — is rejected with `-NOPERM`. Fail-closed at the command level.
 - **Multi-key safety.** Allowed multi-key commands (`MSET`, `DEL`, `RENAME`, `COPY`, `SMOVE`, `LMOVE`, `S*STORE`, ...) are safe by construction: *every* key argument is rewritten, so all of them land in the caller's own namespace.
-- **Performance.** Tenant-bound connections are served entirely on the slow path (~345K ops/s P=1 per worker); the default/admin path is byte-for-byte untouched, so the KV gate baselines are unaffected. Namespacing cost is paid only by namespaced connections.
+- **Performance.** Tenant-bound connections are served entirely on the slow path (no throughput for it is published with a harness yet); the default/admin path is byte-for-byte untouched, so the KV gate baselines are unaffected. Namespacing cost is paid only by namespaced connections.
 - **Binary lane (`port+1`).** The `0x37` AUTH frame accepts only the admin credential; tenants cannot use the binary lane (fail-closed; tenant binding for the binary lane is future work).
 
 ### Caveats

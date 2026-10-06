@@ -1,0 +1,29 @@
+  Loading mlx-community/Llama-3.2-1B-Instruct-4bit...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 127745.30it/s]
+  Prompt: 256 tokens, suffix start token = 1176
+
+  Path A: vanilla mlx-lm cold prefill
+    TTFT median:   159.1 ms (min  151.4, max  168.5), first_token=374
+
+  Path B: PionPromptCache cache-rebuild (vquant=fp16)
+    Cold (prefill + register + store + first token):   184.2 ms (min  184.2, max  184.2)
+    Warm (lookup + fetch + rebuild + first token):      12.0 ms (min   10.9, max   13.4)
+
+  Path C: Stage 2, wire lane (Pion computes the prefix attention)
+    Cold (prefill + register + store, both lanes):   167.0 ms (min  167.0, max  167.0)
+    Warm (lookup + wire attention + first token):     18.5 ms (min   18.4, max   26.9)
+
+  Path D: Stage 2, in-process lane (the instance that prefilled)
+    Warm (lookup + local attention + first token):     8.2 ms (min    8.2, max    8.3)
+
+  Headline TTFT (warm path, median of 4):
+    Path A vanilla cold:          159.1 ms
+    Path B cache-rebuild:          12.0 ms  (13.23× vs A)
+    Path C Stage 2, wire lane:     18.5 ms  (8.61× vs A)
+    Path D Stage 2, in-process:     8.2 ms  (19.30× vs A)
+
+    Stage-2 SLOWER than cache-rebuild by 1.54× —
+    M=1 per-layer round-trip dominates at this scale.
+
+    (Path B/C cold path one-time cost: B=184.2ms, C=167.0ms)
+rc=0 for ttft_256

@@ -1,0 +1,84 @@
+✨ Pixi task (vectordbbench): venv_zvec/bin/vectordbbench redis --host localhost --port 6395 --cmd --no-ssl --case-type Performance1536D50K --m 16 --ef-construction 128 --ef-runtime 150 --db-label pion --concurrency-duration 5 --num-concurrency 1,5,10 --load-concurrency 1
+2026-10-06 18:17:17,405 | [92mINFO[0m: [92mTask:
+TaskConfig(db=<DB.Redis: 'Redis'>, db_config=RedisConfig(db_label='pion', version='', note='', password=None, host=SecretStr('**********'), port=6395), db_case_config=RedisHNSWConfig(metric_type=None, M=16, efConstruction=128, ef=150, index=<IndexType.HNSW: 'HNSW'>), case_config=CaseConfig(case_id=<CaseType.Performance1536D50K: 50>, custom_case={}, payload_profile=<PayloadProfile.IDS_ONLY: 'ids_only'>, k=100, concurrency_search_config=ConcurrencySearchConfig(num_concurrency=[1, 5, 10], concurrency_duration=5, concurrency_timeout=3600, serial_cooldown=0.0)), stages=['drop_old', 'load', 'search_serial', 'search_concurrent'], load_concurrency=1, insert_batch_size=100)
+[0m (cli.py:1017) (96082)
+2026-10-06 18:17:17,405 | [92mINFO[0m: [92mgenerated uuid for the tasks: aad3822d4aa94ebeb5230499e6d4d5ec[0m (interface.py:78) (96082)
+2026-10-06 18:17:17,425 | INFO | DB             | CaseType     Dataset               Filter | task_label (task_runner.py:824)
+2026-10-06 18:17:17,425 | INFO | -----------    | ------------ -------------------- ------- | -------    (task_runner.py:824)
+2026-10-06 18:17:17,425 | INFO | Redis-pion     | Performance  OpenAI-SMALL-50K         0.0 | aad3822d4aa94ebeb5230499e6d4d5ec (task_runner.py:824)
+2026-10-06 18:17:17,425 | [92mINFO[0m: [92mtask submitted: id=aad3822d4aa94ebeb5230499e6d4d5ec, aad3822d4aa94ebeb5230499e6d4d5ec, case number: 1[0m (interface.py:257) (96082)
+2026-10-06 18:17:18,291 | [92mINFO[0m: [92m[1/1] start case: {'label': <CaseLabel.Performance: 2>, 'name': 'Search Performance Test (50K Dataset, 1536 Dim)', 'dataset': {'data': {'name': 'OpenAI', 'size': 50000, 'dim': 1536, 'metric_type': <MetricType.COSINE: 'COSINE'>}}, 'db': 'Redis-pion'}, drop_old=True[0m (interface.py:186) (96120)
+2026-10-06 18:17:18,291 | [92mINFO[0m: [92mStarting run[0m (task_runner.py:317) (96120)
+2026-10-06 18:17:18,312 | [92mINFO[0m: [92mRedis client drop_old collection: index[0m (redis.py:45) (96120)
+2026-10-06 18:17:19,723 | [92mINFO[0m: [92mRead the entire file into memory: test.parquet[0m (dataset.py:765) (96120)
+2026-10-06 18:17:19,902 | [92mINFO[0m: [92mStart performance case[0m (task_runner.py:367) (96120)
+2026-10-06 18:17:20,874 | [92mINFO[0m: [92m(SpawnProcess-1:1) Start concurrent insert, batch_size=100, max_workers=1, workload=vector[0m (concurrent_runner.py:270) (96263)
+2026-10-06 18:17:20,875 | [92mINFO[0m: [92mGet iterator for shuffle_train.parquet[0m (dataset.py:801) (96263)
+2026-10-06 18:17:30,236 | [92mINFO[0m: [92m(SpawnProcess-1:1) Finish concurrent insert, count=50000, dur=9.36s[0m (concurrent_runner.py:291) (96263)
+2026-10-06 18:17:47,087 | [92mINFO[0m: [92mFinish loading the entire dataset into VectorDB, insert_duration=10.57764244200007, optimize_duration=15.394408604000091 load_duration(insert + optimize) = 25.9721[0m (task_runner.py:392) (96120)
+2026-10-06 18:17:47,968 | [92mINFO[0m: [92mStart search 5s in concurrency 1, filters: type=<FilterOp.NonFilter: 'NonFilter'> filter_rate=0.0 gt_file_name='neighbors.parquet'[0m (mp_runner.py:189) (96120)
+2026-10-06 18:17:48,992 | [92mINFO[0m: [92mSyncing all process and start concurrency search, concurrency=1[0m (mp_runner.py:196) (96120)
+2026-10-06 18:17:53,993 | [92mINFO[0m: [92mSpawnProcess-1:4 search 5s: actual_dur=5.0007s, count=4297, qps in this process: 859.2797[0m (mp_runner.py:160) (96453)
+2026-10-06 18:17:53,997 | [92mINFO[0m: [92mEnd search in concurrency 1: dur=5.004828541000279s, total_count=4297, qps=858.5709[0m (mp_runner.py:211) (96120)
+2026-10-06 18:17:54,466 | [92mINFO[0m: [92mUpdate largest qps with concurrency 1: current max_qps=858.5709[0m (mp_runner.py:215) (96120)
+2026-10-06 18:17:55,336 | [92mINFO[0m: [92mStart search 5s in concurrency 5, filters: type=<FilterOp.NonFilter: 'NonFilter'> filter_rate=0.0 gt_file_name='neighbors.parquet'[0m (mp_runner.py:189) (96120)
+2026-10-06 18:18:00,363 | [92mINFO[0m: [92mSyncing all process and start concurrency search, concurrency=5[0m (mp_runner.py:196) (96120)
+2026-10-06 18:18:05,364 | [92mINFO[0m: [92mSpawnProcess-1:10 search 5s: actual_dur=5.0001s, count=4336, qps in this process: 867.1827[0m (mp_runner.py:160) (96549)
+2026-10-06 18:18:05,365 | [92mINFO[0m: [92mSpawnProcess-1:9 search 5s: actual_dur=5.0003s, count=4242, qps in this process: 848.3491[0m (mp_runner.py:160) (96548)
+2026-10-06 18:18:05,366 | [92mINFO[0m: [92mSpawnProcess-1:8 search 5s: actual_dur=5.0008s, count=4093, qps in this process: 818.469[0m (mp_runner.py:160) (96547)
+2026-10-06 18:18:05,366 | [92mINFO[0m: [92mSpawnProcess-1:6 search 5s: actual_dur=5.0012s, count=4092, qps in this process: 818.2036[0m (mp_runner.py:160) (96543)
+2026-10-06 18:18:05,366 | [92mINFO[0m: [92mSpawnProcess-1:7 search 5s: actual_dur=5.0014s, count=3096, qps in this process: 619.0267[0m (mp_runner.py:160) (96546)
+2026-10-06 18:18:05,371 | [92mINFO[0m: [92mEnd search in concurrency 5: dur=5.007590822999191s, total_count=19859, qps=3965.7793[0m (mp_runner.py:211) (96120)
+2026-10-06 18:18:05,962 | [92mINFO[0m: [92mUpdate largest qps with concurrency 5: current max_qps=3965.7793[0m (mp_runner.py:215) (96120)
+2026-10-06 18:18:06,831 | [92mINFO[0m: [92mStart search 5s in concurrency 10, filters: type=<FilterOp.NonFilter: 'NonFilter'> filter_rate=0.0 gt_file_name='neighbors.parquet'[0m (mp_runner.py:189) (96120)
+2026-10-06 18:18:16,862 | [92mINFO[0m: [92mSyncing all process and start concurrency search, concurrency=10[0m (mp_runner.py:196) (96120)
+2026-10-06 18:18:21,863 | [92mINFO[0m: [92mSpawnProcess-1:16 search 5s: actual_dur=5.0005s, count=4107, qps in this process: 821.3179[0m (mp_runner.py:160) (96807)
+2026-10-06 18:18:21,864 | [92mINFO[0m: [92mSpawnProcess-1:18 search 5s: actual_dur=5.0004s, count=3901, qps in this process: 780.1376[0m (mp_runner.py:160) (96809)
+2026-10-06 18:18:21,864 | [92mINFO[0m: [92mSpawnProcess-1:17 search 5s: actual_dur=5.0001s, count=4264, qps in this process: 852.7829[0m (mp_runner.py:160) (96808)
+2026-10-06 18:18:21,864 | [92mINFO[0m: [92mSpawnProcess-1:13 search 5s: actual_dur=5.0008s, count=3588, qps in this process: 717.4852[0m (mp_runner.py:160) (96804)
+2026-10-06 18:18:21,864 | [92mINFO[0m: [92mSpawnProcess-1:20 search 5s: actual_dur=5.0007s, count=4150, qps in this process: 829.8838[0m (mp_runner.py:160) (96811)
+2026-10-06 18:18:21,864 | [92mINFO[0m: [92mSpawnProcess-1:12 search 5s: actual_dur=5.0014s, count=3221, qps in this process: 644.0197[0m (mp_runner.py:160) (96801)
+2026-10-06 18:18:21,864 | [92mINFO[0m: [92mSpawnProcess-1:21 search 5s: actual_dur=5.0009s, count=3527, qps in this process: 705.2731[0m (mp_runner.py:160) (96812)
+2026-10-06 18:18:21,865 | [92mINFO[0m: [92mSpawnProcess-1:15 search 5s: actual_dur=5.001s, count=3917, qps in this process: 783.2434[0m (mp_runner.py:160) (96806)
+2026-10-06 18:18:21,865 | [92mINFO[0m: [92mSpawnProcess-1:19 search 5s: actual_dur=5.0006s, count=3804, qps in this process: 760.7087[0m (mp_runner.py:160) (96810)
+2026-10-06 18:18:21,865 | [92mINFO[0m: [92mSpawnProcess-1:14 search 5s: actual_dur=5.0014s, count=2640, qps in this process: 527.8522[0m (mp_runner.py:160) (96805)
+2026-10-06 18:18:21,874 | [92mINFO[0m: [92mEnd search in concurrency 10: dur=5.01158553499954s, total_count=37119, qps=7406.638[0m (mp_runner.py:211) (96120)
+2026-10-06 18:18:22,467 | [92mINFO[0m: [92mUpdate largest qps with concurrency 10: current max_qps=7406.638[0m (mp_runner.py:215) (96120)
+2026-10-06 18:18:22,468 | [92mINFO[0m: [92mSpawnProcess-1 start serial search[0m (serial_runner.py:339) (96120)
+2026-10-06 18:18:23,440 | [92mINFO[0m: [92mSpawnProcess-1:22 start search the entire test_data to get recall and latency[0m (serial_runner.py:242) (97225)
+2026-10-06 18:18:24,876 | [92mINFO[0m: [92mSpawnProcess-1:22 search entire test_data: cost=1.1834s, queries=1000, avg_recall=0.96, avg_ndcg=0.9676, avg_latency=0.0012, p99=0.0013, p95=0.0013, p50=0.0012, recall_at={100: np.float64(0.96)}[0m (serial_runner.py:318) (97225)
+2026-10-06 18:18:25,132 | [92mINFO[0m: [92mPerformance case got result: Metric(max_load_count=0, insert_duration=10.5776, optimize_duration=15.3944, load_duration=25.9721, qps=7406.638, serial_latency_p99=np.float64(0.0013), serial_latency_p95=np.float64(0.0013), serial_latency_p50=np.float64(0.0012), recall=np.float64(0.96), recall_at={100: np.float64(0.96)}, ndcg=np.float64(0.9676), mrr=0.0, conc_num_list=[1, 5, 10], conc_qps_list=[858.5709, 3965.7793, 7406.638], conc_latency_p99_list=[0.0013049046800733776, 0.001751416780352883, 0.0022002944399901023], conc_latency_p95_list=[0.0012686910004049423, 0.0016710741000679264, 0.0017974281004171637], conc_latency_p50_list=[0.0011531029995239805, 0.001198412000121607, 0.0012523450004664483], conc_latency_avg_list=[0.0011629284565897835, 0.0012581015914658275, 0.0013461890412970036], payload_profile='ids_only', payload_estimated_bytes_per_query=2000, inserted_count=50000, insert_rows_per_second=0.0, insert_completion_seconds=0.0, searchable_after_insert_seconds=0.0, indexed_after_searchable_seconds=0.0, additional_parameters={'insert_batch_size': 100, 'load_concurrency': 1, 'ground_truth': {'file': 'neighbors.parquet', 'query_count': 1000, 'width': 1000}}, st_ideal_insert_duration=0, st_search_stage_list=[], st_search_time_list=[], st_max_qps_list_list=[], st_recall_list=[], st_ndcg_list=[], st_serial_latency_p99_list=[], st_serial_latency_p95_list=[], st_conc_failed_rate_list=[], st_conc_num_list_list=[], st_conc_qps_list_list=[], st_conc_latency_p99_list_list=[], st_conc_latency_p95_list_list=[], st_conc_latency_avg_list_list=[])[0m (task_runner.py:448) (96120)
+2026-10-06 18:18:25,132 | [92mINFO[0m: [92m[1/1] finish case: {'label': <CaseLabel.Performance: 2>, 'name': 'Search Performance Test (50K Dataset, 1536 Dim)', 'dataset': {'data': {'name': 'OpenAI', 'size': 50000, 'dim': 1536, 'metric_type': <MetricType.COSINE: 'COSINE'>}}, 'db': 'Redis-pion'}, result=Metric(max_load_count=0, insert_duration=10.5776, optimize_duration=15.3944, load_duration=25.9721, qps=7406.638, serial_latency_p99=np.float64(0.0013), serial_latency_p95=np.float64(0.0013), serial_latency_p50=np.float64(0.0012), recall=np.float64(0.96), recall_at={100: np.float64(0.96)}, ndcg=np.float64(0.9676), mrr=0.0, conc_num_list=[1, 5, 10], conc_qps_list=[858.5709, 3965.7793, 7406.638], conc_latency_p99_list=[0.0013049046800733776, 0.001751416780352883, 0.0022002944399901023], conc_latency_p95_list=[0.0012686910004049423, 0.0016710741000679264, 0.0017974281004171637], conc_latency_p50_list=[0.0011531029995239805, 0.001198412000121607, 0.0012523450004664483], conc_latency_avg_list=[0.0011629284565897835, 0.0012581015914658275, 0.0013461890412970036], payload_profile='ids_only', payload_estimated_bytes_per_query=2000, inserted_count=50000, insert_rows_per_second=0.0, insert_completion_seconds=0.0, searchable_after_insert_seconds=0.0, indexed_after_searchable_seconds=0.0, additional_parameters={'insert_batch_size': 100, 'load_concurrency': 1, 'ground_truth': {'file': 'neighbors.parquet', 'query_count': 1000, 'width': 1000}}, st_ideal_insert_duration=0, st_search_stage_list=[], st_search_time_list=[], st_max_qps_list_list=[], st_recall_list=[], st_ndcg_list=[], st_serial_latency_p99_list=[], st_serial_latency_p95_list=[], st_conc_failed_rate_list=[], st_conc_num_list_list=[], st_conc_qps_list_list=[], st_conc_latency_p99_list_list=[], st_conc_latency_p95_list_list=[], st_conc_latency_avg_list_list=[]), label=ResultLabel.NORMAL[0m (interface.py:188) (96120)
+2026-10-06 18:18:25,133 | INFO |Task summary: run_id=aad38, task_label=aad3822d4aa94ebeb5230499e6d4d5ec (models.py:677)
+2026-10-06 18:18:25,133 | INFO |DB    | db_label case                                            label                            | load_dur    qps         latency(p99)    latency(p95)    recall        max_load_count | label (models.py:677)
+2026-10-06 18:18:25,133 | INFO |----- | -------- ----------------------------------------------- -------------------------------- | ----------- ----------- --------------- --------------- ------------- -------------- | ----- (models.py:677)
+2026-10-06 18:18:25,133 | INFO |Redis | pion     Search Performance Test (50K Dataset, 1536 Dim) aad3822d4aa94ebeb5230499e6d4d5ec | 25.9721     7406.638    0.0013          0.0013          0.96          0              | :)    (models.py:677)
+2026-10-06 18:18:25,133 | [92mINFO[0m: [92mwrite results to disk /opt/Pion/venv_zvec/lib/python3.12/site-packages/vectordb_bench/results/Redis/result_20261006_aad3822d4aa94ebeb5230499e6d4d5ec_redis.json[0m (models.py:488) (96120)
+2026-10-06 18:18:25,133 | [92mINFO[0m: [92mSuccess to finish task: label=aad3822d4aa94ebeb5230499e6d4d5ec, run_id=aad3822d4aa94ebeb5230499e6d4d5ec[0m (interface.py:228) (96120)
+
+[Pion] Starting: /opt/Pion/pion-server -p 6395 -w 16 --independent-workers --no-auto-detect --no-auto-embed
+  Running: pixi run vectordbbench redis --host localhost --port 6395 --cmd --no-ssl --case-type Performance1536D50K --m 16 --ef-construction 128 --ef-runtime 150 --db-label pion --concurrency-duration 5 --num-concurrency 1,5,10 --load-concurrency 1
+
+[Pion] Stopping (waiting up to 60s for HNSW save)...
+  [clean] Removed pion.hnsw.0
+  [clean] Removed pion.wal.0.1
+  [clean] Removed pion.wal.4
+  [clean] Removed pion.wal.14
+  [clean] Removed pion.wal.13
+  [clean] Removed pion.wal.0
+  [clean] Removed pion.wal.12
+  [clean] Removed pion.wal.3
+  [clean] Removed pion.wal.1
+  [clean] Removed pion.wal.6
+  [clean] Removed pion.wal.5
+  [clean] Removed pion.wal.7
+  [clean] Removed pion.wal.11
+  [clean] Removed pion.wal.8
+  [clean] Removed pion.wal.15
+  [clean] Removed pion.wal.2
+  [clean] Removed pion.wal.10
+  [clean] Removed pion.wal.9
+  [clean] Removed pion-6395.status
+  [clean] Removed pion-6395.crash.log
+
+Results appended to /opt/Pion/benchmarks/VectorDBBench/benchmark_results.md

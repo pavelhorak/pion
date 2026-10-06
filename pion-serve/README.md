@@ -12,7 +12,7 @@ Client → pion-serve (:8080) → Backend (ollama / vLLM / OpenAI / Claude / Gem
               └── Intent routing (--route): cheap / mid / top-tier model selection
 ```
 
-Measured L1 hit rate: 28–33 % across the bundled QA datasets. Routing knocks ~27 % off all-Sonnet pricing by sending simple queries to Haiku-tier models. L3 distillation adds 3–12 %, and 40 % on template-paraphrase workloads.
+How much traffic each layer catches depends on how repetitive the traffic is. No hit rate or cost saving is published with a harness yet, so this README states none; `/v1/stats` reports both for your own traffic.
 
 ## Status
 
@@ -64,7 +64,7 @@ python pion-serve/tests/test_intent_router.py        # 15 routing-logic tests
 python pion-serve/tests/test_thread_safety.py        # 6 lock-correctness tests
 ```
 
-Both run offline (no backend required). Total wall-clock < 100 ms.
+Both run offline (no backend required).
 
 ## Docs
 

@@ -1,0 +1,37 @@
+============================================================
+  N3 Failover Test
+============================================================
+
+[1] Starting primary on port 1974
+  Primary ready.
+
+[2] Starting replica on port 1984
+  Replica ready.
+
+[3] Writing 1000 keys to primary...
+  Written 1000 keys.
+  PASS: key:0 readable on primary
+
+[4] Waiting for replication (3s)...
+  PASS: key:0 replicated to replica
+
+[5] Killing primary...
+  Primary killed.
+
+[6] Sending CLUSTER FAILOVER FORCE to replica...
+  PASS: failover completed in 350ms
+
+[7] Verifying keys on promoted replica...
+  Checked 10 keys: 10 hits, 0 misses
+  PASS: 10/10 keys accessible after failover
+
+[8] Testing new writes on promoted replica...
+  PASS: new writes work after failover
+
+[9] Checking CLUSTER INFO role...
+  PASS: role is master after failover
+
+============================================================
+  Results: 6 passed, 0 failed
+============================================================
+rc=0 for failover

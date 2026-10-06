@@ -306,6 +306,11 @@ server = "-w 1"
 tier = "gate"
 
 [[test]]
+file = "tests/test_doc_claims.py"
+server = "none"
+tier = "gate"
+
+[[test]]
 file = "tests/test_docs_site.py"
 server = "none"
 tier = "full"

@@ -75,7 +75,7 @@ All stored vectors are quantized from `Float32` → `Int8` at insert time.
 - **Range**: calibrated from the vectors being built, by every build (`HNSWGraph._calibrate`): one global range over mean ± 8σ (Welford). The HSET-ingest build calibrates on up to the first 65,536 ingested vectors, streaming mode on the first 1,000. 8σ is wide enough that the few near-constant outlier dimensions typical of embedding data are clipped (they cancel in every L2 difference) while every component that really varies is kept.
 - **Formula**: `q = Int8(clamp((v - min) / range * 254) - 127)`
 - **Memory**: 4× compression vs FP32 (1536 dims → 1536 bytes instead of 6144).
-- **FP32 buffer ingest**: `add_vector()` buffers raw FP32 vectors; graph is built in batch on `FT.OPTIMIZE` call (6× faster insert — no graph ops during HSET).
+- **FP32 buffer ingest**: `add_vector()` buffers raw FP32 vectors; graph is built in batch on `FT.OPTIMIZE` call (no graph operations during HSET).
 - **Compact buffer**: After FT.OPTIMIZE, `compact_vectors()` reorders INT8 vectors in BFS traversal order into a contiguous buffer for cache-friendly beam search. Each build (or snapshot load) also derives `l0_slots` — the slot-space adjacency mirror the beam kernel addresses vectors through — plus `compact_stride`/`compact_hdr` (INT8: `dim+8`/8; quant variants: their own stride/0).
 
 ---
@@ -373,56 +373,42 @@ within 1e-4 because the tuned kernels sum in a different order), and
 one real index into both builds and requires identical keys and scores.
 
 **What the open build costs** (gate config: Performance1536D50K, ef=150,
-`-w 10`, Mac M4, 3 interleaved ABBA pairs each, 2026-09-25):
+`-w 10`, M4 Mac mini, 2026-10-06; per mode the arms ran closed, open, open,
+closed, closed, open, and each closed run is paired with the open run next to
+it; [raw output](../benchmarks/results/2026-10-06-mac-m4/vec/)):
 
-| Search | `build` QPS | `build-open` QPS | Open build | Recall@100 (both) |
+| Search | `build` QPS | `build-open` QPS | Open build (median of the 3 pairs) | Recall@100 (both) |
 |---|:---:|:---:|:---:|:---:|
-| INT8 (default) | 8,822 | 6,044 | **−30.0%** (3/3 pairs: −30.0, −28.7, −31.5) | 0.958 |
-| PolarQuant (INT4) | 6,789 | 4,491 | **−33.8%** (−33.8, −31.0, −35.4) | 0.965 |
-| TurboQuant (INT3 + QJL) | 5,035 | 3,776 | **−22.3%** (−26.3, −20.6, −22.3) | 0.95 |
-| NanoQuant (INT2) | 3,606 | 2,818 | **−21.9%** (−24.9, −21.9, +2.3) | 0.46 |
+| INT8 (default) | 8,729 | 6,450 | **−26.1%** (pairs: −24.2, −26.1, −26.1) | 0.960 |
+| PolarQuant (INT4) | 7,732 | 4,874 | **−36.7%** (−36.7, −41.8, −31.5) | 0.964–0.968 |
+| TurboQuant (INT3 + QJL) | 6,419 | 4,248 | **−35.5%** (−35.5, −37.4, −32.5) | 0.953 |
+| NanoQuant (INT2) | 7,385 | 3,449 | **−55.3%** (−57.0, −55.3, −53.2) | 0.463 |
 
-QPS is the median lib/open pair. Recall is the same because the results are
-the same; per-run recall differs only through HNSW build nondeterminism.
-Product-key memory (`NEURON.PKM.*`, 1M slots) was measured the same way on
-2026-09-25: server compute +39% exact, +102% with 8 heads, single-query wire
-latency +12%. **Nothing else changes between the two builds** — KV
-throughput, prompt-cache TTFT and every other headline number come from open
-code.
+QPS is each build's median over its three runs. Recall is the same because the
+results are the same (`tests/test_vector_build_equivalence.py` checks keys and
+scores); per-run recall differs only through HNSW build nondeterminism.
+**Nothing else changes between the two builds** — KV throughput, prompt-cache
+TTFT and every other headline number come from open code.
 
-**On Linux x86-64** (INT8, same gate config, 2026-10-03). The machine was a
-Ryzen 9 9950X (Zen 5), rented with no other tenant and run with `--epoll`.
-The open build was the v0.9.2 release binary and the library build v0.9.3,
-which share a toolchain and engine source. Three rounds ran, with the order
-rotated:
+**On Linux x86-64** (INT8, gate config with `-w 16`, AMD EPYC 8124P, 2026-10-06).
+Both binaries were built on the machine from one commit for the same x86-64-v2
+target: `pixi run build-portable` (the release's Linux build, with the library)
+and `pixi run build-open`. The runs rotated through three arms, the third being
+the library binary with `PION_VECTOR_VNNI=0`
+([raw output](../benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/)):
 
-| Search | Median QPS (3 runs) | Open build (5,836 QPS) | Recall@100 (all) |
+| Search | Median QPS (3 runs) | Open build against it | Recall@100 (all runs) |
 |---|:---:|:---:|:---:|
-| `libpion_vector`, x86-64-v2 build | 7,610 | **−23.3%** (rounds: −24.4, −14.9, −14.3) | 0.960 |
-| `libpion_vector`, VNNI build | 8,534 | **−31.6%** (rounds: −32.6, −14.3, −32.8) | 0.960 |
-
-The VNNI build passed the differential on this machine, with 0 differences
-against the reference compiled for `icelake-server`. Its lead over the
-x86-64-v2 build there (+12% on the medians, one round tied) did not settle
-which build should be the default. A second machine did.
+| `libpion_vector`, VNNI kernels (the default on this CPU) | 7,502 | **−40.5%** | 0.960 |
+| `libpion_vector`, x86-64-v2 kernels (`PION_VECTOR_VNNI=0`) | 5,481 | −18.5% | 0.960 |
+| open build | 4,467 | — | 0.960 |
 
 **The VNNI build is the default on CPUs that have it** (since 2026-10-05;
-`PION_VECTOR_VNNI=0` forces the x86-64-v2 build). The deciding run was on an
-EPYC 8124P (Zen 4c, bare metal, `-w 16`, io_uring), where the VNNI build again
-passed the differential. Both arms used one binary built for that CPU, with
-the library choosing its build at startup, over six rounds with alternating
-order. VNNI won every round:
-
-| | x86-64-v2 build | VNNI build | Median of the per-round changes |
-|---|:---:|:---:|:---:|
-| Server CPU per query | 939 µs | 623 µs | **−32%** (6 of 6) |
-| QPS, 8 clients each pinned to its own worker | 4,578 | 5,601 | **+22%** (6 of 6) |
-| Peak QPS (VectorDBBench, C=10) | 3,881 | 4,710 | **+20%** (6 of 6) |
-| Recall@100 | 0.960 | 0.960 | equal within 0.001 |
-
-The decision rule was written before the runs. Intel parts with AVX-512 VNNI
-(Ice Lake-SP, Sapphire Rapids) have not been measured. Linux arm64 has not
-been measured.
+`PION_VECTOR_VNNI=0` forces the x86-64-v2 build). Here it was 36.9% faster than
+the library's x86-64-v2 kernels. CI's Linux legs check the x86-64-v2 build
+against its open reference on every PR (`pixi run test-vector-differential`).
+Intel parts with AVX-512 VNNI (Ice Lake-SP, Sapphire Rapids) have not been
+measured. Linux arm64 has not been measured.
 
 The interface is open too: `src/vector/vector_abi.mojo` (the calls),
 `beam_view.mojo` and `quant_beam_view.mojo` (the argument structs, whose
@@ -432,19 +418,21 @@ against a library with a different ABI version.
 
 ## Quantized variants
 
-Measured on Performance1536D50K, ef=150, `-w 10`, Mac, 2026-09-25:
+Measured on Performance1536D50K, ef=150, `-w 10`, M4 Mac mini, 2026-10-06 — the
+`build` arms of the open-build table above, median of three
+([raw output](../benchmarks/results/2026-10-06-mac-m4/vec/)):
 
-| Variant | QPS (c=10) | Recall@100 | Compact bytes/vector |
+| Variant | Peak QPS (≤10 clients) | Recall@100 | Compact bytes/vector |
 |---|:---:|:---:|:---:|
-| INT8 (default) | 8,021 | 0.960 | 1,600 |
-| PolarQuant (INT4) | 6,635 | 0.965 | 868 |
-| TurboQuant (INT3+QJL) | 4,924 | 0.953 | 676 + 192 QJL |
-| NanoQuant (INT2) | 3,390 | **0.464** | 484 |
+| INT8 (default) | 8,729 | 0.960 | 1,600 |
+| PolarQuant (INT4) | 7,732 | 0.968 | 868 |
+| TurboQuant (INT3+QJL) | 6,419 | 0.953 | 676 + 192 QJL |
+| NanoQuant (INT2) | 7,385 | **0.463** | 484 |
 
 Every quant variant also keeps an FP32 re-rank copy (6 KB/vector) in memory
 and in the index file, so none of them saves memory or disk overall today;
 their compact buffers only shrink the beam's working set. NanoQuant is
-experimental: INT2 on these embeddings is coarse (recall@10 is 0.81 at ef=150).
+experimental: INT2 on these embeddings is coarse (recall@100 0.463 above).
 
 The proof a mode really ran is its FT.OPTIMIZE log line —
 `[PolarQuant] Block-INT4 …`, `[TurboQuant] Block-INT3 …`,
@@ -514,7 +502,7 @@ Enabled with the `--nanoquant` server flag. The smallest compact footprint (484B
 
 Auto-enabled for indices with more than 1M elements. Eliminates the FP32 staging buffer that would otherwise be required during bulk ingest.
 
-- **Memory savings:** at 5M vectors x 1536 dims x 4 bytes = 33.8GB FP32 staging buffer eliminated
+- **Memory savings:** at 5M vectors x 1536 dims x 4 bytes = 30.72 GB of FP32 staging buffer eliminated
 - **Mechanism:** vectors are quantized on arrival and inserted directly into the index, bypassing the intermediate FP32 buffer
 - **TurboQuant streaming compaction:** when `--turboquant` is active, streaming ingest performs INT8 to FP32 reconstruction on-the-fly for the INT3 quantization pipeline
 
@@ -529,7 +517,7 @@ Auto-enabled for indices with more than 1M elements. Eliminates the FP32 staging
 | `M` | 16 | `config.mojo` (desktop/cloud profiles) |
 | `ef_construction` | 100 (desktop), 200 (cloud); overridden by FT.CREATE | `config.mojo` / `slow_path.mojo` |
 | `ef_runtime` | **150** | `hnsw.mojo` field default |
-| `use_int4` | False (all profiles — V13 INT4 abandoned, recall 0.74) | `config.mojo` |
+| `use_int4` | False (all profiles — the V13 INT4 path was abandoned for low recall) | `config.mojo` |
 | `use_bq` | False (all profiles — Hamming too coarse on 1536-dim) | `config.mojo` |
 
 ---
@@ -588,17 +576,11 @@ Metal GPU brute-force search with async pipelining and adaptive CPU/GPU routing.
 4. **FP32 re-rank buffer**: BFS-ordered FP32 vectors built during `compact_vectors()` for optional GPU oversample re-ranking
 5. **Native Mojo kernel** (`src/vector/gpu_search.mojo`) ready for Xcode-enabled builds (`-D ACCELERATOR=apple-m4`)
 
-### Results (Performance1536D50K, ef=150, w=10→4 capped, macOS M4)
+### Results
 
-| Metric | GPU v2 (Metal) | CPU (HNSW) |
-|---|:---:|:---:|
-| Peak QPS (c=1) | 1,665 | 1,520 |
-| Peak QPS (c=5) | 5,949 | 4,486 |
-| Peak QPS (c=10) | 8,030 | 7,722 |
-| Recall@100 | 0.937 | 0.937 |
-| P99 Latency | 0.8ms | 0.9ms |
-
-GPU +26% over CPU at c=5; converges at c=10 (4 P-core macOS cap). Multiquery kernel positioned for Linux io_uring batch dispatch.
+No GPU-against-CPU measurement is published with raw output yet. To measure it on
+your Mac: `python3 benchmarks/VectorDBBench/vectordb-benchmark.py --pion-only --gpu`
+against the same command without `--gpu`.
 
 ### Usage
 

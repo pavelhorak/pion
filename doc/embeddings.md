@@ -72,7 +72,7 @@ The sidecar accepts any Hugging Face encoder via `--inference-emb-model <hf-id>`
 --emb-doc-prefix   "title: none | text: "
 ```
 
-Both default to empty, so symmetric models (MiniLM, nomic) are untouched. Note that Ollama's `embeddinggemma` modelfile is `TEMPLATE {{ .Prompt }}` — it applies no prefix itself, so these flags are how you supply them. Measured on a BEIR SciFact subset, the EmbeddingGemma prefixes moved nDCG@10 from 0.880 to 0.899 — real but modest; worth setting, not decisive.
+Both default to empty, so symmetric models (MiniLM, nomic) are untouched. Note that Ollama's `embeddinggemma` modelfile is `TEMPLATE {{ .Prompt }}` — it applies no prefix itself, so these flags are how you supply them. EmbeddingGemma's model card specifies these prefixes; no measurement of what they change is published here, so measure on your own retrieval set.
 
 For VectorDBBench benchmarks (Performance1536D50K), the client sends pre-computed 1536-dimensional OpenAI embeddings directly via HSET -- no server-side embedding generation is needed.
 
@@ -123,7 +123,7 @@ This eliminates the client-side embedding round-trip. The embedding call is loca
 The auto-embed sidecar (`src/inference/worker.py`) loads MiniLM-L6-v2 via PyTorch/transformers and communicates with Pion via Unix socket IPC (InferenceBridge). This eliminates the need for Ollama or any external embedding service.
 
 - **Model:** `sentence-transformers/all-MiniLM-L6-v2` (384-dim, ~90 MB download on first run)
-- **Startup:** Auto-launched by Pion main thread, ready in ~1.6s
+- **Startup:** Auto-launched by Pion's main thread; the server listens before the sidecar is ready, so early clients queue rather than fail
 - **Semantic cache threshold:** 0.85 (lower than 768-dim's 0.95 to account for reduced precision)
 - **Disable:** `--no-auto-embed` or `--profile kv`
 - **Test:** `python3 tests/test_auto_embed.py`
@@ -141,42 +141,13 @@ The auto-embed sidecar (`src/inference/worker.py`) loads MiniLM-L6-v2 via PyTorc
 - **Validation:** the same `NLEmbedding` API is validated on iOS for cross-language semantic search.
 - **Output:** L2-normalized to unit norm before return — Pion's INT8 HNSW kernel assumes unit-norm input. NLE's raw vectors have norm ≈ 11 at 512-dim; without normalization, the INT8 quantizer saturates and the cosine threshold becomes meaningless.
 
-## Latency Comparison
+## Where the time goes
 
-**Illustrative, not measured** — a model of where the time goes, under these
-assumptions: `nomic-embed-text` (768 dims), 100-token query, 1ms network
-latency, 1M vectors in index. Treat the totals as a shape, not a benchmark.
-
-### Traditional Pipeline (External Embedding Service)
-
-| Step | Operation | Latency |
-|:---|:---|:---:|
-| 1 | Client -> Embedding API (text) | 1.0ms |
-| 2 | Tokenize | 0.5ms |
-| 3 | Model inference | 5.0ms |
-| 4 | Serialize 768 floats | 0.3ms |
-| 5 | Return floats to Client | 1.0ms |
-| 6 | Client -> Vector DB (floats) | 1.0ms |
-| 7 | DB parses + searches | 1.0ms |
-| 8 | Results -> Client | 1.0ms |
-| | **Total** | **~10.8ms** |
-
-### Current Pion Pipeline (HTTP Embedding, Localhost)
-
-| Step | Operation | Latency |
-|:---|:---|:---:|
-| 1 | Client -> Pion (text, small payload) | 1.0ms |
-| 2 | Pion -> Ollama (localhost HTTP) | 0.5ms |
-| 3 | Tokenize + inference (Ollama) | 5.0ms |
-| 4 | Return floats to Pion (localhost) | 0.5ms |
-| 5 | Zero-copy HNSW search | 0.05ms |
-| 6 | Results -> Client | 1.0ms |
-| | **Total** | **~8.1ms** |
-
-**Current (localhost HTTP):** ~25% lower latency than the traditional external-service
-pipeline in this model. If the traditional pipeline uses an external internet API
-(OpenAI, Cohere), the gap widens — a ~100ms external call is replaced by a local
-inference step.
+A traditional pipeline crosses the network twice per query: text to an embedding
+API, then the returned vector to the vector database, serialized both times.
+Pion takes the text, embeds it on the same machine (sidecar, Ollama or
+`NLEmbedding`) and searches in the same process. No latency comparison between the
+two is published with a harness, so this page states the hops rather than a number.
 
 ### The Float Tax Eliminated
 

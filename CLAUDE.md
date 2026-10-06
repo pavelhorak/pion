@@ -56,7 +56,7 @@ python3 benchmarks/memtier-benchmark/memtier-benchmark.py --pion-only --profiles
 python3 benchmarks/VectorDBBench/vectordb-benchmark.py --pion-only --ef-runtime 150 --workers 10 --gate
 ```
 
-- A leaked server costs about 30% on the write rows. Check `pgrep -x pion-server`
+- A leaked server slows the write rows enough to fail the gate. Check `pgrep -x pion-server`
   and `pgrep -f 'redis-serve[r]'`; Redis rewrites its process title, so
   `pgrep -x redis-server` never matches.
 - LRANGE_300 and LRANGE_600 sit within a few percent of their floors, MSET

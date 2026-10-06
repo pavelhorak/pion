@@ -1,0 +1,37 @@
+§15.4 workload  model=mlx-community/Llama-3.2-1B-Instruct-4bit  prompts=5  q_per_prompt=30  vquant=fp16
+  pion: 127.0.0.1:1974
+loading model...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 73156.47it/s]
+  layers=16  n_kv_heads=8  head_dim=64
+  total requests: 150
+  prompt sizes (tokens): [1258, 1250, 1266, 1234, 1242]
+
+[A] standalone mlx-lm — cold prefill every request
+[C] Pion S1 — V.STOREBATCH on first encounter, V.FETCH RANGE on hit (fp16)
+
+──────── §15.4 results ────────
+  workload          5 system prompts × 30 queries = 150 reqs
+
+  Config A (cold every request):
+    TTFT mean=  765.1 ms  p50=  765.3  p99=  791.0  max=  795.5
+    throughput   1.31 req/s  wall 114.8s
+
+  Config C (Pion S1, fp16 b=0):
+    TTFT mean=   83.0 ms  p50=   60.0  p99=  768.3  max=  775.6
+    throughput   8.48 req/s  wall 17.7s
+    cache hit rate     96.7%  (145/150)
+    fetch p50          26.6 ms
+    bytes up/down     390.6MB / 11328.1MB
+
+  Pion vs standalone:
+    TTFT mean speedup       9.21×
+    TTFT p99 speedup        1.03×
+    throughput speedup      6.49×
+    first-token agreement   100.0% (50/50)
+
+──────── verdict ────────
+  TTFT win        PASS
+  throughput win  PASS
+  correctness     PASS
+  §15.4 OVERALL   PASS
+rc=0 for kv_prefix_workload_q30_r8

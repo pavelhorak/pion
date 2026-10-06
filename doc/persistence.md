@@ -62,7 +62,7 @@ Two rules govern that set:
 - `"async"` (default) — `msync(MS_ASYNC)`, non-blocking
 - `"sync"` — `fdatasync` via C FFI (`pion_fdatasync()`)
 
-**Zero overhead at P=10:** 2M+ RPS across all commands — mmap writes are invisible at pipeline depth.
+**What the WAL costs at P=10:** on the published Linux run, `pion-server -w 1` served 847,249 ops/sec with its WAL and 877,766 with `--no-wal` (−3.5%; memtier, 1:10 SET:GET, so most requests are reads) — [raw output](../benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
 
 ---
 
@@ -105,7 +105,7 @@ Vector index persistence for warm restarts — skips the expensive `FT.OPTIMIZE`
 
 | Operation | File | When |
 |---|---|---|
-| `save_to_disk("pion.hnsw.{worker_id}")` | **Index file v4**: per-node compact slots, the slot→key map, and the INT8 calibration; the node map and neighbor lists cover the index's own nodes (v3 wrote them for the server's whole capacity: 329 MB for 100 vectors). v3 files still load; older ones are refused loudly and rebuilt cold. | After `FT.OPTIMIZE`, from whichever worker handled the request |
+| `save_to_disk("pion.hnsw.{worker_id}")` | **Index file v4**: per-node compact slots, the slot→key map, and the INT8 calibration; the node map and neighbor lists cover the index's own nodes (v3 wrote them for the server's whole capacity, however few vectors the index held). v3 files still load; older ones are refused loudly and rebuilt cold. | After `FT.OPTIMIZE`, from whichever worker handled the request |
 | `load_from_disk("pion.hnsw.{worker_id}")` | Reads header, restores index, sets `index_ready=True` | At startup |
 
 Header: magic, version, num_nodes, M, ef_construction, global_min/max, etc.

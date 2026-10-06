@@ -6,6 +6,37 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Every measured number in the docs names its evidence.**
+  `tools/check_doc_claims.py` finds each number with a performance unit in the
+  README, the website, `doc/` and the package READMEs, and fails unless
+  `benchmarks/claims.toml` points it at a published raw result, a test that
+  asserts it, or the source line that defines it. It runs in CI's source checks
+  and in the gate (`tests/test_doc_claims.py`). The raw output behind the
+  numbers is now in the repository: `benchmarks/results/` and
+  `benchmarks/reproducers/results/`.
+- **Re-measured, same machine for both engines:** the KV and vector comparison
+  against Redis 8.10.2 on one Linux server (`benchmarks/results/`), and the
+  prompt-cache lanes, TTFT paths, Stage-1 workload, BLEU, Metal SDPA, PKM,
+  `ATTEND.*` at 128K, failover time and per-profile memory on an M4 Mac mini.
+  The README's earlier KV headline (14.0M ops/sec, 10.2× Redis) had no
+  surviving raw log and compared Pion's independent keyspaces with a single
+  Redis instance; it is replaced.
+- **Withdrawn until they reproduce or are published with a harness:** the 64K
+  sparse-mask NIAH result (326×; on 2026-10-06 its reproducer did not find the
+  needle), MoE paging sizes and latencies, pion-serve hit rates, `AI.ROUTE` and
+  `RAG.SPECULATE` accuracy, the FLARE results, the binary-lane `ATTEND`
+  figures, and the illustrative latency tables in `doc/embeddings.md`.
+- **Corrected:** the keyspace starts at 65,536 slots and grows (not a fixed
+  10M); lists no longer use a slab allocator; the HNSW visited array is
+  `max_elements` long; the SWIM probe waits 100 ms (+200 ms indirect), not
+  250 ms; requests may be up to 256 MB (`CLIENT_BUF_SIZE`), not 64 MB, and no
+  16 MB blob limit exists; the 5M-vector FP32 staging buffer is 30.72 GB; the
+  command-matrix coverage summary now counts the matrix's own rows; the
+  `--profile` memory column is measured idle RSS; `tests/test_mlx_lm_patch.py`
+  states the threshold it asserts.
+
 ### Fixed
 
 - **Replies of any size arrive whole** (#49). The reply buffer is 4 MB per

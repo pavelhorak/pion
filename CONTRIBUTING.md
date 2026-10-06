@@ -6,7 +6,7 @@ Thanks for considering a contribution. Pion is Apache-2.0, with one closed binar
 
 Every PR that touches Mojo source or wire-protocol surface must show:
 
-1. **Green build** — `pixi run build` exits clean (release `-O3` binary, ~4 MB on Mac, comparable on Linux).
+1. **Green build** — `pixi run build` exits clean (the release `-O3` binary).
 2. **Green correctness gate** — `python3 tests/test_raw.py` (114 invariants) + `python3 tests/test_parity.py` (RESP parity vs Redis).
 3. **Green perf gate when the change can affect the hot path** — KV memtier + VectorDBBench above the documented baselines. The floors are in [`benchmarks/gate_baselines.json`](benchmarks/gate_baselines.json); run via:
 

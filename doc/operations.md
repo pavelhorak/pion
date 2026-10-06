@@ -104,8 +104,8 @@ on the zero-allocation fast path for every request.
 ## 2. Supervised serving
 
 `scripts/pion-supervise.sh` starts a server, waits for a real `+PONG` (not just
-a successful `connect()` — Pion listens *before* it initialises its 10M-slot
-hash map, so a connect can succeed seconds before the server can serve), then
+a successful `connect()` — Pion listens *before* it finishes initialising, so a
+connect can succeed before the server can serve), then
 polls liveness and restarts on death with exponential backoff.
 
 ```bash
@@ -405,8 +405,8 @@ docker run -p 1974:1974 -v pion-data:/data pion
 - State (WAL, snapshots, blob arenas) lands in the `/data` volume.
 - `docker build --target runtime-prebuilt -t pion:dev .` wraps an
   already-built host `./pion-server` and its runtime libraries in seconds, for
-  local use. The default target builds from source (~20 min cold on 4 cores,
-  toolchain layer cached; budget ~5 GB of build cache,
+  local use. The default target builds from source (a cold build takes a long
+  time on a small machine, the toolchain layer is cached; budget several GB of build cache,
   `docker builder prune -f` reclaims it).
 - `Dockerfile.linux` + `docker/run-linux.sh` are an interactive Linux dev
   shell, not the shippable image.

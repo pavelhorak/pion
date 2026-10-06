@@ -163,8 +163,10 @@ def main():
     check("both TTFT rows with factors", "20×" in landing and "17×" in landing and "73.9 ms" in landing)
     # The correction sentence names the retired factors, so check the retired cells.
     check("the retired TTFT cells are gone", "1,530 ms" not in landing and "64.7 ms" not in landing)
-    check("the 64K row is labelled NIAH-class", "326×" in landing and "NIAH-class" in landing)
-    check("the honesty figure", "0.86×" in landing)
+    # The 64K sparse-mask row (326×) was withdrawn on 2026-10-06: its reproducer
+    # missed the needle, and its vanilla time was never recorded.
+    check("the withdrawn 64K row stays withdrawn", "326×" not in landing)
+    check("the honesty figure: what a short prefix saves", "1.5×" in landing)
     check("install: Homebrew first on macOS", "brew install pavelhorak/tap/pion" in landing)
     check("install: the tarball is one click away", 'href="/docs/getting-started/install/"' in landing)
     check("install: docker run", "docker run" in landing)

@@ -1,6 +1,6 @@
 # `cag_legal_demo` — bounded-corpus QA on US Supreme Court opinions
 
-A self-contained demo of `pion-cag-hybrid` on a real legal corpus. Spin up locally in 30 seconds; reproduces the cascade onboarding flow on a non-SQuAD distribution.
+A self-contained demo of `pion-cag-hybrid` on a real legal corpus; reproduces the cascade onboarding flow on a non-SQuAD distribution. Every number below is in `calibration_state.json`, the output of the `pion-serve setup` run that produced it.
 
 ## What's in the demo
 
@@ -48,9 +48,9 @@ Held-out 3-fold CV: F1=0.706  found=0.900  fb=0.0%  (weighted-mean sp 3.77×;
 ### Reading this honestly
 
 - **Quality wins are large.** Pure CAG dominates pure RAG by **+17.7 pp F1 and +16.7 pp answer-found**. That's the bounded-corpus QA story: the model sees the whole corpus every time, so it answers from the full context instead of from a top-3 retrieval slice.
-- **Streaming TTFT win is only 1.2×, not 5×.** At 12,327 tokens, the foundation cache is small enough that cold-prefill RAG (which prefills ~300 tokens of retrieved context plus the question) is comparable in latency to the CAG suffix prefill against the cached corpus. **Larger corpora widen the TTFT gap** — the SQuAD demo at 26 K tokens showed 7.5× streaming TTFT for pure CAG; published numbers at 100 K+ tokens widen further.
+- **The streaming TTFT win is only 1.2× in-sample.** At 12,327 tokens, the foundation cache is small enough that cold-prefill RAG (which prefills ~300 tokens of retrieved context plus the question) is comparable in latency to the CAG suffix prefill against the cached corpus. A larger corpus should widen the gap, because RAG's prefill stays small while a cold CAG prefill grows with the corpus; this demo does not measure that.
 - **Cascade correctly picks pure CAG.** The 3-tier cascade falls through to tier 3 (pure CAG) precisely because it cannot find a smarter `(Te, Tm)` that beats pure CAG on this corpus. Per-fold CV confirms: 2 of 3 folds independently pick pure CAG; fold 2's experimentally smart gate actually regresses (0.54× speedup because fallback overhead dominates). Pure CAG is the right answer here.
-- **For a 5×+ TTFT demo, see SQuAD.** This corpus is intentionally small. For an operator with a 30 K+ token corpus, expect both the quality win AND the 5×+ streaming TTFT win simultaneously.
+- **This corpus is intentionally small.** Run `pion-serve setup` on your own corpus and read its calibration output before expecting a larger TTFT win.
 
 ## Deploy
 

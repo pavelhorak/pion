@@ -1,0 +1,11 @@
+[1] OK — REGISTER without BLOCKS yields +UNKNOWN
+[2a] OK — BLOCKS returns the same 32 hashes (block_size=64)
+[2b] OK — MEMBERSHIP bitmap: 16/20 bits set
+[2c] OK — empty MEMBERSHIP probe returns empty bitmap
+[3] OK — WAL replay restored 32 block hashes
+[4] OK — snapshot replay restored 32 block hashes
+[5] MEMBERSHIP 1562-block probe: p50=128.6us  p99=161.0us
+[5] OK — within 400 µs p50 e2e gate (100 µs server-side target)
+
+PASS — gh #71 KV.PREFIX.BLOCKS / MEMBERSHIP
+rc=0 for kv_prefix_blocks

@@ -1,0 +1,32 @@
+Loading dataset (OpenAI-SMALL-50K)...
+  Train: (50000, 1536), Test: (1000, 1536), Neighbors: (1000, 1000)
+Starting Redis 8.0 on port 6399...
+  Ingesting 50000 vectors (VADD)...
+    10000/50000 (2157 vec/s)
+    20000/50000 (1406 vec/s)
+    30000/50000 (1151 vec/s)
+    40000/50000 (1030 vec/s)
+  Ingest: 51.66s (968 vectors/s)
+  Serial search (1000 queries, K=100)...
+  Recall@100: 0.9195, Avg latency: 1.37ms, P99: 1.72ms
+  Concurrent search (c=1, 5s)...
+    c=1: 3787 queries in 5.0s = 757.2 QPS
+  Concurrent search (c=5, 5s)...
+    c=5: 22367 queries in 5.0s = 4472.6 QPS
+  Concurrent search (c=10, 5s)...
+    c=10: 40207 queries in 5.0s = 8039.3 QPS
+
+============================================================
+Redis 8.0 VSET Benchmark Results (2026-10-06 18:22:55)
+============================================================
+  Insert:     51.66s
+  Recall@100:  0.9195
+  P99 latency: 1.72ms
+  P95 latency: 1.60ms
+  QPS (c= 1):  757.2
+  QPS (c= 5):  4472.6
+  QPS (c=10):  8039.3
+  Peak QPS:   8039.3
+============================================================
+Results appended to /opt/Pion/benchmarks/VectorDBBench/benchmark_results.md
+Stopping Redis 8.0...

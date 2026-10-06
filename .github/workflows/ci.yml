@@ -66,6 +66,13 @@ jobs:
       - name: Documentation links resolve
         run: python3 scripts/check_doc_links.py .
 
+      - name: Every measured number in the docs names its evidence
+        # A number with a performance unit in README, the website, doc/ or a
+        # package README needs an entry in benchmarks/claims.toml: a published
+        # raw result, a test that asserts it, or the source line that defines it.
+        # Docs-only PRs skip the local perf gate, so this is where they are held.
+        run: python3 tests/test_doc_claims.py
+
       - name: The website builds strictly from the tree
         # Landing + docs are derived from README regions, doc/*.md, the --help
         # printer and the command table (website/README.md). Strict mode turns

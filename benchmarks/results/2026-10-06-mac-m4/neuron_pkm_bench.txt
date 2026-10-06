@@ -1,0 +1,66 @@
+
+[1] exact top-k vs dense numpy argsort
+  PASS  CREATE
+  PASS  SETKEYS half 0
+  PASS  SETKEYS half 1
+  PASS  QUERY ids == dense argsort
+  PASS  QUERY scores match
+  PASS  QUERY scores descending
+  PASS  QUERY FAST ids == exact ids
+  PASS  QUERY FAST scores exact
+
+[2] multi-head: H queries share one codebook pass
+  PASS  all 8 heads exact in one call
+  PASS  nq peeling 1/2/3/5/7/9/16 exact
+
+[3] fused FFN, VALTYPE F32
+  PASS  SETVALS
+  PASS  FFN F32 == softmax-weighted gather
+  PASS  FFN TEMP→0 approaches argmax row
+
+[3] fused FFN, VALTYPE F16
+  PASS  SETVALS
+  PASS  FFN F16 == softmax-weighted gather
+  PASS  FFN TEMP→0 approaches argmax row
+
+[4] validation and lifecycle
+  PASS  non-square n_slots rejected
+  PASS  odd dim rejected
+  PASS  duplicate name rejected
+  PASS  unknown table on QUERY
+  PASS  QUERY before both codebooks errors
+  PASS  QUERY with one codebook still errors
+  PASS  SETKEYS wrong blob length rejected
+  PASS  SETKEYS bad half rejected
+  PASS  ragged query blob rejected
+  PASS  k=0 rejected
+  PASS  k over cap rejected
+  PASS  FFN without VDIM errors
+  PASS  SETVALS without VDIM errors
+  PASS  unknown option rejected
+  PASS  k > n_slots pads with (-1, -inf)
+  PASS  INFO reports geometry
+  PASS  DROP returns 1
+  PASS  DROP again returns 0
+  PASS  QUERY after DROP errors
+
+[5] pipelining — the token-skip must not desync the parser
+  PASS  4 pipelined replies stay framed
+  PASS  pipelined CREATE ignores the next command's tokens
+  PASS  pipelined QUERY ignores the next command's tokens
+
+[bench] QUERY p50 ms, dim=896, k=32, 200 reps, single worker.
+        PING round-trip floor = 0.046 ms — subtract it for server compute.
+
+      slots     S    exact     FAST   8-head  per head    HNSW    setup
+       5041    71    0.040    0.042    0.061     0.008    0.47    0.00s
+      50176   224    0.034    0.042    0.094     0.012    3.27    0.00s
+     250000   500    0.051    0.049    0.156     0.019    4.04    0.00s
+    1048576  1024    0.075    0.060    0.268     0.033    5.13    0.00s
+
+  fused FFN, 50176 slots × vdim 2560 FP16 (257 MB of value rows):
+    QUERY 0.057 ms → client then fetches 32×5 KB itself
+    FFN   0.052 ms → 10 KB of activations on the wire, values never leave
+
+38 passed, 0 failed
+rc=0 for neuron_pkm_bench

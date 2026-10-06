@@ -299,7 +299,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
           <h3>The Redis wire, clients unchanged</h3>
           <p>RESP2 and RESP3. redis-py, go-redis, ioredis, Valkey GLIDE, RedisVL, LangChain and LMCache's RedisConnector talk to Pion as they are.</p>
           <p class="fig">{{tile_kv_fig}}</p>
-          <p class="caveat">Peak numbers above one worker use <code>--independent-workers</code>: N independent keyspaces. At P=1 it is parity with Redis — the localhost TCP ceiling every engine hits.</p>
+          <p class="caveat">Numbers above one worker use <code>--independent-workers</code>: N independent keyspaces. Against Redis 8.10.2 on the same server Pion wins at deep pipelines and loses to Redis's I/O threads at shallow ones; the README has both.</p>
         </div>
         <div class="tile">
           <h3>Vector search in the same process</h3>
@@ -330,7 +330,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
           <a class="chip" href="/docs/pion_serve/"><b>Pion Serve</b> · OpenAI-compatible proxy</a>
           <a class="chip" href="/docs/reference/python/integrations/"><b>exo</b> · Mac cluster inference</a>
         </div>
-        <p class="small" style="margin-top:1rem">Runnable examples ship in <a href="/docs/guides/examples/"><code>examples/</code></a>, each with its prerequisites stated — the prompt-cache demo, hybrid retrieval, 64K sparse NIAH, MoE expert paging on a 16 GB Mac, agent memory over MCP.</p>
+        <p class="small" style="margin-top:1rem">Runnable examples ship in <a href="/docs/guides/examples/"><code>examples/</code></a>, each with its prerequisites stated — the prompt-cache demo, hybrid retrieval, 64K sparse NIAH (which currently misses its needle with mlx-lm 0.31), MoE expert paging, agent memory over MCP.</p>
       </div>
     </div>
   </section>
