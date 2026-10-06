@@ -13,6 +13,7 @@ from src.io.wal import WAL, gv_bytes
 from src.common.skip_list import SlabSkipList
 from src.commands.mpop import parse_mpop
 from src.commands.scan_opts import parse_scan_opts, scan_no_opts
+from src.commands.scan_walk import walk_map, append_scan_header
 from src.memory.object_pool import ObjectPool
 
 
@@ -1479,7 +1480,7 @@ def handle_zscan(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
     """ZSCAN key cursor [MATCH pattern] [COUNT count] -> cursor + members."""
     if i + 2 < num_tokens:
         var _zsv = keyspace[].get(tokens[i+1].value())
-        _ = scan_cursor(tokens[i+2].ptr, tokens[i+2].length)   # gh #393: it was never read
+        var zs_cursor = scan_cursor(tokens[i+2].ptr, tokens[i+2].length)   # #50
         var _i = num_tokens - 1
         var so = scan_no_opts()
         if not _zsv.is_none() and _zsv.type.value == ValueType.ZSET:
@@ -1494,32 +1495,29 @@ def handle_zscan(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             var _zs_empty = "*2\r\n$1\r\n0\r\n*0\r\n"
             writer.append_to_response(_zs_empty.unsafe_ptr(), _zs_empty.byte_length())
         else:
-            var _zsp = _zsv.as_zset().bitcast[SlabSkipList]()
             # gh #244: ZSCAN returns a FLAT [member, score, member, score, ...]
-            # list, exactly like HSCAN's field/value. Emitting members only made
-            # the reply half the declared length's worth of pairs, so a client
-            # walking it two-at-a-time read the NEXT MEMBER as the current
-            # member's score. HSCAN and SSCAN were checked and are correct.
+            # list, exactly like HSCAN's field/value. #50: a COUNT-bounded step
+            # from the cursor over the member→score table (hash order, which is
+            # what Redis's SCAN of the dict returns), not the whole set in
+            # sorted order in one reply.
+            var _zsp = _zsv.as_zset().bitcast[SlabSkipList]()
+            var _zm = Pointer(to=_zsp[].members)
             var zs_all = not so.has_match or _glob_all(zs_pat_p, zs_pat_l)
             var zs_mb = alloc[UInt8](24)
-            var zs_n = 0
-            var _zsq = _zsp[].head[].forward[0]
-            while is_not_null(_zsq):
-                if zs_all: zs_n += 1
-                elif _glob_match(zs_pat_p, zs_pat_l, 0, _zsq[].obj.as_string_safe(zs_mb), _zsq[].obj.string_len(), 0):
-                    zs_n += 1
-                _zsq = _zsq[].forward[0]
-            var _zs_hdr = String("*2\r\n$1\r\n0\r\n*") + String(zs_n * 2) + String("\r\n")
-            writer.append_to_response(_zs_hdr.unsafe_ptr(), _zs_hdr.byte_length())
-            var _zsc = _zsp[].head[].forward[0]
-            while is_not_null(_zsc):
-                if not zs_all:
-                    if not _glob_match(zs_pat_p, zs_pat_l, 0, _zsc[].obj.as_string_safe(zs_mb), _zsc[].obj.string_len(), 0):
-                        _zsc = _zsc[].forward[0]
-                        continue
-                writer.append_bulk_value_response(_zsc[].obj)
-                writer.append_bulk_score_response(_zsc[].score)
-                _zsc = _zsc[].forward[0]
+            var zs_w = List[Int]()
+            var zs_next = walk_map(_zm, zs_cursor, so.count, zs_w)
+            var zs_hit = List[Int]()
+            for z in range(len(zs_w)):
+                if zs_all:
+                    zs_hit.append(zs_w[z])
+                else:
+                    var mk = _zm[].keys[unsafe_offset=zs_w[z]]
+                    if _glob_match(zs_pat_p, zs_pat_l, 0, mk.as_string_safe(zs_mb), mk.string_len(), 0):
+                        zs_hit.append(zs_w[z])
+            append_scan_header(writer, zs_next, len(zs_hit) * 2)
+            for z in range(len(zs_hit)):
+                writer.append_bulk_value_response(_zm[].keys[unsafe_offset=zs_hit[z]])
+                writer.append_bulk_score_response(_zm[].values[unsafe_offset=zs_hit[z]].as_float())
             zs_mb.unsafe_free()
         return _i - i
     else:

@@ -2,6 +2,7 @@
 from src.common.container_free import remove_and_free
 from src.common.ptr import is_not_null, null_ptr
 from src.commands.scan_opts import parse_scan_opts, scan_no_opts
+from src.commands.scan_walk import walk_map, append_scan_header
 from src.common.utils import rand_count, strict_atol, _glob_match, _glob_all, scan_cursor, scan_count, arg_eq, parse_int64_strict
 from std.memory.unsafe_pointer import Pointer
 from std.collections import Array
@@ -634,32 +635,27 @@ def handle_sscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                 return consumed
         var ss_pat_p = so.pat_p
         var ss_pat_l = so.pat_l
-        if val_ss.is_none() or ss_cursor != 0:
+        if val_ss.is_none():
             var ss_empty = "*2\r\n$1\r\n0\r\n*0\r\n"
             writer.append_to_response(ss_empty.unsafe_ptr(), ss_empty.byte_length())
         else:
             var ssp = val_ss.as_set().unsafe_bitcast[SlabHashMap]()
             var ss_all = not so.has_match or _glob_all(ss_pat_p, ss_pat_l)
             var ss_mb = alloc[UInt8](24)
-            var ss_n = 0
-            for slot in range(ssp[].capacity):
-                var m0 = ssp[].metadata[unsafe_offset=slot]
-                if m0 != SlabHashMap.EMPTY and m0 != SlabHashMap.DELETED:
-                    if ss_all: ss_n += 1
-                    else:
-                        var mk0 = ssp[].keys[unsafe_offset=slot]
-                        if _glob_match(ss_pat_p, ss_pat_l, 0, mk0.as_string_safe(ss_mb), mk0.string_len(), 0):
-                            ss_n += 1
-            var ss_hdr = String("*2\r\n$1\r\n0\r\n*") + String(ss_n) + String("\r\n")
-            writer.append_to_response(ss_hdr.unsafe_ptr(), ss_hdr.byte_length())
-            for slot in range(ssp[].capacity):
-                var m = ssp[].metadata[unsafe_offset=slot]
-                if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
-                    if not ss_all:
-                        var mk1 = ssp[].keys[unsafe_offset=slot]
-                        if not _glob_match(ss_pat_p, ss_pat_l, 0, mk1.as_string_safe(ss_mb), mk1.string_len(), 0):
-                            continue
-                    writer.append_bulk_value_response(ssp[].keys[unsafe_offset=slot])
+            # #50: a COUNT-bounded step from the cursor, not the whole set.
+            var ss_w = List[Int]()
+            var ss_next = walk_map(ssp, ss_cursor, so.count, ss_w)
+            var ss_hit = List[Int]()
+            for z in range(len(ss_w)):
+                if ss_all:
+                    ss_hit.append(ss_w[z])
+                else:
+                    var mk0 = ssp[].keys[unsafe_offset=ss_w[z]]
+                    if _glob_match(ss_pat_p, ss_pat_l, 0, mk0.as_string_safe(ss_mb), mk0.string_len(), 0):
+                        ss_hit.append(ss_w[z])
+            append_scan_header(writer, ss_next, len(ss_hit))
+            for z in range(len(ss_hit)):
+                writer.append_bulk_value_response(ssp[].keys[unsafe_offset=ss_hit[z]])
             ss_mb.unsafe_free()
         return consumed
     else:

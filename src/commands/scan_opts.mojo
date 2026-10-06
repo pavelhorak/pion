@@ -20,12 +20,13 @@ struct ScanOpts(Copyable, Movable, ImplicitlyCopyable):
     var type_p: Pointer[UInt8, MutUntrackedOrigin]
     var type_l: Int
     var novalues: Bool
+    var count: Int            # #50: COUNT, 10 when absent, as in Redis
 
 
 def scan_no_opts() -> ScanOpts:
     """No options: what a scan of a missing key answers with, unparsed."""
     return ScanOpts(True, False, null_ptr[UInt8, MutUntrackedOrigin](), 0,
-                    False, null_ptr[UInt8, MutUntrackedOrigin](), 0, False)
+                    False, null_ptr[UInt8, MutUntrackedOrigin](), 0, False, 10)
 
 
 def parse_scan_opts(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, end: Int,
@@ -33,7 +34,7 @@ def parse_scan_opts(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int,
     """The options from `start` to `end`. On error the reply is written and
     `ok` is False."""
     var o = ScanOpts(False, False, null_ptr[UInt8, MutUntrackedOrigin](), 0,
-                     False, null_ptr[UInt8, MutUntrackedOrigin](), 0, False)
+                     False, null_ptr[UInt8, MutUntrackedOrigin](), 0, False, 10)
     var j = start
     while j < end:
         var t = tokens[j]
@@ -46,6 +47,7 @@ def parse_scan_opts(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int,
             if c.value < 1:
                 writer.append_error_response("ERR syntax error")
                 return o
+            o.count = Int(c.value)
             j += 2
         elif arg_eq(t.ptr, t.length, "match") and left >= 2:
             o.has_match = True

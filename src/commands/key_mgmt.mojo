@@ -1,6 +1,7 @@
 """Key management commands: TYPE, RENAME, RENAMENX, COPY, OBJECT, SORT, SCAN, KEYS, RANDOMKEY, TOUCH, WAIT."""
 from src.common.container_free import deep_clone, free_container, remove_and_free, index_field_ttls
 from src.commands.scan_opts import parse_scan_opts
+from src.commands.scan_walk import walk_keyspace, append_scan_header
 from src.common.utils import strict_atol, _glob_match, _glob_all, arg_eq, parse_int64_strict, is_valid_float_arg, parse_float64, scan_cursor, scan_count
 from src.common.ptr import is_not_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
@@ -596,52 +597,50 @@ def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         var so = parse_scan_opts(tokens, i + 2, num_tokens, writer, True, False)
         if not so.ok:
             return consumed
-        # cursor 0: return all keys; non-zero: return empty (single sweep)
-        if cursor_i2 != 0:
-            var scan_empty = "*2\r\n$1\r\n0\r\n*0\r\n"
-            writer.append_to_response(scan_empty.unsafe_ptr(), scan_empty.byte_length())
-        else:
-            var kbuf = alloc[UInt8](24)
-            var smbuf = alloc[UInt8](24)
-            # An empty MATCH pattern matches only the empty key, as in Redis;
-            # "no MATCH" is what matches everything.
-            var scan_all = not so.has_match or _glob_all(so.pat_p, so.pat_l)
-            # One pass decides which keys answer; the reply's header is their
-            # count, so the emit pass cannot disagree with it.
-            var hit_shard = List[Int]()
-            var hit_slot = List[Int]()
-            var hit_len = List[Int]()
-            for shard_i in range(8):
-                var sp = keyspace[].shards.unsafe_offset(shard_i)
-                for slot in range(sp[].capacity):
-                    var m = sp[].metadata[unsafe_offset=slot]
-                    if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
-                        continue
-                    if keyspace[].expire_stored_if_due(sp[].keys[unsafe_offset=slot]):
-                        continue              # #45: an expired key is removed, as Redis's SCAN does
-                    var klen = _key_ns_match(sp[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
-                    if klen < 0:
-                        continue
-                    if not scan_all:
-                        var kp1 = sp[].keys[unsafe_offset=slot].as_string_safe(smbuf)
-                        if not _glob_match(so.pat_p, so.pat_l, 0, kp1.unsafe_offset(ns_len), klen - ns_len, 0):
-                            continue
-                    if so.has_type and not _type_is(sp[].values[unsafe_offset=slot], so.type_p, so.type_l):
-                        continue
-                    hit_shard.append(shard_i)
-                    hit_slot.append(slot)
-                    hit_len.append(klen)
-            var scan_hdr = String("*2\r\n$1\r\n0\r\n*") + String(len(hit_slot)) + String("\r\n")
-            writer.append_to_response(scan_hdr.unsafe_ptr(), scan_hdr.byte_length())
-            for h in range(len(hit_slot)):
-                var sp = keyspace[].shards.unsafe_offset(hit_shard[h])
-                if ns_len == 0:
-                    writer.append_bulk_value_response(sp[].keys[unsafe_offset=hit_slot[h]])
-                else:
-                    var kp = sp[].keys[unsafe_offset=hit_slot[h]].as_string_safe(kbuf)
-                    writer.append_bulk_string_response(kp.unsafe_offset(ns_len), hit_len[h] - ns_len)
-            kbuf.unsafe_free()
-            smbuf.unsafe_free()
+        # #50: walk the 8-shard keyspace a COUNT-bounded step at a time, with
+        # the cursor where the last call stopped (0 when done), as Redis does.
+        # It returned the whole keyspace in one reply with cursor 0 whatever
+        # COUNT said, which also ran into the 4 MB reply cap past ~200K keys.
+        var kbuf = alloc[UInt8](24)
+        var smbuf = alloc[UInt8](24)
+        # An empty MATCH pattern matches only the empty key, as in Redis;
+        # "no MATCH" is what matches everything.
+        var scan_all = not so.has_match or _glob_all(so.pat_p, so.pat_l)
+        var w_shards = List[Int]()
+        var w_slots = List[Int]()
+        var next_cursor = walk_keyspace(keyspace, cursor_i2, so.count, w_shards, w_slots)
+        # One pass decides which of the walked slots answer; the reply's header
+        # is their count, so the emit pass cannot disagree with it.
+        var hit_shard = List[Int]()
+        var hit_slot = List[Int]()
+        var hit_len = List[Int]()
+        for h in range(len(w_slots)):
+            var sp = keyspace[].shards.unsafe_offset(w_shards[h])
+            var slot = w_slots[h]
+            if keyspace[].expire_stored_if_due(sp[].keys[unsafe_offset=slot]):
+                continue              # #45: an expired key is removed, as Redis's SCAN does
+            var klen = _key_ns_match(sp[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
+            if klen < 0:
+                continue
+            if not scan_all:
+                var kp1 = sp[].keys[unsafe_offset=slot].as_string_safe(smbuf)
+                if not _glob_match(so.pat_p, so.pat_l, 0, kp1.unsafe_offset(ns_len), klen - ns_len, 0):
+                    continue
+            if so.has_type and not _type_is(sp[].values[unsafe_offset=slot], so.type_p, so.type_l):
+                continue
+            hit_shard.append(w_shards[h])
+            hit_slot.append(slot)
+            hit_len.append(klen)
+        append_scan_header(writer, next_cursor, len(hit_slot))
+        for h in range(len(hit_slot)):
+            var sp = keyspace[].shards.unsafe_offset(hit_shard[h])
+            if ns_len == 0:
+                writer.append_bulk_value_response(sp[].keys[unsafe_offset=hit_slot[h]])
+            else:
+                var kp = sp[].keys[unsafe_offset=hit_slot[h]].as_string_safe(kbuf)
+                writer.append_bulk_string_response(kp.unsafe_offset(ns_len), hit_len[h] - ns_len)
+        kbuf.unsafe_free()
+        smbuf.unsafe_free()
         return consumed
     else:
         writer.append_error_response("ERR wrong number of arguments for 'scan' command")

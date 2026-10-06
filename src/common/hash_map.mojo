@@ -54,6 +54,10 @@ struct SlabHashMap(Movable):
     var vec_field_h: UInt64
     var vec_tomb: Pointer[VecTomb, MutUntrackedOrigin]
     var vec_gen: UInt64          # the slot numbering's generation at the link
+    # #50: how many times the table was rebuilt (_rehash moves every entry).
+    # A SCAN cursor carries it, so a walk across a rebuild starts that table
+    # over: duplicates, which SCAN allows, but nothing missed.
+    var rehashes: Int
 
     # Metadata constants
     comptime EMPTY = UInt8(0b10000000)
@@ -74,6 +78,7 @@ struct SlabHashMap(Movable):
         self.vec_field_h = 0
         self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         self.vec_gen = 0
+        self.rehashes = 0
         self.metadata = alloc[UInt8](real_cap + 16)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), real_cap + 16)
         self.keys = alloc[GenericValue](real_cap)
@@ -128,6 +133,7 @@ struct SlabHashMap(Movable):
         self.vec_field_h = take.vec_field_h
         self.vec_tomb = take.vec_tomb
         self.vec_gen = take.vec_gen
+        self.rehashes = take.rehashes
 
     # ── #46: the vector this hash put in the index ───────────────────────────
     def index_vector(mut self, slot: Int, field_h: UInt64, tomb: Pointer[VecTomb, MutUntrackedOrigin]):
@@ -833,7 +839,32 @@ struct SlabHashMap(Movable):
                 return key
         return GenericValue()
 
+    @always_inline
+    def next_live(self, slot: Int, limit: Int) -> Int:
+        """#50: the first slot in [slot, min(limit, capacity)) holding an
+        entry, else that bound. A live slot's metadata byte has its top bit
+        clear (EMPTY and DELETED both set it); 16 slots are checked a load."""
+        var end = limit if limit < self.capacity else self.capacity
+        var s = slot
+        while s < end and (s & 15) != 0:
+            if self.metadata[unsafe_offset=s] < 128:
+                return s
+            s += 1
+        var high = SIMD[DType.uint8, 16](128)
+        while s + 16 <= end:
+            var chunk = (self.metadata.unsafe_offset(s)).load[width=16]()
+            var live = _movemask16(chunk.lt(high))
+            if live != 0:
+                return s + count_trailing_zeros(live)
+            s += 16
+        while s < end:
+            if self.metadata[unsafe_offset=s] < 128:
+                return s
+            s += 1
+        return end
+
     def _rehash(mut self):
+        self.rehashes += 1                       # #50: every entry moves
         var old_cap = self.capacity
         var old_meta = self.metadata
         var old_keys = self.keys

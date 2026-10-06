@@ -14,6 +14,7 @@ from src.network.dispatcher import CommandDispatcher
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
 from src.commands.scan_opts import parse_scan_opts, scan_no_opts
+from src.commands.scan_walk import walk_map, append_scan_header
 from src.common.utils import rand_count, strict_atol, bytes_to_string, _glob_match, _glob_all,  format_int_to_buf, format_float_to_buf, parse_filter_float, parse_float64, parse_int64_strict, is_valid_float_arg, parse_redis_double, DOUBLE_LONG, scan_cursor, scan_count, arg_eq
 from src.memory.object_pool import ObjectPool
 from src.io.wal import WAL
@@ -517,34 +518,29 @@ def handle_hscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                 return extra
         var hs_pat_p = so.pat_p
         var hs_pat_l = so.pat_l
-        if val.is_none() or hs_cursor != 0:
+        if val.is_none():
             var hs_empty = "*2\r\n$1\r\n0\r\n*0\r\n"
             writer.append_to_response(hs_empty.unsafe_ptr(), hs_empty.byte_length())
         else:
             var hash_ptr = val.as_hash().unsafe_bitcast[SlabHashMap]()
             var hs_all = not so.has_match or _glob_all(hs_pat_p, hs_pat_l)
             var hs_mb = alloc[UInt8](24)
-            var hs_count2 = 0
-            for slot in range(hash_ptr[].capacity):
-                var m = hash_ptr[].metadata[unsafe_offset=slot]
-                if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
-                    if hs_all: hs_count2 += 1
-                    else:
-                        var fk = hash_ptr[].keys[unsafe_offset=slot]
-                        if _glob_match(hs_pat_p, hs_pat_l, 0, fk.as_string_safe(hs_mb), fk.string_len(), 0):
-                            hs_count2 += 1
-            var hs_hdr = String("*2\r\n$1\r\n0\r\n*") + String(hs_count2 if so.novalues else hs_count2 * 2) + String("\r\n")
-            writer.append_to_response(hs_hdr.unsafe_ptr(), hs_hdr.byte_length())
-            for slot in range(hash_ptr[].capacity):
-                var m = hash_ptr[].metadata[unsafe_offset=slot]
-                if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
-                    if not hs_all:
-                        var fk2 = hash_ptr[].keys[unsafe_offset=slot]
-                        if not _glob_match(hs_pat_p, hs_pat_l, 0, fk2.as_string_safe(hs_mb), fk2.string_len(), 0):
-                            continue
-                    writer.append_bulk_value_response(hash_ptr[].keys[unsafe_offset=slot])
-                    if not so.novalues:
-                        writer.append_bulk_value_response(hash_ptr[].values[unsafe_offset=slot])
+            # #50: a COUNT-bounded step from the cursor, not the whole hash.
+            var hs_w = List[Int]()
+            var hs_next = walk_map(hash_ptr, hs_cursor, so.count, hs_w)
+            var hs_hit = List[Int]()
+            for z in range(len(hs_w)):
+                if hs_all:
+                    hs_hit.append(hs_w[z])
+                else:
+                    var fk = hash_ptr[].keys[unsafe_offset=hs_w[z]]
+                    if _glob_match(hs_pat_p, hs_pat_l, 0, fk.as_string_safe(hs_mb), fk.string_len(), 0):
+                        hs_hit.append(hs_w[z])
+            append_scan_header(writer, hs_next, len(hs_hit) if so.novalues else len(hs_hit) * 2)
+            for z in range(len(hs_hit)):
+                writer.append_bulk_value_response(hash_ptr[].keys[unsafe_offset=hs_hit[z]])
+                if not so.novalues:
+                    writer.append_bulk_value_response(hash_ptr[].values[unsafe_offset=hs_hit[z]])
             hs_mb.unsafe_free()
         return extra
     else:

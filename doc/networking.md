@@ -138,7 +138,7 @@ RESP3 tokenizer over a per-handler, heap-resident token table (up to 2048 tokens
 
 ### Response Writer (`response_writer.mojo`)
 
-Pre-allocated 4 MB response buffer per worker. `append_*_response()` methods write directly to buffer. `flush_response()` sends via `send()` or `writev()` (scatter-gather for values >512B). Lazy 4 MB pending buffer allocation per fd on first EAGAIN.
+Pre-allocated 4 MB response buffer per worker. `append_*_response()` methods write directly to the buffer, and `flush_response()` sends it. When the socket cannot take everything, the rest waits in the connection's 4 MB pending block (allocated on first EAGAIN) and, past that, in an overflow queue with no size limit (#49); kqueue and epoll drain it on the write event, io_uring on each SEND completion. A reply that outgrows the response buffer is handed to the connection as the buffer fills, so no reply is ever cut short, and a slow reader never blocks the worker. A subscriber or MONITOR connection owed more than 32 MB is disconnected, as Redis's pubsub limit does.
 
 ---
 

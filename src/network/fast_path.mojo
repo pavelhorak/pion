@@ -430,6 +430,8 @@ struct FastPathHandler(Movable):
         var peer_host_len = self.cluster[].peer_host_lens[pi]
         var peer_port = self.cluster[].peer_ports[pi]
         # Write: -ASK <slot> <host>:<port>\r\n
+        if not writer.reserve(48 + peer_host_len):     # #49: one per pipelined command
+            return True
         var rb = writer.buffer + writer.offset
         rb[0] = 45; rb[1] = 65; rb[2] = 83; rb[3] = 75  # -ASK
         rb[4] = 32  # space
@@ -468,6 +470,8 @@ struct FastPathHandler(Movable):
         var peer_host_len = self.cluster[].peer_host_lens[pi]
         var peer_port = self.cluster[].peer_ports[pi]
         # Write: -MOVED <slot> <host>:<port>\r\n
+        if not writer.reserve(48 + peer_host_len):     # #49: one per pipelined command
+            return True
         var rb = writer.buffer + writer.offset
         rb[0] = 45; rb[1] = 77; rb[2] = 79; rb[3] = 86; rb[4] = 69; rb[5] = 68  # -MOVED
         rb[6] = 32  # space
@@ -497,6 +501,8 @@ struct FastPathHandler(Movable):
         # Non-READONLY: redirect to primary with -MOVED
         var pi = self.cluster[].primary_peer_idx
         if pi >= 0 and pi < self.cluster[].peer_count:
+            if not writer.reserve(48 + self.cluster[].peer_host_lens[pi]):   # #49
+                return True
             var rb = writer.buffer + writer.offset
             rb[0] = 45; rb[1] = 77; rb[2] = 79; rb[3] = 86; rb[4] = 69; rb[5] = 68  # -MOVED
             rb[6] = 32
@@ -882,25 +888,26 @@ struct FastPathHandler(Movable):
                             or (buffer[ci + 3] | 0x20) != 103):
                         break
                     var after = ci + 4
-                    # End-of-buffer: accept this PING (mirrors original
-                    # lenient single-shot behaviour — CR/LF can arrive next read).
-                    if after >= n:
+                    # #53: only a complete, bare `PING` line. Anything else
+                    # stops the batch and is left to the slow path whole:
+                    # `PING hello` was answered PONG here and its `hello` then
+                    # ran as a command (two replies for one), `PINGX` the same,
+                    # and a `PING` whose line had not arrived yet was answered
+                    # before the rest of the line could say otherwise.
+                    if after < n and buffer[after] == 10:
                         count += 1
-                        ci = after
-                        break
-                    # Non-terminator after PING: stop and let the rest fall
-                    # through to slow-path. Don't consume bytes we can't safely batch.
-                    if buffer[after] != 13 and buffer[after] != 10:
+                        ci = after + 1
+                        continue
+                    if after + 1 < n and buffer[after] == 13 and buffer[after + 1] == 10:
                         count += 1
-                        ci = after
-                        break
-                    count += 1
-                    ci = after
-                    if ci < n and buffer[ci] == 13: ci += 1
-                    if ci < n and buffer[ci] == 10: ci += 1
-                writer.append_pong_bulk(count)
-                writer.flush_response(fd, server, kq)
-                return ci
+                        ci = after + 2
+                        continue
+                    break
+                if count > 0:
+                    writer.append_pong_bulk(count)
+                    writer.flush_response(fd, server, kq)
+                    return ci
+                return 0
 
         if not is_complex and num_cmds > 0:
             var it_pos = 0
@@ -908,6 +915,9 @@ struct FastPathHandler(Movable):
             var consumed = 0
 
             while it_pos < n:
+                # #49: bound the buffer for a long pipeline of fixed-size
+                # replies (SET/MSET/INCR), which bare-return on overflow.
+                writer.spill_if_full(fd, server, kq)
                 var cmd_start_pos = it_pos
                 if buffer[it_pos] != 42: # *
                     fast_path_ok = False
@@ -1158,7 +1168,7 @@ struct FastPathHandler(Movable):
                 # 4-byte `PI**` command being silently shadowed by PING.
                 elif b0_lower == 112 and cmd_len == 4 and (buffer[cmd_start + 1] | 0x20) == 105 and (buffer[cmd_start + 2] | 0x20) == 110 and (buffer[cmd_start + 3] | 0x20) == 103: # 'p','i','n','g' - PING
                     if num_args == 1:
-                        writer.append_pong_response()
+                        writer.append_pong_response_fast()
                     elif num_args == 2:
                         if it_pos >= n or buffer[it_pos] != 36:
                             return consumed
@@ -1172,17 +1182,10 @@ struct FastPathHandler(Movable):
                         if msg_len < 0 or it_pos + msg_len + 2 > n:
                             return consumed
 
-                        writer.buffer[writer.offset] = 36 # '$'
-                        writer.offset += 1
-                        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(msg_len))
-                        writer.buffer[writer.offset] = 13 # '\r'
-                        writer.buffer[writer.offset + 1] = 10 # '\n'
-                        writer.offset += 2
-                        unsafe_memcpy(dest=writer.buffer + writer.offset, src=buffer + it_pos, count=msg_len)
-                        writer.offset += msg_len
-                        writer.buffer[writer.offset] = 13 # '\r'
-                        writer.buffer[writer.offset + 1] = 10 # '\n'
-                        writer.offset += 2
+                        # The message is the client's, any length: through the
+                        # appender, which bounds it. A copy straight into the
+                        # buffer here let `PING <5 MB>` write past its end.
+                        writer.append_bulk_string_response(buffer + it_pos, msg_len)
 
                         it_pos += msg_len + 2
                     else:
@@ -1223,12 +1226,12 @@ struct FastPathHandler(Movable):
                     if is_not_null(vptr) and vptr[].type.value == ValueType.INT:
                         var cur = Int64(vptr[]._data0)
                         if cur == 9223372036854775807:
-                            writer.append_error_response("ERR increment or decrement would overflow")
+                            writer.append_error_response_fast("ERR increment or decrement would overflow")
                             it_pos += key_len + 2
                             consumed = it_pos
                             continue
                         vptr[]._data0 = UInt64(cur + 1)
-                        writer.append_int_response(Int64(vptr[]._data0))
+                        writer.append_int_response_fast(Int64(vptr[]._data0))
                         if self.has_wal and is_not_null(self.wal):
                             # gh #216: log the RESOLVED counter, not an empty SET.
                             # A null-value cmd-1 record replays as an empty string,
@@ -1244,7 +1247,7 @@ struct FastPathHandler(Movable):
                     # Key not found: set to 1 directly (skip redundant get())
                     if is_null(vptr):
                         self.keyspace[].set(key_val, GenericValue.from_int(1))
-                        writer.append_int_response(1)
+                        writer.append_int_response_fast(1)
                         if self.has_wal and is_not_null(self.wal):
                             var _cb = stack_allocation[24, UInt8]()   # gh #216
                             var _cl = format_int_to_buf(_cb, 0, Int64(1))
@@ -1320,7 +1323,7 @@ struct FastPathHandler(Movable):
 
                     if valid:
                         self.keyspace[].set(key_val, GenericValue.from_int(new_val))
-                        writer.append_int_response(new_val)
+                        writer.append_int_response_fast(new_val)
                         if self.has_wal and is_not_null(self.wal):
                             # gh #216: this arm (counter held as a string, e.g. SET
                             # then INCR) logged nothing at all, so the increment was
@@ -1330,9 +1333,9 @@ struct FastPathHandler(Movable):
                             _ = self.wal[].append_kv(UInt8(1), buffer + it_pos, key_len,
                                 _cb, _cl)
                     elif val.is_container():   # gh #232
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     else:
-                        writer.append_error_response("ERR value is not an integer or out of range")
+                        writer.append_error_response_fast("ERR value is not an integer or out of range")
 
                     it_pos += key_len + 2
                 elif b0_lower == 100 and cmd_len == 4 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 99 and (buffer[cmd_start + 3] | 0x20) == 114: # 'd' 'e' 'c' 'r' - DECR
@@ -1361,12 +1364,12 @@ struct FastPathHandler(Movable):
                     if is_not_null(vptr) and vptr[].type.value == ValueType.INT:
                         var cur = Int64(vptr[]._data0)
                         if cur == -9223372036854775808:
-                            writer.append_error_response("ERR increment or decrement would overflow")
+                            writer.append_error_response_fast("ERR increment or decrement would overflow")
                             it_pos += key_len + 2
                             consumed = it_pos
                             continue
                         vptr[]._data0 = UInt64(cur - 1)
-                        writer.append_int_response(Int64(vptr[]._data0))
+                        writer.append_int_response_fast(Int64(vptr[]._data0))
                         if self.has_wal and is_not_null(self.wal):
                             var _cb = stack_allocation[24, UInt8]()   # gh #216
                             var _cl = format_int_to_buf(_cb, 0, Int64(vptr[]._data0))
@@ -1379,7 +1382,7 @@ struct FastPathHandler(Movable):
                     # Key not found: set to -1 directly (skip redundant get())
                     if is_null(vptr):
                         self.keyspace[].set(key_val, GenericValue.from_int(-1))
-                        writer.append_int_response(-1)
+                        writer.append_int_response_fast(-1)
                         if self.has_wal and is_not_null(self.wal):
                             var _cb = stack_allocation[24, UInt8]()   # gh #216
                             var _cl = format_int_to_buf(_cb, 0, Int64(-1))
@@ -1455,7 +1458,7 @@ struct FastPathHandler(Movable):
 
                     if valid:
                         self.keyspace[].set(key_val, GenericValue.from_int(new_val))
-                        writer.append_int_response(new_val)
+                        writer.append_int_response_fast(new_val)
                         if self.has_wal and is_not_null(self.wal):
                             # gh #216: this arm (counter held as a string, e.g. SET
                             # then INCR) logged nothing at all, so the increment was
@@ -1465,9 +1468,9 @@ struct FastPathHandler(Movable):
                             _ = self.wal[].append_kv(UInt8(1), buffer + it_pos, key_len,
                                 _cb, _cl)
                     elif val.is_container():   # gh #232
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     else:
-                        writer.append_error_response("ERR value is not an integer or out of range")
+                        writer.append_error_response_fast("ERR value is not an integer or out of range")
 
                     it_pos += key_len + 2
                 elif b0_lower == 100 and cmd_len == 3 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 108: # 'd' 'e' 'l' - DEL
@@ -1501,7 +1504,7 @@ struct FastPathHandler(Movable):
                             self.key_versions[_kv_slot] += 1
                         if is_not_null(self.ttl_map):
                             _ = self.ttl_map[].remove_generic(key_val)
-                    writer.append_int_response(Int64(1 if removed else 0))
+                    writer.append_int_response_fast(Int64(1 if removed else 0))
                 elif b0_lower == 101 and cmd_len == 6 and cmd_matches_6(buffer + cmd_start, 101, 120, 105, 115, 116, 115): # EXISTS (gh #225: shared 'e'+6 with EXPIRE)
                     if num_args != 2 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -1521,7 +1524,7 @@ struct FastPathHandler(Movable):
                     # gh #85b: P2 cross-worker routing removed (shared-nothing, gh #48).
                     var exists = not self.keyspace[].get_with_ptr(buffer + it_pos, key_len).is_none()
                     it_pos += key_len + 2
-                    writer.append_int_response(Int64(1 if exists else 0))
+                    writer.append_int_response_fast(Int64(1 if exists else 0))
                 elif b0_lower == 104 and cmd_len == 4 and cmd_matches_4(buffer + cmd_start, 104, 103, 101, 116): # HGET (gh #225: every byte)
                     if num_args != 3 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -1571,14 +1574,14 @@ struct FastPathHandler(Movable):
                                 if hash_ptr[].size == 0:   # the last field went: so does the key
                                     _ = remove_and_free(self.keyspace, GenericValue.borrow_buf(hget_key_ptr, hget_key_len))
                         if field_expired_fp:
-                            writer.append_null_response()
+                            writer.append_null_response_fast()
                         else:
                             var field_val = hash_ptr[].get_with_ptr(field_ptr, field_len)
                             writer.append_bulk_value_response(field_val)
                     elif not outer_val.is_none():   # gh #232
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     else:
-                        writer.append_null_response()
+                        writer.append_null_response_fast()
                 elif b0_lower == 109 and cmd_len == 4: # 'm' - MGET or MSET
                     var b1_lower = buffer[cmd_start + 1] | 0x20
                     if cmd_matches_4(buffer + cmd_start, 109, 103, 101, 116): # MGET (gh #225: shares 'm'+4 with MOVE)
@@ -1638,21 +1641,37 @@ struct FastPathHandler(Movable):
                                 writer.append_bulk_value_response(val)
                                 k += 1
                         else:
-                            # Sequential fallback for large MGET (>16 keys)
+                            # Sequential fallback for large MGET (>16 keys).
+                            # #49: the whole frame is checked before the first
+                            # value is written. A long reply can spill to the
+                            # connection mid-way, and nothing that has left the
+                            # buffer can be taken back by `writer.offset = mget_w0`.
+                            var scan = it_pos
+                            var scanned = 0
+                            while scanned < num_keys:
+                                if scan >= n or buffer[scan] != 36:
+                                    break
+                                scan += 1
+                                var skl = 0
+                                while scan < n and buffer[scan] != 13:
+                                    skl = skl * 10 + Int(buffer[scan] - 48)
+                                    scan += 1
+                                scan += 2
+                                if skl < 0 or scan + skl + 2 > n:
+                                    break
+                                scan += skl + 2
+                                scanned += 1
+                            if scanned < num_keys:
+                                writer.offset = mget_w0
+                                return consumed
                             var keys_parsed = 0
                             while keys_parsed < num_keys:
-                                if it_pos >= n or buffer[it_pos] != 36:
-                                    writer.offset = mget_w0
-                                    return consumed
                                 it_pos += 1
                                 var key_len = 0
                                 while it_pos < n and buffer[it_pos] != 13:
                                     key_len = key_len * 10 + Int(buffer[it_pos] - 48)
                                     it_pos += 1
                                 it_pos += 2
-                                if key_len < 0 or it_pos + key_len + 2 > n:
-                                    writer.offset = mget_w0
-                                    return consumed
                                 var val = self.keyspace[].get_with_ptr(buffer + it_pos, key_len)
                                 writer.append_bulk_value_response(val)
                                 it_pos += key_len + 2
@@ -1737,7 +1756,7 @@ struct FastPathHandler(Movable):
                                                                buffer + it_pos, val_len)
                             if is_not_null(self.shared_hnsw) and self.shared_hnsw[].pre_index_ready:
                                 self._ingest_field(key_ptr, k_len, field_ptr, f_len, buffer + it_pos, val_len)
-                            writer.append_int_response(Int64(1))
+                            writer.append_int_response_fast(Int64(1))
                         elif val.type.value == ValueType.HASH:
                             var hash_ptr = val.as_hash().bitcast[SlabHashMap]()
                             # gh #232: Redis returns the number of fields ADDED, so a
@@ -1756,11 +1775,11 @@ struct FastPathHandler(Movable):
                                                                buffer + it_pos, val_len)
                             if is_not_null(self.shared_hnsw) and self.shared_hnsw[].pre_index_ready:
                                 self._ingest_field(key_ptr, k_len, field_ptr, f_len, buffer + it_pos, val_len)
-                            writer.append_int_response(Int64(1) if hash_ptr[].size > _hs_before else Int64(0))
+                            writer.append_int_response_fast(Int64(1) if hash_ptr[].size > _hs_before else Int64(0))
                         else:
                             valid = False
                         if not valid:
-                            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                            writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                         it_pos += val_len + 2
                     elif num_args >= 6 and (num_args - 2) % 2 == 0:
                         # Multi-field HSET: num_args = 2 + 2*num_fields
@@ -1807,7 +1826,7 @@ struct FastPathHandler(Movable):
                         elif kv2.type.value == ValueType.HASH:
                             hash_ptr2 = kv2.as_hash().bitcast[SlabHashMap]()
                         else:
-                            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                            writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                             # Skip remaining field-value tokens
                             var _skip = num_args - 2
                             while _skip > 0 and it_pos < n:
@@ -1869,7 +1888,7 @@ struct FastPathHandler(Movable):
                                     and v_len2 == self.shared_hnsw[].pre_dim * 4:
                                 self._ingest_field(key_ptr2, k_len2, f_ptr2, f_len2, buffer + it_pos, v_len2)
                             it_pos += v_len2 + 2
-                        writer.append_int_response(Int64(hash_ptr2[].size - _hms_before))
+                        writer.append_int_response_fast(Int64(hash_ptr2[].size - _hms_before))
                     else:
                         return consumed
                 elif b0_lower == 108 and cmd_len == 5 and (buffer[cmd_start + 1] | 0x20) == 112 and (buffer[cmd_start + 2] | 0x20) == 117 and (buffer[cmd_start + 3] | 0x20) == 115 and (buffer[cmd_start + 4] | 0x20) == 104: # 'l' 'p' 'u' 's' 'h' - LPUSH
@@ -1914,17 +1933,17 @@ struct FastPathHandler(Movable):
                         list_ptr[].lpush(val_val)
                         if self.has_wal:   # gh #170
                             _ = self.wal[].append_kv(6, key_ptr, k_len, buffer + it_pos, val_len)
-                        writer.append_int_response(Int64(list_ptr[].llen()))
+                        writer.append_int_response_fast(Int64(list_ptr[].llen()))
                     elif val.type.value == ValueType.LIST:
                         var list_ptr = val.as_list().bitcast[SlabList]()
                         list_ptr[].lpush(val_val)
                         if self.has_wal:   # gh #170
                             _ = self.wal[].append_kv(6, key_ptr, k_len, buffer + it_pos, val_len)
-                        writer.append_int_response(Int64(list_ptr[].llen()))
+                        writer.append_int_response_fast(Int64(list_ptr[].llen()))
                     else:
                         valid = False
                     if not valid:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     it_pos += val_len + 2
                 elif b0_lower == 108 and cmd_len == 4 and (buffer[cmd_start + 1] | 0x20) == 112 and (buffer[cmd_start + 2] | 0x20) == 111 and (buffer[cmd_start + 3] | 0x20) == 112: # 'l' 'p' 'o' 'p' - LPOP
                     if num_args != 2 or it_pos >= n or buffer[it_pos] != 36:
@@ -1948,7 +1967,7 @@ struct FastPathHandler(Movable):
                         var list_ptr = val.as_list().bitcast[SlabList]()
                         if list_ptr[].size == 0:
                             # Empty list fast path — avoid full lpop() call + GenericValue construction
-                            writer.append_null_response()
+                            writer.append_null_response_fast()
                         else:
                             var popped = list_ptr[].lpop()
                             if self.has_wal:   # gh #170
@@ -1970,9 +1989,9 @@ struct FastPathHandler(Movable):
                     # WRONGTYPE. The extra compare rides the not-a-list branch
                     # only — the served path above is untouched.
                     elif not val.is_none():
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     else:
-                        writer.append_null_response()
+                        writer.append_null_response_fast()
                     it_pos += key_len + 2
                 elif b0_lower == 114 and cmd_len == 5 and (buffer[cmd_start + 1] | 0x20) == 112 and (buffer[cmd_start + 2] | 0x20) == 117 and (buffer[cmd_start + 3] | 0x20) == 115 and (buffer[cmd_start + 4] | 0x20) == 104: # 'r' 'p' 'u' 's' 'h' - RPUSH
                     if num_args != 3 or it_pos >= n or buffer[it_pos] != 36:
@@ -2016,17 +2035,17 @@ struct FastPathHandler(Movable):
                         list_ptr[].rpush(val_val)
                         if self.has_wal:   # gh #170
                             _ = self.wal[].append_kv(7, key_ptr, k_len, buffer + it_pos, val_len)
-                        writer.append_int_response(Int64(list_ptr[].llen()))
+                        writer.append_int_response_fast(Int64(list_ptr[].llen()))
                     elif val.type.value == ValueType.LIST:
                         var list_ptr = val.as_list().bitcast[SlabList]()
                         list_ptr[].rpush(val_val)
                         if self.has_wal:   # gh #170
                             _ = self.wal[].append_kv(7, key_ptr, k_len, buffer + it_pos, val_len)
-                        writer.append_int_response(Int64(list_ptr[].llen()))
+                        writer.append_int_response_fast(Int64(list_ptr[].llen()))
                     else:
                         valid = False
                     if not valid:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     it_pos += val_len + 2
                 elif b0_lower == 114 and cmd_len == 4 and (buffer[cmd_start + 1] | 0x20) == 112 and (buffer[cmd_start + 2] | 0x20) == 111 and (buffer[cmd_start + 3] | 0x20) == 112: # 'r' 'p' 'o' 'p' - RPOP
                     if num_args != 2 or it_pos >= n or buffer[it_pos] != 36:
@@ -2049,7 +2068,7 @@ struct FastPathHandler(Movable):
                     if val.type.value == ValueType.LIST:
                         var list_ptr = val.as_list().bitcast[SlabList]()
                         if list_ptr[].size == 0:
-                            writer.append_null_response()
+                            writer.append_null_response_fast()
                         else:
                             var popped = list_ptr[].rpop()
                             if self.has_wal:   # gh #170
@@ -2068,9 +2087,9 @@ struct FastPathHandler(Movable):
                                 if self.has_wal:
                                     _ = self.wal[].append(2, buffer + it_pos, key_len)
                     elif not val.is_none():   # gh #232
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     else:
-                        writer.append_null_response()
+                        writer.append_null_response_fast()
                     it_pos += key_len + 2
                 elif b0_lower == 122 and cmd_len == 4 and (buffer[cmd_start + 1] | 0x20) == 97 and (buffer[cmd_start + 2] | 0x20) == 100 and (buffer[cmd_start + 3] | 0x20) == 100: # 'z' 'a' 'd' 'd' - ZADD
                     if num_args != 4 or it_pos >= n or buffer[it_pos] != 36:
@@ -2160,7 +2179,7 @@ struct FastPathHandler(Movable):
                         if self.has_wal:   # gh #170
                             _ = self.wal[].append_scored(9, key_ptr, k_len, parsed_score,
                                                          buffer + it_pos, val_len)
-                        writer.append_int_response(Int64(zadd_added))
+                        writer.append_int_response_fast(Int64(zadd_added))
                     elif val.type.value == ValueType.ZSET:
                         var zset_ptr = val.as_zset().bitcast[SlabSkipList]()
                         # gh #187: upsert dedups; reply counts new members only
@@ -2168,11 +2187,11 @@ struct FastPathHandler(Movable):
                         if self.has_wal:   # gh #170
                             _ = self.wal[].append_scored(9, key_ptr, k_len, parsed_score,
                                                          buffer + it_pos, val_len)
-                        writer.append_int_response(Int64(zadd_added))
+                        writer.append_int_response_fast(Int64(zadd_added))
                     else:
                         valid = False
                     if not valid:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     it_pos += val_len + 2
                 elif b0_lower == 122 and cmd_len == 7 and cmd_matches_7(buffer + cmd_start, 122, 112, 111, 112, 109, 105, 110):  # ZPOPMIN (gh #225: every byte)
                     if num_args != 2 or it_pos >= n or buffer[it_pos] != 36:
@@ -2196,7 +2215,7 @@ struct FastPathHandler(Movable):
                         var zset_ptr = val.as_zset().bitcast[SlabSkipList]()
                         var res = zset_ptr[].pop_min()
                         if not res.valid or res.obj.is_none():
-                            writer.append_empty_array_response()
+                            writer.append_empty_array_response_fast()
                         else:
                             var score = res.score
                             var obj = res.obj
@@ -2236,12 +2255,12 @@ struct FastPathHandler(Movable):
                         # the reply shape has to match the popped-pair shape so
                         # a client can treat it uniformly. The slow path already
                         # answered this correctly; only the fast path did not.
-                        writer.append_empty_array_response()
+                        writer.append_empty_array_response_fast()
                     else:
                         # gh #232: the deferred "Pion permissive" remainder,
                         # now closed. The compare rides the not-a-zset branch,
                         # which ZPOPMIN's gate row never takes.
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     it_pos += key_len + 2
                 elif b0_lower == 115 and cmd_len == 4 and cmd_matches_4(buffer + cmd_start, 115, 97, 100, 100): # SADD (gh #225: every byte)
                     if num_args != 3 or it_pos >= n or buffer[it_pos] != 36:
@@ -2289,7 +2308,7 @@ struct FastPathHandler(Movable):
                         set_ptr[].set(val_val, GenericValue.from_int(1))
                         if self.has_wal:   # gh #170
                             _ = self.wal[].append_kv(8, key_ptr, k_len, buffer + it_pos, val_len)
-                        writer.append_int_response(Int64(1))
+                        writer.append_int_response_fast(Int64(1))
                     elif val.type.value == ValueType.SET:
                         var set_ptr = val.as_set().bitcast[SlabHashMap]()
                         var exists = set_ptr[].get(val_val)
@@ -2297,13 +2316,13 @@ struct FastPathHandler(Movable):
                             set_ptr[].set(val_val, GenericValue.from_int(1))
                             if self.has_wal:   # gh #170
                                 _ = self.wal[].append_kv(8, key_ptr, k_len, buffer + it_pos, val_len)
-                            writer.append_int_response(Int64(1))
+                            writer.append_int_response_fast(Int64(1))
                         else:
-                            writer.append_int_response(Int64(0))
+                            writer.append_int_response_fast(Int64(0))
                     else:
                         valid = False
                     if not valid:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     it_pos += val_len + 2
                 elif b0_lower == 115 and cmd_len == 4 and cmd_matches_4(buffer + cmd_start, 115, 112, 111, 112): # SPOP (gh #225: every byte)
                     if (num_args != 2 and num_args != 3) or it_pos >= n or buffer[it_pos] != 36:
@@ -2345,12 +2364,12 @@ struct FastPathHandler(Movable):
                         it_pos += cnt_len + 2
                         if not _spc.ok:
                             key_val.free_str_payload()
-                            writer.append_error_response("ERR value is not an integer or out of range")
+                            writer.append_error_response_fast("ERR value is not an integer or out of range")
                             consumed = it_pos
                             continue
                         if _spc.value < 0:
                             key_val.free_str_payload()
-                            writer.append_error_response("ERR value is out of range, must be positive")
+                            writer.append_error_response_fast("ERR value is out of range, must be positive")
                             consumed = it_pos
                             continue
                         spop_count = Int(_spc.value)
@@ -2371,7 +2390,7 @@ struct FastPathHandler(Movable):
                             # Count arg: return array of popped elements
                             var actual_count = min(spop_count, set_ptr[].size)
                             # RESP3: a set, as Redis; and no String built on the fast path.
-                            writer.append_set_header(actual_count)
+                            writer.append_set_header_fast(actual_count)
                             for _pi in range(actual_count):
                                 var popped = set_ptr[].pop_random(self.prng)
                                 if self.has_wal and not popped.is_none():  # gh #170
@@ -2389,14 +2408,14 @@ struct FastPathHandler(Movable):
                             if self.has_wal:
                                 _ = self.wal[].append(2, _sp_kp, key_len)
                     elif not val.is_none():   # gh #232
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     else:
                         # gh #251: WITH and WITHOUT `count` are different reply
                         # types, and on a missing key the split flips.
                         if num_args == 2:
-                            writer.append_null_response()
+                            writer.append_null_response_fast()
                         else:
-                            writer.append_set_header(0)   # RESP3 `~0`, RESP2 `*0`
+                            writer.append_set_header_fast(0)   # RESP3 `~0`, RESP2 `*0`
                 elif b0_lower == 108 and cmd_len == 6 and cmd_matches_6(buffer + cmd_start, 108, 114, 97, 110, 103, 101): # LRANGE (gh #225: every byte)
                     if num_args != 4 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2448,7 +2467,7 @@ struct FastPathHandler(Movable):
                     var _lr_s = parse_int64_strict(start_ptr, st_len)
                     var _lr_e = parse_int64_strict(stop_ptr, sp_len)
                     if not _lr_s.ok or not _lr_e.ok:
-                        writer.append_error_response("ERR value is not an integer or out of range")
+                        writer.append_error_response_fast("ERR value is not an integer or out of range")
                         consumed = it_pos
                         continue
                     var start_idx = Int(_lr_s.value)
@@ -2471,9 +2490,15 @@ struct FastPathHandler(Movable):
                         if stop - start >= 4096:
                             return consumed
                         if start > stop or start >= size:
-                            writer.append_empty_array_response()
+                            writer.append_empty_array_response_fast()
                         else:
                             var count = stop - start + 1
+                            # The ziplist branch writes the buffer itself: at most
+                            # `$64\r\n` + 64 + `\r\n` per element. Without this,
+                            # pipelined LRANGEs of small lists ran past the end of
+                            # the buffer (nothing checked between commands).
+                            if not writer.reserve(16 + count * 72):
+                                return consumed
                             writer.buffer[writer.offset] = 42 # '*'
                             writer.offset += 1
                             writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(count))
@@ -2552,9 +2577,9 @@ struct FastPathHandler(Movable):
                                     tk += 1
                                     global_idx += 1
                     elif not val.is_none():   # gh #232
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                     else:
-                        writer.append_empty_array_response()
+                        writer.append_empty_array_response_fast()
                 elif b0_lower == 108 and cmd_len == 4 and cmd_matches_4(buffer + cmd_start, 108, 108, 101, 110): # LLEN (gh #225: every byte)
                     if num_args != 2 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2574,12 +2599,12 @@ struct FastPathHandler(Movable):
                     var llen_val = self.keyspace[].get_with_ptr(buffer + it_pos, key_len)
                     it_pos += key_len + 2
                     if llen_val.is_none():
-                        writer.append_int_response(0)
+                        writer.append_int_response_fast(0)
                     elif llen_val.type.value == ValueType.LIST:
                         var list_ptr = llen_val.as_list().bitcast[SlabList]()
-                        writer.append_int_response(Int64(list_ptr[].llen()))
+                        writer.append_int_response_fast(Int64(list_ptr[].llen()))
                     else:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                 elif b0_lower == 103 and cmd_len == 6 and cmd_matches_6(buffer + cmd_start, 103, 101, 116, 98, 105, 116): # GETBIT
                     if num_args != 3 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2616,12 +2641,12 @@ struct FastPathHandler(Movable):
                     var bit_offset = Int(_gbo.value)
                     it_pos += off_len + 2
                     if not _gbo.ok or _gbo.value < 0 or _gbo.value >= 4294967296:
-                        writer.append_error_response("ERR bit offset is not an integer or out of range")
+                        writer.append_error_response_fast("ERR bit offset is not an integer or out of range")
                         consumed = it_pos
                         continue
                     var gb_val = self.keyspace[].get(key_val)
                     if gb_val.is_none():
-                        writer.append_int_response(0)
+                        writer.append_int_response_fast(0)
                     elif gb_val.is_string_like():
                         # gh #232: a plain SET string is a valid bitmap in Redis
                         # (`SET k hello; GETBIT k 0` -> 0, not WRONGTYPE).
@@ -2629,11 +2654,11 @@ struct FastPathHandler(Movable):
                         var byte_len = 0
                         var bitmap_ptr = gb_val.bitmap_view(_gb_scratch, byte_len)
                         if bit_offset // 8 >= byte_len:
-                            writer.append_int_response(0)
+                            writer.append_int_response_fast(0)
                         else:
-                            writer.append_int_response(Int64(getbit(bitmap_ptr, byte_len, bit_offset)))
+                            writer.append_int_response_fast(Int64(getbit(bitmap_ptr, byte_len, bit_offset)))
                     else:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                 elif b0_lower == 115 and cmd_len == 6 and cmd_matches_6(buffer + cmd_start, 115, 101, 116, 98, 105, 116): # SETBIT
                     if num_args != 4 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2683,9 +2708,9 @@ struct FastPathHandler(Movable):
                     var bit_value = Int(buffer[it_pos] - 48) if bv_len == 1 else -1
                     it_pos += bv_len + 2
                     if not _sbo_ok:
-                        writer.append_error_response("ERR bit offset is not an integer or out of range")
+                        writer.append_error_response_fast("ERR bit offset is not an integer or out of range")
                     elif bit_value != 0 and bit_value != 1:
-                        writer.append_error_response("ERR bit is not an integer or out of range")
+                        writer.append_error_response_fast("ERR bit is not an integer or out of range")
                     else:
                         var sb_val = self.keyspace[].get(key_val)
                         if sb_val.is_none():
@@ -2706,7 +2731,7 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_u64_val(18, _bp, _bl,
                                         (UInt64(bit_offset) << 1) | UInt64(bit_value & 1),
                                         null_ptr[UInt8, MutUntrackedOrigin](), 0)
-                            writer.append_int_response(Int64(old_bit))
+                            writer.append_int_response_fast(Int64(old_bit))
                         elif sb_val.type.value == ValueType.BITMAP:
                             var bitmap_ptr = sb_val.as_bitmap()
                             var byte_len = sb_val.bitmap_len()
@@ -2722,7 +2747,7 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_u64_val(18, _bp, _bl,
                                         (UInt64(bit_offset) << 1) | UInt64(bit_value & 1),
                                         null_ptr[UInt8, MutUntrackedOrigin](), 0)
-                            writer.append_int_response(Int64(old_bit))
+                            writer.append_int_response_fast(Int64(old_bit))
                         elif sb_val.is_string_like():
                             # gh #232: a bitmap IS a string in Redis, so
                             # `SET k "hello"; SETBIT k 10 1` is textbook usage
@@ -2762,9 +2787,9 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_u64_val(18, _bp, _bl,
                                         (UInt64(bit_offset) << 1) | UInt64(bit_value & 1),
                                         null_ptr[UInt8, MutUntrackedOrigin](), 0)
-                            writer.append_int_response(Int64(old_bit))
+                            writer.append_int_response_fast(Int64(old_bit))
                         else:
-                            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                            writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                 elif b0_lower == 98 and cmd_len == 8 and cmd_matches_8(buffer + cmd_start, 98, 105, 116, 99, 111, 117, 110, 116): # BITCOUNT
                     if num_args != 2 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2785,16 +2810,16 @@ struct FastPathHandler(Movable):
                     it_pos += key_len + 2
                     var bc_val = self.keyspace[].get(key_val)
                     if bc_val.is_none():
-                        writer.append_int_response(0)
+                        writer.append_int_response_fast(0)
                     elif bc_val.is_string_like():
                         # gh #232: `SET k "hello"; BITCOUNT k` -> 21 in Redis.
                         # Textbook usage, and it was answering WRONGTYPE.
                         var _bc_scratch = stack_allocation[24, UInt8]()
                         var byte_len = 0
                         var bitmap_ptr = bc_val.bitmap_view(_bc_scratch, byte_len)
-                        writer.append_int_response(Int64(bitcount(bitmap_ptr, byte_len)))
+                        writer.append_int_response_fast(Int64(bitcount(bitmap_ptr, byte_len)))
                     else:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                 elif b0_lower == 112 and cmd_len == 5 and cmd_matches_5(buffer + cmd_start, 112, 102, 97, 100, 100): # PFADD (gh #225: every byte)
                     # Whole frame present before anything is applied or answered
                     # (see _bulks_end): the element loop below mutates as it goes.
@@ -2828,7 +2853,7 @@ struct FastPathHandler(Movable):
                     elif hll_stored.type.value == ValueType.HLL:
                         hll_ptr = hll_stored.as_hll()
                     else:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                         # skip remaining args
                         var args_to_skip = num_args - 2
                         for _ in range(args_to_skip):
@@ -2880,7 +2905,7 @@ struct FastPathHandler(Movable):
                         it_pos += elem_len + 2
                     if not pfadd_ok:
                         return consumed
-                    writer.append_int_response(Int64(1 if pfadd_updated else 0))
+                    writer.append_int_response_fast(Int64(1 if pfadd_updated else 0))
                 elif b0_lower == 112 and cmd_len == 7 and cmd_matches_7(buffer + cmd_start, 112, 102, 99, 111, 117, 110, 116): # PFCOUNT single key (gh #225: shared 'p','f'+7 with PFDEBUG)
                     if num_args != 2 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2901,12 +2926,12 @@ struct FastPathHandler(Movable):
                     it_pos += key_len + 2
                     var pfc_val = self.keyspace[].get(key_val)
                     if pfc_val.is_none():
-                        writer.append_int_response(0)
+                        writer.append_int_response_fast(0)
                     elif pfc_val.type.value == ValueType.HLL:
                         var hll_ptr = pfc_val.as_hll()
-                        writer.append_int_response(Int64(hll_count(hll_ptr)))
+                        writer.append_int_response_fast(Int64(hll_count(hll_ptr)))
                     else:
-                        writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                        writer.append_error_response_fast("WRONGTYPE Operation against a key holding the wrong kind of value")
                 elif b0_lower == 101 and cmd_len == 4 and cmd_matches_4(buffer + cmd_start, 101, 99, 104, 111): # ECHO (gh #225: every byte)
                     if num_args != 2 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2982,7 +3007,7 @@ struct FastPathHandler(Movable):
                     it_pos = _fe
                     var _dbsz: Int64 = 0
                     for _si in range(8): _dbsz += Int64(self.keyspace[].shards[_si].size)
-                    writer.append_int_response(_dbsz)
+                    writer.append_int_response_fast(_dbsz)
                 elif b0_lower == 114 and cmd_len == 5 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 115 and (buffer[cmd_start + 3] | 0x20) == 101 and (buffer[cmd_start + 4] | 0x20) == 116: # RESET
                     # Redis answers RESET with +RESET (the slow path does); this
                     # arm said +OK, so the reply depended on which path ran it.

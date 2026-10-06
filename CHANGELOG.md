@@ -6,6 +6,51 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Replies of any size arrive whole** (#49). The reply buffer is 4 MB per
+  worker; a reply that did not fit was cut short with
+  `-ERR response exceeds buffer`, and a pipeline of small replies past 4 MB
+  lost the ones that did not fit. A full buffer is now handed to its
+  connection and the reply goes on, as Redis's goes on into its output
+  buffer: LRANGE, HGETALL, KEYS, SMEMBERS, ZRANGE and MGET of any size, and a
+  pipeline of any length. A connection that stops reading no longer blocks
+  the others: what it is owed waits in its own queue. A published message or
+  MONITOR line to a connection already owed 32 MB closes it, as Redis's
+  pub/sub output limit does.
+- **SCAN, HSCAN, SSCAN and ZSCAN iterate with a cursor** (#50). Each returned
+  its whole table in one reply with cursor 0, whatever COUNT said, so a large
+  keyspace ran into the reply limit. They now walk the table COUNT entries at
+  a time and return every key present for the whole iteration, across
+  inserts, deletes and table rebuilds. A small keyspace still comes back in
+  one call.
+- **AI.CHAT returns the model's reply** (#51). It compared an 11-byte JSON key
+  as 12 bytes and answered nil to every reply. AI.CHAT and AI.COMPLETE now
+  decode `\uXXXX` escapes, surrogate pairs included, so `<`, `>` and `&` from
+  Go-based backends such as Ollama no longer come back as `u003c`.
+- **Commands with more than 2,048 arguments run** (#52) instead of being
+  refused, through a token table that grows for the one command that needs it.
+- **Inline commands parse as Redis parses them** (#53): double- and
+  single-quoted arguments and their escapes follow `sdssplitargs`, any line
+  not starting with `*` is an inline command, and a malformed request (a bad
+  count, an element without `$`, an unbalanced quote) gets Redis's
+  `-ERR Protocol error: ...` and a closed connection. Before, `SET k "a b"`
+  was a syntax error, and `"PING"` or a line starting with a space got no
+  reply at all.
+- The unknown-command error is Redis 7's full text: the name and the
+  arguments, cut at 128 bytes.
+- CLIENT REPLY OFF / SKIP drops a reply even when the reply is larger than
+  the reply buffer.
+- A command that fails after part of its reply has already been sent is
+  answered and the connection closed, rather than rolled back to bytes the
+  client already holds.
+
+### Security
+
+- A fast-path reply could be written past the end of the 4 MB reply buffer:
+  PING with a large argument, a pipeline of LRANGEs of small lists, and
+  cluster redirects.
+
 ## [0.9.5] — 2026-10-06
 
 Linux fixes from the first run of the whole gate tier there, Redis

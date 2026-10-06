@@ -314,6 +314,31 @@ def tenant_keyspec(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> TenantKey
     return TenantKeySpec(False, 0, 0, 0)
 
 
+def tenant_rewrite_need(
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
+    i: Int,
+    cmd_end_tok: Int,
+    spec: TenantKeySpec,
+    name_len: Int,
+) -> Int:
+    """#52: the scratch bytes apply_tenant_rewrite needs for this command,
+    so the caller can size the scratch first: a command may have any number
+    of keys, and rewriting cannot grow the buffer it repoints tokens into."""
+    if not spec.allowed or spec.firstkey <= 0:
+        return 0
+    var need = 0
+    var k = i + Int(spec.firstkey)
+    var last = cmd_end_tok - 1
+    if spec.lastkey > 0:
+        var abs_last = i + Int(spec.lastkey)
+        if abs_last < last:
+            last = abs_last
+    while k <= last:
+        need += name_len + 1 + tokens[unsafe_offset=k].length
+        k += Int(spec.keystep)
+    return need
+
+
 def apply_tenant_rewrite(
     tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
@@ -322,6 +347,7 @@ def apply_tenant_rewrite(
     name_ptr: Pointer[UInt8, MutUntrackedOrigin],
     name_len: Int,
     scratch: Pointer[UInt8, MutUntrackedOrigin],
+    scratch_cap: Int = TENANT_SCRATCH_CAP,
 ) -> Bool:
     """Prefix every key token of tokens[i..cmd_end_tok) with "NAME:",
     repointing the token into `scratch` (reset per command — safe because a
@@ -340,7 +366,7 @@ def apply_tenant_rewrite(
             last = abs_last
     while k <= last:
         var klen = tokens[unsafe_offset=k].length
-        if off + prefix_len + klen > TENANT_SCRATCH_CAP:
+        if off + prefix_len + klen > scratch_cap:
             return False
         unsafe_memcpy(dest=scratch.unsafe_offset(off), src=name_ptr, count=name_len)
         scratch[unsafe_offset=off + name_len] = 58  # ':'

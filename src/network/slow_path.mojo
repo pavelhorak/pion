@@ -7,7 +7,7 @@ from std.collections import Array, List
 # IVF-PQ disabled: recall@100 = 0.59 for 50K 1536-dim vectors (a measured dead end).
 # gh #87.1: ENABLE_IVF_PQ removed (was permanently False).
 
-from src.network.resp3 import RESP3Parser, RESP3Token, TOKENS_OVERFLOW, MAX_CMD_TOKENS, MAX_CMD_ENDS
+from src.network.resp3 import RESP3Parser, RESP3Token, TOKENS_OVERFLOW, PROTOCOL_ERROR, protocol_error_text, MAX_CMD_TOKENS, MAX_CMD_ENDS
 from src.network.dispatcher import CommandDispatcher
 from src.network.server import TCPServer
 from src.network.response_writer import ResponseWriter
@@ -50,7 +50,7 @@ from src.common.hll import hll_add, hll_count, hll_merge, HLL_REGISTERS
 # Command modules (Phase 1 extraction)
 from src.commands.transaction import TransactionState, QueuedCommand, handle_multi, handle_exec_start, handle_discard, handle_watch, handle_unwatch, tx_queue_has_denyoom
 from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, command_is_noscript, command_hidden_from_monitor, command_touches_keyspace, command_monitor_first, PION_COMMAND_COUNT
-from src.commands.tenant import TenantTable, tenant_keyspec, apply_tenant_rewrite, TENANT_SCRATCH_CAP, MAX_TENANT_NAME
+from src.commands.tenant import TenantTable, tenant_keyspec, apply_tenant_rewrite, tenant_rewrite_need, TENANT_SCRATCH_CAP, MAX_TENANT_NAME
 from src.commands.stream import handle_xadd, handle_xlen, handle_xdel, handle_xread, handle_xtrim, handle_xrange, handle_xrevrange, BlockedReaderRegistry, write_xread_reply
 from src.commands.stream_groups import (handle_xgroup, handle_xreadgroup, handle_xack, handle_xpending, handle_xclaim,
                                         handle_xautoclaim, handle_xsetid, handle_xinfo, handle_xdelex, handle_xackdel,
@@ -162,6 +162,42 @@ def _binary_send_all(server: TCPServer, fd: Int32,
             _ = external_call["usleep", Int32](Int32(100))  # EAGAIN: 100µs backoff
         else:
             break  # n == 0: connection closed
+
+
+
+def unknown_command_error(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int) -> String:
+    """#53: Redis 7's error for an unknown command, byte for byte:
+    `ERR unknown command '<name>', with args beginning with: '<a>' '<b>' `,
+    the name cut at 128 bytes, arguments listed until they reach 128 bytes
+    (each cut to what is left of those), CR and LF shown as spaces."""
+    var out = List[UInt8]()
+    var head = "ERR unknown command '"
+    for b in head.as_bytes():
+        out.append(b)
+    var nl = tokens[i].length if tokens[i].length < 128 else 128
+    for k in range(nl):
+        out.append(tokens[i].ptr[k])
+    var mid = "', with args beginning with: "
+    for b in mid.as_bytes():
+        out.append(b)
+    var args_len = 0
+    var a = i + 1
+    while a < end and args_len < 128:
+        var room = 128 - args_len
+        var al = tokens[a].length if tokens[a].length < room else room
+        out.append(39)
+        for k in range(al):
+            out.append(tokens[a].ptr[k])
+        out.append(39)
+        out.append(32)
+        args_len += al + 3
+        a += 1
+    for k in range(len(out)):
+        if out[k] == 13 or out[k] == 10:
+            out[k] = 32
+    var s = bytes_to_string(UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(out.unsafe_ptr())), len(out))
+    _ = out^   # alive until the copy above is made: the pointer does not keep it
+    return s^
 
 
 struct SlowPathHandler:
@@ -343,6 +379,16 @@ struct SlowPathHandler:
     var slowlog_all: Bool             # slowlog-log-slower-than < 1 ms: every command is timed here
     var slowlog_thr: Int64            # slowlog-log-slower-than as last read (process-wide, in C)
     var slowlog_thr_ticks: UInt64     # the same in pion_ticks units; max when off
+    # #52: a command with more arguments than the token table holds is parsed
+    # alone into one of these, grown to its size (24 B per argument; at most
+    # MAX_ARRAY_LEN). One for the top level, one for a script's redis.call,
+    # which runs while the EVAL that started it is still using its tokens.
+    var big_tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin]
+    var big_tok_cap: Int
+    var script_big_tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin]
+    var script_big_tok_cap: Int
+    # #52: tenant_scratch's size; grown to fit a command with many keys
+    var tenant_scratch_cap: Int
 
     def __init__(
         out self,
@@ -427,6 +473,11 @@ struct SlowPathHandler:
         self.slowlog_all = False
         self.slowlog_thr = 10000
         self.slowlog_thr_ticks = UInt64(Float64(10000) * self.slowlog.ticks_per_us)
+        self.big_tokens = null_ptr[RESP3Token, MutUntrackedOrigin]()
+        self.big_tok_cap = 0
+        self.script_big_tokens = null_ptr[RESP3Token, MutUntrackedOrigin]()
+        self.script_big_tok_cap = 0
+        self.tenant_scratch_cap = TENANT_SCRATCH_CAP if self.tenant_table.count > 0 else 1
         self.cluster = cluster
         self.shard_query_seq = alloc[UInt64](1)
         self.shard_query_seq[0] = 1
@@ -1218,7 +1269,7 @@ struct SlowPathHandler:
 
     def _client_line_of(mut self, fd: Int32, caller: Int32, qbuf_self: Int, resp_self: Int,
                         mut writer: ResponseWriter) raises -> String:
-        var pending = is_not_null(writer.pending_offsets) and writer.pending_offsets[Int(fd)] > 0
+        var pending = is_not_null(writer.ctx[].pending_offsets) and writer.owes(Int(fd))
         return client_line(self.clients, self._client_view(fd, caller, qbuf_self, resp_self, pending))
 
     def _client_type(self, fd: Int32) -> Int:
@@ -1327,6 +1378,24 @@ struct SlowPathHandler:
             return self._tx_has_write(fd)
         return False
 
+    def _big_token_table(mut self, need: Int) -> UnsafePointer[RESP3Token, MutUntrackedOrigin]:
+        """#52: the table a command of `need` arguments is parsed into when the
+        regular one is too small: the top level's or the running script's,
+        grown to fit and kept for the next one."""
+        if self.script_depth == 0:
+            if need > self.big_tok_cap:
+                if is_not_null(self.big_tokens):
+                    self.big_tokens.free()
+                self.big_tokens = alloc[RESP3Token](need)
+                self.big_tok_cap = need
+            return self.big_tokens
+        if need > self.script_big_tok_cap:
+            if is_not_null(self.script_big_tokens):
+                self.script_big_tokens.free()
+            self.script_big_tokens = alloc[RESP3Token](need)
+            self.script_big_tok_cap = need
+        return self.script_big_tokens
+
     def _reply_gate(mut self, fd: Int32, mut writer: ResponseWriter, start: Int, flushes: Int):
         """CLIENT REPLY, once a command's reply is complete: OFF drops it; SKIP
         drops the reply of the command after CLIENT REPLY SKIP. A reply that
@@ -1338,7 +1407,7 @@ struct SlowPathHandler:
         if m == REPLY_SKIP_NEXT:
             self.clients.reply[f] = REPLY_SKIP_NOW   # the next command's reply goes
             return
-        if writer.flush_count == flushes and start <= writer.offset:
+        if writer.ctx[].flush_count == flushes and start <= writer.offset:
             writer.offset = start
         if m == REPLY_SKIP_NOW:
             self.clients.set_reply(fd, REPLY_ON)
@@ -1365,10 +1434,12 @@ struct SlowPathHandler:
             info = line^
         self.acl_log.add(reason^, ctx^, object^, username^, info^)
 
-    def _wrote_wrongpass(self, mut writer: ResponseWriter, start: Int) -> Bool:
-        """Did the command just run answer -WRONGPASS (a failed AUTH)?"""
+    def _wrote_wrongpass(self, mut writer: ResponseWriter, start: Int, flushes: Int) -> Bool:
+        """Did the command just run answer -WRONGPASS (a failed AUTH)? Read
+        where its reply began, which is only there while nothing was flushed
+        or spilled since (#49)."""
         comptime W = "-WRONGPASS"
-        if start < 0 or writer.offset - start < 10:
+        if start < 0 or writer.ctx[].flush_count != flushes or writer.offset - start < 10:
             return False
         var p = W.unsafe_ptr()
         for k in range(10):
@@ -1751,6 +1822,7 @@ struct SlowPathHandler:
         var num_cmds = 0
         var on_primary = True
         var cmd_write_start = 0
+        var cmd_flushes = 0         # #49: writer.ctx[].flush_count when the command began
         # #47 CLIENT REPLY: where the current primary command's reply began,
         # and the writer's flush count then
         var _rg_start = -1
@@ -1760,23 +1832,37 @@ struct SlowPathHandler:
             var num_tokens = 0
             var consumed_bytes = 0
             var cmd_ends = self.cmd_ends_buf if self.script_depth == 0 else self.script_cmd_ends_buf
-            self.parser.parse_stream(buffer, n, tokens, num_tokens, consumed_bytes, cmd_ends, cmd_byte_ends, num_cmds)
+            var need_tokens = 0
+            self.parser.parse_stream(buffer, n, tokens, num_tokens, consumed_bytes, cmd_ends, cmd_byte_ends, num_cmds, need_tokens)
             if num_tokens == TOKENS_OVERFLOW:
                 # gh #153: a single complete command with more than
-                # MAX_CMD_TOKENS arguments. Waiting for more data can never
-                # help (that's what used to hang the connection), so reply and
-                # skip the frame — `consumed_bytes` covers it exactly, which
-                # keeps a pipelined client frame-synced.
-                writer.append_error_response(
-                    "ERR command has too many arguments (max "
-                    + String(MAX_CMD_TOKENS)
-                    + "); for high-dimension vectors use the FP32 blob form"
-                )
+                # MAX_CMD_TOKENS arguments, first in the buffer; `consumed_bytes`
+                # is its end. #52: parse it alone into a table its size and run
+                # it, as Redis runs it (it used to answer -ERR).
+                tokens = self._big_token_table(need_tokens)
+                var frame_end = consumed_bytes
+                self.parser.parse_stream(buffer, frame_end, tokens, num_tokens, consumed_bytes, cmd_ends, cmd_byte_ends, num_cmds, need_tokens, need_tokens)
+                if num_tokens <= 0:
+                    writer.append_error_response("ERR Protocol error: invalid multibulk length")
+                    writer.flush_response(fd, server, kq)
+                    return frame_end
+            if num_tokens == PROTOCOL_ERROR:
+                # #53: a request Redis refuses with a protocol error, first in
+                # the buffer (complete commands before it ran in an earlier
+                # call). Redis answers and closes the connection: what follows
+                # cannot be read as commands.
+                writer.append_error_response("ERR " + protocol_error_text(need_tokens))
                 writer.flush_response(fd, server, kq)
-                return consumed_bytes
+                if self.script_depth == 0 and is_not_null(writer.ctx[].pending_offsets):
+                    self.clients.close_after[Int(fd)] = 1
+                    if not writer.ctx[].use_uring and kq != -1 and not writer.owes(Int(fd)):
+                        _ = external_call["pion_kill_fd", Int32](fd)
+                return n
             if num_tokens == 0:
-                # Empty buffer or partial/incomplete command — wait for more data
-                return 0
+                # Empty buffer or partial/incomplete command — wait for more
+                # data. #53: lines that are no command (an empty line, `*0`)
+                # are consumed rather than left in front of the next request.
+                return consumed_bytes
             # MULTI/EXEC replay outer loop. EXEC stages the queued buffers
             # in exec_replay_q/_count below; each replay iteration re-enters
             # this same stack frame instead of recursing into process_slow_path,
@@ -1790,18 +1876,35 @@ struct SlowPathHandler:
                     var token = tokens[i]
                     var tl = token.length
                     var tp = token.ptr
+                    # #49: bound the buffer across a long batch of fixed-size
+                    # replies before this command writes (covers EXEC replay,
+                    # which re-enters this loop). Not on a capture writer (a
+                    # script's redis.call keeps its bytes) or the XDP lane.
+                    if on_primary and is_not_null(writer.ctx[].pending_offsets):
+                        writer.spill_if_full(fd, server, kq)
                     # gh #162: where this command's response starts, so the
                     # recovery `except` can drop a half-written frame before
                     # emitting its error.
                     # #47 CLIENT REPLY OFF / SKIP: the previous command's reply
                     # is complete, so drop it here when the mode says so (this
                     # also covers a command that `continue`d: +QUEUED, -NOAUTH)
+                    writer.ctx[].suppress_from = -1   # #49: cleared per command (replay, scripts)
                     if on_primary and self.script_depth == 0:
                         if self.clients.reply_off_count > 0 and _rg_start >= 0:
                             self._reply_gate(fd, writer, _rg_start, _rg_flushes)
                         _rg_start = writer.offset
-                        _rg_flushes = writer.flush_count
+                        _rg_flushes = writer.ctx[].flush_count
+                        # #49: when this command's reply will be dropped (REPLY
+                        # OFF, or the one after CLIENT REPLY SKIP — _reply_gate
+                        # above has just turned SKIP_NEXT into SKIP_NOW), mark
+                        # the writer so a reply too big to buffer is dropped as
+                        # it fills instead of sent before _reply_gate can.
+                        if self.clients.reply_off_count > 0:
+                            var _rm = self.clients.reply[Int(fd)]
+                            if _rm == REPLY_OFF or _rm == REPLY_SKIP_NOW:
+                                writer.ctx[].suppress_from = writer.offset
                     cmd_write_start = writer.offset
+                    cmd_flushes = writer.ctx[].flush_count
                     # #47 SLOWLOG: when this command started (a counter read)
                     var _sl_t0 = external_call["pion_ticks", UInt64]()
                     # cmd_ends holds MAX_CMD_ENDS == MAX_CMD_TOKENS entries and a
@@ -1939,8 +2042,7 @@ struct SlowPathHandler:
                                 writer.append_error_response("OOM command not allowed when used memory > 'maxmemory'.")
                             elif not command_exists(tp, tl):
                                 self.tx_state.set_dirty(fd)
-                                writer.append_error_response(
-                                    "ERR unknown command '" + token.value() + "'")
+                                writer.append_error_response(unknown_command_error(tokens, i, cmd_end_tok))
                             elif _tx_bad_arity:
                                 self.tx_state.set_dirty(fd)
                                 writer.append_error_response(
@@ -2035,8 +2137,15 @@ struct SlowPathHandler:
                             if not _treject:
                                 var _tnp = self.tenant_table.name_ptr(_tid)
                                 var _tnl = self.tenant_table.name_len(_tid)
+                                # #52: size the scratch to the command first; no
+                                # token points into it yet (it is per command)
+                                var _tneed = tenant_rewrite_need(tokens, i, cmd_end_tok, _tspec, _tnl)
+                                if _tneed > self.tenant_scratch_cap:
+                                    self.tenant_scratch.free()
+                                    self.tenant_scratch = alloc[UInt8](_tneed)
+                                    self.tenant_scratch_cap = _tneed
                                 if apply_tenant_rewrite(tokens, i, cmd_end_tok, _tspec,
-                                                        _tnp, _tnl, self.tenant_scratch):
+                                                        _tnp, _tnl, self.tenant_scratch, self.tenant_scratch_cap):
                                     # Namespace filter for KEYS/SCAN: "name:".
                                     unsafe_memcpy(dest=self.tenant_ns_buf, src=_tnp, count=_tnl)
                                     self.tenant_ns_buf[_tnl] = 58  # ':'
@@ -2087,7 +2196,7 @@ struct SlowPathHandler:
                                          self.tx_state.tenant_id,
                                          self.tx_state.resp_proto)
                         # #47: a rejected AUTH clause goes to ACL LOG, under the user it named
-                        if self._wrote_wrongpass(writer, cmd_write_start):
+                        if self._wrote_wrongpass(writer, cmd_write_start, cmd_flushes):
                             var _hu = String("default")
                             for _hk in range(i + 1, cmd_end_tok - 2):
                                 if arg_eq(tokens[_hk].ptr, tokens[_hk].length, "auth"):
@@ -2938,8 +3047,10 @@ struct SlowPathHandler:
                                                 self.worker_id, self.dispatcher,
                                                 self.last_save_time, writer, self.ttl_map)
                                 # handle_save wrote +OK; SHUTDOWN must not reply, so
-                                # roll that back rather than desyncing the client.
-                                writer.offset = cmd_write_start
+                                # roll that back rather than desyncing the client
+                                # (only while it is still in the buffer, #49).
+                                if writer.ctx[].flush_count == cmd_flushes:
+                                    writer.offset = cmd_write_start
                             external_call["pion_request_shutdown", NoneType]()
                         i = cmd_end_tok - 1
                     # ── TTL/Expiry Commands (src/commands/ttl.mojo) ──
@@ -4341,7 +4452,7 @@ struct SlowPathHandler:
                                          rebind[UnsafePointer[TenantTable, MutUntrackedOrigin]](UnsafePointer(to=self.tenant_table)),
                                          self.tx_state.tenant_id)
                         # #47: a failed AUTH goes to ACL LOG, under the user it named
-                        if self._wrote_wrongpass(writer, cmd_write_start):
+                        if self._wrote_wrongpass(writer, cmd_write_start, cmd_flushes):
                             var _au = String("default")
                             if cmd_end_tok - i == 3:
                                 _au = bytes_to_string(tokens[i + 1].ptr, tokens[i + 1].length)
@@ -4742,7 +4853,7 @@ struct SlowPathHandler:
                         handle_xackdel(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)  # #40
                         i = cmd_end_tok - 1
                     else:
-                        writer.append_error_response("ERR unknown command '" + token.value() + "'")
+                        writer.append_error_response(unknown_command_error(tokens, i, cmd_end_tok))
                         # Skip remaining tokens of this command
                         i = cmd_end_tok - 1  # -1 because i += 1 below
                     # gh #240: STRUCTURAL enforcement of "a command consumes its
@@ -4799,17 +4910,20 @@ struct SlowPathHandler:
                         var rce = self.replay_ends_buf
                         var rcbe = self.replay_byte_ends_buf
                         var rnc = 0
-                        self.parser.parse_stream(rq.data, rq.length, tokens, rnt, rcb, rce, rcbe, rnc)
-                        # gh #153: a queued command too large for the token
-                        # array can't be replayed. Report it rather than
-                        # dropping it silently, and clamp so the dispatch
-                        # loop below sees a plain empty parse.
+                        var rneed = 0
+                        tokens = self.tokens_buf if self.script_depth == 0 else self.script_tokens_buf
+                        self.parser.parse_stream(rq.data, rq.length, tokens, rnt, rcb, rce, rcbe, rnc, rneed)
+                        # gh #153, #52: a queued command too large for the token
+                        # array is parsed alone into a table its size, as on
+                        # the primary path.
                         if rnt == TOKENS_OVERFLOW:
-                            writer.append_error_response(
-                                "ERR queued command has too many arguments (max "
-                                + String(MAX_CMD_TOKENS)
-                                + ")"
-                            )
+                            tokens = self._big_token_table(rneed)
+                            self.parser.parse_stream(rq.data, rq.length, tokens, rnt, rcb, rce, rcbe, rnc, rneed, rneed)
+                            if rnt <= 0:
+                                writer.append_error_response("ERR Protocol error: invalid multibulk length")
+                                rnt = 0
+                        elif rnt == PROTOCOL_ERROR:
+                            writer.append_error_response("ERR " + protocol_error_text(rneed))
                             rnt = 0
                         num_tokens = rnt
                         num_cmds = rnc
@@ -4843,8 +4957,8 @@ struct SlowPathHandler:
             if self.kill_after_reply == fd:
                 self.kill_after_reply = -1
                 self.clients.close_after[Int(fd)] = 1
-                if not writer.use_uring and kq != -1 and is_not_null(writer.pending_offsets) \
-                   and writer.pending_offsets[Int(fd)] == 0:
+                if not writer.ctx[].use_uring and kq != -1 and is_not_null(writer.ctx[].pending_offsets) \
+                   and not writer.owes(Int(fd)):
                     _ = external_call["pion_kill_fd", Int32](fd)
             return primary_consumed
         except e:
@@ -4868,7 +4982,14 @@ struct SlowPathHandler:
             # SSM.PREFIX.FETCH, …) reset offset to 0, and forcing it back to
             # cmd_write_start would resurrect stale buffer bytes. In that rare
             # case leave offset where it is and just append the error after it.
-            if cmd_write_start <= writer.offset:
+            # #49: part of the failed command's reply may already have left the
+            # buffer (a spill, or a handler's own flush) and cannot be taken
+            # back. The error would then be read as part of that reply and the
+            # connection is out of step for good: it gets the error, and is
+            # closed once that is out.
+            var _out_of_step = on_primary and is_not_null(writer.ctx[].pending_offsets) \
+                and writer.ctx[].flush_count != cmd_flushes
+            if writer.ctx[].flush_count == cmd_flushes and cmd_write_start <= writer.offset:
                 writer.offset = cmd_write_start
             # A handler that raised a REDIS error (strict_atol's "ERR value is
             # not an integer or out of range") gets that text as its reply;
@@ -4881,6 +5002,11 @@ struct SlowPathHandler:
             if self.script_depth == 0 and self.clients.reply_off_count > 0 and on_primary:   # #47
                 self._reply_gate(fd, writer, cmd_write_start, _rg_flushes)
             writer.flush_response(fd, server, kq)
+            if _out_of_step:
+                self.clients.close_after[Int(fd)] = 1
+                if not writer.ctx[].use_uring and kq != -1 and not writer.owes(Int(fd)):
+                    _ = external_call["pion_kill_fd", Int32](fd)
+                return n
             if on_primary and cmd_idx < num_cmds:
                 var skip_to = cmd_byte_ends[cmd_idx]
                 if skip_to > 0 and skip_to <= n:
@@ -4935,9 +5061,9 @@ struct SlowPathHandler:
             self.script_writer.unsafe_write(ResponseWriter(capture_only=True))
         var w = self.script_writer
         w[].offset = 0
-        w[].overflow_emitted = False
+        w[].ctx[].cap_len = 0           # #49: the last call's reply past the buffer
+        w[].ctx[].overflow_emitted = False
         w[].proto = UInt8(resp)
-        reply[0] = w[].buffer
         var ar = command_arity(np, nl)
         var sp = argv[1] if argc > 1 else np
         var sl = Int(lens[1]) if argc > 1 else 0
@@ -4991,7 +5117,11 @@ struct SlowPathHandler:
             self.can_park_wait = park
             if command_is_write(np, nl):
                 wrote[0] = 1
-        return w[].offset
+        # #49: a reply too long for the buffer spilled into cap_buf, where it
+        # is read whole; the next call starts both over
+        var rlen = w[].captured()
+        reply[0] = w[].ctx[].cap_buf if w[].ctx[].cap_len > 0 else w[].buffer
+        return rlen
 
     def drain_pubsub(mut self, mut writer: ResponseWriter, server: TCPServer, kq: Int32):
         """#42: deliver what other workers published since the last tick.
@@ -5027,6 +5157,7 @@ struct SlowPathHandler:
         # Check completion and send deferred responses.
         var i = 0
         while i < self.deferred_count:
+            writer.ctx[].cur_fd = self.deferred_fds[i]   # #49: what is written here is that fd's
             var active = self.deferred_active[i]
             var done   = self.deferred_done[i]
             var seq    = self.deferred_seqs[i]

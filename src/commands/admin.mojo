@@ -378,7 +378,7 @@ def handle_info(mut dispatcher: CommandDispatcher, mut writer: ResponseWriter,
 
     gh #262: port, memory, uptime and keyspace are resolved by the caller
     from real state; `extra` is the `# Pion` value-receipt section."""
-    var body = dispatcher.execute_info(writer.send_stalls, listen_port, keys, expires, uptime_s, extra,
+    var body = dispatcher.execute_info(writer.ctx[].send_stalls, listen_port, keys, expires, uptime_s, extra,
                                        repl_section, cluster_enabled)
     var out = _info_sections(body, sections)
     writer.append_verbatim_response(out.unsafe_ptr(), out.byte_length())

@@ -1,4 +1,5 @@
-from src.common.ptr import null_ptr
+from src.common.ptr import null_ptr, is_not_null
+from std.memory import alloc
 from std.collections import List, Array, Span
 from std.memory.unsafe_pointer import Pointer
 from std.sys import simd_width_of
@@ -19,7 +20,9 @@ comptime MAX_ARRAY_LEN = 1048576    # 1M elements per command array
 # does not fit the 64-token array (never satisfiable by waiting). The caller
 # treated both as "wait", so the oversized command parked its fd forever.
 # num_tokens == TOKENS_OVERFLOW distinguishes the second: the frame is complete
-# and `consumed_bytes` covers it, so reply -ERR and skip it.
+# and `consumed_bytes` covers it. Since #52 the slow path then parses that one
+# command into a table of its own size (`need_tokens`) and runs it, up to
+# MAX_ARRAY_LEN arguments, as Redis does; it used to answer -ERR.
 comptime TOKENS_OVERFLOW = -1
 # gh #166: 2048, not 64. `VADD key VALUES 1536 <v1..v1536> elem` is ~1539 RESP
 # tokens; at 64 it could only ever be the gh #153 error. The array no longer
@@ -198,9 +201,114 @@ struct RESP3Token(Copyable, Movable, ImplicitlyCopyable):
     def value_bytes_ptr(self) -> Pointer[UInt8, MutUntrackedOrigin]:
         return self.ptr
 
+# #53: Redis's limit for a request line: an inline command, or the count
+# line of a multibulk request or of one of its bulk strings.
+comptime PROTO_INLINE_MAX_SIZE = 64 * 1024
+# #53: a request Redis refuses with a protocol error and then closes the
+# connection for. num_tokens == PROTOCOL_ERROR, need_tokens == the PE_* code.
+comptime PROTOCOL_ERROR = -2
+comptime PE_UNBALANCED_QUOTES = 1
+comptime PE_BIG_INLINE = 2
+comptime PE_MULTIBULK_LEN = 3
+comptime PE_BULK_LEN = 4
+comptime PE_BIG_MBULK_COUNT = 5
+comptime PE_BIG_BULK_COUNT = 6
+comptime PE_EXPECTED_DOLLAR = 256    # + the byte found where a `$` belonged
+
+
+def protocol_error_text(code: Int) -> String:
+    """The error Redis answers a PE_* protocol error with, without `-ERR `."""
+    if code == PE_UNBALANCED_QUOTES:
+        return "Protocol error: unbalanced quotes in request"
+    if code == PE_BIG_INLINE:
+        return "Protocol error: too big inline request"
+    if code == PE_MULTIBULK_LEN:
+        return "Protocol error: invalid multibulk length"
+    if code == PE_BULK_LEN:
+        return "Protocol error: invalid bulk length"
+    if code == PE_BIG_MBULK_COUNT:
+        return "Protocol error: too big mbulk count string"
+    if code == PE_BIG_BULK_COUNT:
+        return "Protocol error: too big bulk count string"
+    if code >= PE_EXPECTED_DOLLAR:
+        var b = code - PE_EXPECTED_DOLLAR
+        var shown = chr(b) if b >= 32 and b < 127 else String("\\x") + chr(_hex_digit(b >> 4)) + chr(_hex_digit(b & 15))
+        return "Protocol error: expected '$', got '" + shown + "'"
+    return "Protocol error"
+
+
+@always_inline
+def _hex_digit(v: Int) -> Int:
+    return v + 48 if v < 10 else v + 87
+
+
+@always_inline
+def _string2ll(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, mut ok: Bool) -> Int:
+    """Redis's string2ll: an optional '-', then digits, no leading zero (but
+    "0"), nothing else, within Int64. ok is False otherwise."""
+    ok = False
+    if n <= 0 or n > 20:
+        return 0
+    var i = 0
+    var neg = False
+    if p[unsafe_offset=0] == 45:          # '-'
+        neg = True
+        i = 1
+        if n == 1:
+            return 0
+    var d0 = Int(p[unsafe_offset=i])
+    if d0 < 48 or d0 > 57:
+        return 0
+    if d0 == 48:
+        if n == i + 1 and not neg:
+            ok = True
+        return 0
+    var v = 0
+    while i < n:
+        var d = Int(p[unsafe_offset=i])
+        if d < 48 or d > 57:
+            return 0
+        if v > (9223372036854775807 - (d - 48)) // 10:
+            return 0
+        v = v * 10 + (d - 48)
+        i += 1
+    ok = True
+    return -v if neg else v
+
+
+@always_inline
+def _is_space(b: Int) -> Bool:
+    """C isspace: space, \t, \n, \v, \f, \r."""
+    return b == 32 or (b >= 9 and b <= 13)
+
+
+@always_inline
+def _hex_val(b: Int) -> Int:
+    if b >= 48 and b <= 57:
+        return b - 48
+    if b >= 97 and b <= 102:
+        return b - 87
+    if b >= 65 and b <= 70:
+        return b - 55
+    return -1
+
+
 struct RESP3Parser:
+    # #53: an inline argument written in quotes is not a slice of the request
+    # (its quotes are gone, its escapes decoded), so it is decoded here and its
+    # token points here. Tokens are only read until the next parse_stream call,
+    # which reuses the bytes. Grown to the request's length at the first quoted
+    # argument of a parse, so it never moves while a parse uses it: a script's
+    # redis.call, which parses while its EVAL still uses its tokens, sends RESP
+    # arrays and never reaches the inline path.
+    var scratch: Pointer[UInt8, MutUntrackedOrigin]
+    var scratch_cap: Int
+    var scratch_used: Int
+
     def __init__(out self):
-        pass
+        self.scratch = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.scratch_cap = 0
+        self.scratch_used = 0
 
     @always_inline
     def find_newline_simd(self, buffer: Pointer[UInt8, MutUntrackedOrigin], start: Int, length: Int) -> Int:
@@ -221,184 +329,307 @@ struct RESP3Parser:
                 return i
         return -1
 
-    def parse_stream(self, buffer: Pointer[UInt8, MutUntrackedOrigin], length: Int, tokens: Pointer[RESP3Token, MutUntrackedOrigin], mut num_tokens: Int, mut consumed_bytes: Int, cmd_ends: Pointer[Int, MutUntrackedOrigin], cmd_byte_ends: Pointer[Int, MutUntrackedOrigin], mut num_cmds: Int) raises:
+    def _split_inline(mut self, buffer: Pointer[UInt8, MutUntrackedOrigin], start: Int, end: Int,
+                      length: Int, tokens: Pointer[RESP3Token, MutUntrackedOrigin],
+                      mut num_tokens: Int, token_cap: Int) -> Int:
+        """#53: split buffer[start, end) as Redis's sdssplitargs does: blanks
+        separate arguments; "..." decodes \\xHH \\n \\r \\t \\b \\a and
+        \\<c> -> c; '...' decodes \\'; a closing quote must be followed by a
+        blank or the end; a NUL ends the line, as it ends the C string Redis
+        splits. Stores tokens while num_tokens < token_cap. Returns how many
+        arguments the line holds, or -1 for unbalanced quotes."""
+        var p = start
+        var argc = 0
+        var lim = end
+        for z in range(start, end):
+            if buffer[unsafe_offset=z] == 0:
+                lim = z
+                break
+        while True:
+            while p < lim and _is_space(Int(buffer[unsafe_offset=p])):
+                p += 1
+            if p >= lim:
+                return argc
+            var tok_start = p
+            var quoted = False
+            var inq = False
+            var insq = False
+            # first pass: find where the argument ends and whether it is quoted
+            var q = p
+            while True:
+                if q >= lim:
+                    if inq or insq:
+                        return -1
+                    break
+                var c = Int(buffer[unsafe_offset=q])
+                if inq:
+                    if c == 92 and q + 1 < lim:          # backslash: skip what it escapes
+                        q += 2
+                        continue
+                    if c == 34:                          # closing "
+                        if q + 1 < lim and not _is_space(Int(buffer[unsafe_offset=q + 1])):
+                            return -1
+                        q += 1
+                        break
+                    q += 1
+                elif insq:
+                    if c == 92 and q + 1 < lim and buffer[unsafe_offset=q + 1] == 39:
+                        q += 2
+                        continue
+                    if c == 39:                          # closing '
+                        if q + 1 < lim and not _is_space(Int(buffer[unsafe_offset=q + 1])):
+                            return -1
+                        q += 1
+                        break
+                    q += 1
+                else:
+                    if _is_space(c):
+                        break
+                    if c == 34:
+                        inq = True
+                        quoted = True
+                    elif c == 39:
+                        insq = True
+                        quoted = True
+                    q += 1
+            var stored = num_tokens < token_cap
+            if not quoted:
+                if stored:
+                    tokens[unsafe_offset=num_tokens] = RESP3Token(73, buffer.unsafe_offset(tok_start), q - tok_start)
+            elif stored:
+                # decode into the scratch (never longer than the raw argument)
+                if self.scratch_cap < length:
+                    if is_not_null(self.scratch):
+                        self.scratch.free()
+                    self.scratch = alloc[UInt8](length)
+                    self.scratch_cap = length
+                var out = self.scratch.unsafe_offset(self.scratch_used)
+                var o = 0
+                var r = tok_start
+                inq = False
+                insq = False
+                while r < q:
+                    var c = Int(buffer[unsafe_offset=r])
+                    if inq:
+                        if c == 92 and r + 3 < q and buffer[unsafe_offset=r + 1] == 120 \
+                           and _hex_val(Int(buffer[unsafe_offset=r + 2])) >= 0 and _hex_val(Int(buffer[unsafe_offset=r + 3])) >= 0:
+                            out[unsafe_offset=o] = UInt8(_hex_val(Int(buffer[unsafe_offset=r + 2])) * 16 + _hex_val(Int(buffer[unsafe_offset=r + 3])))
+                            o += 1
+                            r += 4
+                            continue
+                        if c == 92 and r + 1 < q:
+                            var e = Int(buffer[unsafe_offset=r + 1])
+                            var d = e
+                            if e == 110: d = 10        # \n
+                            elif e == 114: d = 13      # \r
+                            elif e == 116: d = 9       # \t
+                            elif e == 98: d = 8        # \b
+                            elif e == 97: d = 7        # \a
+                            out[unsafe_offset=o] = UInt8(d)
+                            o += 1
+                            r += 2
+                            continue
+                        if c == 34:
+                            inq = False
+                            r += 1
+                            continue
+                        out[unsafe_offset=o] = UInt8(c)
+                        o += 1
+                        r += 1
+                    elif insq:
+                        if c == 92 and r + 1 < q and buffer[unsafe_offset=r + 1] == 39:
+                            out[unsafe_offset=o] = 39
+                            o += 1
+                            r += 2
+                            continue
+                        if c == 39:
+                            insq = False
+                            r += 1
+                            continue
+                        out[unsafe_offset=o] = UInt8(c)
+                        o += 1
+                        r += 1
+                    else:
+                        if c == 34:
+                            inq = True
+                        elif c == 39:
+                            insq = True
+                        else:
+                            out[unsafe_offset=o] = UInt8(c)
+                            o += 1
+                        r += 1
+                tokens[unsafe_offset=num_tokens] = RESP3Token(73, out, o)
+                self.scratch_used += o
+            if stored:
+                num_tokens += 1
+            argc += 1
+            p = q
+
+    def parse_stream(mut self, buffer: Pointer[UInt8, MutUntrackedOrigin], length: Int, tokens: Pointer[RESP3Token, MutUntrackedOrigin], mut num_tokens: Int, mut consumed_bytes: Int, cmd_ends: Pointer[Int, MutUntrackedOrigin], cmd_byte_ends: Pointer[Int, MutUntrackedOrigin], mut num_cmds: Int, mut need_tokens: Int, token_cap: Int = MAX_CMD_TOKENS) raises:
         # cmd_ends[k]      = token index one past command k's last token.
         # cmd_byte_ends[k] = buffer byte offset one past command k's last byte.
         # gh #162: the byte end lets the slow-path recover from a handler that
         # raises mid-batch by consuming exactly the offending command and
         # re-dispatching the rest, instead of discarding the whole recv buffer.
+        #
+        # #52: `tokens` holds `token_cap` entries. A command that does not fit
+        # them sets num_tokens = TOKENS_OVERFLOW and need_tokens = its count, so
+        # the caller can parse it alone into a table that size.
+        # #53: a request Redis refuses with a protocol error sets num_tokens =
+        # PROTOCOL_ERROR and need_tokens = its PE_* code; the caller answers
+        # and closes the connection. Like an overflow, it is only reported
+        # once no complete command precedes it in the buffer: those run first.
         num_tokens = 0
         consumed_bytes = 0
         num_cmds = 0
+        need_tokens = 0
+        self.scratch_used = 0
         if length <= 0: return
 
         var pos = 0
         while pos < length:
-            var marker = buffer[unsafe_offset=pos]
-            var m_int = Int(marker)
+            var m_int = Int(buffer[unsafe_offset=pos])
+            var tokens_checkpoint = num_tokens
 
-            var line_end = self.find_newline_simd(buffer, pos + 1, length)
-
-            if line_end == -1: break
-
-            if m_int == 42: # * — RESP array command: verify ALL N bulk strings are complete
-                # Parse array count N
-                var count = 0
-                for i in range(pos + 1, line_end):
-                    var ch = Int(buffer[unsafe_offset=i])
-                    if ch >= 48 and ch <= 57:
-                        count = count * 10 + (ch - 48)
-                        if count > MAX_ARRAY_LEN: break  # gh #102: bound the per-command loop
-                # Checkpoint: save token count before this command
-                var tokens_checkpoint = num_tokens
-                # gh #102 (C4): reject an oversized/wrapped array count outright
-                # rather than iterating `range(count)` billions of times.
-                if count > MAX_ARRAY_LEN:
-                    num_tokens = tokens_checkpoint
+            if m_int != 42:
+                # #53: every line that does not start with `*` is an inline
+                # command, as in Redis — not only lines that start with a
+                # letter (`"PING"`, `  PING` and `123` got no reply at all, and
+                # a `$3` line read the next line as its payload).
+                var nl = self.find_newline_simd(buffer, pos, length)
+                if nl == -1:
+                    if length - pos > PROTO_INLINE_MAX_SIZE:
+                        if tokens_checkpoint == 0:
+                            num_tokens = PROTOCOL_ERROR
+                            need_tokens = PE_BIG_INLINE
                     return
-                var temp_pos = line_end + 1
-                var all_ok = True
-                # gh #153: set when this command has more tokens than the array
-                # holds. We keep verifying (advancing temp_pos) without storing,
-                # so the frame's true end is known and can be skipped.
-                var overflowed = False
-                # Verify and add each of the N bulk-string tokens
-                for _ in range(count):
-                    if temp_pos >= length or buffer[unsafe_offset=temp_pos] != 36:
-                        all_ok = False; break
-                    var bl_end = self.find_newline_simd(buffer, temp_pos + 1, length)
-                    if bl_end == -1: all_ok = False; break
-                    var bl = 0
-                    var bl_ovf = False
-                    for i in range(temp_pos + 1, bl_end):
-                        var ch = Int(buffer[unsafe_offset=i])
-                        if ch >= 48 and ch <= 57:
-                            bl = bl * 10 + (ch - 48)
-                            if bl > MAX_BULK_LEN:  # gh #102: bail before Int overflow
-                                bl_ovf = True; break
-                    if bl_ovf: all_ok = False; break
-                    var data_start = bl_end + 1
-                    if data_start + bl + 2 > length: all_ok = False; break
-                    if num_tokens < MAX_CMD_TOKENS:
-                        tokens[unsafe_offset=num_tokens] = RESP3Token(buffer[unsafe_offset=temp_pos], buffer.unsafe_offset(data_start), bl)
-                        num_tokens += 1
-                    else:
-                        # Token array full. Don't store, but keep walking the
-                        # frame so `temp_pos` ends up past it. No `overflowed`
-                        # guard needed above: num_tokens is frozen at the cap
-                        # from here on, so the bound test alone keeps us here —
-                        # and the per-token loop stays exactly as cheap as it
-                        # was before gh #153.
-                        overflowed = True
-                    temp_pos = data_start + bl + 2
-                if all_ok and overflowed:
-                    # gh #153: the frame is complete, it just doesn't fit.
+                var argc = self._split_inline(buffer, pos, nl, length, tokens, num_tokens, token_cap)
+                if argc < 0:
+                    num_tokens = tokens_checkpoint
                     if tokens_checkpoint == 0:
-                        # Nothing earlier to drain, so re-parsing can never make
-                        # this fit — waiting for more data would hang the fd on
-                        # a command that already arrived in full. Hand the
-                        # caller the frame's length and the overflow signal so
-                        # it can reply -ERR and stay frame-synced.
-                        consumed_bytes = temp_pos
-                        num_tokens = TOKENS_OVERFLOW
-                    else:
-                        # Earlier commands in this batch did produce tokens.
-                        # Let the caller execute and drain those; this command
-                        # is re-parsed as the first one next call and then takes
-                        # the branch above. consumed_bytes stays at the end of
-                        # the last fully-parsed command.
-                        num_tokens = tokens_checkpoint
+                        num_tokens = PROTOCOL_ERROR
+                        need_tokens = PE_UNBALANCED_QUOTES
                     return
-                if all_ok:
-                    pos = temp_pos
-                    consumed_bytes = pos  # complete command consumed up to here
-                    if num_cmds < MAX_CMD_ENDS:
-                        cmd_ends[unsafe_offset=num_cmds] = num_tokens
-                        cmd_byte_ends[unsafe_offset=num_cmds] = pos
-                        num_cmds += 1
-                else:
-                    # Partial command: undo any tokens added and stop parsing
+                if tokens_checkpoint + argc > token_cap:
+                    # #52: more arguments than the table holds
                     num_tokens = tokens_checkpoint
+                    if tokens_checkpoint == 0:
+                        num_tokens = TOKENS_OVERFLOW
+                        need_tokens = argc
+                        consumed_bytes = nl + 1
                     return
+                pos = nl + 1
+                consumed_bytes = pos
+                # An empty line is no command (Redis ignores it). gh #156: a
+                # command needs a boundary entry, or every `i = cmd_end_tok - 1`
+                # handler reads the end of the batch as its own.
+                if argc > 0 and num_cmds < MAX_CMD_ENDS:
+                    cmd_ends[unsafe_offset=num_cmds] = num_tokens
+                    cmd_byte_ends[unsafe_offset=num_cmds] = pos
+                    num_cmds += 1
+                continue
 
-            elif m_int == 36: # $ standalone bulk string (outside array)
-                var bl = 0
-                var is_neg = False
-                for i in range(pos + 1, line_end):
-                    var ch = Int(buffer[unsafe_offset=i])
-                    if ch >= 48 and ch <= 57:
-                        bl = bl * 10 + (ch - 48)
-                        if bl > MAX_BULK_LEN:  # gh #102: bail before Int overflow → OOB read
-                            break
-                    elif ch == 45: # -
-                        is_neg = True
-
-                if is_neg: bl = -1
-                elif bl > MAX_BULK_LEN: break  # gh #102: oversized bulk length — stop parsing
-
-                pos = line_end + 1
-                if bl >= 0:
-                    if pos + bl + 2 > length: break  # incomplete standalone bulk string
-                    tokens[unsafe_offset=num_tokens] = RESP3Token(marker, buffer.unsafe_offset(pos), bl)
-                    num_tokens += 1
-                    if num_tokens >= 64: return
-                    pos += bl
-                    if pos < length and Int(buffer[unsafe_offset=pos]) == 13: pos += 1
-                    if pos < length and Int(buffer[unsafe_offset=pos]) == 10: pos += 1
-                    consumed_bytes = pos
-                else:
-                    tokens[unsafe_offset=num_tokens] = RESP3Token(marker, null_ptr[UInt8, MutUntrackedOrigin](), 0)
-                    num_tokens += 1
-                    if num_tokens >= 64: return
-                    consumed_bytes = pos
-
-            elif m_int == 43 or m_int == 45 or m_int == 58: # +, -, :
-                var s_start = pos + 1
-                var s_end = line_end
-                if s_end > s_start and Int(buffer[unsafe_offset=s_end-1]) == 13:
-                    s_end -= 1
-
-                tokens[unsafe_offset=num_tokens] = RESP3Token(marker, buffer.unsafe_offset(s_start), s_end - s_start)
-                num_tokens += 1
-                if num_tokens >= 64: return
+            # `*<count>\r\n`, then <count> bulk strings: verify ALL are complete
+            var line_end = self.find_newline_simd(buffer, pos + 1, length)
+            if line_end == -1:
+                if length - pos > PROTO_INLINE_MAX_SIZE and tokens_checkpoint == 0:
+                    num_tokens = PROTOCOL_ERROR
+                    need_tokens = PE_BIG_MBULK_COUNT
+                return
+            # #53: the count as Redis reads it (string2ll up to the \r);
+            # anything else is a protocol error. The old loop skipped every
+            # non-digit, so `*-1` read as 1 and `*2x` as 2.
+            var count_ok = False
+            var count = 0
+            if Int(buffer[unsafe_offset=line_end - 1]) == 13:
+                count = _string2ll(buffer.unsafe_offset(pos + 1), line_end - 1 - (pos + 1), count_ok)
+            if not count_ok or count > MAX_ARRAY_LEN:   # gh #102 (C4): bound the per-command loop
+                if tokens_checkpoint == 0:
+                    num_tokens = PROTOCOL_ERROR
+                    need_tokens = PE_MULTIBULK_LEN
+                return
+            if count <= 0:
+                # `*0`, `*-1`: no command, as in Redis
                 pos = line_end + 1
                 consumed_bytes = pos
-
-            elif (m_int >= 65 and m_int <= 90) or (m_int >= 97 and m_int <= 122):
-                var s_end = line_end
-                if s_end > pos and Int(buffer[unsafe_offset=s_end-1]) == 13:
-                    s_end -= 1
-
-                # Split inline command by spaces
-                var tok_start = pos
-                for i in range(pos, s_end):
-                    if Int(buffer[unsafe_offset=i]) == 32: # space
-                        if i > tok_start:
-                            tokens[unsafe_offset=num_tokens] = RESP3Token(73, buffer.unsafe_offset(tok_start), i - tok_start)
-                            num_tokens += 1
-                            if num_tokens >= 64: return
-                        tok_start = i + 1
-
-                if s_end > tok_start:
-                    tokens[unsafe_offset=num_tokens] = RESP3Token(73, buffer.unsafe_offset(tok_start), s_end - tok_start)
+                continue
+            var temp_pos = line_end + 1
+            var all_ok = True
+            var proto_err = 0
+            # gh #153: set when this command has more tokens than the array
+            # holds. We keep verifying (advancing temp_pos) without storing,
+            # so the frame's true end is known and can be skipped.
+            var overflowed = False
+            # Verify and add each of the N bulk-string tokens
+            for _ in range(count):
+                if temp_pos >= length:
+                    all_ok = False; break
+                if buffer[unsafe_offset=temp_pos] != 36:
+                    proto_err = PE_EXPECTED_DOLLAR + Int(buffer[unsafe_offset=temp_pos])
+                    break
+                var bl_end = self.find_newline_simd(buffer, temp_pos + 1, length)
+                if bl_end == -1:
+                    if length - temp_pos > PROTO_INLINE_MAX_SIZE:
+                        proto_err = PE_BIG_BULK_COUNT
+                    else:
+                        all_ok = False
+                    break
+                var bl_ok = False
+                var bl = 0
+                if Int(buffer[unsafe_offset=bl_end - 1]) == 13:
+                    bl = _string2ll(buffer.unsafe_offset(temp_pos + 1), bl_end - 1 - (temp_pos + 1), bl_ok)
+                if not bl_ok or bl < 0 or bl > MAX_BULK_LEN:   # gh #102: bail before Int overflow
+                    proto_err = PE_BULK_LEN
+                    break
+                var data_start = bl_end + 1
+                if data_start + bl + 2 > length: all_ok = False; break
+                if num_tokens < token_cap:
+                    tokens[unsafe_offset=num_tokens] = RESP3Token(buffer[unsafe_offset=temp_pos], buffer.unsafe_offset(data_start), bl)
                     num_tokens += 1
-                    if num_tokens >= 64: return
-
-                # gh #156: an inline command is a command, so it needs a
-                # boundary entry too. Without one `num_cmds` stayed 0 for an
-                # all-inline batch and every `i = cmd_end_tok - 1` handler read
-                # the fallback `num_tokens` — i.e. the end of the *batch* — and
-                # ate every command behind it.
+                else:
+                    # Token array full. Don't store, but keep walking the
+                    # frame so `temp_pos` ends up past it. No `overflowed`
+                    # guard needed above: num_tokens is frozen at the cap
+                    # from here on, so the bound test alone keeps us here —
+                    # and the per-token loop stays exactly as cheap as it
+                    # was before gh #153.
+                    overflowed = True
+                temp_pos = data_start + bl + 2
+            if proto_err != 0:
+                num_tokens = tokens_checkpoint
+                if tokens_checkpoint == 0:
+                    num_tokens = PROTOCOL_ERROR
+                    need_tokens = proto_err
+                return
+            if all_ok and overflowed:
+                # gh #153: the frame is complete, it just doesn't fit.
+                if tokens_checkpoint == 0:
+                    # Nothing earlier to drain, so re-parsing can never make
+                    # this fit — waiting for more data would hang the fd on
+                    # a command that already arrived in full. Hand the
+                    # caller the frame's length and the overflow signal (#52:
+                    # and its size, to parse it alone into a table that big).
+                    consumed_bytes = temp_pos
+                    num_tokens = TOKENS_OVERFLOW
+                    need_tokens = count
+                else:
+                    # Earlier commands in this batch did produce tokens.
+                    # Let the caller execute and drain those; this command
+                    # is re-parsed as the first one next call and then takes
+                    # the branch above. consumed_bytes stays at the end of
+                    # the last fully-parsed command.
+                    num_tokens = tokens_checkpoint
+                return
+            if all_ok:
+                pos = temp_pos
+                consumed_bytes = pos  # complete command consumed up to here
                 if num_cmds < MAX_CMD_ENDS:
                     cmd_ends[unsafe_offset=num_cmds] = num_tokens
-                    cmd_byte_ends[unsafe_offset=num_cmds] = line_end + 1
+                    cmd_byte_ends[unsafe_offset=num_cmds] = pos
                     num_cmds += 1
-
-                pos = line_end + 1
-                consumed_bytes = pos
             else:
-                # Unknown marker: skip to next newline
-                pos = line_end + 1
-                consumed_bytes = pos
+                # Partial command: undo any tokens added and stop parsing
+                num_tokens = tokens_checkpoint
+                return
 
         return

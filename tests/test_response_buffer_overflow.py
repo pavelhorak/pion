@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""gh #82 — ResponseWriter overflow regression.
+"""gh #82, #49 — ResponseWriter overflow regression.
 
 Asserts that when a pipelined batch of responses can't fit in the 4 MB
-RESP_BUF_SIZE, the client receives N well-formed frames followed by
-`-ERR response exceeds buffer\r\n` — never a silently truncated stream.
+RESP_BUF_SIZE, the client receives every reply, whole and in order, and
+the connection stays in frame.
+
+gh #82 replaced a silent drop with one `-ERR response exceeds buffer`
+frame, after which the rest of the batch was dropped. #49: a full buffer
+is now handed to the connection's output queue and the replies go on, so
+there is no error at all. tests/test_big_replies.py covers the rest of
+#49 (huge single replies, slow readers, scripts, transactions).
 
 Pre-fix behaviour: every fixed-byte appender (`append_ok_response`,
 `append_pong_response`, …) silently `return`-ed on overflow, leaving the
@@ -17,9 +23,8 @@ Test plan:
      enough that ~19 of them blow past 4 MB).
   3. Pipeline N GET k requests in a single TCP write (N chosen so total
      reply bytes ≈ 6 MB, comfortably past the 4 MB buffer + 194 KB margin).
-  4. Read RESP frames off the connection until quiet. Count how many are
-     `$220000\r\n…\r\n` and confirm at least one `-ERR response exceeds
-     buffer\r\n` appears in their natural order.
+  4. Read RESP frames off the connection. Every one of the N must be
+     `$220000\r\n…\r\n`, and no `-ERR response exceeds buffer` may appear.
   5. Send PING on the same socket and require `+PONG` — confirms the wire
      stayed frame-synced through the overflow.
 
@@ -178,29 +183,17 @@ def main() -> int:
               f"~{PIPELINE_DEPTH * VALUE_SIZE // (1024*1024)} MB of replies)…")
         s.sendall(pipe)
 
-        # Phase 3: drain whatever the server sent for the batch. The current
-        # ResponseWriter design emits exactly one `-ERR response exceeds buffer`
-        # per flush-cycle (overflow_emitted latch). Subsequent appends in the
-        # same flush are dropped — pre-fix they were SILENTLY dropped, which
-        # is the bug; post-fix the latch-and-emit-once design at least gives
-        # the client a clear signal in the stream instead of a truncated tail.
-        # So the contract this test enforces:
-        #   (a) at least one `-ERR response exceeds buffer` appeared,
-        #   (b) every frame the client actually received parses as a
-        #       well-formed RESP frame,
-        #   (c) the connection is still frame-synced for the next request.
+        # Phase 3: every GET is answered, whole and in order (#49). Until
+        # #49 the batch got about 18 replies, one `-ERR response exceeds
+        # buffer` and then nothing for the rest.
         ok_count = 0
         overflow_count = 0
         other = []
-        while True:
-            # Tight timeout once we've already seen the overflow signal:
-            # the server flushes once per batch, so the trailing tail is
-            # whatever it managed to write before _check_overflow tripped.
-            poll_timeout = 0.4 if overflow_count >= 1 else 5.0
-            frame = fr.next_frame(timeout=poll_timeout)
+        while ok_count + overflow_count + len(other) < PIPELINE_DEPTH:
+            frame = fr.next_frame(timeout=15.0)
             if frame is None:
                 break
-            if frame.startswith(b"$" + str(VALUE_SIZE).encode() + b"\r\n"):
+            if frame == b"$" + str(VALUE_SIZE).encode() + b"\r\n" + big_value + b"\r\n":
                 ok_count += 1
             elif frame == OVERFLOW_LINE:
                 overflow_count += 1
@@ -211,11 +204,11 @@ def main() -> int:
         if other:
             print(f"  unexpected first three: {other[:3]}")
 
-        if overflow_count == 0:
-            print("FAIL: no overflow frame seen — silent drop still happening")
+        if ok_count != PIPELINE_DEPTH:
+            print(f"FAIL: {ok_count} of {PIPELINE_DEPTH} GETs answered with the value")
             return 1
-        if ok_count == 0:
-            print("FAIL: zero successful GETs — every response replaced by overflow")
+        if overflow_count:
+            print("FAIL: the server still answers a full buffer with -ERR (#49)")
             return 1
         if other:
             print("FAIL: malformed frames in the stream")
@@ -227,12 +220,12 @@ def main() -> int:
         s.sendall(_encode(["PING"]))
         ping_reply = fr.next_frame(timeout=5.0)
         if ping_reply != b"+PONG\r\n":
-            print(f"FAIL: PING after overflow returned {ping_reply!r}, expected +PONG")
+            print(f"FAIL: PING after the batch returned {ping_reply!r}, expected +PONG")
             return 1
-        print("  PING after overflow → +PONG (connection still frame-synced)")
+        print("  PING after the batch → +PONG (connection still frame-synced)")
 
         s.close()
-        print("\nPASS — gh #82 ResponseWriter overflow emits -ERR, stays frame-synced")
+        print(f"\nPASS — {PIPELINE_DEPTH} replies past the 4 MB buffer arrived whole (#49), frame-synced")
     finally:
         stop_server(proc)
         # No state files generated; nothing to clean.

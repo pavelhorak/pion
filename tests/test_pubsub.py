@@ -155,7 +155,8 @@ def run_slow(port: int):
     s2.sendall(encode(("SUBSCRIBE", "slow2")))
     time.sleep(0.2)
     big = b"z" * 100000
-    for k in range(80):                       # 8 MB: past the 4 MB output buffer
+    n_big = 400                               # 40 MB: past the 32 MB a subscriber may be owed (#49)
+    for k in range(n_big):
         p.cmd("PUBLISH", "slow2", big)
     sc2 = Conn.wrap(s2, timeout=20)
     frames, closed, bad = 0, False, False
@@ -171,7 +172,7 @@ def run_slow(port: int):
         closed = True
     except Exception:                         # noqa: BLE001
         bad = True
-    check("past the limit: disconnected after whole frames, never a cut one", closed and not bad and frames < 80,
+    check("past the limit: disconnected after whole frames, never a cut one", closed and not bad and frames < n_big,
           f"closed={closed} bad={bad} frames={frames}")
     check("the server is fine", p.cmd("PING") == "PONG")
     s2.close()
