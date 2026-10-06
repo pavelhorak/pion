@@ -71,9 +71,19 @@ struct IOVec(Copyable, Movable, ImplicitlyCopyable):
     var iov_len: Int
 
 
-struct ResponseWriter(Movable):
-    var buffer: Pointer[UInt8, MutUntrackedOrigin]
-    var offset: Int
+struct WriterCtx(Movable):
+    """#49: the writer's per-connection and cold state, behind one pointer.
+
+    These fields used to sit in ResponseWriter itself. Mojo hands `mut self`
+    to an out-of-line method as the struct's fields, copied in and back out,
+    so every call from an inlined appender into a cold path cost one copy of
+    each field — and the fast path inlines appenders ~100 times. With these
+    eighteen fields in the writer, `process_data_plane` grew 264 -> 316 KB,
+    its stack frame doubled, and MSET lost 5-10% (2026-10-06; stack samples
+    showed `_mset_frame` 1.8x costlier per call). The capture constructor's
+    note records the same effect for one field (~1% on MSET/GET). The writer
+    now carries what an appender touches — buffer, offset, proto — and this
+    pointer; the cold paths are free functions over (ctx, buffer, offset)."""
     var pending_offsets: Pointer[Int, MutUntrackedOrigin]
     var pending_buffers: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]
     # io_uring send path (Linux only; use_uring=False on macOS kqueue path)
@@ -91,17 +101,6 @@ struct ResponseWriter(Movable):
     # the XDP lane now; everywhere else a full buffer is handed to its
     # connection and the reply goes on.
     var overflow_emitted: Bool
-    # gh #172: wire protocol for the connection currently being served — 2 or 3.
-    # The writer is per-worker, not per-fd, so the event loop stamps this from
-    # `tx_state.resp_proto[fd]` once per recv-buffer dispatch (not per command).
-    # Every RESP3-divergent appender branches on it with RESP2 as the
-    # fall-through, so the RESP2 hot path keeps its original instruction count.
-    #
-    # NOTE (gh #149 discipline): this field is LAST on purpose. Inserting a
-    # field mid-struct shifts every field after it and measurably costs
-    # throughput — `blobs`/`blob_threshold` mid-FastPathHandler cost ~1.5% by
-    # itself. New fields go at the end.
-    var proto: UInt8
     # gh #192: EAGAIN stalls in the blocking large-response send loops (each
     # one costs a ~150 µs usleep on macOS). Per-worker (writer is per-worker),
     # so plain increments are lockless. Exposed as INFO send_eagain_stalls —
@@ -136,50 +135,25 @@ struct ResponseWriter(Movable):
     # otherwise. The slow path sets it per command; other writers never do.
     var suppress_from: Int
 
-    def __init__(out self):
-        self.buffer = alloc[UInt8](RESP_BUF_SIZE)
-        self.offset = 0
-        self.pending_offsets = alloc[Int](65536)
-        self.pending_buffers = alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
-        self.use_uring = False
-        self.ring = null_ptr[IOUring, MutUntrackedOrigin]()
-        self.uring_inflight = alloc[Int](65536)
-        self.overflow_emitted = False
-        self.proto = 2
-        self.send_stalls = 0
-        self.flush_count = 0
-        self.cur_fd = -1
-        self.queued = False
-        self.ovf_bufs = null_ptr[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]()
-        self.ovf_lens = null_ptr[Int, MutUntrackedOrigin]()
-        self.ovf_heads = null_ptr[Int, MutUntrackedOrigin]()
-        self.ovf_caps = null_ptr[Int, MutUntrackedOrigin]()
-        self.cap_buf = null_ptr[UInt8, MutUntrackedOrigin]()
-        self.cap_len = 0
-        self.cap_cap = 0
-        self.suppress_from = -1
-        for i in range(65536):
-            self.pending_offsets[unsafe_offset=i] = 0
-            self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
-            self.uring_inflight[unsafe_offset=i] = 0
-
-    def __init__(out self, *, capture_only: Bool):
-        """#36: a writer that never sends, for a script's redis.call(): its
-        reply stays in `buffer` for the engine to read. It has no per-connection
+    def __init__(out self, *, connections: Bool):
+        """`connections` False makes a capture context (#36): no per-connection
         output state, which is how the paths that would write to a connection
-        recognise it (`is_null(pending_offsets)`), and its flushes are given
-        kq = -1, the no-op flush the XDP lane uses. (A `capture` field on every
-        writer cost the MSET and GET helpers, which take the writer, about 1%
-        more instructions.)"""
-        self.buffer = alloc[UInt8](RESP_BUF_SIZE)
-        self.offset = 0
-        self.pending_offsets = null_ptr[Int, MutUntrackedOrigin]()
-        self.pending_buffers = null_ptr[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]()
+        recognise it (`is_null(pending_offsets)`)."""
+        if connections:
+            self.pending_offsets = alloc[Int](65536)
+            self.pending_buffers = alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
+            self.uring_inflight = alloc[Int](65536)
+            for i in range(65536):
+                self.pending_offsets[unsafe_offset=i] = 0
+                self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
+                self.uring_inflight[unsafe_offset=i] = 0
+        else:
+            self.pending_offsets = null_ptr[Int, MutUntrackedOrigin]()
+            self.pending_buffers = null_ptr[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]()
+            self.uring_inflight = null_ptr[Int, MutUntrackedOrigin]()
         self.use_uring = False
         self.ring = null_ptr[IOUring, MutUntrackedOrigin]()
-        self.uring_inflight = null_ptr[Int, MutUntrackedOrigin]()
         self.overflow_emitted = False
-        self.proto = 2
         self.send_stalls = 0
         self.flush_count = 0
         self.cur_fd = -1
@@ -192,137 +166,6 @@ struct ResponseWriter(Movable):
         self.cap_len = 0
         self.cap_cap = 0
         self.suppress_from = -1
-
-    @always_inline
-    def bind_ring(mut self, ring_ptr: Pointer[IOUring, MutUntrackedOrigin]):
-        """Wire this ResponseWriter to an IOUring instance for Linux io_uring sends."""
-        self.ring = ring_ptr
-        self.use_uring = True
-
-    def _emit_overflow_error(mut self):
-        """Cold-path emit of `-ERR response exceeds buffer\r\n` (30 bytes),
-        only where a full buffer cannot be handed on: the XDP lane (#49).
-        Deliberately NOT `@always_inline`: embedding the emit in an inlined
-        appender mis-lowered under recursive dispatcher entry (MULTI/EXEC
-        replay), and a non-trivial cold branch made the inliner back off the
-        hot appenders."""
-        if self.overflow_emitted: return
-        self.overflow_emitted = True
-        _write_overflow_error_bytes(self.buffer.unsafe_offset(self.offset))
-        self.offset += 30
-
-    @no_inline
-    def _spill(mut self) -> Bool:
-        """#49: the buffer is about to overflow. Hand what it holds to the
-        connection it belongs to and start again at 0: the reply goes on, as
-        Redis's goes on into its reply list. A capture writer keeps the bytes
-        for the script. False where no connection can take them (cur_fd -1,
-        the XDP lane)."""
-        if self.suppress_from >= 0:
-            # #49: this reply is being dropped (CLIENT REPLY OFF / SKIP). Throw
-            # away what overflowed, back to where the command began, and send
-            # nothing — a dropped reply must never reach the socket.
-            self.offset = self.suppress_from
-            return True
-        if is_null(self.pending_offsets):
-            if self.offset > 0:
-                self._cap_push(self.buffer, self.offset)
-                self.offset = 0
-            self.flush_count += 1
-            return True
-        if self.cur_fd < 0:
-            return False
-        if self.offset > 0:
-            self._to_conn(self.cur_fd, self.buffer, self.offset)
-            self.offset = 0
-        self.flush_count += 1   # what was written is no longer in the buffer
-        return True
-
-    @no_inline
-    def _put_big(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
-        """#49: n payload bytes, however many, after what the buffer holds.
-        False only on the XDP lane, where the caller has already been told
-        the buffer is full."""
-        if self.offset + n <= RESP_LIMIT:
-            unsafe_memcpy(dest=self.buffer.unsafe_offset(self.offset), src=src, count=n)
-            self.offset += n
-            return True
-        if not self._spill():
-            return False
-        if n <= RESP_LIMIT:
-            unsafe_memcpy(dest=self.buffer, src=src, count=n)
-            self.offset = n
-            return True
-        if is_null(self.pending_offsets):
-            self._cap_push(src, n)
-        else:
-            self._to_conn(self.cur_fd, src, n)
-        return True
-
-    @no_inline
-    def _framed_cold(mut self, lead: UInt8, prefix: StaticString, data: Pointer[UInt8, MutUntrackedOrigin],
-                     length: Int, frame_len: Int):
-        """#49: `<lead><frame_len>\r\n<prefix><data>\r\n` for a payload that
-        does not fit what is left of the buffer: a bulk string (`$`), a RESP3
-        verbatim string (`=`, prefix `txt:`) or a double (`,`, no length)."""
-        if self.overflow_emitted:
-            return
-        if is_not_null(self.pending_offsets) and self.cur_fd < 0:
-            self._emit_overflow_error()     # the XDP lane, as before #49
-            return
-        if self.offset + 64 > RESP_LIMIT:
-            _ = self._spill()
-        self.buffer[unsafe_offset=self.offset] = lead
-        self.offset += 1
-        if frame_len >= 0:
-            self.offset = format_int_to_buf(self.buffer, self.offset, Int64(frame_len))
-            self.buffer[unsafe_offset=self.offset] = 13
-            self.buffer[unsafe_offset=self.offset + 1] = 10
-            self.offset += 2
-        var pl = prefix.byte_length()
-        if pl > 0:
-            unsafe_memcpy(dest=self.buffer.unsafe_offset(self.offset),
-                          src=prefix.unsafe_ptr().unsafe_bitcast[UInt8](), count=pl)
-            self.offset += pl
-        _ = self._put_big(data, length)
-        if self.offset + 2 > RESP_LIMIT:
-            _ = self._spill()
-        self.buffer[unsafe_offset=self.offset] = 13
-        self.buffer[unsafe_offset=self.offset + 1] = 10
-        self.offset += 2
-
-    @no_inline
-    def _raw_cold(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
-        """#49: raw bytes that do not fit what is left of the buffer."""
-        if self.overflow_emitted:
-            return
-        if is_not_null(self.pending_offsets) and self.cur_fd < 0:
-            self._emit_overflow_error()     # the XDP lane, as before #49
-            return
-        _ = self._put_big(src, n)
-
-    @always_inline
-    def reserve(mut self, n: Int) -> Bool:
-        """#49: room for a direct write of at most `n` bytes into `buffer`
-        (n well under RESP_LIMIT), spilling first when it is full. Every
-        caller that writes the buffer itself, not through an appender, must
-        reserve: a fast-path LRANGE and PING once wrote past the buffer's end.
-        False on the XDP lane once the buffer is full; the caller must then
-        write nothing."""
-        if self.offset + n > RESP_LIMIT:
-            return self._fixed_cold()
-        return True
-
-    @no_inline
-    def _fixed_cold(mut self) -> Bool:
-        """#49: a fixed-size append found the buffer full. Spill and go on;
-        False on the XDP lane, where the variable-length append that filled
-        the buffer has already sent the -ERR frame."""
-        if self.overflow_emitted:
-            return False
-        return self._spill()
-
-    # ── #49: what a connection is owed ────────────────────────────────────────
 
     def _cap_push(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
         """A capture writer's reply past its buffer, kept for the script."""
@@ -341,17 +184,6 @@ struct ResponseWriter(Movable):
             self.cap_cap = ncap
         unsafe_memcpy(dest=self.cap_buf.unsafe_offset(self.cap_len), src=src, count=n)
         self.cap_len += n
-
-    def captured(mut self) -> Int:
-        """A capture writer's whole reply, after its buffer spilled: move the
-        buffer behind the spilled bytes. Read it at `cap_buf` when cap_len > 0,
-        else at `buffer`; the return value is its length either way."""
-        if self.cap_len == 0:
-            return self.offset
-        if self.offset > 0:
-            self._cap_push(self.buffer, self.offset)
-            self.offset = 0
-        return self.cap_len
 
     def _ovf_init(mut self):
         self.ovf_bufs = alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
@@ -494,6 +326,290 @@ struct ResponseWriter(Movable):
             self.out_append(ci, src.unsafe_offset(sent), n - sent)
             self.queued = True
 
+
+# ---- #49: the cold paths, as free functions over (ctx, buffer, offset) --------
+# Each returns the buffer offset to continue at; -1 means no connection can
+# take the bytes (the XDP lane). They are free functions, not `mut self`
+# methods, so that an appender's call into them passes three registers rather
+# than copying the writer in and out (see WriterCtx).
+
+comptime _WCtx = Pointer[WriterCtx, MutUntrackedOrigin]
+comptime _WBuf = Pointer[UInt8, MutUntrackedOrigin]
+
+
+def _w_emit_overflow_error(ctx: _WCtx, buffer: _WBuf, offset: Int) -> Int:
+    """`-ERR response exceeds buffer\r\n` (30 bytes), only where a full buffer
+    cannot be handed on: the XDP lane (#49). Once per batch."""
+    if ctx[].overflow_emitted:
+        return offset
+    ctx[].overflow_emitted = True
+    _write_overflow_error_bytes(buffer.unsafe_offset(offset))
+    return offset + 30
+
+
+@no_inline
+def _w_spill(ctx: _WCtx, buffer: _WBuf, offset: Int) -> Int:
+    """#49: the buffer is about to overflow. Hand what it holds to the
+    connection it belongs to and start again at 0: the reply goes on, as
+    Redis's goes on into its reply list. A capture writer keeps the bytes
+    for the script. -1 where no connection can take them (cur_fd -1, the
+    XDP lane)."""
+    if ctx[].suppress_from >= 0:
+        # #49: this reply is being dropped (CLIENT REPLY OFF / SKIP). Throw
+        # away what overflowed, back to where the command began, and send
+        # nothing — a dropped reply must never reach the socket.
+        return ctx[].suppress_from
+    if is_null(ctx[].pending_offsets):
+        if offset > 0:
+            ctx[]._cap_push(buffer, offset)
+        ctx[].flush_count += 1
+        return 0
+    if ctx[].cur_fd < 0:
+        return -1
+    if offset > 0:
+        ctx[]._to_conn(ctx[].cur_fd, buffer, offset)
+    ctx[].flush_count += 1   # what was written is no longer in the buffer
+    return 0
+
+
+@no_inline
+def _w_put_big(ctx: _WCtx, buffer: _WBuf, offset: Int, src: _WBuf, n: Int) -> Int:
+    """#49: n payload bytes, however many, after what the buffer holds.
+    -1 only on the XDP lane, where the caller has already been told the
+    buffer is full."""
+    if ctx[].suppress_from >= 0:
+        # #49: this reply is being dropped (CLIENT REPLY OFF / SKIP). Write
+        # nothing and send nothing — the buffer up to suppress_from holds
+        # earlier commands' replies and is rolled back by _reply_gate. A
+        # single large value is written or sent directly here, so it must opt
+        # out, or the dropped payload would go out unframed (found by review,
+        # 2026-10-06).
+        return offset
+    if offset + n <= RESP_LIMIT:
+        unsafe_memcpy(dest=buffer.unsafe_offset(offset), src=src, count=n)
+        return offset + n
+    var o = _w_spill(ctx, buffer, offset)
+    if o < 0:
+        return -1
+    if o + n <= RESP_LIMIT:
+        unsafe_memcpy(dest=buffer.unsafe_offset(o), src=src, count=n)
+        return o + n
+    if is_null(ctx[].pending_offsets):
+        ctx[]._cap_push(src, n)
+    else:
+        ctx[]._to_conn(ctx[].cur_fd, src, n)
+    return o
+
+
+@no_inline
+def _w_framed_cold(ctx: _WCtx, buffer: _WBuf, offset: Int, lead: UInt8, prefix: StaticString,
+                   data: _WBuf, length: Int, frame_len: Int) -> Int:
+    """#49: `<lead><frame_len>\r\n<prefix><data>\r\n` for a payload that
+    does not fit what is left of the buffer: a bulk string (`$`), a RESP3
+    verbatim string (`=`, prefix `txt:`) or a double (`,`, no length)."""
+    if ctx[].overflow_emitted:
+        return offset
+    if is_not_null(ctx[].pending_offsets) and ctx[].cur_fd < 0:
+        return _w_emit_overflow_error(ctx, buffer, offset)     # the XDP lane, as before #49
+    var off = offset
+    if off + 64 > RESP_LIMIT:
+        var o = _w_spill(ctx, buffer, off)
+        if o >= 0:
+            off = o
+    buffer[unsafe_offset=off] = lead
+    off += 1
+    if frame_len >= 0:
+        off = format_int_to_buf(buffer, off, Int64(frame_len))
+        buffer[unsafe_offset=off] = 13
+        buffer[unsafe_offset=off + 1] = 10
+        off += 2
+    var pl = prefix.byte_length()
+    if pl > 0:
+        unsafe_memcpy(dest=buffer.unsafe_offset(off),
+                      src=prefix.unsafe_ptr().unsafe_bitcast[UInt8](), count=pl)
+        off += pl
+    var o2 = _w_put_big(ctx, buffer, off, data, length)
+    if o2 >= 0:
+        off = o2
+    if off + 2 > RESP_LIMIT:
+        var o3 = _w_spill(ctx, buffer, off)
+        if o3 >= 0:
+            off = o3
+    buffer[unsafe_offset=off] = 13
+    buffer[unsafe_offset=off + 1] = 10
+    return off + 2
+
+
+@no_inline
+def _w_raw_cold(ctx: _WCtx, buffer: _WBuf, offset: Int, src: _WBuf, n: Int) -> Int:
+    """#49: raw bytes that do not fit what is left of the buffer."""
+    if ctx[].overflow_emitted:
+        return offset
+    if is_not_null(ctx[].pending_offsets) and ctx[].cur_fd < 0:
+        return _w_emit_overflow_error(ctx, buffer, offset)     # the XDP lane, as before #49
+    var o = _w_put_big(ctx, buffer, offset, src, n)
+    if o < 0:
+        return offset
+    return o
+
+
+@no_inline
+def _w_fixed_cold(ctx: _WCtx, buffer: _WBuf, offset: Int) -> Int:
+    """#49: a fixed-size append found the buffer full. Spill and go on; -1 on
+    the XDP lane, where the variable-length append that filled the buffer has
+    already sent the -ERR frame."""
+    if ctx[].overflow_emitted:
+        return -1
+    return _w_spill(ctx, buffer, offset)
+
+
+struct ResponseWriter(Movable):
+    var buffer: Pointer[UInt8, MutUntrackedOrigin]
+    var offset: Int
+    # #49: everything else the writer keeps — per-connection queues, the
+    # capture buffer, the io_uring state, CLIENT REPLY suppression — lives
+    # behind this one pointer (see WriterCtx for why).
+    var ctx: Pointer[WriterCtx, MutUntrackedOrigin]
+    # gh #172: wire protocol for the connection currently being served — 2 or 3.
+    # The writer is per-worker, not per-fd, so the event loop stamps this from
+    # `tx_state.resp_proto[fd]` once per recv-buffer dispatch (not per command).
+    # Every RESP3-divergent appender branches on it with RESP2 as the
+    # fall-through, so the RESP2 hot path keeps its original instruction count.
+    #
+    # NOTE (gh #149 discipline): this field is LAST on purpose. Inserting a
+    # field mid-struct shifts every field after it and measurably costs
+    # throughput — `blobs`/`blob_threshold` mid-FastPathHandler cost ~1.5% by
+    # itself. New fields go at the end.
+    var proto: UInt8
+
+
+    def __init__(out self):
+        self.buffer = alloc[UInt8](RESP_BUF_SIZE)
+        self.offset = 0
+        self.ctx = alloc[WriterCtx](1)
+        self.ctx.unsafe_write(WriterCtx(connections=True))
+        self.proto = 2
+
+    def __init__(out self, *, capture_only: Bool):
+        """#36: a writer that never sends, for a script's redis.call(): its
+        reply stays in `buffer` for the engine to read. It has no per-connection
+        output state, which is how the paths that would write to a connection
+        recognise it (`is_null(ctx[].pending_offsets)`), and its flushes are
+        given kq = -1, the no-op flush the XDP lane uses. (A `capture` field on
+        every writer cost the MSET and GET helpers, which take the writer, about
+        1% more instructions — the effect WriterCtx exists to avoid.)"""
+        self.buffer = alloc[UInt8](RESP_BUF_SIZE)
+        self.offset = 0
+        self.ctx = alloc[WriterCtx](1)
+        self.ctx.unsafe_write(WriterCtx(connections=False))
+        self.proto = 2
+
+    # ---- #49: the cold paths. Thin and inlined: each passes (ctx, buffer,
+    # offset) to a free function and takes back the offset, so an appender
+    # that inlines one costs a call with three arguments, not a copy of the
+    # writer in and out.
+
+    @always_inline
+    def _emit_overflow_error(mut self):
+        self.offset = _w_emit_overflow_error(self.ctx, self.buffer, self.offset)
+
+    @always_inline
+    def _spill(mut self) -> Bool:
+        var o = _w_spill(self.ctx, self.buffer, self.offset)
+        if o < 0:
+            return False
+        self.offset = o
+        return True
+
+    @always_inline
+    def _put_big(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+        var o = _w_put_big(self.ctx, self.buffer, self.offset, src, n)
+        if o < 0:
+            return False
+        self.offset = o
+        return True
+
+    @always_inline
+    def _framed_cold(mut self, lead: UInt8, prefix: StaticString, data: Pointer[UInt8, MutUntrackedOrigin],
+                     length: Int, frame_len: Int):
+        self.offset = _w_framed_cold(self.ctx, self.buffer, self.offset, lead, prefix, data, length, frame_len)
+
+    @always_inline
+    def _raw_cold(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+        self.offset = _w_raw_cold(self.ctx, self.buffer, self.offset, src, n)
+
+    @always_inline
+    def _fixed_cold(mut self) -> Bool:
+        var o = _w_fixed_cold(self.ctx, self.buffer, self.offset)
+        if o < 0:
+            return False
+        self.offset = o
+        return True
+
+    # ---- #49: what a connection is owed — forwarded to the context, so the
+    # engine's calls read as before.
+
+    @always_inline
+    def _cap_push(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+        self.ctx[]._cap_push(src, n)
+
+    @always_inline
+    def out_overflowed(self, ci: Int) -> Bool:
+        return self.ctx[].out_overflowed(ci)
+
+    @always_inline
+    def owes(self, ci: Int) -> Bool:
+        return self.ctx[].owes(ci)
+
+    @always_inline
+    def out_owed(self, ci: Int) -> Int:
+        return self.ctx[].out_owed(ci)
+
+    @always_inline
+    def out_append(mut self, ci: Int, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+        self.ctx[].out_append(ci, src, n)
+
+    @always_inline
+    def out_refill(mut self, ci: Int):
+        self.ctx[].out_refill(ci)
+
+    @always_inline
+    def out_free(mut self, ci: Int):
+        self.ctx[].out_free(ci)
+
+    @always_inline
+    def _to_conn(mut self, fd: Int32, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+        self.ctx[]._to_conn(fd, src, n)
+
+    @always_inline
+    def bind_ring(mut self, ring_ptr: Pointer[IOUring, MutUntrackedOrigin]):
+        """Wire this ResponseWriter to an IOUring instance for Linux io_uring sends."""
+        self.ctx[].ring = ring_ptr
+        self.ctx[].use_uring = True
+
+    @always_inline
+    def reserve(mut self, n: Int) -> Bool:
+        """#49: room for a direct write of at most `n` bytes into `buffer`
+        (n well under RESP_LIMIT), spilling first when it is full. Every
+        caller that writes the buffer itself, not through an appender, must
+        reserve: a fast-path LRANGE and PING once wrote past the buffer's end.
+        False on the XDP lane once the buffer is full; the caller must then
+        write nothing."""
+        if self.offset + n > RESP_LIMIT:
+            return self._fixed_cold()
+        return True
+
+    def captured(mut self) -> Int:
+        """A capture writer's whole reply, after its buffer spilled: move the
+        buffer behind the spilled bytes. Read it at `cap_buf` when cap_len > 0,
+        else at `buffer`; the return value is its length either way."""
+        if self.ctx[].cap_len == 0:
+            return self.offset
+        if self.offset > 0:
+            self._cap_push(self.buffer, self.offset)
+            self.offset = 0
+        return self.ctx[].cap_len
+
     @always_inline
     def append_to_response[origin: Origin](mut self, src: Pointer[UInt8, origin], length: Int):
         if self.offset + length > RESP_LIMIT:
@@ -503,10 +619,24 @@ struct ResponseWriter(Movable):
         self.offset += length
 
     @always_inline
+    def spill_if_full(mut self, fd: Int32, server: TCPServer, kq: Int32):
+        """#49: between commands in a batch, hand the buffer to the connection
+        once it is within 1 MB of the limit. append_ok (SET/MSET) and the other
+        single-reply fixed appenders bare-return on overflow to stay inlined;
+        a pipeline of them (up to the 256 MB recv buffer) would otherwise fill
+        the 4 MB buffer with no variable-length appender to trigger a spill.
+        This keeps offset far enough from the limit that a single command's own
+        fixed replies never reach it (a single over-buffer reply, a huge
+        LRANGE, is still spilled mid-reply by the variable-length appenders).
+        One compare per command; the flush only on the rare crossing."""
+        if self.offset > RESP_LIMIT - 1048576:
+            self.flush_response(fd, server, kq)
+
+    @always_inline
     def flush_response(mut self, fd: Int32, server: TCPServer, kq: Int32):
-        self.flush_count += 1
-        self.queued = False
-        if self.use_uring:
+        self.ctx[].flush_count += 1
+        self.ctx[].queued = False
+        if self.ctx[].use_uring:
             self._flush_uring(fd)
         elif kq == -1:
             # XDP path: don't flush via TCP — the XDP event loop reads
@@ -518,7 +648,7 @@ struct ResponseWriter(Movable):
         # (offset == 0 means the bytes were either sent or moved to pending).
         # The next pre-flush batch starts with a clean slate.
         if self.offset == 0:
-            self.overflow_emitted = False
+            self.ctx[].overflow_emitted = False
 
     def deliver_to(mut self, fd: Int32, data: Pointer[UInt8, MutUntrackedOrigin], length: Int,
                    server: TCPServer, kq: Int32):
@@ -533,14 +663,14 @@ struct ResponseWriter(Movable):
         disconnects a client past its output-buffer limit, because a
         subscriber that received half a frame is out of sync for good.
         Not on the XDP lane (kq == -1), which sends nothing over TCP."""
-        if length <= 0 or (kq == -1 and not self.use_uring):
+        if length <= 0 or (kq == -1 and not self.ctx[].use_uring):
             return
         var ci = Int(fd)
         var p = data
         var left = length
-        if self.use_uring and self.ring[].fd_closing[unsafe_offset=ci] != 0:
+        if self.ctx[].use_uring and self.ctx[].ring[].fd_closing[unsafe_offset=ci] != 0:
             return
-        if not self.use_uring and not self.owes(ci):
+        if not self.ctx[].use_uring and not self.owes(ci):
             while left > 0:
                 var n = server.send(fd, p, left)
                 if n <= 0:
@@ -556,7 +686,7 @@ struct ResponseWriter(Movable):
             _ = external_call["shutdown", Int32](fd, Int32(2))   # SHUT_RDWR: the engine sees EOF
             return
         self.out_append(ci, p, left)
-        if self.use_uring:
+        if self.ctx[].use_uring:
             self.uring_kick(fd, ci)
         else:
             server.kevent_add_write(kq, fd)
@@ -564,53 +694,53 @@ struct ResponseWriter(Movable):
     def uring_kick(mut self, fd: Int32, ci: Int):
         """io_uring: submit a SEND of the pending block when none is in
         flight, refilled from the overflow queue first."""
-        if self.uring_inflight[unsafe_offset=ci] != 0:
+        if self.ctx[].uring_inflight[unsafe_offset=ci] != 0:
             return
-        if self.pending_offsets[unsafe_offset=ci] < OUT_BLOCK:
+        if self.ctx[].pending_offsets[unsafe_offset=ci] < OUT_BLOCK:
             self.out_refill(ci)
-        if self.pending_offsets[unsafe_offset=ci] > 0:
-            self.uring_inflight[unsafe_offset=ci] = self.pending_offsets[unsafe_offset=ci]
-            self.ring[].submit_send(fd, self.pending_buffers[unsafe_offset=ci], self.uring_inflight[unsafe_offset=ci])
+        if self.ctx[].pending_offsets[unsafe_offset=ci] > 0:
+            self.ctx[].uring_inflight[unsafe_offset=ci] = self.ctx[].pending_offsets[unsafe_offset=ci]
+            self.ctx[].ring[].submit_send(fd, self.ctx[].pending_buffers[unsafe_offset=ci], self.ctx[].uring_inflight[unsafe_offset=ci])
 
     def uring_sent(mut self, ci: Int, sent: Int):
         """io_uring: a SEND of the pending block completed with `sent` bytes.
         Drop them from its front (nothing is in flight now) and refill it."""
-        var remaining = self.pending_offsets[unsafe_offset=ci] - sent
+        var remaining = self.ctx[].pending_offsets[unsafe_offset=ci] - sent
         if remaining > 0:
             _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
-                self.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
-                (self.pending_buffers[unsafe_offset=ci].unsafe_offset(sent)).unsafe_bitcast[NoneType](),
+                self.ctx[].pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
+                (self.ctx[].pending_buffers[unsafe_offset=ci].unsafe_offset(sent)).unsafe_bitcast[NoneType](),
                 remaining,
             )
-            self.pending_offsets[unsafe_offset=ci] = remaining
+            self.ctx[].pending_offsets[unsafe_offset=ci] = remaining
         else:
-            self.pending_offsets[unsafe_offset=ci] = 0
+            self.ctx[].pending_offsets[unsafe_offset=ci] = 0
         self.out_refill(ci)
 
-    @always_inline
+    @no_inline
     def _flush_uring(mut self, fd: Int32):
         """io_uring send path. Queues the response buffer behind what the
         connection is owed and submits a SEND if none is in flight; the SEND
         completion handler (uring_sent) drains the remainder."""
         var ci = Int(fd)
         if self.offset == 0 and not self.owes(ci):
-            self.overflow_emitted = False
+            self.ctx[].overflow_emitted = False
             return
-        if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+        if self.ctx[].ring[].fd_closing[unsafe_offset=ci] != 0:
             # The engine is closing this connection and waits for its last
             # SEND to complete before freeing the buffer a new one would read.
             self.offset = 0
-            self.overflow_emitted = False
+            self.ctx[].overflow_emitted = False
             return
         if self.offset > 0:
             self.out_append(ci, self.buffer, self.offset)
             self.offset = 0
-        self.overflow_emitted = False
+        self.ctx[].overflow_emitted = False
         # Submit SEND only if no send is currently in flight for this fd;
         # otherwise its completion sends what was queued meanwhile.
         self.uring_kick(fd, ci)
 
-    @always_inline
+    @no_inline
     def _flush_kqueue(mut self, fd: Int32, server: TCPServer, kq: Int32):
         var fd_idx = Int(fd)
 
@@ -647,24 +777,24 @@ struct ResponseWriter(Movable):
         """kqueue / epoll: send what the connection is owed, for as long as
         its socket takes it; arm the write event for the rest."""
         while True:
-            if self.pending_offsets[unsafe_offset=ci] == 0:
+            if self.ctx[].pending_offsets[unsafe_offset=ci] == 0:
                 self.out_refill(ci)
-                if self.pending_offsets[unsafe_offset=ci] == 0:
+                if self.ctx[].pending_offsets[unsafe_offset=ci] == 0:
                     server.kevent_del_write(kq, fd)
                     return
-            var owed = self.pending_offsets[unsafe_offset=ci]
-            var n = server.send(fd, self.pending_buffers[unsafe_offset=ci], owed)
+            var owed = self.ctx[].pending_offsets[unsafe_offset=ci]
+            var n = server.send(fd, self.ctx[].pending_buffers[unsafe_offset=ci], owed)
             if n >= owed:
-                self.pending_offsets[unsafe_offset=ci] = 0
+                self.ctx[].pending_offsets[unsafe_offset=ci] = 0
                 continue
             if n > 0:
                 var remaining = owed - n
                 _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
-                    self.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
-                    (self.pending_buffers[unsafe_offset=ci].unsafe_offset(n)).unsafe_bitcast[NoneType](),
+                    self.ctx[].pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
+                    (self.ctx[].pending_buffers[unsafe_offset=ci].unsafe_offset(n)).unsafe_bitcast[NoneType](),
                     remaining,
                 )
-                self.pending_offsets[unsafe_offset=ci] = remaining
+                self.ctx[].pending_offsets[unsafe_offset=ci] = remaining
                 server.kevent_add_write(kq, fd)
                 return
             if _send_errno() == _EAGAIN():
@@ -672,7 +802,7 @@ struct ResponseWriter(Movable):
             else:
                 # EPIPE/ECONNRESET: the fd is dead; drop what it is owed, the
                 # event loop closes it
-                self.pending_offsets[unsafe_offset=ci] = 0
+                self.ctx[].pending_offsets[unsafe_offset=ci] = 0
                 self.out_free(ci)
             return
 
@@ -682,24 +812,95 @@ struct ResponseWriter(Movable):
         var line = String("+") + msg + "\r\n"
         self.append_to_response(line.unsafe_ptr(), line.byte_length())
 
+    # ---- #49: fast-path appenders ------------------------------------------
+    # The fixed-size appenders below spill to the connection when the buffer is
+    # full (`_fixed_cold`), which a slow-path loop needs: SMISMEMBER, LPOS
+    # COUNT 0, BITFIELD and the like build one large reply out of small fixed
+    # pieces. In `process_data_plane` that cold call was a measured MSET
+    # regression: the fast path inlines these ~80 times, every inlined call
+    # site makes the writer's fields live in memory around a call, and the
+    # function grew 264 -> 316 KB with its stack frame doubled, so MSET (whose
+    # dispatch runs through it) lost 5-10% (2026-10-06, server-saturated A/B
+    # and stack samples). The release kept these exact appenders BARE, and so
+    # does the fast path: no fast-path command builds a reply out of more than a
+    # bounded handful of fixed pieces (anything unbounded -- MGET, LRANGE,
+    # ZPOPMIN with a count -- goes through a spilling variable-length appender
+    # or `reserve`, and a fixed write after one lands in the 194 KB slack), and
+    # a pipeline of them is bounded by `spill_if_full` at the top of the
+    # fast-path loop. Use these in fast_path.mojo only.
+
+    @always_inline
+    def append_int_response_fast(mut self, val: Int64):
+        if self.offset + 24 > RESP_LIMIT: return
+        self.buffer[unsafe_offset=self.offset] = 58 # ':'
+        self.offset += 1
+        self.offset = format_int_to_buf(self.buffer, self.offset, val)
+        self.buffer[unsafe_offset=self.offset] = 13 # '\r'
+        self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
+        self.offset += 2
+
+    @always_inline
+    def append_null_response_fast(mut self):
+        var off = self.offset
+        if off + 5 > RESP_LIMIT: return
+        if self.proto == 3:
+            (self.buffer.unsafe_offset(off)).unsafe_bitcast[UInt64]()[] = UInt64(0x00000000000A0D5F)
+            self.offset = off + 3
+            return
+        (self.buffer.unsafe_offset(off)).unsafe_bitcast[UInt64]()[] = UInt64(0x0000000A0D312D24)
+        self.offset = off + 5
+
+    @always_inline
+    def append_error_response_fast(mut self, msg: String):
+        var b = msg.as_bytes()
+        if self.offset + len(b) + 4 > RESP_LIMIT: return
+        self.buffer[unsafe_offset=self.offset] = 45 # '-'
+        self.offset += 1
+        unsafe_memcpy(dest=self.buffer.unsafe_offset(self.offset), src=b.unsafe_ptr(), count=len(b))
+        self.offset += len(b)
+        self.buffer[unsafe_offset=self.offset] = 13 # '\r'
+        self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
+        self.offset += 2
+
+    @always_inline
+    def append_empty_array_response_fast(mut self):
+        var off = self.offset
+        if off + 4 > RESP_LIMIT: return
+        (self.buffer.unsafe_offset(off)).unsafe_bitcast[UInt64]()[] = UInt64(0x000000000A0D302A)
+        self.offset = off + 4
+
+    @always_inline
+    def append_pong_response_fast(mut self):
+        var off = self.offset
+        if off + 7 > RESP_LIMIT: return
+        (self.buffer.unsafe_offset(off)).unsafe_bitcast[UInt64]()[] = UInt64(0x000A0D474E4F502B)
+        self.offset = off + 7
+
+    @always_inline
+    def append_set_header_fast(mut self, count: Int):
+        if self.offset + 16 > RESP_LIMIT: return
+        self.buffer[unsafe_offset=self.offset] = 126 if self.proto == 3 else 42   # '~' / '*'
+        self.offset += 1
+        self.offset = format_int_to_buf(self.buffer, self.offset, Int64(count))
+        self.buffer[unsafe_offset=self.offset] = 13 # '\r'
+        self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
+        self.offset += 2
+
     @always_inline
     def append_ok_response(mut self):
-        # gh #82: hot path — keep the original constant guard. Fixed-byte writes
-        # are protected by the safe-zone invariant maintained by variable-length
-        # appenders (which emit `-ERR …` before offset crosses into the margin).
-        # Probed the alternative — calling `self._emit_overflow_error()` here
-        # too, so every silent-drop becomes a `-ERR` frame — and LRANGE_300
-        # dropped ~10% on the Mac gate (the cold branch stops being trivial,
-        # so Mojo's inliner backs off and the hot path pays the cost). The
-        # invariant: any variable-length appender that brings offset into the
-        # safe zone has already emitted the `-ERR` frame, so a fixed-byte
-        # silent return after that is downstream of an already-overflowed
-        # client signal — not a fresh silent loss. Frame-sync test:
-        # `tests/test_response_buffer_overflow.py`.
+        # gh #82 / #49: hot path — a BARE return on overflow, no call. MSET
+        # (and SET) reply +OK through here, and MSET's +OK is inlined into the
+        # tight `_mset_frame` loop; a call in the cold branch (`_fixed_cold`)
+        # made LLVM treat the loop as non-leaf and spill its registers, costing
+        # MSET ~5-8% (interleaved A/B, 2026-10-06, 1.886M vs the release's
+        # 1.96-2.04M). The gh #82 note recorded the same effect on LRANGE_300.
+        # Correctness is kept by `spill_if_full`, called between commands in
+        # both dispatch loops: it hands the buffer to the connection once
+        # offset is within 1 MB of the limit, so a pipeline of +OK (up to the
+        # 256 MB recv buffer) cannot overflow here, and a single +OK is 5 bytes
+        # against ≥1 MB of headroom — this `return` is unreachable in practice.
         var off = self.offset
-        if off + 5 > RESP_LIMIT:
-            if not self._fixed_cold(): return
-            off = self.offset
+        if off + 5 > RESP_LIMIT: return
         # '+OK\r\n' packed LE: 0x0000000A0D4B4F2B (writes 8 bytes; extra 3 safely overwritten)
         (self.buffer.unsafe_offset(off)).unsafe_bitcast[UInt64]()[] = UInt64(0x0000000A0D4B4F2B)
         self.offset = off + 5

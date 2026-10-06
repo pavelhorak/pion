@@ -152,6 +152,16 @@ def main() -> int:
     check("the SET under REPLY OFF still ran", c.cmd("GET", "br:k") == b"v")
     c.cmd("DEL", "br:k")
 
+    # A single reply too big for the buffer, dropped: must send NOTHING and
+    # corrupt nothing (the _put_big suppress path, #49).
+    c.cmd("SET", "br:big", b"x" * (5 * 1024 * 1024))
+    off2 = socket.create_connection(("127.0.0.1", port)); off2.settimeout(10)
+    off2.sendall(encode(("CLIENT", "REPLY", "SKIP")) + encode(("GET", "br:big")) + encode(("PING",)))
+    time.sleep(0.4)
+    check("REPLY SKIP + GET 5 MB sends only the PONG", off2.recv(1 << 20) == b"+PONG\r\n")
+    off2.close()
+    c.cmd("DEL", "br:big")
+
     print("[6] a slow reader holds up nobody else")
     a = socket.create_connection(("127.0.0.1", port))
     a.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)

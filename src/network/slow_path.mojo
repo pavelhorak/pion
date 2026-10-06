@@ -1269,7 +1269,7 @@ struct SlowPathHandler:
 
     def _client_line_of(mut self, fd: Int32, caller: Int32, qbuf_self: Int, resp_self: Int,
                         mut writer: ResponseWriter) raises -> String:
-        var pending = is_not_null(writer.pending_offsets) and writer.owes(Int(fd))
+        var pending = is_not_null(writer.ctx[].pending_offsets) and writer.owes(Int(fd))
         return client_line(self.clients, self._client_view(fd, caller, qbuf_self, resp_self, pending))
 
     def _client_type(self, fd: Int32) -> Int:
@@ -1407,7 +1407,7 @@ struct SlowPathHandler:
         if m == REPLY_SKIP_NEXT:
             self.clients.reply[f] = REPLY_SKIP_NOW   # the next command's reply goes
             return
-        if writer.flush_count == flushes and start <= writer.offset:
+        if writer.ctx[].flush_count == flushes and start <= writer.offset:
             writer.offset = start
         if m == REPLY_SKIP_NOW:
             self.clients.set_reply(fd, REPLY_ON)
@@ -1439,7 +1439,7 @@ struct SlowPathHandler:
         where its reply began, which is only there while nothing was flushed
         or spilled since (#49)."""
         comptime W = "-WRONGPASS"
-        if start < 0 or writer.flush_count != flushes or writer.offset - start < 10:
+        if start < 0 or writer.ctx[].flush_count != flushes or writer.offset - start < 10:
             return False
         var p = W.unsafe_ptr()
         for k in range(10):
@@ -1822,7 +1822,7 @@ struct SlowPathHandler:
         var num_cmds = 0
         var on_primary = True
         var cmd_write_start = 0
-        var cmd_flushes = 0         # #49: writer.flush_count when the command began
+        var cmd_flushes = 0         # #49: writer.ctx[].flush_count when the command began
         # #47 CLIENT REPLY: where the current primary command's reply began,
         # and the writer's flush count then
         var _rg_start = -1
@@ -1853,9 +1853,9 @@ struct SlowPathHandler:
                 # cannot be read as commands.
                 writer.append_error_response("ERR " + protocol_error_text(need_tokens))
                 writer.flush_response(fd, server, kq)
-                if self.script_depth == 0 and is_not_null(writer.pending_offsets):
+                if self.script_depth == 0 and is_not_null(writer.ctx[].pending_offsets):
                     self.clients.close_after[Int(fd)] = 1
-                    if not writer.use_uring and kq != -1 and not writer.owes(Int(fd)):
+                    if not writer.ctx[].use_uring and kq != -1 and not writer.owes(Int(fd)):
                         _ = external_call["pion_kill_fd", Int32](fd)
                 return n
             if num_tokens == 0:
@@ -1876,18 +1876,24 @@ struct SlowPathHandler:
                     var token = tokens[i]
                     var tl = token.length
                     var tp = token.ptr
+                    # #49: bound the buffer across a long batch of fixed-size
+                    # replies before this command writes (covers EXEC replay,
+                    # which re-enters this loop). Not on a capture writer (a
+                    # script's redis.call keeps its bytes) or the XDP lane.
+                    if on_primary and is_not_null(writer.ctx[].pending_offsets):
+                        writer.spill_if_full(fd, server, kq)
                     # gh #162: where this command's response starts, so the
                     # recovery `except` can drop a half-written frame before
                     # emitting its error.
                     # #47 CLIENT REPLY OFF / SKIP: the previous command's reply
                     # is complete, so drop it here when the mode says so (this
                     # also covers a command that `continue`d: +QUEUED, -NOAUTH)
-                    writer.suppress_from = -1   # #49: cleared per command (replay, scripts)
+                    writer.ctx[].suppress_from = -1   # #49: cleared per command (replay, scripts)
                     if on_primary and self.script_depth == 0:
                         if self.clients.reply_off_count > 0 and _rg_start >= 0:
                             self._reply_gate(fd, writer, _rg_start, _rg_flushes)
                         _rg_start = writer.offset
-                        _rg_flushes = writer.flush_count
+                        _rg_flushes = writer.ctx[].flush_count
                         # #49: when this command's reply will be dropped (REPLY
                         # OFF, or the one after CLIENT REPLY SKIP — _reply_gate
                         # above has just turned SKIP_NEXT into SKIP_NOW), mark
@@ -1896,9 +1902,9 @@ struct SlowPathHandler:
                         if self.clients.reply_off_count > 0:
                             var _rm = self.clients.reply[Int(fd)]
                             if _rm == REPLY_OFF or _rm == REPLY_SKIP_NOW:
-                                writer.suppress_from = writer.offset
+                                writer.ctx[].suppress_from = writer.offset
                     cmd_write_start = writer.offset
-                    cmd_flushes = writer.flush_count
+                    cmd_flushes = writer.ctx[].flush_count
                     # #47 SLOWLOG: when this command started (a counter read)
                     var _sl_t0 = external_call["pion_ticks", UInt64]()
                     # cmd_ends holds MAX_CMD_ENDS == MAX_CMD_TOKENS entries and a
@@ -3043,7 +3049,7 @@ struct SlowPathHandler:
                                 # handle_save wrote +OK; SHUTDOWN must not reply, so
                                 # roll that back rather than desyncing the client
                                 # (only while it is still in the buffer, #49).
-                                if writer.flush_count == cmd_flushes:
+                                if writer.ctx[].flush_count == cmd_flushes:
                                     writer.offset = cmd_write_start
                             external_call["pion_request_shutdown", NoneType]()
                         i = cmd_end_tok - 1
@@ -4951,7 +4957,7 @@ struct SlowPathHandler:
             if self.kill_after_reply == fd:
                 self.kill_after_reply = -1
                 self.clients.close_after[Int(fd)] = 1
-                if not writer.use_uring and kq != -1 and is_not_null(writer.pending_offsets) \
+                if not writer.ctx[].use_uring and kq != -1 and is_not_null(writer.ctx[].pending_offsets) \
                    and not writer.owes(Int(fd)):
                     _ = external_call["pion_kill_fd", Int32](fd)
             return primary_consumed
@@ -4981,9 +4987,9 @@ struct SlowPathHandler:
             # back. The error would then be read as part of that reply and the
             # connection is out of step for good: it gets the error, and is
             # closed once that is out.
-            var _out_of_step = on_primary and is_not_null(writer.pending_offsets) \
-                and writer.flush_count != cmd_flushes
-            if writer.flush_count == cmd_flushes and cmd_write_start <= writer.offset:
+            var _out_of_step = on_primary and is_not_null(writer.ctx[].pending_offsets) \
+                and writer.ctx[].flush_count != cmd_flushes
+            if writer.ctx[].flush_count == cmd_flushes and cmd_write_start <= writer.offset:
                 writer.offset = cmd_write_start
             # A handler that raised a REDIS error (strict_atol's "ERR value is
             # not an integer or out of range") gets that text as its reply;
@@ -4998,7 +5004,7 @@ struct SlowPathHandler:
             writer.flush_response(fd, server, kq)
             if _out_of_step:
                 self.clients.close_after[Int(fd)] = 1
-                if not writer.use_uring and kq != -1 and not writer.owes(Int(fd)):
+                if not writer.ctx[].use_uring and kq != -1 and not writer.owes(Int(fd)):
                     _ = external_call["pion_kill_fd", Int32](fd)
                 return n
             if on_primary and cmd_idx < num_cmds:
@@ -5055,8 +5061,8 @@ struct SlowPathHandler:
             self.script_writer.unsafe_write(ResponseWriter(capture_only=True))
         var w = self.script_writer
         w[].offset = 0
-        w[].cap_len = 0           # #49: the last call's reply past the buffer
-        w[].overflow_emitted = False
+        w[].ctx[].cap_len = 0           # #49: the last call's reply past the buffer
+        w[].ctx[].overflow_emitted = False
         w[].proto = UInt8(resp)
         var ar = command_arity(np, nl)
         var sp = argv[1] if argc > 1 else np
@@ -5114,7 +5120,7 @@ struct SlowPathHandler:
         # #49: a reply too long for the buffer spilled into cap_buf, where it
         # is read whole; the next call starts both over
         var rlen = w[].captured()
-        reply[0] = w[].cap_buf if w[].cap_len > 0 else w[].buffer
+        reply[0] = w[].ctx[].cap_buf if w[].ctx[].cap_len > 0 else w[].buffer
         return rlen
 
     def drain_pubsub(mut self, mut writer: ResponseWriter, server: TCPServer, kq: Int32):
@@ -5151,7 +5157,7 @@ struct SlowPathHandler:
         # Check completion and send deferred responses.
         var i = 0
         while i < self.deferred_count:
-            writer.cur_fd = self.deferred_fds[i]   # #49: what is written here is that fd's
+            writer.ctx[].cur_fd = self.deferred_fds[i]   # #49: what is written here is that fd's
             var active = self.deferred_active[i]
             var done   = self.deferred_done[i]
             var seq    = self.deferred_seqs[i]

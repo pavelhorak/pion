@@ -54,7 +54,6 @@ struct NetworkEngine:
     var client_buffer_lens: Pointer[Int, MutUntrackedOrigin]
     var client_buffers: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]
     var config: PionConfig
-    var writer: ResponseWriter
     var fast_path: FastPathHandler
     var slow_path: SlowPathHandler
     var pending_changes: Pointer[KEvent, MutUntrackedOrigin]
@@ -107,6 +106,11 @@ struct NetworkEngine:
     # over the limit, a client monitors (#39) or one is subscribed (#42); then
     # slow_path.fast_path_ok(fd) decides per connection.
     var over_maxmemory: Bool
+    # #49: writer is LAST, so a change in its size can never move the hot
+    # fast_path/slow_path structs after it (gh #149 layout sensitivity). Its
+    # cold state lives behind `writer.ctx` (see WriterCtx for the measured
+    # reason), and the release-equivalence MSET A/B was taken with it here.
+    var writer: ResponseWriter
 
 
     def __init__(
@@ -238,10 +242,10 @@ struct NetworkEngine:
         if self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
             self.client_buffers[unsafe_offset=ci].unsafe_free()
             self.client_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
-        if self.writer.pending_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
-            self.writer.pending_buffers[unsafe_offset=ci].unsafe_free()
-            self.writer.pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
-        self.writer.pending_offsets[unsafe_offset=ci] = 0
+        if self.writer.ctx[].pending_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+            self.writer.ctx[].pending_buffers[unsafe_offset=ci].unsafe_free()
+            self.writer.ctx[].pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.writer.ctx[].pending_offsets[unsafe_offset=ci] = 0
         self.writer.out_free(ci)                     # #49
 
     @always_inline
@@ -364,7 +368,7 @@ struct NetworkEngine:
         # in the same batch is already RESP3.
         self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=client_idx]
         # #49: and the connection itself, which takes the buffer when it fills
-        self.writer.cur_fd = fd
+        self.writer.ctx[].cur_fd = fd
 
         while cur_len > 0:
             # gh #390: a connection whose WAIT is parked runs nothing more
@@ -405,7 +409,7 @@ struct NetworkEngine:
         # a reply it will never see (concurrent pipelined writes deadlocked
         # 3 of 4 connections; a single connection never tripped it because
         # there was no other fd to mis-deliver to). Drain to THIS fd here.
-        if self.writer.offset > 0 or self.writer.queued:   # #49: queued, buffer empty
+        if self.writer.offset > 0 or self.writer.ctx[].queued:   # #49: queued, buffer empty
             self.writer.flush_response(fd, self.server, kq)
         # gh #394: free the aggregates this batch overwrote — after the flush,
         # since a reply can borrow from the value a later command replaced.
@@ -452,7 +456,7 @@ struct NetworkEngine:
             var fd = w.fd
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
-            self.writer.cur_fd = Int32(ci)   # #49
+            self.writer.ctx[].cur_fd = Int32(ci)   # #49
             if w.unblock == UNBLOCK_ERROR:          # #47: CLIENT UNBLOCK id ERROR
                 self.writer.append_error_response(UNBLOCKED_ERROR)
             else:
@@ -489,7 +493,7 @@ struct NetworkEngine:
                 continue
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
-            self.writer.cur_fd = Int32(ci)   # #49
+            self.writer.ctx[].cur_fd = Int32(ci)   # #49
             var wrote = 0
             if ub == 0:
                 wrote = write_xread_reply(self.writer, self.slow_path.keyspace,
@@ -547,7 +551,7 @@ struct NetworkEngine:
                 self.slow_path.parked_waits.unpark_fd(fd)
                 var tci = Int(fd)
                 self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=tci]
-                self.writer.cur_fd = Int32(tci)   # #49
+                self.writer.ctx[].cur_fd = Int32(tci)   # #49
                 if ub == UNBLOCK_ERROR:
                     self.writer.append_error_response(UNBLOCKED_ERROR)
                 elif nil_bulk:
@@ -568,7 +572,7 @@ struct NetworkEngine:
             self.slow_path.parked_waits.unpark_fd(fd)
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
-            self.writer.cur_fd = Int32(ci)   # #49
+            self.writer.ctx[].cur_fd = Int32(ci)   # #49
             var park = self.slow_path.can_park_wait
             self.slow_path.can_park_wait = False
             # MONITOR showed the command when it first ran (and blocked), as
@@ -1045,7 +1049,7 @@ struct NetworkEngine:
                         var cur_len = total_len
                         # #49: the XDP lane sends `buffer` itself and has no
                         # per-connection queue: a full buffer stays the -ERR frame
-                        self.writer.cur_fd = -1
+                        self.writer.ctx[].cur_fd = -1
                         while cur_len > 0:
                             var consumed = 0
                             if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(vci):   # gh #261, #39, #42
@@ -1125,7 +1129,7 @@ struct NetworkEngine:
                     var n_read = self.server.recv(tfd, self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), CLIENT_BUF_SIZE - stored)
                     if n_read > 0:
                         var cur_len = stored + n_read
-                        self.writer.cur_fd = -1     # #49: this lane sends `buffer` once, as above
+                        self.writer.ctx[].cur_fd = -1     # #49: this lane sends `buffer` once, as above
                         while cur_len > 0:
                             var consumed = 0
                             if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(ci):   # gh #261, #39, #42
@@ -1372,7 +1376,7 @@ struct NetworkEngine:
                     if self.ring[].is_stale(cqe.user_data):
                         continue
                     var sent = Int(cqe.res)
-                    self.writer.uring_inflight[unsafe_offset=ci] = 0   # this SEND is over
+                    self.writer.ctx[].uring_inflight[unsafe_offset=ci] = 0   # this SEND is over
                     if self.ring[].fd_closing[unsafe_offset=ci] != 0:
                         self._uring_finish_close(fd, ci)
                         continue
@@ -1383,7 +1387,7 @@ struct NetworkEngine:
                     # was queued while it was in flight (#49: refilled from the
                     # overflow queue).
                     self.writer.uring_sent(ci, sent)
-                    if self.writer.pending_offsets[unsafe_offset=ci] > 0:
+                    if self.writer.ctx[].pending_offsets[unsafe_offset=ci] > 0:
                         self.writer.uring_kick(fd, ci)
                     else:
                         # #47: a client that killed itself, its reply now out
@@ -1423,12 +1427,12 @@ struct NetworkEngine:
                         if self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                             self.client_buffers[unsafe_offset=ci].unsafe_free()
                         self.client_buffers[unsafe_offset=ci] = alloc[UInt8](CLIENT_BUF_SIZE)
-                        if self.writer.pending_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
-                            self.writer.pending_buffers[unsafe_offset=ci].unsafe_free()
-                            self.writer.pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
-                        self.writer.pending_offsets[unsafe_offset=ci] = 0
+                        if self.writer.ctx[].pending_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+                            self.writer.ctx[].pending_buffers[unsafe_offset=ci].unsafe_free()
+                            self.writer.ctx[].pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
+                        self.writer.ctx[].pending_offsets[unsafe_offset=ci] = 0
                         self.writer.out_free(ci)                     # #49
-                        self.writer.uring_inflight[unsafe_offset=ci] = 0
+                        self.writer.ctx[].uring_inflight[unsafe_offset=ci] = 0
                         self.slow_path.clients.on_accept(new_fd)   # #47
                         self._uring_arm_recv(new_fd, ci, buf_group_id)
 
@@ -1569,14 +1573,14 @@ struct NetworkEngine:
             _ = external_call["shutdown", Int32](fd, Int32(2))   # SHUT_RDWR
             if self.uring_recv_armed[unsafe_offset=ci] != 0:
                 self.ring[].submit_cancel(self.ring[].make_ud(UD_RECV, fd))
-            if self.writer.uring_inflight[unsafe_offset=ci] != 0:
+            if self.writer.ctx[].uring_inflight[unsafe_offset=ci] != 0:
                 self.ring[].submit_cancel(self.ring[].make_ud(UD_SEND, fd))
         self._uring_finish_close(fd, ci)
 
     @always_inline
     def _uring_finish_close(mut self, fd: Int32, ci: Int):
         """Second phase of `_uring_close_fd`: nothing is in flight any more."""
-        if self.uring_recv_armed[unsafe_offset=ci] != 0 or self.writer.uring_inflight[unsafe_offset=ci] != 0:
+        if self.uring_recv_armed[unsafe_offset=ci] != 0 or self.writer.ctx[].uring_inflight[unsafe_offset=ci] != 0:
             return
         self.ring[].retire_fd(fd)
         self.ring[].fd_closing[unsafe_offset=ci] = 0
@@ -1704,10 +1708,10 @@ struct NetworkEngine:
                         if self.client_buffers[unsafe_offset=Int(new_fd)] != null_ptr[UInt8, MutUntrackedOrigin]():
                             self.client_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
                             self.client_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
-                        if self.writer.pending_buffers[unsafe_offset=Int(new_fd)] != null_ptr[UInt8, MutUntrackedOrigin]():
-                            self.writer.pending_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
-                            self.writer.pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
-                        self.writer.pending_offsets[unsafe_offset=Int(new_fd)] = 0
+                        if self.writer.ctx[].pending_buffers[unsafe_offset=Int(new_fd)] != null_ptr[UInt8, MutUntrackedOrigin]():
+                            self.writer.ctx[].pending_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
+                            self.writer.ctx[].pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
+                        self.writer.ctx[].pending_offsets[unsafe_offset=Int(new_fd)] = 0
                         self.writer.out_free(Int(new_fd))                     # #49
                         self.slow_path.clients.on_accept(new_fd)   # #47
                         # Register for EPOLLIN (level-triggered)
@@ -1718,7 +1722,7 @@ struct NetworkEngine:
                     # EPOLLERR/EPOLLHUP: always close — even if EPOLLIN is also set.
                     # Trying to read from an errored fd risks stale data or hangs.
                     # gh #85: epoll-specific deregister + shared close cleanup.
-                    # (This path previously had a subtle bug: writer.pending_buffers
+                    # (This path previously had a subtle bug: writer.ctx[].pending_buffers
                     # / pending_offsets reset were nested inside the client_buffers
                     # null-check, so they wouldn't fire when client_buffers happened
                     # to be null. Routing through `_close_fd_common` aligns the
@@ -1922,10 +1926,10 @@ struct NetworkEngine:
                             self.client_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
                             self.client_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
                         # Clear pending write state
-                        if self.writer.pending_buffers[unsafe_offset=Int(new_fd)] != null_ptr[UInt8, MutUntrackedOrigin]():
-                            self.writer.pending_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
-                            self.writer.pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
-                        self.writer.pending_offsets[unsafe_offset=Int(new_fd)] = 0
+                        if self.writer.ctx[].pending_buffers[unsafe_offset=Int(new_fd)] != null_ptr[UInt8, MutUntrackedOrigin]():
+                            self.writer.ctx[].pending_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
+                            self.writer.ctx[].pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
+                        self.writer.ctx[].pending_offsets[unsafe_offset=Int(new_fd)] = 0
                         self.writer.out_free(Int(new_fd))                     # #49
                         # Register level-triggered READ for client
                         self.slow_path.clients.on_accept(new_fd)   # #47
