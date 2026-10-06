@@ -113,3 +113,22 @@ in mind.
 the first four rows are one configuration run four times: median 8,544 QPS at
 recall 0.939. Redis vector sets at their defaults measured 8,039 QPS at 0.920 on
 this machine (table above).
+
+## KV: the peak, 32 keyspaces each side (P=50, ops/sec, median of 3)
+
+Run after everything above, on the same machine, by [`peak_on_box.sh`](peak_on_box.sh)
+and [`peak64_on_box.sh`](peak64_on_box.sh) (raw output in `peak/` and `peak64/`).
+The machine has 16 cores and 32 hardware threads; both sides get 32 keyspaces,
+32 client threads and 800 connections: `pion-server -w 32 --independent-workers`
+under one `memtier -t 32 -c 25`, against 32 Redis processes under one
+`memtier -t 1 -c 25` each.
+
+| Values | 32 Redis processes | Pion `-w 32` |
+|---|---:|---:|
+| 64 bytes | 14,780,031 | 15,864,842 |
+| 256 bytes | 12,372,245 | 11,640,929 |
+
+April's configuration for the old "14.0M ops/sec" headline — Pion `-w 32` under
+`memtier -t 16 -c 50`, P=50, Pion only — measured 13,750,187 with 64-byte values
+and 9,529,047 with 256-byte values (`peak/`). memtier reported its own threads at
+100% CPU in these runs, so the client, not the server, may set the ceiling.

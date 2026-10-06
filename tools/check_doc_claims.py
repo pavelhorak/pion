@@ -74,7 +74,7 @@ TABLE_NUM = re.compile(r"(?<![\w.,#/$=@:-])(?:\d{1,3}(?:,\d{3})+|\d{3,})(?:\.\d+
 # A number followed by one of these names an input, not a result.
 INPUT_NOUN = re.compile(
     r"\s*-?\s*(?:context|prefix(?:es)?|tokens?|tok\b|-token|slots?|vectors?|keys?|entries|elements|nodes|items|"
-    r"documents?|docs|queries|requests?|reqs|rows?|dims?|dimensions|members|fields|connections|clients|parameters?|params|"
+    r"documents?|docs|queries|requests?|reqs|rows?|dims?|dimensions|members|fields|connections|clients|parameters?|params|bytes?|-byte|"
     r"Mac\b|Mac mini|MacBook|machine|RAM|of RAM|box|laptop|unified|GPU|VRAM|card|device|NIAH|sparse|★)", re.I)
 
 

@@ -1,0 +1,2 @@
+pion-server 0.9.5+d921ceb (2026-10-06)
+vector: libpion_vector abi=1 (closed, dims=1536) isa=vnni

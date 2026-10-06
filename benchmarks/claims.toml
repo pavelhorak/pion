@@ -1222,10 +1222,19 @@ expect = ["insert_duration=11.4326", "insert_duration=10.5776", "insert_duration
 [[claim]]
 file = "README.md"
 where = "| Peak KV throughput |"
-numbers = ["1.71M ops/sec", "1.71M", "1.38M", "9.85M", "11.1M"]
+numbers = ["15.9M ops/sec", "15.9M", "14.8M", "12.4M", "11.6M", "1.71M", "1.38M"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |", "| shard_redis_x16_P50 | 3 | 11,128,400 |", "| shard_pion_w16_P50 | 3 | 9,848,658 |"]
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |", "| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |"]
+
+[[claim]]
+file = "README.md"
+where = "On one keyspace, Redis with I/O threads is faster"
+numbers = ["15864842", "14780031", "12372245", "11640929", "13750187"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md"]
+expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |", "| april_pion_w32_t16c50_d64 | 3 | 13,750,187 |"]
+note = "bare numbers the checker does not flag; recorded so their evidence is still checked"
 
 [[claim]]
 file = "README.md"
