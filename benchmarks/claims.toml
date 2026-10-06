@@ -1230,10 +1230,10 @@ expect = ["| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 
 [[claim]]
 file = "README.md"
 where = "| Vector QPS |"
-numbers = ["7339", "8039", "8729"]
+numbers = ["7339", "0.960", "8544", "0.939", "8039", "0.920", "8729"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt", "benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
-expect = ["qps=7339.098", "8039.3 QPS", "| int8 | 8,728.9 | 6,449.6 |"]
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/pion_w16_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r2.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt", "benchmarks/results/2026-10-06-mac-m4/vec/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/iso/results.txt"]
+expect = ["qps=7339.098", "8039.3 QPS", "| int8 | 8,728.9 | 6,449.6 |", "RESULT ef=100  qps=8718.268 recall=np.float64(0.9391", "Recall@100:  0.9196"]
 
 [[claim]]
 file = "README.md"
@@ -1270,18 +1270,19 @@ expect = ["| durable_pion_w1_wal_P10 | 3 | 847,249 |", "| single_pion_w1_P10 | 3
 [[claim]]
 file = "README.md"
 where = "**Pion is open source under Apache-2.0"
-numbers = ["26%", "55%"]
+numbers = ["26%", "40%", "55%"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
-expect = ["| int8 | 8,728.9 | 6,449.6 | -24.2%, -26.1%, -26.1% | -26.1% |", "| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |", "| polarquant | 7,732.0 | 4,873.8 | -36.7%, -41.8%, -31.5% | -36.7% |"]
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["| int8 | 8,728.9 | 6,449.6 | -24.2%, -26.1%, -26.1% | -26.1% |", "| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |", "| polarquant | 7,732.0 | 4,873.8 | -36.7%, -41.8%, -31.5% | -36.7% |", "RESULT run=1 arm=closed  qps=7653.0231", "RESULT run=6 arm=closed  qps=7502.1279", "RESULT run=8 arm=closed  qps=7143.459", "RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339"]
+note = "Linux: 4,467 / 7,502 = 0.595 (medians)"
 
 [[claim]]
 file = "doc/licensing.md"
 where = "You can build without it."
-numbers = ["26%", "55%"]
+numbers = ["26%", "40%", "55%"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md"]
-expect = ["| int8 | 8,728.9 | 6,449.6 | -24.2%, -26.1%, -26.1% | -26.1% |", "| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |", "| polarquant | 7,732.0 | 4,873.8 | -36.7%, -41.8%, -31.5% | -36.7% |"]
+evidence = ["benchmarks/results/2026-10-06-mac-m4/vec/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["| int8 | 8,728.9 | 6,449.6 | -24.2%, -26.1%, -26.1% | -26.1% |", "| nanoquant | 7,384.6 | 3,448.7 | -57.0%, -55.3%, -53.2% | -55.3% |", "| polarquant | 7,732.0 | 4,873.8 | -36.7%, -41.8%, -31.5% | -36.7% |", "RESULT run=1 arm=closed  qps=7653.0231", "RESULT run=6 arm=closed  qps=7502.1279", "RESULT run=8 arm=closed  qps=7143.459", "RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339"]
 
 [[claim]]
 file = "doc/vector_engine.md"
@@ -1562,3 +1563,55 @@ numbers = ["222"]
 kind = "result"
 evidence = ["benchmarks/results/2026-10-06-mac-m4/attend_128k.txt"]
 expect = ["store=0.6s (222,473 tok/s)  query=1.54ms", "Finalized in 11.3s", "mem≈125MB"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "VNNI kernels (the default on this CPU)"
+numbers = ["7502", "-40.5%", "0.960"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["RESULT run=1 arm=closed  qps=7653.0231", "RESULT run=6 arm=closed  qps=7502.1279", "RESULT run=8 arm=closed  qps=7143.459", "RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339", "recall=np.float64(0.9602"]
+note = "medians: closed 7,502, open 4,467"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "x86-64-v2 kernels"
+numbers = ["5481", "-18.5%", "0.960"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["RESULT run=3 arm=closed-v2  qps=5480.8923", "RESULT run=5 arm=closed-v2  qps=5764.1336", "RESULT run=7 arm=closed-v2  qps=5259.7235", "RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339"]
+note = "4,467 / 5,481 = 0.815"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "| open build | 4,467 |"
+numbers = ["4467", "0.960"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["RESULT run=2 arm=open  qps=4432.7874", "RESULT run=4 arm=open  qps=4466.5888", "RESULT run=9 arm=open  qps=4982.3339"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Here it was 36.9% faster than"
+numbers = ["36.9%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/ovc/results.txt"]
+expect = ["RESULT run=1 arm=closed  qps=7653.0231", "RESULT run=6 arm=closed  qps=7502.1279", "RESULT run=8 arm=closed  qps=7143.459", "RESULT run=3 arm=closed-v2  qps=5480.8923", "RESULT run=5 arm=closed-v2  qps=5764.1336", "RESULT run=7 arm=closed-v2  qps=5259.7235"]
+note = "7,502 / 5,481 = 1.369"
+
+[[claim]]
+file = "README.md"
+where = "At equal or better recall, Pion is the faster of the two."
+numbers = ["8,544 QPS", "0.939", "8039", "0.920", "0.960"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/iso/results.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r3.txt", "benchmarks/results/2026-10-06-linux-epyc-8124p/vec/redis_vset_r1.txt"]
+expect = ["RESULT ef=32  qps=8461.865 recall=np.float64(0.9394", "RESULT ef=48  qps=8481.6228 recall=np.float64(0.9393", "RESULT ef=64  qps=8607.3715 recall=np.float64(0.9394", "RESULT ef=100  qps=8718.268 recall=np.float64(0.9391", "8039.3 QPS", "Recall@100:  0.9196"]
+note = "median of the four ef<=100 runs, which FT.SEARCH runs at ef=k=100"
+
+[[claim]]
+file = "README.md"
+where = "At equal or better recall, Pion is the faster of the two."
+numbers = ["100"]
+kind = "code"
+evidence = ["src/commands/vector.mojo"]
+expect = ["if ef_query < k: ef_query = k"]

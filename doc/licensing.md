@@ -48,9 +48,10 @@ that cannot be given away yet. Everything you need to *trust* Pion is open:
   in the gate. The interface (`src/vector/vector_abi.mojo` and the view
   structs) is open, and the engine refuses to start on an ABI mismatch.
 - **You can build without it.** `pixi run build-open` builds Pion entirely
-  from source. The cost is vector search speed at 1536 dims only — 26% lower
-  QPS in the default INT8 mode on an M4 Mac mini and 36–55% in the quantized
-  modes, measured and published in
+  from source. The cost is vector search speed at 1536 dims only — in the
+  default INT8 mode 26% lower QPS on an M4 Mac mini and 40% lower on an EPYC
+  8124P, and 36–55% lower in the quantized modes on the Mac, measured and
+  published in
   [`vector_engine.md` § Open build](vector_engine.md#open-build-and-the-closed-vector-library).
   The KV engine, persistence, the prompt cache, every quantizer, every other
   vector dimension and the Metal shaders are the same code in both builds.

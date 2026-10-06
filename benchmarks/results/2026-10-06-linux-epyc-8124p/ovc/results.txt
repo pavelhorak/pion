@@ -1,0 +1,9 @@
+RESULT run=1 arm=closed  qps=7653.0231 recall=np.float64(0.96 
+RESULT run=2 arm=open  qps=4432.7874 recall=np.float64(0.9604 
+RESULT run=3 arm=closed-v2  qps=5480.8923 recall=np.float64(0.9601 
+RESULT run=4 arm=open  qps=4466.5888 recall=np.float64(0.9601 
+RESULT run=5 arm=closed-v2  qps=5764.1336 recall=np.float64(0.96 
+RESULT run=6 arm=closed  qps=7502.1279 recall=np.float64(0.9602 
+RESULT run=7 arm=closed-v2  qps=5259.7235 recall=np.float64(0.9601 
+RESULT run=8 arm=closed  qps=7143.459 recall=np.float64(0.96 
+RESULT run=9 arm=open  qps=4982.3339 recall=np.float64(0.96 

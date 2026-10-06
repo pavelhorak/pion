@@ -1,0 +1,5 @@
+RESULT ef=32  qps=8461.865 recall=np.float64(0.9394 conc_qps_list=[956.9503, 4717.8448, 8461.865] 
+RESULT ef=48  qps=8481.6228 recall=np.float64(0.9393 conc_qps_list=[960.8574, 4662.7639, 8481.6228] 
+RESULT ef=64  qps=8607.3715 recall=np.float64(0.9394 conc_qps_list=[958.441, 4625.407, 8607.3715] 
+RESULT ef=100  qps=8718.268 recall=np.float64(0.9391 conc_qps_list=[950.8164, 4543.7321, 8718.268] 
+RESULT ef=150  qps=7495.8629 recall=np.float64(0.9599 conc_qps_list=[869.8616, 3873.2705, 7495.8629] 

@@ -25,9 +25,9 @@ front.** The tuned 1536-dim vector search kernels ship as a free, closed
 binary library (`libpion_vector`). That is open core. The same algorithms are
 open in `src/vector/reference/`, a differential test proves on every release
 that the two return identical results, and `pixi run build-open` builds Pion
-entirely from source, with vector search at 1536 dims slower — by 26% in the
-default INT8 mode on an M4 Mac mini, 36–55% in the quantized modes — and
-everything else — the KV engine, persistence, the prompt cache — unchanged.
+entirely from source, with vector search at 1536 dims slower — in the default INT8 mode by 26% on
+an M4 Mac mini and 40% on an EPYC 8124P, and by 36–55% in the quantized modes on
+the Mac — and everything else — the KV engine, persistence, the prompt cache — unchanged.
 Details: [`doc/licensing.md`](doc/licensing.md).
 <!-- --8<-- [end:open-core] -->
 
@@ -241,6 +241,12 @@ client; Redis runs `VADD`/`VSIM` at its defaults through
 vector-set client, so the two clients are different programs sending the same
 queries. Pion's load is its insert (≈10.7 s) plus the index build (≈15.5 s);
 Redis builds while it inserts.*
+
+At equal or better recall, Pion is the faster of the two. At ef=100 — the
+smallest search effort for 100 results, since Pion raises a smaller ef to k —
+four runs measured a median **8,544 QPS at recall 0.939**, against Redis's 8,039
+at 0.920 (`benchmarks/results/2026-10-06-linux-epyc-8124p/iso/`). Redis was not
+run at a higher EF, so the comparison at 0.960 recall is still open.
 
 ### Expert paging — models beyond RAM (substrate validation)
 
@@ -818,7 +824,7 @@ doc/                              # technical reference
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |
 | Peak KV throughput | **1.71M ops/sec** on one keyspace at P=50 (Redis 8.10.2 with I/O threads: 1.38M) · **9.85M** across 16 cores (16 Redis processes: 11.1M) — [same server](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md) |
-| Vector QPS | 7,339 at 10 clients on Linux (Redis 8.10.2 vector sets: 8,039); 8,729 on an M4 Mac mini |
+| Vector QPS | 7,339 at 10 clients on Linux at recall 0.960, 8,544 at 0.939 (Redis 8.10.2 vector sets: 8,039 at 0.920); 8,729 on an M4 Mac mini |
 | Recall@100 | 0.960 at that QPS (Redis vector sets: 0.920); INT8, ef=150 |
 | P99 latency | 1.4 ms on Linux, 0.6 ms on an M4 Mac mini (vector search, one client) |
 | Embeddings | Apple NLEmbedding 512-dim with `--nle-embed` on macOS (no Python); MiniLM-L6-v2 384-dim from a source build |

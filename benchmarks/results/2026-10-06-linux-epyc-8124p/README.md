@@ -41,8 +41,20 @@ Common memtier settings ([`settings.txt`](settings.txt)): 256-byte values,
   through `benchmarks/VectorDBBench/vset-benchmark.py`, which drives `VADD`/`VSIM`
   at Redis's defaults (VectorDBBench has no vector-set client).
 
+- **Closed vector library against the open build:** [`open_vs_closed_on_box.sh`](open_vs_closed_on_box.sh),
+  run after the above on the same machine. It builds `pixi run build-portable`
+  (the library) and `pixi run build-open` from the same commit, both for
+  x86-64-v2, and runs the vector harness at `--ef-runtime 150 --workers 16` with
+  the arms in the order closed, open, closed-v2, open, closed-v2, closed,
+  closed-v2, closed, open — where closed-v2 is the library binary with
+  `PION_VECTOR_VNNI=0`.
+
 Raw output: `raw/*.txt` (memtier's own report per run), `raw_json.tar.gz`
-(memtier's JSON, which `summarize.py` reads), `vec/` (each vector run's log).
+(memtier's JSON, which `summarize.py` reads), `vec/` (each vector run's log),
+`ovc/` (each open-vs-closed run's log, `results.txt` the script's one-line
+extract per run, `version_*.txt` each binary's `--version`), `iso/` (Pion's
+search `ef` swept by [`iso_recall_on_box.sh`](iso_recall_on_box.sh), same harness
+and settings otherwise).
 
 ## KV: one keyspace, no persistence (ops/sec, median of 3)
 
@@ -78,3 +90,26 @@ Pion's load is its insert (≈10.7 s) plus the index build (≈15.5 s, `FT.OPTIM
 Redis builds its graph while it inserts. The two clients are different programs
 that send the same queries at the same concurrency, so read the QPS row with that
 in mind.
+
+## Vector: closed library against the open build (INT8, median of 3)
+
+| Build | QPS (10 clients) | Recall@100 |
+|---|---:|---:|
+| `libpion_vector`, VNNI kernels (the default on this CPU) | 7,502 | 0.960 |
+| `libpion_vector`, x86-64-v2 kernels (`PION_VECTOR_VNNI=0`) | 5,481 | 0.960 |
+| open build | 4,467 | 0.960 |
+
+## Vector: Pion's search effort against recall (INT8, `-w 16`, one run each)
+
+| `--ef-runtime` | QPS (10 clients) | Recall@100 |
+|---|---:|---:|
+| 32 | 8,462 | 0.939 |
+| 48 | 8,482 | 0.939 |
+| 64 | 8,607 | 0.939 |
+| 100 | 8,718 | 0.939 |
+| 150 | 7,496 | 0.960 |
+
+`FT.SEARCH` raises an ef below k to k (`src/commands/vector.mojo`), so with k=100
+the first four rows are one configuration run four times: median 8,544 QPS at
+recall 0.939. Redis vector sets at their defaults measured 8,039 QPS at 0.920 on
+this machine (table above).

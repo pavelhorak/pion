@@ -1,0 +1,2 @@
+pion-server 0.9.5+d921ceb (2026-10-06)
+vector: reference (open) isa=x86-64-v2
