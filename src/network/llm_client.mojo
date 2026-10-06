@@ -54,7 +54,10 @@ def _parse_float_lp(p: Pointer[UInt8, MutUntrackedOrigin], plen: Int) -> Float32
 @always_inline
 def _llm_escape_json(src: Pointer[UInt8, MutUntrackedOrigin], slen: Int,
                     dst: Pointer[UInt8, MutUntrackedOrigin], mut dp: Int):
-    """JSON-escape src[0..slen-1] into dst starting at dp; advances dp."""
+    """JSON-escape src[0..slen-1] into dst starting at dp; advances dp. Every
+    control byte below 0x20 must be escaped or the body is invalid JSON — a
+    lone tab or form-feed in the prompt used to go through raw and the server
+    rejected the request (#51). dst must have room for 6 bytes per input byte."""
     for ci in range(slen):
         var b = src[unsafe_offset=ci]
         if b == 34:       # '"' → \"
@@ -65,8 +68,100 @@ def _llm_escape_json(src: Pointer[UInt8, MutUntrackedOrigin], slen: Int,
             dst[unsafe_offset=dp] = 92; dp += 1; dst[unsafe_offset=dp] = 110; dp += 1
         elif b == 13:     # '\r' → \r
             dst[unsafe_offset=dp] = 92; dp += 1; dst[unsafe_offset=dp] = 114; dp += 1
+        elif b == 9:      # '\t' → \t
+            dst[unsafe_offset=dp] = 92; dp += 1; dst[unsafe_offset=dp] = 116; dp += 1
+        elif b < 32:      # other C0 control → \u00XX
+            dst[unsafe_offset=dp] = 92; dp += 1; dst[unsafe_offset=dp] = 117; dp += 1   # \u
+            dst[unsafe_offset=dp] = 48; dp += 1; dst[unsafe_offset=dp] = 48; dp += 1    # 00
+            var hi = Int(b) >> 4
+            var lo = Int(b) & 0xF
+            dst[unsafe_offset=dp] = UInt8(48 + hi if hi < 10 else 87 + hi); dp += 1
+            dst[unsafe_offset=dp] = UInt8(48 + lo if lo < 10 else 87 + lo); dp += 1
         else:
             dst[unsafe_offset=dp] = b; dp += 1
+
+
+@always_inline
+def _hexval(b: UInt8) -> Int:
+    """A hex digit's value, or -1."""
+    var c = Int(b)
+    if c >= 48 and c <= 57: return c - 48
+    if c >= 97 and c <= 102: return c - 87
+    if c >= 65 and c <= 70: return c - 55
+    return -1
+
+
+@always_inline
+def _put_utf8(cp: Int, dst: Pointer[UInt8, MutUntrackedOrigin], mut o: Int, out_max: Int):
+    """Encode code point `cp` as UTF-8 into out, advancing o, within out_max-1."""
+    if cp < 0x80:
+        if o < out_max - 1: dst[unsafe_offset=o] = UInt8(cp); o += 1
+    elif cp < 0x800:
+        if o < out_max - 2:
+            dst[unsafe_offset=o] = UInt8(0xC0 | (cp >> 6)); o += 1
+            dst[unsafe_offset=o] = UInt8(0x80 | (cp & 0x3F)); o += 1
+    elif cp < 0x10000:
+        if o < out_max - 3:
+            dst[unsafe_offset=o] = UInt8(0xE0 | (cp >> 12)); o += 1
+            dst[unsafe_offset=o] = UInt8(0x80 | ((cp >> 6) & 0x3F)); o += 1
+            dst[unsafe_offset=o] = UInt8(0x80 | (cp & 0x3F)); o += 1
+    else:
+        if o < out_max - 4:
+            dst[unsafe_offset=o] = UInt8(0xF0 | (cp >> 18)); o += 1
+            dst[unsafe_offset=o] = UInt8(0x80 | ((cp >> 12) & 0x3F)); o += 1
+            dst[unsafe_offset=o] = UInt8(0x80 | ((cp >> 6) & 0x3F)); o += 1
+            dst[unsafe_offset=o] = UInt8(0x80 | (cp & 0x3F)); o += 1
+
+
+def _decode_json_string(buf: Pointer[UInt8, MutUntrackedOrigin], start: Int, total: Int,
+                        dst: Pointer[UInt8, MutUntrackedOrigin], out_max: Int) -> Int:
+    """Decode a JSON string body from `start` until its unescaped closing `"`
+    (or end of buffer), writing the bytes into out. Handles \\n \\t \\r \\" \\\\
+    \\/ \\b \\f and \\uXXXX, including a surrogate pair → one 4-byte UTF-8
+    char (#51: Ollama and OpenAI write `<` `>` `&` as \\u003c etc, and emoji
+    as surrogate pairs; the old loop copied `\\u003c` through as `u003c`).
+    Returns bytes written."""
+    var op = start
+    var o = 0
+    while op < total and o < out_max - 1:
+        var b = buf[unsafe_offset=op]
+        if b == 34:            # closing "
+            break
+        if b == 92 and op + 1 < total:   # backslash
+            var e = buf[unsafe_offset=op + 1]
+            if e == 117 and op + 5 < total:    # \u XXXX
+                var h0 = _hexval(buf[unsafe_offset=op + 2]); var h1 = _hexval(buf[unsafe_offset=op + 3])
+                var h2 = _hexval(buf[unsafe_offset=op + 4]); var h3 = _hexval(buf[unsafe_offset=op + 5])
+                if h0 < 0 or h1 < 0 or h2 < 0 or h3 < 0:
+                    dst[unsafe_offset=o] = b; o += 1; op += 1
+                    continue
+                var cp = (h0 << 12) | (h1 << 8) | (h2 << 4) | h3
+                op += 6
+                # a high surrogate followed by \uXXXX low surrogate → one char
+                if cp >= 0xD800 and cp <= 0xDBFF and op + 5 < total \
+                   and buf[unsafe_offset=op] == 92 and buf[unsafe_offset=op + 1] == 117:
+                    var l0 = _hexval(buf[unsafe_offset=op + 2]); var l1 = _hexval(buf[unsafe_offset=op + 3])
+                    var l2 = _hexval(buf[unsafe_offset=op + 4]); var l3 = _hexval(buf[unsafe_offset=op + 5])
+                    if l0 >= 0 and l1 >= 0 and l2 >= 0 and l3 >= 0:
+                        var lo = (l0 << 12) | (l1 << 8) | (l2 << 4) | l3
+                        if lo >= 0xDC00 and lo <= 0xDFFF:
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+                            op += 6
+                _put_utf8(cp, dst, o, out_max)
+                continue
+            op += 2
+            if e == 110:   dst[unsafe_offset=o] = 10; o += 1          # \n
+            elif e == 116: dst[unsafe_offset=o] = 9;  o += 1          # \t
+            elif e == 114: dst[unsafe_offset=o] = 13; o += 1          # \r
+            elif e == 98:  dst[unsafe_offset=o] = 8;  o += 1          # \b
+            elif e == 102: dst[unsafe_offset=o] = 12; o += 1          # \f
+            elif e == 47:  dst[unsafe_offset=o] = 47; o += 1          # \/
+            elif e == 34:  dst[unsafe_offset=o] = 34; o += 1          # \"
+            elif e == 92:  dst[unsafe_offset=o] = 92; o += 1          # \\
+            else:          dst[unsafe_offset=o] = e;  o += 1
+        else:
+            dst[unsafe_offset=o] = b; o += 1; op += 1
+    return o
 
 
 struct LLMClient(Movable):
@@ -100,7 +195,7 @@ struct LLMClient(Movable):
         if fd < 0: return 0
 
         # ── Build JSON-escaped content string ────────────────────────────────
-        var content_max = context_len * 2 + prompt_len * 2 + 64
+        var content_max = context_len * 6 + prompt_len * 6 + 64   # #51: \u00XX is 6 bytes/char
         var content_buf = alloc[UInt8](content_max)
         var content_mb = content_buf
         var cp = 0
@@ -168,9 +263,13 @@ struct LLMClient(Movable):
         _ = external_call["close", Int32](fd)
 
         # ── Parse JSON: find "content":" ──────────────────────────────────────
-        # Searches for the first occurrence of "content":" in the response body
+        # #51: TAG is 11 bytes (`"content":"`). It was compared as 12, so the
+        # 12th byte — the first character of the reply, never the tag's — never
+        # matched and AI.CHAT answered nil to every reply. AI.COMPLETE's
+        # `"response":"` is genuinely 12, which is why it worked and this did
+        # not. The length comes from the literal now, so it cannot drift again.
         comptime TAG = "\"content\":\""
-        comptime TAG_LEN = 12
+        comptime TAG_LEN = TAG.byte_length()
         var tag_ptr = TAG.unsafe_ptr()
         var found = -1
         for si in range(total_read - TAG_LEN):
@@ -182,22 +281,9 @@ struct LLMClient(Movable):
         if found < 0:
             buf.unsafe_free(); return 0
 
-        # ── Extract until closing '"' (handle backslash escapes) ──────────────
-        var op = found; var dp2 = 0
-        while op < total_read and dp2 < out_max - 1:
-            var b2 = buf_mb[unsafe_offset=op]; op += 1
-            if b2 == 92 and op < total_read:  # backslash escape
-                var esc = buf_mb[unsafe_offset=op]; op += 1
-                if esc == 110:   out_buf[unsafe_offset=dp2] = 10; dp2 += 1  # \n
-                elif esc == 116: out_buf[unsafe_offset=dp2] = 9;  dp2 += 1  # \t
-                elif esc == 114: out_buf[unsafe_offset=dp2] = 13; dp2 += 1  # \r
-                elif esc == 34:  out_buf[unsafe_offset=dp2] = 34; dp2 += 1  # \"
-                elif esc == 92:  out_buf[unsafe_offset=dp2] = 92; dp2 += 1  # \\
-                else: out_buf[unsafe_offset=dp2] = esc; dp2 += 1
-            elif b2 == 34:  # closing '"'
-                break
-            else:
-                out_buf[unsafe_offset=dp2] = b2; dp2 += 1
+        # Decode the JSON string value, including \uXXXX (Ollama writes < > &
+        # as < etc), through the shared decoder (#51).
+        var dp2 = _decode_json_string(buf_mb, found, total_read, out_buf, out_max)
         buf.unsafe_free()
         return dp2
 
@@ -247,7 +333,7 @@ struct LLMClient(Movable):
         var p1l = prefix1.byte_length(); var m1l = mid1.byte_length()
         var s1l = suffix1.byte_length(); var s2l = suffix2.byte_length()
 
-        var max_body = p1l + model_len + m1l + prompt_len * 2 + s1l + np_len + s2l + 4
+        var max_body = p1l + model_len + m1l + prompt_len * 6 + s1l + np_len + s2l + 4   # #51: 6 bytes/char
         var body_buf = alloc[UInt8](max_body)
         var body_mb = body_buf
         var bp = 0
@@ -295,7 +381,7 @@ struct LLMClient(Movable):
 
         # ── Parse "response":"..." ────────────────────────────────────────────
         comptime RTAG = "\"response\":\""
-        comptime RTAG_LEN = 12
+        comptime RTAG_LEN = RTAG.byte_length()   # #51: from the literal, not hand-counted
         var rtag_ptr = RTAG.unsafe_ptr()
         var text_len = 0
         var rfound = -1
@@ -305,21 +391,9 @@ struct LLMClient(Movable):
                 if buf_mb[unsafe_offset=si + ti] != rtag_ptr[unsafe_offset=ti]: ok = False; break
             if ok: rfound = si + RTAG_LEN; break
         if rfound >= 0:
-            var op = rfound
-            while op < total_read and text_len < out_text_max - 1:
-                var b2 = buf_mb[unsafe_offset=op]; op += 1
-                if b2 == 92 and op < total_read:
-                    var esc = buf_mb[unsafe_offset=op]; op += 1
-                    if esc == 110:   out_text[unsafe_offset=text_len] = 10; text_len += 1
-                    elif esc == 116: out_text[unsafe_offset=text_len] = 9;  text_len += 1
-                    elif esc == 114: out_text[unsafe_offset=text_len] = 13; text_len += 1
-                    elif esc == 34:  out_text[unsafe_offset=text_len] = 34; text_len += 1
-                    elif esc == 92:  out_text[unsafe_offset=text_len] = 92; text_len += 1
-                    else: out_text[unsafe_offset=text_len] = esc; text_len += 1
-                elif b2 == 34:  # closing '"'
-                    break
-                else:
-                    out_text[unsafe_offset=text_len] = b2; text_len += 1
+            # #51: same shared decoder as AI.CHAT, so \uXXXX and surrogate
+            # pairs come back decoded here too.
+            text_len = _decode_json_string(buf_mb, rfound, total_read, out_text, out_text_max)
 
         # ── Parse "logprobs":[...] → find minimum logprob ────────────────────
         comptime LTAG = "\"logprobs\":["

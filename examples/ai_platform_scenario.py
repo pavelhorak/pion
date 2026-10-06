@@ -269,9 +269,9 @@ def test_semantic_search(r: redis.Redis, report: ScenarioReport):
 def test_rag_chat(r: redis.Redis, report: ScenarioReport):
     """Test RAG via AI.COMPLETE with pre-loaded knowledge base.
 
-    Note: AI.CHAT's /v1/chat/completions parser has a known issue with
-    Ollama's response format. AI.COMPLETE (which uses /api/generate) is the
-    reliable path and delivers the same value: semantic cache + LLM in one command.
+    Both AI.CHAT (/v1/chat/completions) and AI.COMPLETE (/api/generate) work
+    against Ollama and other OpenAI-compatible backends; this scenario uses
+    AI.COMPLETE for its semantic cache + LLM in one command.
     """
     print("\n--- Scenario 3: RAG via AI.COMPLETE (cache-augmented generation) ---")
     print("    Value: semantic cache + LLM generation in ONE RESP command")

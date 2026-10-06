@@ -1048,6 +1048,12 @@ tier = "gate"
 timeout = 300
 
 [[test]]
+file = "tests/test_ai_chat_json.py"
+server = "self"
+tier = "gate"
+timeout = 120
+
+[[test]]
 file = "tests/test_ruler_subset.py"
 server = "-w 1"
 tier = "full"
