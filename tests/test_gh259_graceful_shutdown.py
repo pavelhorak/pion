@@ -47,6 +47,8 @@ Measured: 19/19 on the fix, 9 failures on 0.980+3a49edf. With [6]: 27/27 on
 Usage: python3 tests/test_gh259_graceful_shutdown.py [./pion-server]
 """
 import os, signal, socket, subprocess, sys, time, shutil
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid  # noqa: E402
 
 BINARY = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server"))
 PORT = 1993
@@ -107,12 +109,11 @@ def spawn(stderr=None):
         stderr=subprocess.DEVNULL if stderr is None else stderr)
 
 
-def connect(timeout=40):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try: return Client(PORT)
-        except OSError: time.sleep(0.25)
-    raise RuntimeError("server did not come up")
+def connect(proc, timeout=40):
+    # THIS process must answer: a predecessor's listening socket can outlive
+    # it for a moment on Linux (#22, #27), and a bare connect landed there.
+    wait_ready_pid(PORT, proc, timeout)
+    return Client(PORT)
 
 
 def write_keys(c, prefix):
@@ -140,7 +141,7 @@ def cycle(stop_fn, label, expect_exit_zero=True):
     err_path = os.path.join(WORKDIR, "stderr.log")
     with open(err_path, "wb") as err:
         proc = spawn(stderr=err)
-    c = connect()
+    c = connect(proc)
     keys = write_keys(c, "g")
     rc = stop_fn(proc, c)
     try: c.close()
@@ -165,7 +166,7 @@ def cycle(stop_fn, label, expect_exit_zero=True):
 
     proc2 = spawn()
     try:
-        c2 = connect()
+        c2 = connect(proc2)
         present = count_present(c2, keys)
         check(f"{label}: all {KEYS} acked writes survive", present == KEYS,
               f"only {present}/{KEYS} came back — the drain did not happen")
@@ -201,7 +202,7 @@ def test_shutdown_sends_no_reply():
     shutil.rmtree(WORKDIR, ignore_errors=True); os.makedirs(WORKDIR, exist_ok=True)
     proc = spawn()
     try:
-        c = connect()
+        c = connect(proc)
         c("SET", "x", "1")
         c.send_only("SHUTDOWN")
         c.sock.settimeout(25)
@@ -226,7 +227,7 @@ def test_second_signal_forces():
     shutil.rmtree(WORKDIR, ignore_errors=True); os.makedirs(WORKDIR, exist_ok=True)
     proc = spawn()
     try:
-        c = connect(); write_keys(c, "f"); c.close()
+        c = connect(proc); write_keys(c, "f"); c.close()
         proc.send_signal(signal.SIGTERM)
         proc.send_signal(signal.SIGTERM)
         try:

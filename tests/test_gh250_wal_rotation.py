@@ -20,6 +20,8 @@ bug-by-bug audit of this file. Hence `--wal-size 1`.
 Usage: python3 tests/test_gh250_wal_rotation.py [./pion-server]
 """
 import os, socket, subprocess, sys, time, shutil, signal
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid  # noqa: E402
 
 BINARY = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server"))
 PORT = 1986
@@ -93,12 +95,13 @@ def evidence():
             print(f"--- {name} (tail) ---\n{tail}")
 
 
-def connect():
-    deadline = time.monotonic() + 40
-    while time.monotonic() < deadline:
-        try: return Client(PORT)
-        except OSError: time.sleep(0.25)
-    raise RuntimeError("server did not come up")
+def connect(proc):
+    # THIS process must answer, not the SIGKILLed one: on Linux its io_uring
+    # teardown keeps the old listening socket open for a moment after the
+    # kill, accepting into a backlog nobody will serve, and a client that took
+    # a bare TCP connect as "up" was reset there (#22, #27) — 1 of 3 runs.
+    wait_ready_pid(PORT, proc, 60)
+    return Client(PORT)
 
 
 def sealed_count(c):
@@ -113,7 +116,7 @@ def main():
     shutil.rmtree(WORKDIR, ignore_errors=True); os.makedirs(WORKDIR, exist_ok=True)
     proc = spawn()
     try:
-        c = connect()
+        c = connect(proc)
         expected = {}
         acked = 0
         for i in range(MSETS):
@@ -141,7 +144,7 @@ def main():
 
         proc.send_signal(signal.SIGKILL); proc.wait(timeout=15)
         proc = spawn()
-        c = connect()
+        c = connect(proc)
 
         try:
             missing = [k for k, v in expected.items() if c("GET", k) != v.encode()]
