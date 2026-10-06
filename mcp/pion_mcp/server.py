@@ -1138,12 +1138,16 @@ def codebase_search(
         codebase_search("how does the HNSW index handle concurrent writes", k=5)
     """
     try:
-        from pion_context.engine import ContextEngine
+        from pion_context.engine import ContextEngine, SearchError
     except ImportError:
         return [{"error": "pion_context package not installed"}]
 
     engine = ContextEngine(host=PION_HOST, port=PION_PORT)
-    results = engine.search_codebase(query, k=k)
+    try:
+        results = engine.search_codebase(query, k=k)
+    except SearchError as e:
+        # e.g. agent memory's index replaced the codebase index on this server
+        return [{"error": str(e)}]
 
     return [
         {
@@ -1182,12 +1186,15 @@ def codebase_context(
         codebase_context("past decisions about quantization strategy")
     """
     try:
-        from pion_context.engine import ContextEngine
+        from pion_context.engine import ContextEngine, SearchError
     except ImportError:
         return "pion_context package not installed."
 
     engine = ContextEngine(host=PION_HOST, port=PION_PORT)
-    results = engine.retrieve_context(query, code_k=code_k, memory_k=memory_k)
+    try:
+        results = engine.retrieve_context(query, code_k=code_k, memory_k=memory_k)
+    except SearchError as e:
+        return f"error: {e}"
     return engine.format_context(results)
 
 

@@ -158,11 +158,11 @@ return response
   the one before. `agent_remember` builds `__agent_memory__` (FT.OPTIMIZE every 50
   memories), `semantic_cache_set` builds `__semantic_cache__` (every 100 entries) and
   `codebase_index` builds `__codebase__`, so on one server they replace one another: after
-  50 memories, `codebase_search` returns nothing. Give each its own server.
-- **Two embedding configurations share one variable.** pion-mcp reads `PION_EMBED_PROVIDER`
-  as `openai | max | mock` (default `openai`); its codebase tools call pion-context, which
-  reads it as `ollama | openai | mock` (default `ollama`). Set to `ollama`, pion-mcp's own
-  tools raise `ValueError`; left unset, the two embed with different models.
+  50 memories, `codebase_search` answers with an error naming `__agent_memory__`. Give
+  each its own server.
+- **Set one embedding provider for both.** `PION_EMBED_PROVIDER` defaults to `openai` here
+  and to `ollama` in pion-context, so left unset the memory and codebase tools embed with
+  different models. Set it to `ollama` and both use pion-context's Ollama embedding.
 - **Codebase search** inherits pion-context's limitations: see
   [`pion_context/README.md`](../pion_context/README.md#known-limitations).
 

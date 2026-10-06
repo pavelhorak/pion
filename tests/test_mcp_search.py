@@ -72,10 +72,36 @@ def main():
     os.environ["PION_EMBED_PROVIDER"] = "mock"
     os.environ["PION_PORT"] = str(args.port)
     sys.path.insert(0, os.path.join(REPO, "mcp"))
+    sys.path.insert(0, os.path.join(REPO, "pion_context"))
+    try:
+        import mcp.server.fastmcp  # noqa: F401
+    except ImportError:
+        # The gate's Python has no `mcp` package, and this test used to SKIP
+        # on every gate run for that alone. The tools are plain functions; a
+        # stub FastMCP that registers nothing lets them be tested here. The
+        # MCP transport itself is not exercised without the real package.
+        import types
+
+        class _StubFastMCP:
+            def __init__(self, *a, **k):
+                pass
+
+            def tool(self, *a, **k):
+                return lambda f: f
+
+            def run(self, *a, **k):
+                raise SystemExit("stub FastMCP cannot serve")
+
+        for name in ("mcp", "mcp.server"):
+            sys.modules.setdefault(name, types.ModuleType(name))
+        stub = types.ModuleType("mcp.server.fastmcp")
+        stub.FastMCP = _StubFastMCP
+        sys.modules["mcp.server.fastmcp"] = stub
+        print("  note: no `mcp` package; the tools run under a stub FastMCP (transport not exercised)")
     try:
         from pion_mcp import server as s
     except ImportError as e:
-        print(f"SKIP: pion_mcp not importable ({e}); pip install -e mcp/")
+        print(f"SKIP: pion_mcp not importable ({e})")
         return 2
 
     print("[1] helpers")
@@ -146,9 +172,85 @@ def main():
             serve._pion, serve._embed_fn = r, (lambda q: vec(int(q.split()[-1])))
             serve._config["rag_index"] = "rag"
             got = serve._rag_retrieve("query 4", k=3)
-            check("RAG returns passages, nearest first", got[:1] == ["passage 4"] and len(got) == 3, str(got))
+            check("RAG returns passages, nearest first (vector field learned from the server)",
+                  got[:1] == ["passage 4"] and len(got) == 3, str(got))
+            check("the learned field is the index's own", serve._config.get("rag_field") == "emb",
+                  str(serve._config.get("rag_field")))
+            errors_before = serve._stats.get("rag_errors", 0)
+            serve._config.update(rag_field="nope", rag_field_pinned=True)
+            got = serve._rag_retrieve("query 4", k=3)
+            check("a failing RAG lookup is counted in rag_errors, not silent",
+                  got == [] and serve._stats.get("rag_errors", 0) == errors_before + 1,
+                  f"{got} rag_errors={serve._stats.get('rag_errors')}")
         finally:
             proc.kill(); proc.wait(); shutil.rmtree(proc.workdir, ignore_errors=True)
+
+    print("[5] codebase tools through pion-mcp, and agent memory replacing their index")
+    proc = fresh_server(args.port)
+    repo = tempfile.mkdtemp(prefix="pion_mcp_repo_")
+    try:
+        from pion_context import indexer as ix
+        files = {"pkg/models/user.py": "class User:\n    def set_password(self, raw):\n        self.h = hash(raw)\n\n\n\n",
+                 "pkg/notify.py": "def send_email(to, body):\n    return (to, body)\n\n\n\n\n"}
+        for rel, text in files.items():
+            os.makedirs(os.path.join(repo, os.path.dirname(rel)), exist_ok=True)
+            with open(os.path.join(repo, rel), "w") as f:
+                f.write(text)
+        # pion-context lists files the way git does; the harness's temp dir sits
+        # in an ignored directory of this checkout, so the repo needs its own git.
+        subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
+        s._pion = None
+        st = s.codebase_index(repo)
+        check("codebase_index indexes every file, models/ included", "Indexed 2 files" in str(st), str(st)[:160])
+        path = os.path.join(repo, "pkg/models/user.py")
+        chunk = ix.chunk_file(path, files["pkg/models/user.py"])[0]
+        query = f"{chunk.file_path}:{chunk.start_line} ({chunk.kind} {chunk.name})\n{chunk.content}"   # mock: exact text
+        got = s.codebase_search(query, k=2)
+        check("codebase_search finds the file", bool(got) and got[0].get("file_path") == path, str(got)[:200])
+        for i in range(50):        # pion-mcp builds __agent_memory__ at the 50th memory
+            s.agent_remember(f"fact number {i} about the deployment", session_id="t")
+        got = s.codebase_search(query, k=2)
+        err = got[0].get("error", "") if got else ""
+        check("after 50 memories codebase_search reports the replaced index, not []",
+              "__agent_memory__" in err, str(got)[:200])
+    finally:
+        proc.kill(); proc.wait(); shutil.rmtree(proc.workdir, ignore_errors=True)
+        shutil.rmtree(repo, ignore_errors=True)
+
+    print("[6] PION_EMBED_PROVIDER=ollama works in pion-mcp, with pion-context's vectors")
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _FakeOllama(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            body = _json.loads(self.rfile.read(int(self.headers["content-length"])))
+            texts = body.get("input") or [body.get("prompt", "")]
+            vecs = [[float((hash(t) >> (i % 32)) & 7) - 3.5 for i in range(768)] for t in texts]
+            out = {"embeddings": vecs} if self.path == "/api/embed" else {"embedding": vecs[0]}
+            data = _json.dumps(out).encode()
+            self.send_response(200); self.send_header("content-length", str(len(data))); self.end_headers()
+            self.wfile.write(data)
+
+    fake = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOllama)
+    threading.Thread(target=fake.serve_forever, daemon=True).start()
+    os.environ.update(PION_EMBED_PROVIDER="ollama", PION_OLLAMA_URL=f"http://127.0.0.1:{fake.server_port}")
+    try:
+        from pion_mcp import embeddings as me
+        from pion_context import embeddings as ce
+        try:
+            v = me.embed_text("hello world")
+            raised = ""
+        except Exception as e:
+            v, raised = b"", f"{type(e).__name__}: {e}"
+        check("pion-mcp accepts ollama", not raised and len(v) == 1536 * 4, raised or f"{len(v)} bytes")
+        check("and embeds exactly as pion-context does", v == ce.embed_text("hello world"))
+    finally:
+        os.environ["PION_EMBED_PROVIDER"] = "mock"
+        fake.shutdown()
 
     print(f"\n{'FAIL: ' + ', '.join(FAIL) if FAIL else 'ALL PASS'}")
     return 1 if FAIL else 0

@@ -5,13 +5,16 @@ classes, or fixed-size blocks), embeds each chunk, and stores them in
 Pion's HNSW index for semantic retrieval.
 
 Supports incremental indexing: only re-indexes files whose content hash
-has changed since the last index run.
+has changed since the last index run. Pion builds an index once
+(ingest -> FT.OPTIMIZE -> search), so a change to a built index is applied by
+rebuilding it from the vectors already stored with each chunk (`rebuild`).
 """
 from __future__ import annotations
 
 import hashlib
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,9 +28,12 @@ from .embeddings import embed_text, embed_texts, embed_dim
 
 INDEX_NAME = "__codebase__"
 HASH_PREFIX = "cb:"
+FILE_KEYS_PREFIX = "cbf:"         # cbf:<file_path> -> set of that file's chunk keys
 CHECKSUM_KEY = "__cb_checksums__"
 COUNTER_KEY = "__cb_seq__"
-OPTIMIZE_EVERY = 100  # auto-optimize after N new chunks
+LAYOUT_KEY = "__cb_layout__"      # "2": chunk keys are tracked per file in cbf: sets
+REBUILD_LOCK_KEY = "__cb_rebuild_lock__"
+ROOTS_KEY = "__cb_roots__"        # absolute root -> the root as it was given to index_directory
 
 # File extensions to index
 CODE_EXTENSIONS = {
@@ -37,14 +43,16 @@ CODE_EXTENSIONS = {
     ".toml", ".yaml", ".yml", ".json", ".md", ".txt", ".rst",
 }
 
-# Directories to skip
+# Inside a git work tree the files to index are git's: tracked plus untracked
+# but not ignored (`git ls-files --cached --others --exclude-standard`), so
+# .gitignore decides and no source directory is dropped for its name. This
+# list is applied on top, and is all that applies outside a git work tree. It
+# used to hold `models` and `dataset` too, which dropped Django's ORM
+# (django/db/models/) and any other source directory with those names.
 SKIP_DIRS = {
-    ".git", ".pixi", ".pixi-linux", "node_modules", "__pycache__", ".pytest_cache",
-    ".venv", "venv", ".tox", "dist", "build", ".eggs", ".mypy_cache",
-    ".ruff_cache", "target", ".next", ".nuxt", ".claude",
-    # virtualenvs and local scratch / data dirs
-    "venv", ".venv", "localtemp",
-    "dataset", "models", ".kv_cache",
+    ".git", ".hg", ".svn", ".pixi", ".pixi-linux", "node_modules", "__pycache__",
+    ".pytest_cache", ".venv", "venv", ".tox", ".eggs", ".mypy_cache", ".ruff_cache",
+    ".next", ".nuxt", ".claude", ".kv_cache",
 }
 
 # Max file size to index (512KB)
@@ -214,6 +222,37 @@ def _extract_name(line: str) -> str:
 
 # ── Indexing Engine ───────────────────────────────────────────────────────────
 
+def list_files(root: str, extensions: set[str] | None = None,
+               skip_dirs: set[str] | None = None) -> list[str]:
+    """The files to index under `root`, as paths that start with `root`.
+
+    In a git work tree: tracked files plus untracked files that are not
+    ignored. Elsewhere: a walk that skips `skip_dirs`. Either way only
+    `extensions` are kept and `skip_dirs` components are dropped.
+    """
+    extensions = CODE_EXTENSIONS if extensions is None else extensions
+    skip_dirs = SKIP_DIRS if skip_dirs is None else skip_dirs
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True, check=True, timeout=60,
+        ).stdout.decode("utf-8", "surrogateescape")
+        candidates = [os.path.join(root, rel) for rel in out.split("\0") if rel]
+    except (OSError, subprocess.SubprocessError):
+        candidates = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in skip_dirs)
+            candidates += [os.path.join(dirpath, f) for f in sorted(filenames)]
+    files = []
+    for path in candidates:
+        parts = os.path.normpath(path).split(os.sep)
+        if any(part in skip_dirs for part in parts[:-1]):
+            continue
+        if os.path.splitext(path)[1].lower() in extensions and os.path.isfile(path):
+            files.append(path)
+    return files
+
+
 class CodebaseIndexer:
     """Indexes a codebase into Pion's HNSW index."""
 
@@ -223,24 +262,113 @@ class CodebaseIndexer:
             decode_responses=False,
             socket_keepalive=True,
         )
-        self._inserts_since_optimize = 0
+
+    # ── index lifecycle ──────────────────────────────────────────────────────
+
+    def _index_exists(self) -> bool:
+        try:
+            self.conn.execute_command("FT.INFO", INDEX_NAME)
+            return True
+        except redis_lib.ResponseError:
+            return False
+
+    def _create_index(self):
+        self.conn.execute_command(
+            "FT.CREATE", INDEX_NAME,
+            "SCHEMA", "vec", "VECTOR", "HNSW",
+            "10",
+            "TYPE", "FLOAT32",
+            "DIM", str(embed_dim()),
+            "DISTANCE_METRIC", "COSINE",
+            "M", "16",
+            "EF_CONSTRUCTION", "128",
+        )
 
     def _ensure_index(self):
         """Create the codebase index if it doesn't exist."""
+        if not self._index_exists():
+            self._create_index()
+            self.conn.set(LAYOUT_KEY, "2")
+
+    def optimize(self):
+        """Build the HNSW graph from the chunks ingested since FT.CREATE."""
         try:
-            self.conn.execute_command("FT.INFO", INDEX_NAME)
-        except Exception:
-            dim = embed_dim()
-            self.conn.execute_command(
-                "FT.CREATE", INDEX_NAME,
-                "SCHEMA", "vec", "VECTOR", "HNSW",
-                "10",
-                "TYPE", "FLOAT32",
-                "DIM", str(dim),
-                "DISTANCE_METRIC", "COSINE",
-                "M", "16",
-                "EF_CONSTRUCTION", "128",
-            )
+            self.conn.execute_command("FT.OPTIMIZE", INDEX_NAME)
+        except redis_lib.ResponseError:
+            pass  # index may not exist yet
+
+    def rebuild(self, lock_wait_s: float = 60.0) -> int:
+        """Apply changes to a built index by building it again.
+
+        Pion's index contract is ingest -> FT.OPTIMIZE -> search: a vector
+        written after FT.OPTIMIZE is stored with its hash but never enters the
+        graph. So: drop the index (FT.DROPINDEX keeps the documents), create it
+        again, send every chunk's vector again (read back from its own hash,
+        so nothing is re-embedded), and optimize. Returns the chunk count.
+        Searches fail for the moment between the drop and the optimize.
+        """
+        deadline = time.time() + lock_wait_s
+        while not self.conn.set(REBUILD_LOCK_KEY, str(os.getpid()), nx=True, px=int(lock_wait_s * 1000)):
+            if time.time() > deadline:
+                raise TimeoutError("another rebuild of the codebase index is still running")
+            time.sleep(0.1)
+        try:
+            keys = list(self.conn.scan_iter(f"{HASH_PREFIX}*", count=1000))
+            vectors = []
+            for i in range(0, len(keys), 500):
+                p = self.conn.pipeline(transaction=False)
+                for k in keys[i:i + 500]:
+                    p.hget(k, "vec")
+                vectors += p.execute()
+            missing = [k for k, v in zip(keys, vectors) if not v]
+            if missing:
+                # Refuse before dropping anything: rebuilding without these
+                # vectors would silently lose their chunks.
+                raise RuntimeError(
+                    f"{len(missing)} chunks (e.g. {missing[0]!r}) have no stored vector; "
+                    "re-index with --force into a fresh server")
+            try:
+                self.conn.execute_command("FT.DROPINDEX", INDEX_NAME)
+            except redis_lib.ResponseError:
+                pass
+            self._create_index()
+            p = self.conn.pipeline(transaction=False)
+            for n, (k, v) in enumerate(zip(keys, vectors), start=1):
+                p.hset(k, "vec", v)
+                if n % 500 == 0:
+                    p.execute()
+            p.execute()
+            self.conn.execute_command("FT.OPTIMIZE", INDEX_NAME)
+            return len(keys)
+        finally:
+            self.conn.delete(REBUILD_LOCK_KEY)
+
+    def _finish(self, existed: bool):
+        """Make the index searchable after a batch of changes."""
+        if existed:
+            self.rebuild()
+        else:
+            self.optimize()
+
+    # ── files ────────────────────────────────────────────────────────────────
+
+    def canonical_path(self, file_path: str) -> str:
+        """The path a file is stored under. Chunks keep the path as the walk
+        of their root produced it ("./pkg/x.py", "src/x.py"); a hook passes
+        an absolute path, which is mapped back through the indexed roots so
+        it replaces the file's chunks instead of adding a second copy."""
+        if not os.path.isabs(file_path):
+            return file_path
+        real = os.path.realpath(file_path)       # macOS: /var is /private/var
+        best = None
+        for raw_abs, raw_given in self.conn.hgetall(ROOTS_KEY).items():
+            root_abs = raw_abs.decode("utf-8", "replace")
+            if real == root_abs or real.startswith(root_abs.rstrip(os.sep) + os.sep):
+                if best is None or len(root_abs) > len(best[0]):
+                    best = (root_abs, raw_given.decode("utf-8", "replace"))
+        if best is None:
+            return file_path
+        return os.path.join(best[1], os.path.relpath(real, best[0]))
 
     def _get_checksum(self, file_path: str) -> Optional[str]:
         """Get stored checksum for a file."""
@@ -259,16 +387,40 @@ class CodebaseIndexer:
         """Get next sequential chunk ID."""
         return self.conn.incr(COUNTER_KEY)
 
-    def index_file(self, file_path: str, force: bool = False) -> int:
+    def _remove_file_chunks(self, file_path: str):
+        """Remove all chunks of a file."""
+        set_key = f"{FILE_KEYS_PREFIX}{file_path}"
+        keys = self.conn.smembers(set_key)
+        if keys:
+            self.conn.delete(*keys)
+        self.conn.delete(set_key)
+        if self.conn.get(LAYOUT_KEY) == b"2":
+            return
+        # An index written before chunk keys were tracked per file: scan.
+        file_path_bytes = file_path.encode("utf-8")
+        for key in self.conn.scan_iter(f"{HASH_PREFIX}*", count=500):
+            if self.conn.hget(key, "file_path") == file_path_bytes:
+                self.conn.delete(key)
+
+    def remove_file(self, file_path: str):
+        """Drop a file (deleted or emptied) from the index. No rebuild is
+        needed: a document leaves the results when its hash is deleted."""
+        self._remove_file_chunks(file_path)
+        self.conn.hdel(CHECKSUM_KEY, file_path)
+
+    def index_file(self, file_path: str, force: bool = False, finish: bool = True) -> int:
         """Index a single file. Returns number of chunks indexed.
 
-        Skips if file content hasn't changed (unless force=True).
+        Skips if file content hasn't changed (unless force=True). With
+        finish=True the index is searchable again on return: optimized if
+        this call created it, rebuilt if it was already built.
         """
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
         except (OSError, UnicodeDecodeError):
             return 0
+        file_path = self.canonical_path(file_path)
 
         if len(content) > MAX_FILE_SIZE:
             return 0
@@ -279,10 +431,13 @@ class CodebaseIndexer:
             if stored == checksum:
                 return 0  # unchanged
 
+        existed = self._index_exists()
         self._ensure_index()
 
-        chunks = chunk_file(file_path, content)
+        chunks = chunk_file(file_path, content) if content.strip() else []
         if not chunks:
+            if self._get_checksum(file_path) is not None:
+                self.remove_file(file_path)      # emptied: its old chunks go
             return 0
 
         # Remove old chunks for this file
@@ -296,11 +451,12 @@ class CodebaseIndexer:
         except Exception as e:
             raise RuntimeError(f"Embedding failed for {file_path}: {e}") from e
 
+        p = self.conn.pipeline(transaction=False)
+        doc_keys = []
         for chunk, embedding in zip(chunks, embeddings):
-            chunk_id = self._next_id()
-            doc_key = f"{HASH_PREFIX}{chunk_id}"
-
-            self.conn.hset(doc_key, mapping={
+            doc_key = f"{HASH_PREFIX}{self._next_id()}"
+            doc_keys.append(doc_key)
+            p.hset(doc_key, mapping={
                 "vec": embedding,
                 "text": chunk.content.encode("utf-8"),
                 "file_path": chunk.file_path.encode("utf-8"),
@@ -310,31 +466,13 @@ class CodebaseIndexer:
                 "name": chunk.name.encode("utf-8"),
                 "index": INDEX_NAME.encode("utf-8"),
             })
-
-            self._inserts_since_optimize += 1
+        p.sadd(f"{FILE_KEYS_PREFIX}{file_path}", *doc_keys)
+        p.execute()
 
         self._set_checksum(file_path, checksum)
-
-        # NOTE: Do NOT auto-optimize here. Pion's HNSW ingest buffer is freed
-        # after FT.OPTIMIZE, so subsequent HSETs would silently skip vector
-        # routing. All inserts must complete before a single FT.OPTIMIZE call.
-
+        if finish:
+            self._finish(existed)
         return len(chunks)
-
-    def _remove_file_chunks(self, file_path: str):
-        """Remove all chunks for a file (for re-indexing)."""
-        # Scan for chunks with this file_path
-        # Note: this is O(N) but only runs during re-index of a single file
-        cursor = 0
-        file_path_bytes = file_path.encode("utf-8")
-        while True:
-            cursor, keys = self.conn.scan(cursor, match=f"{HASH_PREFIX}*", count=500)
-            for key in keys:
-                stored_path = self.conn.hget(key, "file_path")
-                if stored_path == file_path_bytes:
-                    self.conn.delete(key)
-            if cursor == 0:
-                break
 
     def index_directory(
         self,
@@ -351,50 +489,40 @@ class CodebaseIndexer:
             skip_dirs: Directory names to skip (default: SKIP_DIRS).
             force: Re-index all files even if unchanged.
         """
-        if extensions is None:
-            extensions = CODE_EXTENSIONS
-        if skip_dirs is None:
-            skip_dirs = SKIP_DIRS
-
         stats = IndexStats()
         t0 = time.time()
+        existed = self._index_exists()
+        self.conn.hset(ROOTS_KEY, os.path.realpath(root), root)
+        files = list_files(root, extensions, skip_dirs)
+        changed = False
 
-        for dirpath, dirnames, filenames in os.walk(root):
-            # Skip excluded directories
-            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        for file_path in files:
+            stats.files_scanned += 1
+            try:
+                n = self.index_file(file_path, force=force, finish=False)
+                if n > 0:
+                    stats.files_indexed += 1
+                    stats.chunks_created += n
+                    stats.chunks_embedded += n
+                    changed = True
+                else:
+                    stats.files_skipped += 1
+            except Exception as e:
+                stats.errors.append(f"{file_path}: {e}")
 
-            for filename in filenames:
-                ext = os.path.splitext(filename)[1].lower()
-                if ext not in extensions:
-                    continue
+        # Files indexed earlier under this root that are gone now
+        present = set(files)
+        prefix = os.path.join(root, "")
+        for raw in self.conn.hkeys(CHECKSUM_KEY):
+            path = raw.decode("utf-8", "replace")
+            if (path.startswith(prefix) or os.path.dirname(path) == root) and path not in present:
+                self.remove_file(path)
 
-                file_path = os.path.join(dirpath, filename)
-                stats.files_scanned += 1
-
-                try:
-                    n = self.index_file(file_path, force=force)
-                    if n > 0:
-                        stats.files_indexed += 1
-                        stats.chunks_created += n
-                        stats.chunks_embedded += n
-                    else:
-                        stats.files_skipped += 1
-                except Exception as e:
-                    stats.errors.append(f"{file_path}: {e}")
-
-        # Final optimize
-        if stats.chunks_created > 0:
-            self.optimize()
+        if changed:
+            self._finish(existed)
 
         stats.elapsed_s = time.time() - t0
         return stats
-
-    def optimize(self):
-        """Build/rebuild the HNSW index."""
-        try:
-            self.conn.execute_command("FT.OPTIMIZE", INDEX_NAME)
-        except Exception:
-            pass  # index may not exist yet
 
     def stats(self) -> dict:
         """Get index statistics."""
