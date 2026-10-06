@@ -45,9 +45,8 @@ def cmd_index_file(args):
     from .indexer import CodebaseIndexer
     indexer = CodebaseIndexer(host=args.host, port=args.port)
 
-    n = indexer.index_file(args.file, force=True)
+    n = indexer.index_file(args.file, force=True)   # searchable again on return
     if n > 0:
-        indexer.optimize()
         print(f"Indexed {args.file}: {n} chunks")
     else:
         print(f"Skipped {args.file} (empty or too large)")
@@ -55,10 +54,14 @@ def cmd_index_file(args):
 
 def cmd_search(args):
     """Semantic code search."""
-    from .engine import ContextEngine
+    from .engine import ContextEngine, SearchError
     engine = ContextEngine(host=args.host, port=args.port)
 
-    results = engine.search_codebase(args.query, k=args.k)
+    try:
+        results = engine.search_codebase(args.query, k=args.k)
+    except SearchError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
     if not results:
         print("No results found.")
         return
@@ -75,10 +78,14 @@ def cmd_search(args):
 
 def cmd_context(args):
     """Full context retrieval (code + memory + cache)."""
-    from .engine import ContextEngine
+    from .engine import ContextEngine, SearchError
     engine = ContextEngine(host=args.host, port=args.port)
 
-    results = engine.retrieve_context(args.query, code_k=args.k)
+    try:
+        results = engine.retrieve_context(args.query, code_k=args.k)
+    except SearchError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
     formatted = engine.format_context(results)
 
     if formatted:
@@ -154,9 +161,7 @@ def cmd_hook_reindex(args):
 
     try:
         indexer = CodebaseIndexer(host=args.host, port=args.port)
-        n = indexer.index_file(file_path, force=True)
-        if n > 0:
-            indexer.optimize()
+        indexer.index_file(file_path, force=True)   # rebuilds the built index
     except Exception:
         pass  # non-blocking: don't fail the tool call
 
@@ -208,6 +213,38 @@ def cmd_hook_session(args):
     sys.exit(0)
 
 
+def cmd_install_hooks(args):
+    """Add the SessionStart and PostToolUse hooks to <project>/.claude/settings.json.
+
+    The hooks run this same Python (sys.executable), the one pion_context is
+    installed in, so they cannot pick up a different python3 from PATH that
+    cannot import it. Existing settings are kept; earlier pion_context hooks
+    are replaced, so running it twice changes nothing.
+    """
+    import shlex
+    path = os.path.join(args.project_dir, ".claude", "settings.json")
+    settings = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            settings = json.load(f)
+    base = f"{shlex.quote(sys.executable)} -m pion_context.cli --host {shlex.quote(args.host)} --port {args.port}"
+    hooks = settings.setdefault("hooks", {})
+
+    def put(event, entry):
+        kept = [e for e in hooks.get(event, []) if "pion_context.cli" not in json.dumps(e)]
+        hooks[event] = kept + [entry]
+
+    put("SessionStart", {"hooks": [{"type": "command", "command": f"{base} hook-session", "timeout": 15}]})
+    put("PostToolUse", {"matcher": "Edit|Write|MultiEdit",
+                        "hooks": [{"type": "command", "command": f"{base} hook-reindex",
+                                   "timeout": 60, "async": True}]})
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+    print(f"Wrote hooks to {path} (python: {sys.executable})")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="pion-context",
@@ -253,6 +290,11 @@ def main():
     # hook-reindex (called by PostToolUse hook)
     p_hook_ri = sub.add_parser("hook-reindex", help="Hook: re-index after Edit/Write")
     p_hook_ri.set_defaults(func=cmd_hook_reindex)
+
+    # install-hooks
+    p_inst = sub.add_parser("install-hooks", help="Add the Claude Code hooks to <project>/.claude/settings.json")
+    p_inst.add_argument("--project-dir", default=".", help="Project root (default: cwd)")
+    p_inst.set_defaults(func=cmd_install_hooks)
 
     # hook-session (called by SessionStart hook)
     p_hook_ss = sub.add_parser("hook-session", help="Hook: session start context")

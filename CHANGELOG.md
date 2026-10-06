@@ -45,6 +45,25 @@ enumerated — there were roughly 1,100 of them.
   answered and the connection closed, rather than rolled back to bytes the
   client already holds.
 
+- **pion-context indexes what git tracks, and keeps a built index current.** It skipped
+  every directory named `models` (Django's ORM among them) and `dataset`; it now indexes
+  git's files (tracked, plus untracked not ignored). Re-indexing a file in a built index
+  (`index-file`, the PostToolUse hook) made the file unsearchable, because a vector written
+  after FT.OPTIMIZE never enters the graph; it now rebuilds the index from the stored
+  vectors. The hook's absolute paths replace a file's chunks instead of adding a second
+  copy, deleted and emptied files leave the index, and `install-hooks` writes the Claude
+  Code hooks. Ollama embeddings go 64 to a request: Django's 8,627 chunks index in 194 s on
+  an M4 Mac mini. A search that cannot run raises instead of returning nothing. Tested on
+  every push by `tests/test_pion_context_index.py`.
+- **pion-mcp accepts `PION_EMBED_PROVIDER=ollama`** (it raised) and embeds exactly as
+  pion-context does; `codebase_search` reports a replaced index instead of returning `[]`.
+  `tests/test_mcp_search.py` now runs in the gate without the `mcp` package, through a stub
+  FastMCP; it was skipped on every gate run.
+- **pion-serve's `--rag-index` retrieves from any index.** It queried `@vector` whatever
+  the index's vector field was called, Pion refused, and the error was swallowed, so RAG
+  injected nothing. The field is learned from the server or set with `--rag-field`, and a
+  failed lookup is logged and counted in `/v1/stats` as `rag_errors`.
+
 ### Security
 
 - A fast-path reply could be written past the end of the 4 MB reply buffer:

@@ -57,6 +57,8 @@ def embed_texts(texts: Sequence[str]) -> list[bytes]:
     provider = _provider()
     if provider == "openai":
         return _embed_openai_batch(texts)
+    if provider == "ollama":
+        return _embed_ollama_batch(texts)
     return [embed_text(t) for t in texts]
 
 
@@ -69,10 +71,21 @@ def embed_to_floats(text: str) -> list[float]:
 
 # ── Ollama (default, local) ──────────────────────────────────────────────────
 
+def _finish_ollama(floats: Sequence[float]) -> bytes:
+    """Pad to the index dimension (e.g. nomic's 768 -> 1536), L2-normalize, pack."""
+    target_dim = _dim()
+    floats = list(floats)
+    if len(floats) < target_dim:
+        floats.extend([0.0] * (target_dim - len(floats)))
+    elif len(floats) > target_dim:
+        floats = floats[:target_dim]
+    norm = math.sqrt(sum(v * v for v in floats)) or 1.0
+    return _floats_to_bytes([v / norm for v in floats])
+
+
 def _embed_ollama(text: str) -> bytes:
     import time
     import requests
-    target_dim = _dim()
     for attempt in range(3):
         try:
             resp = requests.post(
@@ -81,21 +94,42 @@ def _embed_ollama(text: str) -> bytes:
                 timeout=30,
             )
             resp.raise_for_status()
-            data = resp.json()
-            floats = data["embedding"]
-            # Pad to target dim if model outputs fewer dimensions (e.g., 768 → 1536)
-            if len(floats) < target_dim:
-                floats.extend([0.0] * (target_dim - len(floats)))
-            elif len(floats) > target_dim:
-                floats = floats[:target_dim]
-            norm = math.sqrt(sum(v * v for v in floats)) or 1.0
-            floats = [v / norm for v in floats]
-            return _floats_to_bytes(floats)
+            return _finish_ollama(resp.json()["embedding"])
         except Exception:
             if attempt < 2:
                 time.sleep(0.5)
             else:
                 raise
+
+
+def _embed_ollama_batch(texts: Sequence[str], batch: int = 64) -> list[bytes]:
+    """One /api/embed request per `batch` texts instead of one request per
+    text. The vectors are the ones _embed_ollama returns: both paths cut the
+    text at 2,048 characters, and normalization makes /api/embed's
+    unit-length output and /api/embeddings' raw output the same vector."""
+    import time
+    import requests
+    out: list[bytes] = []
+    for i in range(0, len(texts), batch):
+        part = [t[:2048] for t in texts[i:i + batch]]
+        for attempt in range(3):
+            try:
+                resp = requests.post(f"{_ollama_url()}/api/embed",
+                                     json={"model": _model(), "input": part}, timeout=300)
+                if resp.status_code == 404:          # an Ollama without /api/embed
+                    return [_embed_ollama(t) for t in texts]
+                resp.raise_for_status()
+                vecs = resp.json()["embeddings"]
+                if len(vecs) != len(part):
+                    raise ValueError(f"/api/embed returned {len(vecs)} vectors for {len(part)} inputs")
+                out += [_finish_ollama(v) for v in vecs]
+                break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.5)
+                else:
+                    raise
+    return out
 
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────

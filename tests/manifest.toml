@@ -891,7 +891,7 @@ tier = "full"
 file = "tests/test_mcp_search.py"
 server = "self"
 tier = "gate"
-requires = ["py:mcp.server.fastmcp", "py:redis"]
+requires = ["py:redis", "py:requests"]   # no `mcp`: the tools run under a stub FastMCP when it is absent
 
 [[test]]
 file = "tests/test_metal_attention_window.py"
@@ -955,6 +955,12 @@ tier = "full"
 file = "tests/test_numeric_validation.py"
 server = "-w 1"
 tier = "gate"
+
+[[test]]
+file = "tests/test_pion_context_index.py"
+server = "self"
+tier = "gate"
+requires = ["py:redis", "py:requests", "bin:git"]
 
 [[test]]
 file = "tests/test_parity.py"

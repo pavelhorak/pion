@@ -210,6 +210,7 @@ _stats = {
     "l3_fragment": 0,
     "full_inference": 0,
     "rag_injections": 0,
+    "rag_errors": 0,
     "tokens_saved": 0,
     "total_latency_ms": 0,
     "route_simple": 0,
@@ -441,12 +442,26 @@ def _rag_retrieve(query: str, k: int = 3) -> list[str]:
         index_name = _config["rag_index"]
         vec_blob = vec.tobytes()
         # Standard KNN form. `FT.SEARCH <idx> <blob> KNN k` is not a vector
-        # query to Pion — it answered [] — so RAG retrieved nothing. Pion
-        # matches the index's own vector field whatever @name says here.
-        result = _pion.execute_command(
-            "FT.SEARCH", index_name, f"*=>[KNN {k} @vector $vec AS score]",
-            "PARAMS", "2", "vec", vec_blob, "DIALECT", "2",
-        )
+        # query to Pion — it answered [] — so RAG retrieved nothing. The
+        # @field must be the index's own vector field: Pion refuses any other
+        # name ("KNN field '@vector' is not this index's vector field
+        # '@emb'"), and this used to send @vector to every index. Without
+        # --rag-field, the field is learned from that refusal, once.
+        field = _config.get("rag_field") or "vector"
+        for attempt in (0, 1):
+            try:
+                result = _pion.execute_command(
+                    "FT.SEARCH", index_name, f"*=>[KNN {k} @{field} $vec AS score]",
+                    "PARAMS", "2", "vec", vec_blob, "DIALECT", "2",
+                )
+                break
+            except redis.ResponseError as e:
+                m = re.search(r"vector field '@([^']+)'", str(e))
+                if attempt == 0 and m and not _config.get("rag_field_pinned"):
+                    field = m.group(1)
+                    _config["rag_field"] = field
+                    continue
+                raise
         # Reply: [count, key, fields, key, fields, ...]. The fields carry only
         # id/score, never the document text, so read it from the hash.
         if isinstance(result, list) and len(result) > 1:
@@ -458,7 +473,10 @@ def _rag_retrieve(query: str, k: int = 3) -> list[str]:
                     docs.append(body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body))
             return docs
     except Exception as e:
-        log.debug(f"RAG retrieval failed: {e}")
+        # Reported, not hidden: a RAG lookup that fails injects nothing, and
+        # that looked exactly like an index with nothing relevant.
+        _incr_stat("rag_errors")
+        log.warning(f"RAG retrieval from {_config.get('rag_index')!r} failed: {e}")
     return []
 
 
@@ -2144,6 +2162,8 @@ def main():
                         help="Pion FT index name for RAG context injection")
     parser.add_argument("--rag-k", type=int, default=3,
                         help="Number of RAG documents to inject (default: 3)")
+    parser.add_argument("--rag-field", default=None,
+                        help="Vector field of --rag-index (default: learned from the server)")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434",
                         help="Ollama URL for embeddings (default: http://127.0.0.1:11434)")
     # gh #69: SIE (superlinked/sie) embedding backend. Opt-in via --sie-url
@@ -2222,6 +2242,8 @@ def main():
         "distill_enabled": args.distill,
         "rag_index": args.rag_index,
         "rag_k": args.rag_k,
+        "rag_field": args.rag_field,
+        "rag_field_pinned": bool(args.rag_field),
         "ollama_url": args.ollama_url,
         "sie_url": args.sie_url,
         "sie_model": args.sie_model,

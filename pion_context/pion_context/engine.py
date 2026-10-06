@@ -15,6 +15,11 @@ from .embeddings import embed_text, embed_dim
 from .indexer import INDEX_NAME, HASH_PREFIX
 
 
+class SearchError(RuntimeError):
+    """A codebase search that could not run: the query could not be embedded,
+    or the server refused it (no index, or another index has replaced it)."""
+
+
 @dataclass
 class ContextResult:
     """A single context retrieval result."""
@@ -43,11 +48,17 @@ class ContextEngine:
         )
 
     def search_codebase(self, query: str, k: int = 10, ef_runtime: int = 150) -> list[ContextResult]:
-        """Search the codebase index for semantically relevant code."""
+        """Search the codebase index for semantically relevant code.
+
+        Raises SearchError when the search cannot run. It used to return []
+        then, so an embedding outage, a missing index, or an index replaced
+        by another one (Pion serves one at a time) all read as "nothing
+        relevant".
+        """
         try:
             query_vec = embed_text(query)
-        except Exception:
-            return []
+        except Exception as e:
+            raise SearchError(f"could not embed the query: {e}") from e
 
         try:
             raw = self.conn.execute_command(
@@ -55,8 +66,8 @@ class ContextEngine:
                 f"*=>[KNN {k} @vec $vec EF_RUNTIME {ef_runtime}]",
                 "PARAMS", "2", "vec", query_vec,
             )
-        except Exception:
-            return []
+        except redis_lib.ResponseError as e:
+            raise SearchError(f"the server refused the codebase search: {e}") from e
 
         return self._parse_hnsw_results(raw, "codebase", HASH_PREFIX)
 
@@ -111,7 +122,7 @@ class ContextEngine:
         """
         results: list[ContextResult] = []
 
-        # 1. Codebase search
+        # 1. Codebase search (a failure is reported, not hidden: see search_codebase)
         code_results = self.search_codebase(query, k=code_k)
         results.extend(code_results)
 

@@ -5,6 +5,18 @@ search: functions, classes and blocks are embedded and searched by meaning. Read
 [known limitations](#known-limitations) before relying on it. No benefit to coding
 agents has been measured.
 
+What it does, and the test that checks it on every push
+(`tests/test_pion_context_index.py`):
+
+- **Indexes what git tracks.** In a git work tree the files are git's: tracked, plus
+  untracked files that are not ignored, so `.gitignore` decides. No source directory is
+  dropped for its name.
+- **Keeps a built index current.** Re-indexing a file replaces its chunks and rebuilds
+  the index from the vectors already stored with each chunk; nothing is re-embedded
+  except the changed file. Deleted and emptied files leave the index.
+- **Reports a search that cannot run.** `search` exits 1 with the reason (the embedding
+  provider failed, or another index replaced this one) instead of printing no results.
+
 ## Setup
 
 ```bash
@@ -24,10 +36,15 @@ export OPENAI_API_KEY=sk-...
 
 # 4. Index your codebase into that fresh server
 pion-context index --dir .
+
+# 5. Optional: let Claude Code keep the index current
+pion-context install-hooks
 ```
 
-Indexing makes one embedding request per chunk, so its time is set by the embedding
-provider.
+Measured on an M4 Mac mini with Ollama `nomic-embed-text` (2026-10-06): Django's
+`django/` package, 818 files and 8,627 chunks, indexes in 194 s (44 chunks a second,
+embedding 64 chunks per request). A search takes about 13 ms, most of it embedding the
+query.
 
 ## Usage
 
@@ -41,12 +58,27 @@ pion-context search "authentication middleware" -k 5
 # Code plus agent memories and the semantic cache (see the limitations)
 pion-context context "race condition in queue processor"
 
+# Re-index one file after editing it
+pion-context index-file src/network/fast_path.mojo
+
 # Migrate Claude Code memories to Pion
 pion-context migrate
 
 # Show index stats
 pion-context stats
 ```
+
+### Claude Code hooks
+
+`pion-context install-hooks [--project-dir DIR]` adds two hooks to the project's
+`.claude/settings.json`, keeping the settings already there. Running it again replaces
+them rather than adding copies. The hooks run the Python that ran `install-hooks`, so they
+use the environment pion-context is installed in.
+
+- **SessionStart** queries the index for project-level context and adds it to the session.
+- **PostToolUse** (Edit, Write, MultiEdit) re-indexes the edited file. On the Django index
+  above, re-indexing `django/db/models/query.py` after an edit took 3.2 s, process start
+  included. It runs asynchronously, so the edit does not wait for it.
 
 ### MCP tools
 
@@ -77,25 +109,25 @@ Files are split into semantic chunks:
 Max chunk size: 80 lines. Min: 5 lines. Files over 512 KB are skipped, and so are some
 directories (see the limitations).
 
-### Checksums
+### Re-indexing
 
 Each file's SHA256 checksum is stored in Pion, and `pion-context index` skips files whose
-checksum has not changed unless `--force` is given.
+checksum has not changed unless `--force` is given. Pion builds an index once (ingest,
+`FT.OPTIMIZE`, search), and a vector written after `FT.OPTIMIZE` does not enter the built
+graph. So a change to a built index ends with a rebuild: drop the index (the chunks stay),
+create it again, send every chunk's stored vector again, optimize. A rebuild that would
+lose chunks, because some have no stored vector, refuses before it drops anything.
 
 ## Known limitations
 
-- **Directories are skipped by name, anywhere in the tree.** `SKIP_DIRS` in `indexer.py`
-  drops `.git`, `node_modules`, `build`, `dist`, `target`, `venv`, `dataset`, `models` and
-  a few more wherever they occur, including source directories: Django's ORM,
-  `django/db/models/`, is not indexed.
-- **Re-indexing into a built index removes files from search.** Vectors written after
-  `FT.OPTIMIZE` are not added to the HNSW graph. `pion-context index-file`, and the
-  `hook-reindex` handler meant for a Claude Code PostToolUse hook, delete the file's old
-  chunks and store new ones that no search returns. Index into a fresh server instead.
 - **One FT index per server.** Pion serves one FT index at a time. pion-mcp's agent memory
   and semantic cache tools build their own indexes, and the last one built replaces
-  `__codebase__`, so `context` and `codebase_context` cannot return code and memories from
-  one server.
+  `__codebase__`; a search then fails with an error that names the index that replaced it.
+  `context` and `codebase_context` cannot return code and memories from one server: give
+  each its own server.
+- **Searches fail during a rebuild**, between dropping the index and optimizing it again.
+- **Outside a git work tree**, a walk is used instead, skipping version-control, virtualenv,
+  cache and `node_modules` directories.
 - **Embedding input is cut at 2,048 characters**, and `nomic-embed-text` is called without
   the `search_query:` / `search_document:` prefixes it was trained with.
 
