@@ -1036,6 +1036,12 @@ server = "self"
 tier = "gate"
 
 [[test]]
+file = "tests/test_big_replies.py"
+server = "-w 1"
+tier = "gate"
+timeout = 300
+
+[[test]]
 file = "tests/test_ruler_subset.py"
 server = "-w 1"
 tier = "full"

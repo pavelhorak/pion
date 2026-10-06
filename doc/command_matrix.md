@@ -300,9 +300,9 @@ ignored. XINFO STREAM leaves out the fields they report (`idmp-*`,
 
 Delivery goes through each subscriber's output buffer, in RESP2 or as RESP3
 pushes, with no cap on channels, patterns or subscribers (#42). A subscriber
-that is slow to read keeps what it has not read yet; one more than 4 MB behind
-is disconnected, as Redis disconnects one past its output-buffer limit, so it
-never receives half a message. A RESP2 connection with subscriptions may run
+that is slow to read keeps what it has not read yet; one more than 32 MB behind
+is disconnected, as Redis disconnects one past its pubsub output-buffer limit
+(32 MB), so it never receives half a message. A RESP2 connection with subscriptions may run
 only the pub/sub commands, PING (`[pong, <message>]`), QUIT and RESET, as in
 Redis. With `-w N > 1` (`--independent-workers`) a message reaches subscribers
 on every worker; PUBLISH counts those of its own worker, as a Redis Cluster

@@ -242,6 +242,7 @@ struct NetworkEngine:
             self.writer.pending_buffers[unsafe_offset=ci].unsafe_free()
             self.writer.pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
         self.writer.pending_offsets[unsafe_offset=ci] = 0
+        self.writer.out_free(ci)                     # #49
 
     @always_inline
     def _set_expiry_clock(mut self):
@@ -362,6 +363,8 @@ struct NetworkEngine:
         # updates `writer.proto` itself so its own reply and everything after it
         # in the same batch is already RESP3.
         self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=client_idx]
+        # #49: and the connection itself, which takes the buffer when it fills
+        self.writer.cur_fd = fd
 
         while cur_len > 0:
             # gh #390: a connection whose WAIT is parked runs nothing more
@@ -402,7 +405,7 @@ struct NetworkEngine:
         # a reply it will never see (concurrent pipelined writes deadlocked
         # 3 of 4 connections; a single connection never tripped it because
         # there was no other fd to mis-deliver to). Drain to THIS fd here.
-        if self.writer.offset > 0:
+        if self.writer.offset > 0 or self.writer.queued:   # #49: queued, buffer empty
             self.writer.flush_response(fd, self.server, kq)
         # gh #394: free the aggregates this batch overwrote — after the flush,
         # since a reply can borrow from the value a later command replaced.
@@ -449,6 +452,7 @@ struct NetworkEngine:
             var fd = w.fd
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
+            self.writer.cur_fd = Int32(ci)   # #49
             if w.unblock == UNBLOCK_ERROR:          # #47: CLIENT UNBLOCK id ERROR
                 self.writer.append_error_response(UNBLOCKED_ERROR)
             else:
@@ -485,6 +489,7 @@ struct NetworkEngine:
                 continue
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
+            self.writer.cur_fd = Int32(ci)   # #49
             var wrote = 0
             if ub == 0:
                 wrote = write_xread_reply(self.writer, self.slow_path.keyspace,
@@ -542,6 +547,7 @@ struct NetworkEngine:
                 self.slow_path.parked_waits.unpark_fd(fd)
                 var tci = Int(fd)
                 self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=tci]
+                self.writer.cur_fd = Int32(tci)   # #49
                 if ub == UNBLOCK_ERROR:
                     self.writer.append_error_response(UNBLOCKED_ERROR)
                 elif nil_bulk:
@@ -562,6 +568,7 @@ struct NetworkEngine:
             self.slow_path.parked_waits.unpark_fd(fd)
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
+            self.writer.cur_fd = Int32(ci)   # #49
             var park = self.slow_path.can_park_wait
             self.slow_path.can_park_wait = False
             # MONITOR showed the command when it first ran (and blocked), as
@@ -593,7 +600,7 @@ struct NetworkEngine:
         (kqueue / epoll write event): shut down, and its loop closes it."""
         var ci = Int(fd)
         if self.slow_path.clients.close_after[unsafe_offset=ci] != 0 \
-           and self.writer.pending_offsets[unsafe_offset=ci] == 0:
+           and not self.writer.owes(ci):
             _ = external_call["pion_kill_fd", Int32](fd)
 
     def _service_pause(mut self, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
@@ -1036,6 +1043,9 @@ struct NetworkEngine:
 
                         # Process all complete RESP frames
                         var cur_len = total_len
+                        # #49: the XDP lane sends `buffer` itself and has no
+                        # per-connection queue: a full buffer stays the -ERR frame
+                        self.writer.cur_fd = -1
                         while cur_len > 0:
                             var consumed = 0
                             if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(vci):   # gh #261, #39, #42
@@ -1115,6 +1125,7 @@ struct NetworkEngine:
                     var n_read = self.server.recv(tfd, self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), CLIENT_BUF_SIZE - stored)
                     if n_read > 0:
                         var cur_len = stored + n_read
+                        self.writer.cur_fd = -1     # #49: this lane sends `buffer` once, as above
                         while cur_len > 0:
                             var consumed = 0
                             if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(ci):   # gh #261, #39, #42
@@ -1369,19 +1380,12 @@ struct NetworkEngine:
                         self._uring_close_fd(fd, ci)
                         continue
                     # Bytes still owed: what this SEND did not take, plus what
-                    # was appended while it was in flight.
-                    var remaining = self.writer.pending_offsets[unsafe_offset=ci] - sent
-                    if remaining > 0:
-                        _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
-                            self.writer.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
-                            (self.writer.pending_buffers[unsafe_offset=ci].unsafe_offset(sent)).unsafe_bitcast[NoneType](),
-                            remaining,
-                        )
-                        self.writer.pending_offsets[unsafe_offset=ci] = remaining
-                        self.writer.uring_inflight[unsafe_offset=ci] = remaining
-                        self.ring[].submit_send(fd, self.writer.pending_buffers[unsafe_offset=ci], remaining)
+                    # was queued while it was in flight (#49: refilled from the
+                    # overflow queue).
+                    self.writer.uring_sent(ci, sent)
+                    if self.writer.pending_offsets[unsafe_offset=ci] > 0:
+                        self.writer.uring_kick(fd, ci)
                     else:
-                        self.writer.pending_offsets[unsafe_offset=ci] = 0
                         # #47: a client that killed itself, its reply now out
                         if self.slow_path.clients.close_after[unsafe_offset=ci] != 0:
                             self._uring_close_fd(fd, ci)
@@ -1423,6 +1427,7 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=ci].unsafe_free()
                             self.writer.pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=ci] = 0
+                        self.writer.out_free(ci)                     # #49
                         self.writer.uring_inflight[unsafe_offset=ci] = 0
                         self.slow_path.clients.on_accept(new_fd)   # #47
                         self._uring_arm_recv(new_fd, ci, buf_group_id)
@@ -1703,6 +1708,7 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=Int(new_fd)] = 0
+                        self.writer.out_free(Int(new_fd))                     # #49
                         self.slow_path.clients.on_accept(new_fd)   # #47
                         # Register for EPOLLIN (level-triggered)
                         ev[unsafe_offset=0].events = EPOLLIN
@@ -1920,6 +1926,7 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=Int(new_fd)] = 0
+                        self.writer.out_free(Int(new_fd))                     # #49
                         # Register level-triggered READ for client
                         self.slow_path.clients.on_accept(new_fd)   # #47
                         self.server.kevent_add_read(kq, new_fd, edge_triggered=False)

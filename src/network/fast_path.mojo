@@ -1638,21 +1638,37 @@ struct FastPathHandler(Movable):
                                 writer.append_bulk_value_response(val)
                                 k += 1
                         else:
-                            # Sequential fallback for large MGET (>16 keys)
+                            # Sequential fallback for large MGET (>16 keys).
+                            # #49: the whole frame is checked before the first
+                            # value is written. A long reply can spill to the
+                            # connection mid-way, and nothing that has left the
+                            # buffer can be taken back by `writer.offset = mget_w0`.
+                            var scan = it_pos
+                            var scanned = 0
+                            while scanned < num_keys:
+                                if scan >= n or buffer[scan] != 36:
+                                    break
+                                scan += 1
+                                var skl = 0
+                                while scan < n and buffer[scan] != 13:
+                                    skl = skl * 10 + Int(buffer[scan] - 48)
+                                    scan += 1
+                                scan += 2
+                                if skl < 0 or scan + skl + 2 > n:
+                                    break
+                                scan += skl + 2
+                                scanned += 1
+                            if scanned < num_keys:
+                                writer.offset = mget_w0
+                                return consumed
                             var keys_parsed = 0
                             while keys_parsed < num_keys:
-                                if it_pos >= n or buffer[it_pos] != 36:
-                                    writer.offset = mget_w0
-                                    return consumed
                                 it_pos += 1
                                 var key_len = 0
                                 while it_pos < n and buffer[it_pos] != 13:
                                     key_len = key_len * 10 + Int(buffer[it_pos] - 48)
                                     it_pos += 1
                                 it_pos += 2
-                                if key_len < 0 or it_pos + key_len + 2 > n:
-                                    writer.offset = mget_w0
-                                    return consumed
                                 var val = self.keyspace[].get_with_ptr(buffer + it_pos, key_len)
                                 writer.append_bulk_value_response(val)
                                 it_pos += key_len + 2

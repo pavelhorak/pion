@@ -55,7 +55,9 @@ map.reset()
 
 ## Response Buffer
 
-Each worker pre-allocates a **4 MB response buffer** (`response_buffer` in `ResponseWriter`) for formatting RESP responses. All `append_*_response()` methods write directly into this buffer. `flush_response()` sends the accumulated data via `send()` or `writev()`. No allocation occurs during response formatting.
+Each worker pre-allocates a **4 MB response buffer** (`buffer` in `ResponseWriter`) for formatting RESP responses. All `append_*_response()` methods write directly into this buffer, and `flush_response()` sends it once per batch. No allocation occurs during response formatting.
+
+A connection that the socket cannot keep up with gets a 4 MB pending block, allocated on first use, and past that an overflow queue that grows as needed (#49), as a Redis client's reply list does: a normal client's output has no size limit, and a subscriber or MONITOR connection is disconnected once it is owed more than 32 MB. A reply larger than the response buffer is handed to that queue as the buffer fills, so it arrives whole however large it is; the worker never blocks on a slow reader.
 
 ## Data Copy Path
 

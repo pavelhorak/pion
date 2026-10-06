@@ -613,16 +613,16 @@ def _drain_all(sock, total_timeout=10.0, idle_timeout=0.5):
 
 
 def test_response_buffer_overflow(sock):
-    """gh #82: when a pipelined batch overflows the 4 MB response buffer,
-    server must emit `-ERR response exceeds buffer` instead of silently
-    dropping bytes (the previous behavior desynced pipelined clients)."""
-    print("\n=== Section 10b: Response Buffer Overflow (gh #82) ===")
+    """gh #82, #49: a pipelined batch whose replies overflow the 4 MB response
+    buffer is answered whole. gh #82 replaced a silent drop with one
+    `-ERR response exceeds buffer` and dropped the rest of the batch; since
+    #49 a full buffer is handed to the connection and every reply arrives."""
+    print("\n=== Section 10b: Response Buffer Overflow (gh #82, #49) ===")
     flushall(sock)
 
     # Store a 1 MiB value. Each GET response is ~1,048,591 bytes
-    # ($1048576\r\n + 1 MiB + \r\n).  Three full responses fit in the 4 MB
-    # buffer; the fourth (~4.19 MB cumulative) enters the 194 KB safety
-    # margin and must be replaced by the error frame.
+    # ($1048576\r\n + 1 MiB + \r\n). Three full responses fit in the 4 MB
+    # buffer; the fourth crosses into the 194 KB safety margin.
     big = b"o" * (1024 * 1024)
     sock.sendall(encode_cmd(["SET", "raw:big", big]))
     r = recv_resp(sock)
@@ -632,27 +632,19 @@ def test_response_buffer_overflow(sock):
     sock.sendall(b"".join(cmds))
     raw = _drain_all(sock)
 
-    # 1. The overflow error frame must appear.
-    has_err = b"-ERR response exceeds buffer\r\n" in raw
-    check(has_err, "overflow emits -ERR frame (not silent drop)",
-          f"len={len(raw)} tail={raw[-128:]!r}")
+    # 1. All five replies arrive, byte for byte, and no overflow error.
+    one = b"$1048576\r\n" + big + b"\r\n"
+    check(raw == one * 5, "all 5 replies past the 4 MB buffer arrive whole (#49)",
+          f"len={len(raw)} of {5 * len(one)} tail={raw[-64:]!r}")
+    check(b"-ERR response exceeds buffer" not in raw, "no overflow error frame (#49)")
 
-    # 2. At least three well-formed bulk-string responses precede the error.
-    n_headers = raw.count(b"$1048576\r\n")
-    check(n_headers >= 3,
-          "well-formed bulk-string frames before the error",
-          f"got {n_headers}, raw_len={len(raw)}")
-
-    # 3. The connection must remain frame-synced after the overflow:
-    #    a subsequent small command on the same socket must succeed.
+    # 2. The connection must remain frame-synced: a subsequent small command
+    #    on the same socket must succeed.
     r = send_recv(sock, "PING")
-    check("+PONG" in r, "socket usable after overflow (frame-synced)",
+    check("+PONG" in r, "socket usable after the batch (frame-synced)",
           f"got {r!r}")
-
-    # 4. A normal small command writes well-formed responses again
-    #    (overflow_emitted is cleared on flush).
     r = send_recv(sock, "SET", "raw:tiny", "v")
-    check("+OK" in r, "subsequent SET works after overflow batch",
+    check("+OK" in r, "subsequent SET works after the batch",
           f"got {r!r}")
 
 

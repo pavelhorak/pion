@@ -743,7 +743,7 @@ python3 tests/test_raw.py && python3 tests/test_parity.py
 ```
 
 - **Shared-nothing workers**: N OS threads, each owns private hash map, HNSW, WAL, allocators — so `-w N` is N independent keyspaces and is gated behind `--independent-workers`; the default is `-w 1`. See [Scaling past one worker](#scaling-past-one-worker).
-- **Zero-alloc hot path**: SSO 23B strings, SIMD Swiss Table, `format_int_to_buf` (no division), 4 MB response buffer (emits `-ERR response exceeds buffer` instead of silent truncation on overflow).
+- **Zero-alloc hot path**: SSO 23B strings, SIMD Swiss Table, `format_int_to_buf` (no division), 4 MB response buffer per worker; a reply that outgrows it continues in the connection's output queue, so replies of any size arrive whole (#49).
 - **GenericValue**: 32-byte tagged union (STRING_SSO / STRING / INT / FLOAT / HASH / LIST / SET / ZSET / BITMAP / HLL / GEO).
 - **SlabHashMap**: Swiss Table with `h2` fingerprint SIMD probing, Wyhash, 70 % fill rehash.
 - **HNSWGraph**: INT8 batch-8 prefix pruning, suffix early-exit, `l0_compact`, 24-cache-line prefetch.
