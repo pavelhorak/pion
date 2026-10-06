@@ -6,7 +6,43 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Added
+
+- **Stream consumer groups** (#40): XGROUP, XREADGROUP (`>`, history, COUNT,
+  NOACK, BLOCK), XACK, XCLAIM, XAUTOCLAIM, XPENDING, XINFO GROUPS /
+  CONSUMERS / STREAM FULL, XSETID, and Redis 7's stream metadata
+  (entries-added, max-deleted-entry-id, recorded-first-entry-id, lag).
+  Redis 8.2's XDELEX and XACKDEL, and KEEPREF / DELREF / ACKED on XADD and
+  XTRIM trimming, are in too. Groups, consumers and pending entries are
+  durable (WAL, snapshot, DUMP, COPY) and replicated. Checked against Redis
+  8.10 in RESP2 and RESP3. Not implemented, and refused: XREADGROUP CLAIM,
+  MAXCOUNT / MAXSIZE, XNACK, idempotent XADD.
+- **Blocking list and sorted-set commands block** (#38): BLPOP and BRPOP
+  answered nil at once; BRPOPLPUSH, BLMOVE, BLMPOP, BZPOPMIN, BZPOPMAX and
+  BZMPOP did not exist. A blocked client parks, in FIFO order, until a key
+  holds what it pops or its timeout passes.
+- **Commands Redis 7 clients send** (#39): LCS, LOLWUT, MONITOR, ROLE,
+  PFDEBUG, PFSELFTEST, REPLICAOF / SLAVEOF, FAILOVER, REPLCONF,
+  RESTORE-ASKING, EVAL_RO / EVALSHA_RO / FCALL_RO, TIME. SYNC and PSYNC
+  refuse.
+
 ### Changed
+
+- **Scripts run the server's own commands** (#36). `redis.call` used a
+  26-command copy of the server; every command now runs through the real
+  dispatcher, logs its own WAL record and reaches replicas. Errors,
+  conversions, the sandbox and the `redis.*` API follow Redis 8.10. FUNCTION
+  libraries persist. `--lua-time-limit` and `--lua-memory-limit` replace the
+  old instruction and heap caps.
+- **The HNSW index file is the size of the index** (file v4). It held the
+  node map and neighbor lists for the server's whole capacity: 329 MB for a
+  100-vector index, rewritten on every FT.OPTIMIZE. A 100-vector rebuild went
+  from about 410 ms to 6 ms. v3 files still load.
+- **Admin and introspection commands do what they answer, or refuse** (#47):
+  CLIENT (IDs, LIST, INFO, KILL, PAUSE, REPLY, UNBLOCK), COMMAND (INFO, LIST,
+  GETKEYS, DOCS from Redis's own tables), SLOWLOG, ACL, LATENCY, MEMORY,
+  MODULE, SHUTDOWN, and CLUSTER outside cluster mode. SHUTDOWN ABORT used to
+  shut the server down.
 
 - **Linux x86-64 runs the closed vector library's AVX-512 VNNI build by
   default on CPUs that have it.** `PION_VECTOR_VNNI=0` forces the x86-64-v2
@@ -43,6 +79,70 @@ enumerated — there were roughly 1,100 of them.
   base image, on every image through 0.9.4. The release now sets it from
   `VERSION` and checks the pushed image's label against the tag, which also
   stops a tag cut without bumping `VERSION`.
+
+- **Linux:**
+  - the io_uring loop ticks when idle, so shutdown, WAIT, replica ACKs and
+    expiry no longer stall on a quiet server; a failed `io_uring_setup` falls
+    back to epoll instead of leaving a port nobody answers (#17, #21);
+  - the CPU count comes from Linux's own constant, so Linux machines no
+    longer all ran the `embedded` profile (#20);
+  - a multi-worker warm restart serves no query before the index has loaded
+    (#19);
+  - a stopped server frees its port, and a restart waits for one still held
+    (#22);
+  - no libm `fmaf` call per lane on the x86-64-v2 build, in the vector
+    library and in 60 places in the open kernels (#25).
+- **Replies Redis clients parse:** ±inf scores no longer read INT64_MIN on
+  x86, and scores print as Redis prints them (#18); HGETALL is a RESP3 map
+  (#23); a bad password in HELLO's AUTH answers WRONGPASS (#24); RESP3 sets,
+  doubles and pairs where Redis sends them (#30).
+- **Parsing as Redis parses:** bitmaps (#31), option keywords matched by
+  whole names and unknown options refused (#32), geo, now a sorted set as in
+  Redis (#33), streams (#34), long-double INCRBYFLOAT (#35).
+- **Each command that embeds text sees only its own entries** (#29).
+- **INFO and `--version` say which vector build runs** (#26).
+- **DUMP and RESTORE carry every type**, with Redis's options and errors;
+  MIGRATE works (#41).
+- **Pub/sub delivers every message whole**, across workers, with shard
+  channels (#42).
+- **RESET resets the connection**, and WATCH, QUIT and RESET run inside
+  MULTI (#44).
+- **A key past its deadline is gone for every command**, and expiry is
+  logged, so a restart does not bring an expired key back (#45).
+- **FT.SEARCH drops documents that were deleted, renamed or given a new
+  vector** (#46). Writing the same vector again keeps a document indexed, and
+  an FT.OPTIMIZE with no index defined no longer blocks the next index's
+  ingest.
+- **Vectors written by every path are indexed**: HSET inside MULTI/EXEC or a
+  script, HMSET, HSETNX (#43).
+- **OBJECT ENCODING** reports embstr by Redis 8's rule, which depends on
+  the key's length and the platform's cache line.
+- **Startup refusals exit 1**: an invalid `--tenant` setup exited 0. A
+  cluster node whose replication port would pass 65535 refuses to start.
+
+### Security
+
+These were reachable from the wire, and are fixed in this release:
+
+- io_uring: a request that overflowed the client buffer was still read past
+  its end; a late completion could act on a new connection that reused the
+  fd; the submission ring published entries before they were written.
+- Heap overflows in fixed-size buffers: the XREAD BLOCK wake reply (64 KB),
+  PUBLISH deliveries (4 KB) and DUMP (1 MB).
+- SETBIT read the old bit before growing the bitmap: an out-of-bounds read.
+- Replies and WAL records built from freed buffers (AI.KNN_LM.INFO,
+  NEURON.PKM.INFO, COMMAND GETKEYSANDFLAGS, ACL LOG, the MoE manifest
+  probes).
+- XADD truncated a field or value longer than 65,535 bytes and reported
+  success.
+- Commands pipelined behind XREAD BLOCK were answered before it.
+- A replica acknowledged a FULLRESYNC before applying it, so WAIT could count
+  writes the replica did not hold.
+- A removed key's TTL stayed behind and expired a later key of the same name.
+- SELECT n answered +OK and stayed on database 0. It now refuses, as Redis
+  does with one database.
+- FLUSHALL and FLUSHDB were not written to the WAL, so flushed data came back
+  after a restart and stayed on replicas.
 
 ## [0.9.4] — 2026-10-04
 
