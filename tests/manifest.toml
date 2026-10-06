@@ -1042,6 +1042,12 @@ tier = "gate"
 timeout = 300
 
 [[test]]
+file = "tests/test_scan_cursor.py"
+server = "-w 1"
+tier = "gate"
+timeout = 300
+
+[[test]]
 file = "tests/test_ruler_subset.py"
 server = "-w 1"
 tier = "full"

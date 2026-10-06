@@ -692,7 +692,7 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 |---|---|
 | `r.incr(key)` → INCRBY | Python redis-py sends `INCRBY key 1`, not `INCR key`. Both work; `INCR` takes the fast path. |
 | Multi-worker + AI | When `--flare` / `--emb-enabled` is set, Pion auto-caps to `-w 1`. SemanticCache is per-worker and cannot share state across workers. |
-| SCAN cursor semantics | SCAN is implemented but returns all keys in a single sweep (cursor always returns 0 on second call). Applications that rely on incremental cursor-based iteration may need adjustment. |
+| SCAN cursor semantics | SCAN, HSCAN, SSCAN and ZSCAN iterate incrementally, COUNT-bounded, with a working cursor (#50). A full iteration returns every key present from start to finish, as in Redis. A small keyspace still returns in one call; a large one paginates. |
 | Blocking commands | BLPOP, BRPOP, BRPOPLPUSH, BLMOVE, BLMPOP, BZPOPMIN, BZPOPMAX and BZMPOP block as in Redis. The wait is per worker: with `-w N > 1` a push on another worker's keyspace never reaches them (see `--independent-workers`). Inside MULTI/EXEC and inside a script they answer at once. |
 | Lua scripting | `redis.call()` runs every command. A script that runs past `--lua-time-limit` without writing is stopped, because a worker cannot answer SCRIPT KILL mid-script (see §12). |
 
