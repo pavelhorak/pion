@@ -6,6 +6,14 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-10-06
+
+Linux fixes from the first run of the whole gate tier there, Redis
+compatibility fixes across the command surface, and fixes for 14 bugs
+reachable over the network, listed under Security. Several of those are heap
+overflows, so every deployment should upgrade. New: stream consumer groups,
+blocking list and sorted-set commands, and the commands Redis 7 clients send.
+
 ### Added
 
 - **Stream consumer groups** (#40): XGROUP, XREADGROUP (`>`, history, COUNT,
@@ -43,7 +51,6 @@ enumerated — there were roughly 1,100 of them.
   GETKEYS, DOCS from Redis's own tables), SLOWLOG, ACL, LATENCY, MEMORY,
   MODULE, SHUTDOWN, and CLUSTER outside cluster mode. SHUTDOWN ABORT used to
   shut the server down.
-
 - **Linux x86-64 runs the closed vector library's AVX-512 VNNI build by
   default on CPUs that have it.** `PION_VECTOR_VNNI=0` forces the x86-64-v2
   build, which was the default until now. The VNNI build has passed the
@@ -79,7 +86,6 @@ enumerated — there were roughly 1,100 of them.
   base image, on every image through 0.9.4. The release now sets it from
   `VERSION` and checks the pushed image's label against the tag, which also
   stops a tag cut without bumping `VERSION`.
-
 - **Linux:**
   - the io_uring loop ticks when idle, so shutdown, WAIT, replica ACKs and
     expiry no longer stall on a quiet server; a failed `io_uring_setup` falls
@@ -126,7 +132,8 @@ These were reachable from the wire, and are fixed in this release:
 
 - io_uring: a request that overflowed the client buffer was still read past
   its end; a late completion could act on a new connection that reused the
-  fd; the submission ring published entries before they were written.
+  fd; the submission ring had no full check and published entries before
+  they were written.
 - Heap overflows in fixed-size buffers: the XREAD BLOCK wake reply (64 KB),
   PUBLISH deliveries (4 KB) and DUMP (1 MB).
 - SETBIT read the old bit before growing the bitmap: an out-of-bounds read.
