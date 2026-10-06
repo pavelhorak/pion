@@ -22,6 +22,8 @@ throughput number would ever show.
 Usage: python3 tests/test_gh230_mset.py [./pion-server-dev]
 """
 import os, socket, subprocess, sys, time, shutil, signal
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
 
 BINARY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server")
 PORT = 1985
@@ -116,6 +118,7 @@ def main():
     os.makedirs(WORKDIR, exist_ok=True)
     proc = spawn()
     try:
+        wait_ready_pid(PORT, proc, 30)   # this process, not a lingering listener (#27)
         c = connect()
 
         # ── MSET clears the TTL of every key it writes ───────────────────
@@ -223,7 +226,9 @@ def main():
         # path by which any of this can come back.
         proc.send_signal(signal.SIGKILL)
         proc.wait(timeout=10)
+        wait_port_free(PORT)
         proc = spawn()
+        wait_ready_pid(PORT, proc, 30)
         c = connect()
         after = c("DBSIZE")
         check("keyspace is non-empty after WAL replay",

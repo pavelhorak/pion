@@ -172,7 +172,10 @@ def handle_ttl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_toke
             if exp_gv.is_none():
                 writer.append_int_response(Int64(-1))
             else:
-                var remaining_ns = exp_gv.as_int() - _get_now_ns()
+                # #45: measured from the batch clock, as Redis measures from
+                # its command time snapshot
+                var _now = keyspace[].clock_ns if keyspace[].clock_ns != 0 else _get_now_ns()
+                var remaining_ns = exp_gv.as_int() - _now
                 if remaining_ns <= 0:
                     writer.append_int_response(Int64(-2))
                 else:
@@ -204,7 +207,8 @@ def handle_pttl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
             if exp_gv.is_none():
                 writer.append_int_response(Int64(-1))
             else:
-                var remaining_ns = exp_gv.as_int() - _get_now_ns()
+                var _now = keyspace[].clock_ns if keyspace[].clock_ns != 0 else _get_now_ns()   # #45
+                var remaining_ns = exp_gv.as_int() - _now
                 if remaining_ns <= 0:
                     writer.append_int_response(Int64(-2))
                 else:
@@ -218,13 +222,16 @@ def handle_pttl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 
 
 @always_inline
-def handle_persist(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
+def handle_persist(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
+                   keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
                    wal: Pointer[WAL, MutUntrackedOrigin] = null_ptr[WAL, MutUntrackedOrigin]()) raises -> Int:
-    """PERSIST key → 1 if TTL removed, 0 if no TTL or key not found."""
+    """PERSIST key → 1 if TTL removed, 0 if no TTL or key not found. The key
+    is looked up first: an expired key is gone (#45), and removing its TTL
+    alone used to bring it back."""
     if i + 1 < num_tokens:
         var key = tokens[unsafe_offset=i+1].value()
         var key_gv = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
-        if is_not_null(ttl_map) and not ttl_map[].get(key_gv).is_none():
+        if not keyspace[].get(key_gv).is_none() and is_not_null(ttl_map) and not ttl_map[].get(key_gv).is_none():
             _ = ttl_map[].remove_generic(key_gv)
             if is_not_null(wal):
                 _ = wal[].append(26, key.unsafe_ptr(), key.byte_length())

@@ -222,9 +222,7 @@ def handle_ai_knn_lm_info(
     var info = String("count=") + String(knn_lm.datastores[slot].count)
     info += " dim=" + String(knn_lm.datastores[slot].dim)
     info += " max_entries=" + String(knn_lm.datastores[slot].max_entries)
-    var bytes = info.as_bytes()
-    var info_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(bytes.unsafe_ptr()))
-    writer.append_bulk_string_response(info_ext, len(bytes))
+    writer.append_bulk_string_response(info.unsafe_ptr(), info.byte_length())
     return 1
 
 

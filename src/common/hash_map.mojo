@@ -1,6 +1,7 @@
 from src.common.ptr import null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
+from std.ffi import external_call
 from std.memory import unsafe_memset, unsafe_memcpy
 from std.sys.intrinsics import prefetch
 from std.bit import count_trailing_zeros
@@ -8,6 +9,7 @@ from std.math import iota
 from std.collections import List
 from src.common.value import GenericValue, ValueType, BLOB_TAG
 from src.common.prng import Xoshiro256PlusPlus
+from src.common.vec_tomb import VecTomb
 
 # Per-lane weights (1 << lane) for packing a 16-lane bool compare into a
 # movemask-style bitmask. Computed once at compile time.
@@ -44,6 +46,14 @@ struct SlabHashMap(Movable):
     # did not follow RENAME. Owned here, a field TTL goes wherever the hash
     # goes and dies with it.
     var field_ttl: Pointer[SlabHashMap, MutUntrackedOrigin]
+    # #46: a HASH whose vector the shared index holds: its slot, the hash of
+    # the field the vector is in, and its worker's tombstones. The slot dies
+    # with this map (__del__), and when the field is set or removed. -1 / null
+    # everywhere else. At the END: the keyspace's shards are hot (gh #149).
+    var vec_slot: Int
+    var vec_field_h: UInt64
+    var vec_tomb: Pointer[VecTomb, MutUntrackedOrigin]
+    var vec_gen: UInt64          # the slot numbering's generation at the link
 
     # Metadata constants
     comptime EMPTY = UInt8(0b10000000)
@@ -60,6 +70,10 @@ struct SlabHashMap(Movable):
         self.tombstones = 0
         self.graveyard = null_ptr[List[GenericValue], MutUntrackedOrigin]()
         self.field_ttl = null_ptr[SlabHashMap, MutUntrackedOrigin]()
+        self.vec_slot = -1
+        self.vec_field_h = 0
+        self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
+        self.vec_gen = 0
         self.metadata = alloc[UInt8](real_cap + 16)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), real_cap + 16)
         self.keys = alloc[GenericValue](real_cap)
@@ -73,6 +87,8 @@ struct SlabHashMap(Movable):
     def reset(mut self):
         """Lazy reset: skip entirely when the map is already clean (fresh from pool)."""
         self._drop_field_ttl()
+        self.vec_slot = -1          # #46: a recycled map indexes nothing
+        self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         if self.size == 0:
             return
         # gh #131 §1.4: visit only OCCUPIED slots via the Swiss metadata instead of
@@ -108,7 +124,52 @@ struct SlabHashMap(Movable):
         self.tombstones = take.tombstones
         self.graveyard = take.graveyard
         self.field_ttl = take.field_ttl
-    
+        self.vec_slot = take.vec_slot
+        self.vec_field_h = take.vec_field_h
+        self.vec_tomb = take.vec_tomb
+        self.vec_gen = take.vec_gen
+
+    # ── #46: the vector this hash put in the index ───────────────────────────
+    def index_vector(mut self, slot: Int, field_h: UInt64, tomb: Pointer[VecTomb, MutUntrackedOrigin]):
+        """The index holds this hash's vector at `slot` (field hash `field_h`)."""
+        self.vec_slot = slot
+        self.vec_field_h = field_h
+        self.vec_tomb = tomb
+        self.vec_gen = tomb[].generation() if Int(tomb) != 0 else UInt64(0)
+
+    @no_inline
+    def drop_vector(mut self):
+        """This hash's vector leaves the index: its slot dies."""
+        if self.vec_slot >= 0 and Int(self.vec_tomb) != 0:
+            self.vec_tomb[].kill(self.vec_slot, self.vec_gen)
+        self.vec_slot = -1
+
+    @no_inline
+    def _vector_field_set(mut self, key: GenericValue, value: GenericValue):
+        """A set of the indexed vector's field: the indexed vector stops being
+        this hash's, unless these are the bytes it already holds. Writing the
+        same vector again (an ingest script run twice, the README's snippet
+        run twice) must not take the document out of the index: after the
+        build nothing can put it back."""
+        var old = self.get(key)
+        var n = old.string_len()
+        if old.is_string() and value.is_string() and n == value.string_len():
+            var sa = alloc[UInt8](24)
+            var sb = alloc[UInt8](24)
+            var same = external_call["memcmp", Int32](old.as_string_safe(sa), value.as_string_safe(sb), n) == 0
+            sa.free()
+            sb.free()
+            if same:
+                return
+        self.drop_vector()
+
+    @always_inline
+    def _vector_field_touched(mut self, h: UInt64):
+        """A set or remove of the field with hash `h`: when it is the indexed
+        vector's field, the indexed vector is no longer this hash's."""
+        if self.vec_slot >= 0 and h == self.vec_field_h:
+            self.drop_vector()
+
     # ── gh #392: per-field expiry of a HASH ─────────────────────────────────
     def _drop_field_ttl(mut self):
         if Int(self.field_ttl) != 0:
@@ -177,13 +238,13 @@ struct SlabHashMap(Movable):
         if old.type.value == ValueType.STRING:
             old.free_str_payload()
         elif Int(self.graveyard) != 0 and (old.is_container()
-                                           or old.type.value == ValueType.HLL):
+                                           or old.type.value == ValueType.HLL
+                                           or old.type.value == ValueType.BITMAP):
             self._park(old)
-        # BITMAP is left out on purpose: setbit() reallocates a growing bitmap
-        # and FREES the old buffer itself, then its caller set()s the new one —
-        # parking the old value here freed it a second time (tcmalloc "Attempt
-        # to free invalid pointer" under the Redis differential). DEL still
-        # frees a bitmap (remove_generic_taking hands it back).
+        # BITMAP was once left out, because setbit() freed the buffer it grew
+        # out of, so a bitmap that SET, BITOP or FLUSHALL replaced was never
+        # freed at all. setbit() now leaves the old buffer here. The set() paths skip this call when the new
+        # value keeps the same buffer (an in-place SETBIT).
 
     @no_inline
     def _park(mut self, old: GenericValue):
@@ -204,6 +265,8 @@ struct SlabHashMap(Movable):
             self._rehash()
 
         var h = UInt64(key.__hash__())
+        if self.vec_slot >= 0 and h == self.vec_field_h:
+            self._vector_field_set(key, value)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
 
@@ -449,7 +512,9 @@ struct SlabHashMap(Movable):
 
     @always_inline
     def set_with_hash(mut self, key: GenericValue, var value: GenericValue, h: UInt64):
-        """Like set() but skips hash computation — caller provides precomputed hash."""
+        """Like set() but skips hash computation — caller provides precomputed hash.
+        Only the keyspace stores through this (MSET's loop among them), so it
+        has no #46 vector-field check: a hash's fields go through set()."""
         if (self.size + self.tombstones) * 100 > self.capacity * 70:
             self._rehash()
         var h1 = self._h1(h)
@@ -510,6 +575,7 @@ struct SlabHashMap(Movable):
     @always_inline
     def remove_generic_with_hash(mut self, key: GenericValue, h: UInt64) -> Bool:
         """Like remove_generic() but skips hash computation — caller provides precomputed hash."""
+        self._vector_field_touched(h)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
         var mask = self.capacity - 1
@@ -555,6 +621,7 @@ struct SlabHashMap(Movable):
         (list/hash/set/zset/geo/stream/vset, and HLL/bitmap) in `taken`, so the caller can free the
         container it points to (gh #369) without a second probe. String
         payloads are freed here as before and never handed back."""
+        self._vector_field_touched(h)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
         var mask = self.capacity - 1
@@ -699,6 +766,7 @@ struct SlabHashMap(Movable):
 
     def remove_generic(mut self, key: GenericValue) -> Bool:
         var h = UInt64(key.__hash__())
+        self._vector_field_touched(h)    # #46
         var h1 = self._h1(h)
         var h2 = self._h2(h)
         
@@ -843,6 +911,10 @@ struct SlabHashMap(Movable):
         self.size = 0
 
     def __del__(deinit self):
+        # #46: every route that drops a hash ends here (DEL, expiry, FLUSHALL,
+        # an overwrite, a pop or HDEL that empties it): its vector dies with it
+        if self.vec_slot >= 0 and Int(self.vec_tomb) != 0:
+            self.vec_tomb[].kill(self.vec_slot, self.vec_gen)
         if Int(self.field_ttl) != 0:
             self.field_ttl.unsafe_deinit_pointee()
             self.field_ttl.unsafe_free()
@@ -871,9 +943,39 @@ struct StripedHashMap(Movable):
     # or its last field TTL went); the sweep drops those. Lazy expiry on every
     # read keeps visibility right regardless.
     var field_ttl_index: Pointer[SlabHashMap, MutUntrackedOrigin]
+    # The worker's key TTLs (the engine's ttl_map), so that removing
+    # a key takes its TTL with it. Before, every route but DEL, UNLINK and
+    # expiry (an aggregate emptied by a pop, GETDEL, a *STORE replacing its
+    # destination) left the entry behind, and the next key of that name expired
+    # at the old deadline. Null for a keyspace that keeps no TTLs.
+    var ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]
+    # #45: lazy expiry. The time this dispatch batch compares deadlines with
+    # (Redis's command time snapshot), set by the engine before each batch
+    # while any key has a TTL, so a key cannot expire in the middle of a
+    # command. 0 turns lazy expiry off: WAL replay and snapshot load see every
+    # key as stored. A lookup that finds a key past its deadline removes it, as
+    # the sweep would, and reports it missing: no command reads an expired
+    # value or writes into one.
+    var clock_ns: Int64
+    # #45: keys removed as expired and not yet logged, as [u32 len][key]
+    # records. The WAL logs a DEL for each before its next record
+    # (WAL.log_expired), so a key that expired and was created again replays
+    # as the new key, not as the old value under the old deadline. Null when
+    # no WAL is attached (--no-wal): nothing is queued.
+    var expired_log: Pointer[List[UInt8], MutUntrackedOrigin]
+    # #45: the active sweep's switch (DEBUG SET-ACTIVE-EXPIRE 0|1).
+    var active_expire: Bool
+    # #45: on a replica, a lookup reports an expired key missing without
+    # removing it; the primary's DEL does that, as on a Redis replica.
+    var expire_hides_only: Bool
 
     def __init__(out self, initial_capacity: Int):
         var shard_cap = max(16, initial_capacity // 8)
+        self.ttl_map = null_ptr[SlabHashMap, MutUntrackedOrigin]()
+        self.clock_ns = 0
+        self.expired_log = null_ptr[List[UInt8], MutUntrackedOrigin]()
+        self.active_expire = True
+        self.expire_hides_only = False
         self.graveyard = alloc[List[GenericValue]](1)
         self.graveyard.unsafe_write(List[GenericValue]())
         self.field_ttl_index = alloc[SlabHashMap](1)
@@ -887,6 +989,11 @@ struct StripedHashMap(Movable):
         self.shards = take.shards
         self.graveyard = take.graveyard
         self.field_ttl_index = take.field_ttl_index
+        self.ttl_map = take.ttl_map
+        self.clock_ns = take.clock_ns
+        self.expired_log = take.expired_log
+        self.active_expire = take.active_expire
+        self.expire_hides_only = take.expire_hides_only
 
     def __del__(deinit self):
         if Int(self.shards) != 0:
@@ -899,15 +1006,99 @@ struct StripedHashMap(Movable):
         if Int(self.field_ttl_index) != 0:
             self.field_ttl_index.unsafe_deinit_pointee()
             self.field_ttl_index.unsafe_free()
+        if Int(self.expired_log) != 0:
+            self.expired_log.unsafe_deinit_pointee()
+            self.expired_log.unsafe_free()
 
     @always_inline
     def _shard(self, h: UInt64) -> Int:
         return Int(h & 7)
 
+    # ── #45: expiry ──────────────────────────────────────────────────────────
+
+    def enable_expiry_log(mut self):
+        """Queue expired keys for the WAL (state.mojo, when a WAL is open)."""
+        if Int(self.expired_log) == 0:
+            self.expired_log = alloc[List[UInt8]](1)
+            self.expired_log.unsafe_write(List[UInt8]())
+
+    def deadline(self, key: GenericValue) -> Int64:
+        """The key's TTL deadline in ns, or -1 when it has none."""
+        if Int(self.ttl_map) == 0 or self.ttl_map[].size == 0:
+            return -1
+        var d = self.ttl_map[].get(key)
+        if d.is_none():
+            return -1
+        return Int64(d.as_int())
+
+    def is_expired(self, key: GenericValue) -> Bool:
+        """True when `key` is past its deadline at this batch's clock, without
+        removing it: for a caller walking the shards (KEYS, SCAN, RANDOMKEY),
+        whose keys are the map's own stored keys."""
+        if self.clock_ns == 0:
+            return False
+        var d = self.deadline(key)
+        return d >= 0 and d < self.clock_ns
+
+    def expire_stored_if_due(self, key: GenericValue) -> Bool:
+        """For a caller walking the shards (SCAN, RANDOMKEY): True when the
+        stored key `key` is past its deadline, and then removed (except on a
+        replica), as Redis's SCAN and RANDOMKEY remove the expired keys they
+        meet. The removal frees `key`: the caller must not use it after a
+        True."""
+        if not self.is_expired(key):
+            return False
+        if not self.expire_hides_only:
+            _ = self.expire_key(key, UInt64(key.__hash__()), True)
+        return True
+
+    @no_inline
+    def _expire_if_due(self, key: GenericValue, h: UInt64) -> Bool:
+        """Lazy expiry: remove `key` (just found) when it is past its deadline
+        at the batch clock. True when it was removed. Redis's rule: expired
+        once the clock is past the deadline."""
+        var d = self.deadline(key)
+        if d < 0 or d >= self.clock_ns:
+            return False
+        if not self.expire_hides_only:
+            _ = self.expire_key(key, h, True)
+        return True
+
+    def expire_key(self, key: GenericValue, h: UInt64, park: Bool) -> GenericValue:
+        """Remove `key` as expired, for lazy expiry and for the sweep: queue its
+        WAL DEL, drop its TTL, remove it. An aggregate's value is parked in the
+        graveyard (`park`: freed after the batch's replies are written) or
+        handed back for the caller to free. `key` must not be one of this
+        map's stored keys unless the caller is done with it: the removal
+        frees the stored key."""
+        if Int(self.expired_log) != 0:
+            var buf = alloc[UInt8](24)
+            var kl = key.string_len()
+            var kp = key.as_string_safe(buf)
+            var log = self.expired_log
+            log[].append(UInt8(kl & 0xFF))
+            log[].append(UInt8((kl >> 8) & 0xFF))
+            log[].append(UInt8((kl >> 16) & 0xFF))
+            log[].append(UInt8((kl >> 24) & 0xFF))
+            for b in range(kl):
+                log[].append(kp[b])
+            buf.unsafe_free()
+        if Int(self.ttl_map) != 0:
+            _ = self.ttl_map[].remove_generic(key)
+        var taken = GenericValue()
+        _ = self.shards[unsafe_offset=self._shard(h)].remove_generic_with_hash_taking(key, h, taken)
+        if park and taken.type.value != ValueType.NONE:
+            self.graveyard[].append(taken)
+            return GenericValue()
+        return taken
+
     @always_inline
     def get(self, key: GenericValue) -> GenericValue:
         var h = UInt64(key.__hash__())
-        return self.shards[unsafe_offset=self._shard(h)].get_with_hash(key, h)
+        var v = self.shards[unsafe_offset=self._shard(h)].get_with_hash(key, h)
+        if self.clock_ns != 0 and v.type.value != ValueType.NONE and self._expire_if_due(key, h):
+            return GenericValue()
+        return v
 
     @always_inline
     def get(self, key_str: String) -> GenericValue:
@@ -916,7 +1107,10 @@ struct StripedHashMap(Movable):
 
     @always_inline
     def get_with_hash(self, key: GenericValue, h: UInt64) -> GenericValue:
-        return self.shards[unsafe_offset=self._shard(h)].get_with_hash(key, h)
+        var v = self.shards[unsafe_offset=self._shard(h)].get_with_hash(key, h)
+        if self.clock_ns != 0 and v.type.value != ValueType.NONE and self._expire_if_due(key, h):
+            return GenericValue()
+        return v
 
     @always_inline
     def get_with_ptr(self, ptr: Pointer[UInt8, MutUntrackedOrigin], length: Int) -> GenericValue:
@@ -925,7 +1119,11 @@ struct StripedHashMap(Movable):
         if length <= 23:
             var packed = GenericValue.hash_and_pack_sso(ptr, length)
             var h = packed[0]
-            return self.shards[unsafe_offset=self._shard(h)].get_with_sso(h, packed[1], packed[2], packed[3])
+            var v = self.shards[unsafe_offset=self._shard(h)].get_with_sso(h, packed[1], packed[2], packed[3])
+            if self.clock_ns != 0 and v.type.value != ValueType.NONE \
+                    and self._expire_if_due(GenericValue.borrow(ptr, length), h):
+                return GenericValue()
+            return v
         else:
             # gh #394: borrow, don't copy — the copy was never freed.
             return self.get(GenericValue.borrow(ptr, length))
@@ -933,6 +1131,8 @@ struct StripedHashMap(Movable):
     @always_inline
     def set(mut self, key: GenericValue, var value: GenericValue):
         var h = UInt64(key.__hash__())
+        if self.clock_ns != 0:
+            _ = self._expire_if_due(key, h)   # #45: never store over an expired value
         self.shards[unsafe_offset=self._shard(h)].set_with_hash(key, value^, h)
 
     @always_inline
@@ -941,6 +1141,8 @@ struct StripedHashMap(Movable):
 
         MSET needs the hash a second time — for the WATCH version slot — so
         computing it here as well would mean hashing every key twice."""
+        if self.clock_ns != 0:
+            _ = self._expire_if_due(key, h)   # #45: as in set()
         self.shards[unsafe_offset=self._shard(h)].set_with_hash(key, value^, h)
 
     @always_inline
@@ -950,6 +1152,8 @@ struct StripedHashMap(Movable):
         """gh #175: SET-from-raw-bytes with in-place payload reuse — see
         SlabHashMap.set_str_reuse_with_hash."""
         var h = UInt64(key.__hash__())
+        if self.clock_ns != 0:
+            _ = self._expire_if_due(key, h)   # #45: as in set()
         self.shards[unsafe_offset=self._shard(h)].set_str_reuse_with_hash(key, h, val_ptr, val_len)
 
     @always_inline
@@ -958,14 +1162,32 @@ struct StripedHashMap(Movable):
         self.set(GenericValue.borrow(key_str.unsafe_ptr(), key_str.byte_length()), value^)
 
     @always_inline
+    def _drop_ttl(mut self, key: GenericValue):
+        """A removed key's TTL goes with it. Called FIRST, while `key`
+        is valid: a caller may pass the keyspace's own stored key, which the
+        removal frees. (A key read out of the TTL map itself must be an owned
+        copy — this frees the map's.)"""
+        if Int(self.ttl_map) != 0 and self.ttl_map[].size > 0:
+            _ = self.ttl_map[].remove_generic(key)
+
+    @always_inline
     def remove_generic(mut self, key: GenericValue) -> Bool:
+        """Remove `key`; False when it was missing. An expired key counts as
+        missing (#45): it is removed as expired, and DEL answers 0 for it."""
         var h = UInt64(key.__hash__())
+        if self.clock_ns != 0 and self._expire_if_due(key, h):
+            return False
+        self._drop_ttl(key)
         return self.shards[unsafe_offset=self._shard(h)].remove_generic_with_hash(key, h)
 
     def remove_generic_taking(mut self, key: GenericValue, mut taken: GenericValue) -> Bool:
         """gh #369: remove, and hand back an aggregate value so its container
-        can be freed (see container_free.mojo). One probe, like remove_generic."""
+        can be freed (see container_free.mojo). One probe, like remove_generic.
+        An expired key counts as missing (#45), as in remove_generic."""
         var h = UInt64(key.__hash__())
+        if self.clock_ns != 0 and self._expire_if_due(key, h):
+            return False
+        self._drop_ttl(key)
         return self.shards[unsafe_offset=self._shard(h)].remove_generic_with_hash_taking(key, h, taken)
 
     @always_inline
@@ -979,14 +1201,21 @@ struct StripedHashMap(Movable):
     @always_inline
     def get_value_ptr(mut self, key: GenericValue) -> Pointer[GenericValue, MutUntrackedOrigin]:
         """Return pointer to value slot for in-place mutation (e.g. INCR).
-        Returns null pointer if key not found."""
+        Returns null pointer if key not found (or found expired, #45)."""
         var h = UInt64(key.__hash__())
-        return self.shards[unsafe_offset=self._shard(h)].get_value_ptr(key)
+        var p = self.shards[unsafe_offset=self._shard(h)].get_value_ptr(key)
+        if self.clock_ns != 0 and Int(p) != 0 and self._expire_if_due(key, h):
+            return null_ptr[GenericValue, MutUntrackedOrigin]()
+        return p
 
     def reset(mut self):
         for i in range(8):
             self.shards[unsafe_offset=i].reset()
         self.field_ttl_index[].reset()
+        # The keys' TTLs go with them, or a key created later under a
+        # flushed name expires at the old deadline.
+        if Int(self.ttl_map) != 0:
+            self.ttl_map[].reset()
 
     @always_inline
     def note_field_ttl(mut self, key: GenericValue):

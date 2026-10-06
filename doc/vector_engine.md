@@ -195,7 +195,16 @@ FT.OPTIMIZE <index>
 ```
 Triggers batch graph construction from the FP32 ingest buffer. Calls `hnsw.build_index_from_shared()` (if shared buffer has data) or `hnsw.build_index()` (local). After build: `compact_vectors()` reorders vectors in BFS order, `publish_to_shared()` makes the index available to other workers via `SharedHNSWView`. Returns `+OK`.
 
-**Ingest → optimize → search is a one-way contract.** Every `HSET` must land *before* `FT.OPTIMIZE`; the FP32 ingest buffer is freed after the build, so an `HSET` issued *after* `FT.OPTIMIZE` is stored as a hash but **not indexed** (no error, and `FT.SEARCH` will not find it). For incremental inserts, `FT.DROPINDEX` → re-ingest everything → `FT.OPTIMIZE` again.
+**Ingest → optimize → search is a one-way contract.** Every `HSET` must land *before* `FT.OPTIMIZE`; the FP32 ingest buffer is freed after the build, so an `HSET` issued *after* `FT.OPTIMIZE` is stored as a hash but **not indexed** (no error, and `FT.SEARCH` will not find it). For incremental inserts, `FT.DROPINDEX` → re-ingest everything → `FT.OPTIMIZE` again. Re-issuing `FT.CREATE` for the index being served changes nothing, and does not reopen ingest — unless that index is empty (built with no documents), which has nothing to protect: then ingest opens again. `FT.OPTIMIZE` with no index defined (no `FT.CREATE`, nothing ingested, no graph) answers `Unknown index name`; it used to build and serve an empty index named by its argument, under which the real index's `FT.CREATE` would not open ingest.
+
+**Deletions do follow the keyspace (#46).** A document leaves the results when its hash leaves the keyspace, by DEL, UNLINK, expiry, FLUSHALL, or a write that replaces the key. It also leaves when the vector leaves the document: an `HSET` of a new vector, an `HDEL` of the field, or a field TTL. Writing the vector it already has (the same bytes: an ingest script run twice) keeps it indexed. A renamed document leaves too: its slot names the old key, and after the build the new name is not indexed. Before the build, a renamed, copied (`COPY`) or restored (`RESTORE`) hash is ingested under its new name, as an `HSET` would be.
+
+Mechanics:
+- The hash records its slot. The slot dies with the hash, or with its vector field.
+- A dead slot is one byte in an array all workers share, so a search on any worker skips it at once.
+- The graph is not changed. Dead nodes still route the beam, as HNSW soft deletes do, and `FT.SEARCH` filters them out of the results. The KNN path widens its candidates until it has k live documents.
+- Each worker records the slots it killed as members `<build id>:<slot>` of an internal set, `__hk_dead__`. The WAL, snapshots and replication carry it like any set.
+- A restart applies the members whose build id matches the loaded index. Each `FT.OPTIMIZE` draws a new build id, saved in index header word 31.
 
 ### FT.DROPINDEX
 ```

@@ -95,7 +95,7 @@ def main():
         "HEXISTS": lambda: r.hexists(H, F) is True, "HLEN": lambda: r.hlen(H) == 1,
         "HKEYS": lambda: r.hkeys(H) == [F.encode()],
         "LRANGE": lambda: r.lrange(L, 0, -1) == [b"a", b"b"], "LLEN": lambda: r.llen(L) == 2,
-        "SMEMBERS": lambda: r.smembers(S) == {b"m"}, "SISMEMBER": lambda: r.sismember(S, "m") is True,
+        "SMEMBERS": lambda: r.smembers(S) == {b"m"}, "SISMEMBER": lambda: r.sismember(S, "m") in (True, 1),   # RESP3 clients get the integer
         "SCARD": lambda: r.scard(S) == 1, "ZRANGE": lambda: r.zrange(Z, 0, -1) == [b"m"],
         "ZSCORE": lambda: r.zscore(Z, "m") == 1.0, "ZCARD": lambda: r.zcard(Z) == 1,
         "RENAME": lambda: r.rename(K, K + "2") and r.get(K + "2") == b"value",

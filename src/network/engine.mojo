@@ -1,5 +1,6 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import free_graveyard
+from src.network.vector_ingest import log_dead_slots
 from std.sys.info import CompilationTarget
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy, stack_allocation
@@ -26,9 +27,11 @@ from src.network.response_writer import ResponseWriter
 from src.network.fast_path import FastPathHandler
 from src.network.slow_path import SlowPathHandler
 from src.network.fast_path import _get_now_ns
-from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE
+from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE, URING_MAX_FDS, UD_RECV, UD_SEND, UD_ACCEPT, UD_TIMEOUT
 from src.io.xdp import XDPEngine, XDPFrameInfo, TCP_SYN, TCP_ACK, TCP_FIN, TCP_RST, TCP_PSH
 from src.network.cluster import ClusterState, REPL_PORT_OFFSET
+from src.commands.stream import write_xread_reply
+from src.commands.blocking import blocked_client_ready, UNBLOCK_ERROR, UNBLOCKED_ERROR
 
 # Client receive buffer size. Supports LMCache KV cache blobs (typical 2-4 MB
 # per chunk, up to ~16 MB for 70B+ models) and shared-KV-cache tensor frames
@@ -100,6 +103,9 @@ struct NetworkEngine:
     # HERE, at the call sites, and not inside process_data_plane: a single
     # branch there measurably cost MSET ~7% (interleaved A/B, 16 runs), the
     # same code-layout sensitivity gh #149 measured for one struct field.
+    # The call sites read slow_path.fast_path_off, which is set while memory is
+    # over the limit, a client monitors (#39) or one is subscribed (#42); then
+    # slow_path.fast_path_ok(fd) decides per connection.
     var over_maxmemory: Bool
 
 
@@ -164,7 +170,10 @@ struct NetworkEngine:
                                          local_affinity=self.local_affinity,
                                          cluster=cluster,
                                          ttl_map=ttl_map)
-        self.slow_path = SlowPathHandler(keyspace, hash_map_pool, skip_list_pool, list_pool, ai_queue, wal, raft, shared_hnsw, config=config, worker_id=worker_id, cluster=cluster, ttl_map=ttl_map)
+        self.slow_path = SlowPathHandler(keyspace, hash_map_pool, skip_list_pool, list_pool, ai_queue, wal, raft, shared_hnsw, config=config, worker_id=worker_id, num_workers=num_workers, cluster=cluster, ttl_map=ttl_map)
+        self.slow_path.local_affinity = self.local_affinity   # RESET clears READONLY (#39)
+        self.slow_path.client_buffer_lens = self.client_buffer_lens   # #47: CLIENT LIST qbuf
+        self.slow_path.client_buf_cap = CLIENT_BUF_SIZE
         # Wire fast_path's transaction pointers to slow_path's transaction state
         self.fast_path.tx_in_multi = self.slow_path.tx_state.in_multi
         self.fast_path.key_versions = self.slow_path.tx_state.key_versions
@@ -210,9 +219,8 @@ struct NetworkEngine:
         the caller's responsibility — those vary across loops. Everything else
         is identical: pubsub / tx / blocked-reader fd cleanup, close the
         socket, free the per-fd RECV + writer buffers, zero pending_offsets.
-        Used by epoll + kqueue inline close paths and as the base of
-        `_uring_close_fd` (which adds uring's recv-armed + inflight resets on
-        top).
+        Used by the epoll + kqueue inline close paths, and by io_uring's
+        `_uring_finish_close` once nothing is in flight for the fd.
 
         Extracted from 3 near-identical copies — adding a new per-fd reset
         without updating every loop was the drift bug class the issue called
@@ -220,6 +228,10 @@ struct NetworkEngine:
         self.slow_path.pubsub.cleanup_fd(fd)
         self.slow_path.tx_state.cleanup_fd(fd)
         self.slow_path.blocked_readers.remove_fd(fd)
+        self.slow_path.blocked_clients.remove_fd(fd)   # #38
+        _ = self.slow_path.monitors.remove(fd)        # #39
+        self.slow_path.clients.on_close(fd)          # #47 (its REPLY mode goes too)
+        self.slow_path.update_dispatch_gate()          # #39, #42, #47
         self.slow_path.parked_waits.remove_fd(fd)   # gh #390
         self.server.close_client(fd)
         self.client_buffer_lens[unsafe_offset=ci] = 0
@@ -232,14 +244,19 @@ struct NetworkEngine:
         self.writer.pending_offsets[unsafe_offset=ci] = 0
 
     @always_inline
-    def _uring_close_fd(mut self, fd: Int32, ci: Int):
-        """Clean up all per-fd state when a connection closes on the io_uring
-        path: common close + uring's recv-armed / writer.uring_inflight resets."""
-        self._close_fd_common(fd, ci)
-        self.uring_recv_armed[unsafe_offset=ci] = 0
-        self.writer.uring_inflight[unsafe_offset=ci] = 0
+    def _set_expiry_clock(mut self):
+        """#45: set the keyspace's lazy-expiry clock for the coming batch."""
+        var ks = self.fast_path.keyspace
+        var tm = self.fast_path.ttl_map
+        if is_not_null(tm) and tm[].size > 0:
+            ks[].clock_ns = _get_now_ns()
+            var cl = self.slow_path.cluster
+            # #47: and while CLIENT PAUSE holds writes, as Redis pauses expiry
+            ks[].expire_hides_only = (is_not_null(cl) and cl[].enabled and cl[].is_replica) \
+                                     or self.slow_path.clients.pause_until_ms != 0
+        else:
+            ks[].clock_ns = 0
 
-    @always_inline
     def _dispatch_recv_buffer(
         mut self,
         fd: Int32,
@@ -272,6 +289,13 @@ struct NetworkEngine:
         provably the same loop, so io_uring shares this body and only keeps
         its own RECV re-arm afterwards (the genuinely poller-specific part)."""
         var cur_len = stored_len + n
+        if n > 0:
+            self.slow_path.clients.touch(fd)    # #47: CLIENT LIST idle
+        # #47: a client that killed itself is closed once its reply is out;
+        # what it sends meanwhile is dropped, as Redis drops it
+        if self.slow_path.clients.close_after[unsafe_offset=client_idx] != 0:
+            self.client_buffer_lens[unsafe_offset=client_idx] = 0
+            return
 
         # gh #14 phase-2 RCU: announce that this worker is inside a dispatch
         # batch, and at which epoch. Bracketing HERE rather than inside
@@ -302,6 +326,12 @@ struct NetworkEngine:
                     self.rcu_epoch_ptr, UInt64(0))
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.SEQUENTIAL](
                 _rcu_slot, (_rcu_ep << 1) | UInt64(1))
+
+        # #45: the batch's clock for lazy expiry, Redis's command time
+        # snapshot: one read per recv buffer while any key has a TTL, 0 (off)
+        # otherwise. A replica only hides an expired key (it refuses writes,
+        # and the primary's DEL removes it), as a Redis replica does.
+        self._set_expiry_clock()
 
         # Binary protocol connections: route to process_binary_request()
         # instead of the RESP fast_path/slow_path. Binary handler sends
@@ -336,10 +366,10 @@ struct NetworkEngine:
         while cur_len > 0:
             # gh #390: a connection whose WAIT is parked runs nothing more
             # until the WAIT is answered; its bytes wait in the buffer.
-            if self.slow_path.parked_waits.count() > 0 and self.slow_path.parked_waits.is_parked(client_idx):
+            if self.slow_path.parked_waits.any() and self.slow_path.parked_waits.is_parked(client_idx):
                 break
             var consumed = 0
-            if not self.over_maxmemory:   # gh #261 — see the field
+            if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(client_idx):   # gh #261, #39, #42
                 consumed = self.fast_path.process_data_plane(
                     fd, self.client_buffers[unsafe_offset=client_idx], cur_len,
                     self.writer, self.server, kq,
@@ -379,6 +409,10 @@ struct NetworkEngine:
         # One load and a compare per recv buffer when there are none.
         if len(self.fast_path.keyspace[].graveyard[]) > 0:
             free_graveyard(self.fast_path.keyspace)
+        # #46: record the vector slots this batch killed (freeing a hash above,
+        # or a field write, kills its slot), so a restart keeps them dead
+        if is_not_null(self.slow_path.vec_tomb) and len(self.slow_path.vec_tomb[].pending) > 0:
+            log_dead_slots(self.slow_path.shared_hnsw, self.slow_path.vec_tomb, self.slow_path.dispatcher)
         self.client_buffer_lens[unsafe_offset=client_idx] = cur_len
         # gh #14: leave the RCU critical section. Placed after the flush, not
         # before it — a handler's reply can still reference borrowed memory
@@ -408,14 +442,17 @@ struct NetworkEngine:
             var acked = 0
             if is_not_null(h):
                 acked = Int(external_call["pion_repl_primary_acked_count", Int32](h, w.target))
-            if acked < w.num_req and (w.deadline_ns == 0 or now < w.deadline_ns):
+            if w.unblock == 0 and acked < w.num_req and (w.deadline_ns == 0 or now < w.deadline_ns):
                 k += 1
                 continue
             pw[].unpark_at(k)          # entry k is now a different one: no k += 1
             var fd = w.fd
             var ci = Int(fd)
             self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
-            self.writer.append_int_response(Int64(acked))
+            if w.unblock == UNBLOCK_ERROR:          # #47: CLIENT UNBLOCK id ERROR
+                self.writer.append_error_response(UNBLOCKED_ERROR)
+            else:
+                self.writer.append_int_response(Int64(acked))
             self.writer.flush_response(fd, self.server, kq)
             var stored = self.client_buffer_lens[unsafe_offset=ci]
             if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
@@ -423,13 +460,168 @@ struct NetworkEngine:
             if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
                and not pw[].is_parked(ci) \
                and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
-                var cur_len = self.client_buffer_lens[unsafe_offset=ci]
-                if self.multishot_active:
-                    self.ring[].submit_recv_multishot(fd, UInt16(uring_group))
-                    self.uring_recv_armed[unsafe_offset=ci] = 2
+                self._uring_arm_recv(fd, ci, UInt16(uring_group))
+
+    def _service_blocked_readers(mut self, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
+                                 uring_group: Int = -1) raises:
+        """Answer every parked XREAD BLOCK whose stream got data (an
+        XADD marked it ready) or whose deadline passed, then run what its
+        client pipelined behind it, as _service_parked_waits does for WAIT.
+        The reply goes through the writer like any other, in order with the
+        replies the connection is owed."""
+        var reg = Pointer(to=self.slow_path.blocked_readers)
+        if reg[]._count() == 0:
+            return
+        var now_ms = Int64(_get_now_ns() // 1_000_000)
+        var k = 0
+        while k < reg[]._count():
+            var fd = reg[].readers[k].fd
+            # #47: CLIENT UNBLOCK answers it as its timeout would, or with an
+            # error, whatever its streams hold by now
+            var ub = reg[].readers[k].unblock
+            var timed_out = ub != 0 or (reg[].readers[k].timeout_ms > 0 and now_ms >= reg[].readers[k].timeout_ms)
+            if not reg[].readers[k].ready and not timed_out:
+                k += 1
+                continue
+            var ci = Int(fd)
+            self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
+            var wrote = 0
+            if ub == 0:
+                wrote = write_xread_reply(self.writer, self.slow_path.keyspace,
+                                          reg[].readers[k].keys, reg[].readers[k].after_ms,
+                                          reg[].readers[k].after_seq, reg[].readers[k].count_limit)
+            if wrote == 0:
+                if not timed_out:
+                    # Woken, but the new entries are gone again (XDEL, XTRIM).
+                    reg[].readers[k].ready = False
+                    k += 1
+                    continue
+                if ub == UNBLOCK_ERROR:
+                    self.writer.append_error_response(UNBLOCKED_ERROR)
                 else:
-                    self.ring[].submit_recv(fd, self.client_buffers[unsafe_offset=ci].unsafe_offset(cur_len), CLIENT_BUF_SIZE - cur_len)
-                    self.uring_recv_armed[unsafe_offset=ci] = 1
+                    self.writer.append_null_array_response()
+            reg[].remove_at(k)            # entry k is now a different one: no k += 1
+            self.slow_path.parked_waits.unpark_fd(fd)
+            self.writer.flush_response(fd, self.server, kq)
+            var stored = self.client_buffer_lens[unsafe_offset=ci]
+            if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+                self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
+            if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
+               and not self.slow_path.parked_waits.is_parked(ci) \
+               and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+                self._uring_arm_recv(fd, ci, UInt16(uring_group))
+
+    def _service_blocked_clients(mut self, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
+                                 uring_group: Int = -1) raises:
+        """#38: wake parked BLPOP & co., oldest first. A client whose key now
+        holds what it pops, or whose timeout has passed, has its command run
+        again through the slow path, unable to block: served now, or answered
+        with the timeout's nil (the command's own reply either way). Then
+        whatever it pipelined behind it runs, as for a woken XREAD."""
+        var reg = Pointer(to=self.slow_path.blocked_clients)
+        if reg[]._count() == 0:
+            return
+        var now_ms = Int64(_get_now_ns() // 1_000_000)
+        var k = 0
+        while k < reg[]._count():
+            var ub = reg[].clients[k].unblock
+            var dl = reg[].clients[k].deadline_ms
+            var timed_out = ub != 0 or (dl > 0 and now_ms >= dl)
+            var ready = ub == 0 and blocked_client_ready(self.slow_path.keyspace, reg[].clients[k])
+            if not timed_out and not ready:
+                k += 1
+                continue
+            var fd = reg[].clients[k].fd
+            if not ready:
+                # Its timeout passed, or CLIENT UNBLOCK (#47): the timeout's
+                # nil, without running the command again. A key that now
+                # holds another type would make it answer WRONGTYPE, where
+                # Redis answers the timeout.
+                var nil_bulk = reg[].clients[k].nil_bulk
+                reg[].remove_at(k)                 # the next client is now at k
+                self.slow_path.parked_waits.unpark_fd(fd)
+                var tci = Int(fd)
+                self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=tci]
+                if ub == UNBLOCK_ERROR:
+                    self.writer.append_error_response(UNBLOCKED_ERROR)
+                elif nil_bulk:
+                    self.writer.append_null_response()
+                else:
+                    self.writer.append_null_array_response()
+                self.writer.flush_response(fd, self.server, kq)
+                self._resume_unparked(fd, kq, hnsw, db_size, uring_group)
+                continue
+            # The frame goes to a heap buffer this function frees itself: a
+            # List's last use is `unsafe_ptr()`, and Mojo destroys a value
+            # right after its last use, so the parse below would read freed
+            # memory (it did: the allocator reused the first bytes).
+            var flen = len(reg[].clients[k].frame)
+            var frame = alloc[UInt8](flen + 1)
+            unsafe_memcpy(dest=frame, src=reg[].clients[k].frame.unsafe_ptr(), count=flen)
+            reg[].remove_at(k)                 # the next client is now at k
+            self.slow_path.parked_waits.unpark_fd(fd)
+            var ci = Int(fd)
+            self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
+            var park = self.slow_path.can_park_wait
+            self.slow_path.can_park_wait = False
+            # MONITOR showed the command when it first ran (and blocked), as
+            # Redis does; running it again is not a new command.
+            self.slow_path.monitor_skip = True
+            _ = self.slow_path.process_slow_path(frame, flen, fd, self.writer, self.server, kq,
+                                                 hnsw, db_size, self.config)
+            self.slow_path.monitor_skip = False
+            frame.free()
+            self.slow_path.can_park_wait = park
+            self._resume_unparked(fd, kq, hnsw, db_size, uring_group)
+
+    def _resume_unparked(mut self, fd: Int32, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
+                         uring_group: Int) raises:
+        """A parked client was answered: run what it pipelined behind the
+        command that parked it, and on io_uring arm its receive again."""
+        var ci = Int(fd)
+        var stored = self.client_buffer_lens[unsafe_offset=ci]
+        if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+            self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
+        if uring_group >= 0 and self.uring_recv_armed[unsafe_offset=ci] == 0 \
+           and not self.slow_path.parked_waits.is_parked(ci) \
+           and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+            self._uring_arm_recv(fd, ci, UInt16(uring_group))
+
+    @always_inline
+    def _close_after_reply(mut self, fd: Int32):
+        """#47: a client that killed itself, once its pending reply is out
+        (kqueue / epoll write event): shut down, and its loop closes it."""
+        var ci = Int(fd)
+        if self.slow_path.clients.close_after[unsafe_offset=ci] != 0 \
+           and self.writer.pending_offsets[unsafe_offset=ci] == 0:
+            _ = external_call["pion_kill_fd", Int32](fd)
+
+    def _service_pause(mut self, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int,
+                       uring_group: Int = -1) raises:
+        """#47 CLIENT PAUSE: when the pause is over (its timeout passed, or
+        UNPAUSE) or changed (another PAUSE), the connections it held run their
+        commands, as Redis's unblockPostponedClients; under a pause that still
+        applies to them they are held again. A held connection CLIENT KILL let
+        go runs (and so reads its end of input) at once."""
+        var reg = Pointer(to=self.slow_path.clients)
+        var ended = reg[].pause_until_ms != 0 and external_call["pion_unix_ms", Int64]() >= reg[].pause_until_ms
+        if ended:
+            reg[].pause_until_ms = 0
+        var go = List[Int32]()
+        if ended or reg[].pause_changed:
+            reg[].pause_changed = False
+            for k in range(len(reg[].paused_fds)):
+                var f = reg[].paused_fds[k]
+                reg[].postponed[Int(f)] = 0
+                go.append(f)
+            reg[].paused_fds.clear()
+        for k in range(len(reg[].released)):
+            go.append(reg[].released[k])
+        reg[].released.clear()
+        self.slow_path.update_dispatch_gate()
+        for k in range(len(go)):
+            self.slow_path.parked_waits.unpark_fd(go[k])
+            self._resume_unparked(go[k], kq, hnsw, db_size, uring_group)
 
     def _replica_drain(mut self, cl: Pointer[ClusterState, MutUntrackedOrigin]):
         """gh #390: drain the replica ring, apply every whole record, carry a
@@ -444,7 +636,12 @@ struct NetworkEngine:
         var total = carry + n
         if total == 0:
             return
+        # #45: the primary's records apply to what it had: no lazy expiry here
+        # (a key this replica's clock calls expired may still be live there).
+        var _clk = self.fast_path.keyspace[].clock_ns
+        self.fast_path.keyspace[].clock_ns = 0
         var used = apply_wal_entries(self.fast_path.keyspace, buf, total, self.fast_path.ttl_map)
+        self.fast_path.keyspace[].clock_ns = _clk
         if used > 0:
             free_graveyard(self.fast_path.keyspace)   # gh #394: a replicated SET over an aggregate
             external_call["pion_repl_replica_applied", NoneType](
@@ -554,6 +751,7 @@ struct NetworkEngine:
         var _oom = external_call["pion_maxmemory_check", Int32]() != 0
         self.over_maxmemory = _oom
         self.slow_path.over_maxmemory = _oom
+        self.slow_path.update_dispatch_gate()
 
         # gh #259: graceful shutdown. SIGTERM/SIGINT no longer kill us where
         # they land — they latch, and the drain happens HERE, on the event loop,
@@ -567,8 +765,20 @@ struct NetworkEngine:
         # Worst-case latency to notice is 64 ticks, bounded well under the
         # SIGALRM grace period. Each worker flushes its OWN WAL — they are
         # shared-nothing, so there is nothing to coordinate.
+        # #45: log the DELs of keys that expired with no write behind them (a
+        # write logs them itself, ahead of its own record).
+        if is_not_null(self.fast_path.wal):
+            self.fast_path.wal[].log_expired()
+        # #46: and the vector slots the sweep's frees killed
+        if is_not_null(self.slow_path.vec_tomb) and len(self.slow_path.vec_tomb[].pending) > 0:
+            log_dead_slots(self.slow_path.shared_hnsw, self.slow_path.vec_tomb, self.slow_path.dispatcher)
+        # #47: a SLOWLOG threshold set on another worker reaches this one
+        if self.slow_path.slowlog_thr != external_call["pion_slowlog_get_slower_than", Int64]():
+            self.slow_path.update_dispatch_gate()
+
         if not self.shutting_down:
             if external_call["pion_shutdown_requested", Int32]() != 0:
+                external_call["pion_shutdown_begin_drain", NoneType]()   # #47: past ABORT now
                 if is_not_null(self.fast_path.wal):
                     self.fast_path.wal[].sync_durable()
                 self.shutting_down = True
@@ -828,7 +1038,7 @@ struct NetworkEngine:
                         var cur_len = total_len
                         while cur_len > 0:
                             var consumed = 0
-                            if not self.over_maxmemory:   # gh #261 — see the field
+                            if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(vci):   # gh #261, #39, #42
                                 consumed = self.fast_path.process_data_plane(
                                     virtual_fd, self.client_buffers[unsafe_offset=vci], cur_len,
                                     self.writer, self.server, kq,
@@ -883,6 +1093,7 @@ struct NetworkEngine:
                     self.server.set_tcp_nodelay(new_fd)
                     if tcp_active_count < 256:
                         tcp_active_fds[unsafe_offset=tcp_active_count] = new_fd
+                        self.slow_path.clients.on_accept(new_fd)   # #47
                         tcp_active_count += 1
                         # Allocate client buffer for this TCP fd
                         var ci = Int(new_fd)
@@ -906,7 +1117,7 @@ struct NetworkEngine:
                         var cur_len = stored + n_read
                         while cur_len > 0:
                             var consumed = 0
-                            if not self.over_maxmemory:   # gh #261 — see the field
+                            if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(ci):   # gh #261, #39, #42
                                 consumed = self.fast_path.process_data_plane(
                                     tfd, self.client_buffers[unsafe_offset=ci], cur_len,
                                     self.writer, self.server, kq, hnsw, db_size,
@@ -930,13 +1141,15 @@ struct NetworkEngine:
                         if resp_off > 0:
                             _ = self.server.send(tfd, self.writer.buffer, resp_off)
                             self.writer.offset = 0
+                        # #47: a client that killed itself, its reply now sent
+                        if self.slow_path.clients.close_after[unsafe_offset=ci] != 0:
+                            _ = external_call["pion_kill_fd", Int32](tfd)
                     elif n_read == 0:
-                        # Client disconnected — close and remove from active list
-                        self.server.close_client(tfd)
-                        if self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
-                            self.client_buffers[unsafe_offset=ci].unsafe_free()
-                            self.client_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
-                        self.client_buffer_lens[unsafe_offset=ci] = 0
+                        # Client disconnected — close and remove from active list.
+                        # #47: the per-connection cleanup every other loop does
+                        # (subscriptions, MULTI, CLIENT state, buffers): this
+                        # closed the socket and freed the buffer only.
+                        self._close_fd_common(tfd, ci)
                         # Swap with last active fd
                         tcp_active_count -= 1
                         if ti < tcp_active_count:
@@ -951,17 +1164,22 @@ struct NetworkEngine:
 
             # Cross-worker pub/sub broadcast drain (every tick for responsive delivery)
             if self.num_workers > 1:
-                self.slow_path.drain_pubsub_broadcast(self.server)
+                self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # TTL sweep
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
-                self.fast_path.sweep_expired_keys(20)
+                if self.slow_path.clients.pause_until_ms == 0:   # #47: CLIENT PAUSE holds expiry too
+                    self.fast_path.sweep_expired_keys(20)
 
-            # Blocked XREAD timeout drain (every 8 ticks)
-            if self.ttl_sweep_counter & 0x7 == 0:
-                self.slow_path.drain_blocked_readers(self.server)
+            # Parked XREAD BLOCK clients, every tick while any exist (the
+            # check is one load): answered when an XADD reached them or on timeout.
+            if self.slow_path.blocked_readers._count() > 0:
+                self._service_blocked_readers(Int32(-1), hnsw, db_size, -1)
+            # #38: parked BLPOP & co., the same way.
+            if self.slow_path.blocked_clients._count() > 0:
+                self._service_blocked_clients(Int32(-1), hnsw, db_size, -1)
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the
             # LRU cache. Cheap (atomic load, 0-N memcpy per tick); no-op
@@ -984,17 +1202,20 @@ struct NetworkEngine:
     def run_server_uring(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
         from src.network.replication import apply_wal_entries
         var use_sqpoll = self.config.server.use_sqpoll
-        if not self.ring[].setup(UInt32(1024), sqpoll=use_sqpoll):
-            if use_sqpoll:
-                print("io_uring SQPOLL setup failed (requires root or CAP_SYS_NICE), trying without SQPOLL...")
-                if not self.ring[].setup(UInt32(1024), sqpoll=False):
-                    print("io_uring setup failed, falling back to kqueue")
-                    self.run_server_kqueue(hnsw, db_size)
-                    return
-            else:
-                print("io_uring setup failed (errno check: run with --security-opt seccomp=unconfined), falling back to kqueue")
-                self.run_server_kqueue(hnsw, db_size)
-                return
+        var ring_ok = self.ring[].setup(UInt32(1024), sqpoll=use_sqpoll)
+        if not ring_ok and use_sqpoll:
+            print("io_uring SQPOLL setup failed (it needs root or CAP_SYS_NICE); trying without SQPOLL")
+            ring_ok = self.ring[].setup(UInt32(1024), sqpoll=False)
+        if not ring_ok:
+            # #21: this fell back to run_server_kqueue, which returns at once on
+            # Linux, so the worker thread ended while the listening socket stayed
+            # open: a port that accepted connections and never answered them.
+            # io_uring is missing under Docker's default seccomp profile, on old
+            # kernels and in sandboxes; epoll is always there.
+            print("io_uring unavailable (blocked by seccomp, or an old kernel): worker "
+                  + String(self.worker_id) + " uses epoll")
+            self.run_server_epoll(hnsw, db_size)
+            return
 
         if self.server.fd < 0 and not self.server.listen():
             return
@@ -1011,7 +1232,7 @@ struct NetworkEngine:
         self.ring[].submit_provide_buffers(
             self.multishot_bufs, PBUF_SIZE, PBUF_RING_ENTRIES,
             buf_group_id, UInt16(0))
-        self.ring[].enter(Int32(1), Int32(1))
+        self.ring[].enter(Int32(1))
         var pbuf_peek = self.ring[].peek_cqe()
         if pbuf_peek.found and pbuf_peek.cqe.res >= 0:
             self.multishot_active = True
@@ -1027,51 +1248,40 @@ struct NetworkEngine:
 
         # Submit initial ACCEPT(s).
         self.ring[].submit_accept(self.server.fd)
-        var sqes_to_submit = Int32(1)
         if self.secondary_listen_fd >= 0:
             self.ring[].submit_accept(self.secondary_listen_fd)
-            sqes_to_submit += 1
         if self.binary_listen_fd >= 0:
             self.ring[].submit_accept(self.binary_listen_fd)
-            sqes_to_submit += 1
 
         var my_tid = external_call["pthread_self", UInt64]()
         print("--- Pion IO_URING Engine Active --- worker=" + String(self.worker_id) + " tid=" + String(my_tid))
 
-        # gh #173: at most one OP_TIMEOUT in flight; armed only while a blocked
-        # XREAD exists so the idle path keeps its zero-wakeup profile.
+        # #17: one 1 ms OP_TIMEOUT is ALWAYS in flight, so enter() returns at
+        # least every millisecond and the loop ticks with no client traffic, as
+        # the kqueue (1 ms) and epoll (1 ms) loops do. It used to be armed only
+        # while a blocked XREAD or a parked WAIT existed (gh #173), so an idle
+        # worker slept in enter() for good: the shutdown drain, the replica's
+        # apply-and-ACK, the TTL and field-expiry sweeps, a primary's FULLRESYNC
+        # service and the status heartbeat all stopped until a client sent bytes.
         var uring_timeout_armed = False
 
         while True:
-            # Adaptive min_complete: 0 (non-blocking) when P2 bus needs polling, else 1 (wait).
-            var _sh2 = self.slow_path.shared_hnsw
             # shard_active: always non-blocking when num_shards>1.
             # Non-coordinator workers have index_ready=False before shard build; if we wait for
             # trigger_pending they are ALREADY blocked in enter() when the trigger fires → poll=0.
             # Solution: any worker in a sharded config must never sleep in enter().
+            var _sh2 = self.slow_path.shared_hnsw
             var shard_active = (is_not_null(_sh2) and _sh2[].num_shards > 1)
             var min_complete = Int32(1)
             if self.num_workers > 1 and shard_active:
                 min_complete = Int32(0)
 
-            # gh #173: a blocked XREAD needs time-driven expiry, but with
-            # min_complete=1 and a silent client, enter() would sleep forever
-            # and drain_blocked_readers below would never run. Arm ONE 8 ms
-            # timeout SQE while any reader is blocked.
-            if (not uring_timeout_armed) and (self.slow_path.blocked_readers._count() > 0
-                                              or self.slow_path.parked_waits.count() > 0):
-                self.ring[].submit_timeout(8)
-                sqes_to_submit += 1
+            if not uring_timeout_armed:
+                self.ring[].submit_timeout(1)
                 uring_timeout_armed = True
 
-            # Submit all pending SQEs; wait for min_complete CQEs.
-            if sqes_to_submit > 0 or min_complete > 0:
-                self.ring[].enter(sqes_to_submit, min_complete)
-                sqes_to_submit = 0
-
-            # Track sq_tail before draining CQEs so we can count SQEs submitted inside
-            # CQE handlers (accept resubmit, submit_recv, submit_send via _flush_uring).
-            var sq_before = self.ring[].sq_tail[]
+            # Submit every SQE written since the last enter; wait for one CQE.
+            self.ring[].enter(min_complete)
 
             # Drain all available CQEs without blocking.
             while True:
@@ -1079,30 +1289,128 @@ struct NetworkEngine:
                 if not peek.found: break
                 var cqe = peek.cqe
                 self.ring[].advance_cq()
+                var kind = IOUring.ud_kind(cqe.user_data)
 
-                if self.ring[].is_timeout_completion(cqe.user_data):
-                    # gh #173: tick timeout fired (res=-ETIME expected) — its only
-                    # job was to wake the loop so the blocked-reader drain runs.
-                    uring_timeout_armed = False
-                    continue
+                if kind == UD_RECV:
+                    var fd = IOUring.fd_from_user_data(cqe.user_data)
+                    var ci = Int(fd)
+                    var n = Int(cqe.res)
+                    var has_buf = IOUring.cqe_has_buffer(cqe.flags)
+                    if self.ring[].is_stale(cqe.user_data):
+                        # The connection this RECV belonged to is gone.
+                        if has_buf:
+                            self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+                        continue
+                    # Multishot: while F_MORE is set the request stays armed.
+                    var is_multishot = self.uring_recv_armed[unsafe_offset=ci] == 2
+                    if not (is_multishot and IOUring.cqe_has_more(cqe.flags)):
+                        self.uring_recv_armed[unsafe_offset=ci] = 0
+                    if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+                        if has_buf:
+                            self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+                        self._uring_finish_close(fd, ci)
+                        continue
 
-                if self.ring[].is_accept_completion(cqe.user_data):
-                    # ---- ACCEPT completion ----
-                    var listen_fd = Int32(self.ring[].fd_from_user_data(cqe.user_data))
+                    if n <= 0:
+                        if is_multishot and n == -105 and self.uring_recv_armed[unsafe_offset=ci] == 0:
+                            # -ENOBUFS: the provided-buffer pool ran dry. The
+                            # connection is fine; re-arm (the buffers recycled
+                            # in this pass go to the kernel ahead of it).
+                            self.ring[].submit_recv_multishot(fd, buf_group_id)
+                            self.uring_recv_armed[unsafe_offset=ci] = 2
+                        else:
+                            # EOF, or a socket error. Re-arming on any error
+                            # (as before) spun forever on a reset connection.
+                            self._uring_close_fd(fd, ci)
+                        continue
+
+                    var stored = self.client_buffer_lens[unsafe_offset=ci]
+                    if is_multishot:
+                        if not has_buf:
+                            self._uring_close_fd(fd, ci)
+                            continue
+                        var bid = Int(IOUring.cqe_buffer_id(cqe.flags))
+                        var src_buf = self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE)
+                        if stored + n > CLIENT_BUF_SIZE:
+                            # An unfinished request larger than the client
+                            # buffer: close the connection, as the other loops
+                            # do when the buffer is full. Nothing is dispatched.
+                            self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+                            self._uring_close_fd(fd, ci)
+                            continue
+                        unsafe_memcpy(dest=self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), src=src_buf, count=n)
+                        # Recycle: re-provide this single buffer to the kernel
+                        self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+
+                    # The buffer holds stored + n bytes (multishot copied them
+                    # above; a plain RECV wrote at client_buffers[ci] + stored).
+                    # gh #85: dispatch + drain is the shared body.
+                    self._dispatch_recv_buffer(
+                        fd, ci, stored, n, kq, hnsw, db_size,
+                    )
+                    # Arm next RECV immediately — overlap with in-flight SEND.
+                    # For multishot: re-arm only if exhausted (uring_recv_armed==0).
+                    # For regular: always re-arm (saves one io_uring_enter round-trip).
+                    # gh #390: a parked fd is re-armed by _service_parked_waits.
+                    if self.uring_recv_armed[unsafe_offset=ci] == 0 and not self.slow_path.parked_waits.is_parked(ci):
+                        self._uring_arm_recv(fd, ci, buf_group_id)
+
+                elif kind == UD_SEND:
+                    var fd = IOUring.fd_from_user_data(cqe.user_data)
+                    var ci = Int(fd)
+                    if self.ring[].is_stale(cqe.user_data):
+                        continue
+                    var sent = Int(cqe.res)
+                    self.writer.uring_inflight[unsafe_offset=ci] = 0   # this SEND is over
+                    if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+                        self._uring_finish_close(fd, ci)
+                        continue
+                    if sent <= 0:
+                        self._uring_close_fd(fd, ci)
+                        continue
+                    # Bytes still owed: what this SEND did not take, plus what
+                    # was appended while it was in flight.
+                    var remaining = self.writer.pending_offsets[unsafe_offset=ci] - sent
+                    if remaining > 0:
+                        _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
+                            self.writer.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
+                            (self.writer.pending_buffers[unsafe_offset=ci].unsafe_offset(sent)).unsafe_bitcast[NoneType](),
+                            remaining,
+                        )
+                        self.writer.pending_offsets[unsafe_offset=ci] = remaining
+                        self.writer.uring_inflight[unsafe_offset=ci] = remaining
+                        self.ring[].submit_send(fd, self.writer.pending_buffers[unsafe_offset=ci], remaining)
+                    else:
+                        self.writer.pending_offsets[unsafe_offset=ci] = 0
+                        # #47: a client that killed itself, its reply now out
+                        if self.slow_path.clients.close_after[unsafe_offset=ci] != 0:
+                            self._uring_close_fd(fd, ci)
+                            continue
+                        # All sent — arm the next RECV if none is armed.
+                        # gh #390: not while a WAIT is parked — _service_parked_waits
+                        # moves this buffer's bytes and re-arms itself.
+                        if self.uring_recv_armed[unsafe_offset=ci] == 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]() \
+                           and not self.slow_path.parked_waits.is_parked(ci):
+                            self._uring_arm_recv(fd, ci, buf_group_id)
+
+                elif kind == UD_ACCEPT:
+                    var listen_fd = IOUring.fd_from_user_data(cqe.user_data)
                     var new_fd = cqe.res
                     # Resubmit ACCEPT immediately so the next connection isn't missed.
                     self.ring[].submit_accept(listen_fd)
                     if new_fd >= 0:
+                        var ci = Int(new_fd)
+                        if ci >= URING_MAX_FDS:
+                            # Every per-fd table holds URING_MAX_FDS entries.
+                            _ = external_call["close", Int32](new_fd)
+                            continue
                         self.server.set_nonblocking(new_fd)
                         self.server.set_tcp_nodelay(new_fd)
-                        var ci = Int(new_fd)
                         self.client_buffer_lens[unsafe_offset=ci] = 0
                         self.uring_recv_armed[unsafe_offset=ci] = 0
-                        var _is_secondary = (self.secondary_listen_fd >= 0 and listen_fd == self.secondary_listen_fd)
+                        self.ring[].fd_closing[unsafe_offset=ci] = 0
                         var is_binary = (self.binary_listen_fd >= 0 and listen_fd == self.binary_listen_fd)
                         # All connections are local-affinity (shared-nothing model).
-                        # Cross-worker P2 routing is disabled — each worker handles its own
-                        # connections independently, like Dragonfly's per-thread sharding.
                         var affinity_val = UInt8(1)
                         if is_binary:
                             affinity_val = UInt8(2)
@@ -1116,129 +1424,15 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=ci] = 0
                         self.writer.uring_inflight[unsafe_offset=ci] = 0
-                        # Arm first RECV for new connection.
-                        if self.multishot_active:
-                            self.ring[].submit_recv_multishot(new_fd, buf_group_id)
-                            self.uring_recv_armed[unsafe_offset=ci] = 2  # 2 = multishot (persistent)
-                        else:
-                            self.ring[].submit_recv(new_fd, self.client_buffers[unsafe_offset=ci], CLIENT_BUF_SIZE)
-                            self.uring_recv_armed[unsafe_offset=ci] = 1
+                        self.slow_path.clients.on_accept(new_fd)   # #47
+                        self._uring_arm_recv(new_fd, ci, buf_group_id)
 
-                elif self.ring[].is_send_completion(cqe.user_data):
-                    # ---- SEND completion ----
-                    var fd = self.ring[].fd_from_user_data(cqe.user_data)
-                    var ci = Int(fd)
-                    var sent = Int(cqe.res)
-                    if sent <= 0:
-                        self._uring_close_fd(fd, ci)
-                    else:
-                        var inflight = self.writer.uring_inflight[unsafe_offset=ci]
-                        var total_pending = self.writer.pending_offsets[unsafe_offset=ci]
-                        if sent >= inflight:
-                            var accumulated = total_pending - inflight
-                            if accumulated > 0:
-                                # More data was appended during the in-flight send.
-                                _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
-                                    self.writer.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
-                                    (self.writer.pending_buffers[unsafe_offset=ci].unsafe_offset(inflight)).unsafe_bitcast[NoneType](),
-                                    accumulated,
-                                )
-                                self.writer.pending_offsets[unsafe_offset=ci] = accumulated
-                                self.writer.uring_inflight[unsafe_offset=ci] = accumulated
-                                self.ring[].submit_send(fd, self.writer.pending_buffers[unsafe_offset=ci], accumulated)
-                            else:
-                                # All done — arm next RECV if not already armed.
-                                self.writer.pending_offsets[unsafe_offset=ci] = 0
-                                self.writer.uring_inflight[unsafe_offset=ci] = 0
-                                # gh #390: not while a WAIT is parked — _service_parked_waits
-                                # moves this buffer's bytes and re-arms itself.
-                                if self.uring_recv_armed[unsafe_offset=ci] == 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]() \
-                                   and not self.slow_path.parked_waits.is_parked(ci):
-                                    var stored = self.client_buffer_lens[unsafe_offset=ci]
-                                    if self.multishot_active:
-                                        self.ring[].submit_recv_multishot(fd, buf_group_id)
-                                        self.uring_recv_armed[unsafe_offset=ci] = 2
-                                    else:
-                                        self.ring[].submit_recv(fd, self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), CLIENT_BUF_SIZE - stored)
-                                        self.uring_recv_armed[unsafe_offset=ci] = 1
-                        else:
-                            # Partial send — memmove remainder to front and resubmit.
-                            var remaining_total = total_pending - sent
-                            _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
-                                self.writer.pending_buffers[unsafe_offset=ci].unsafe_bitcast[NoneType](),
-                                (self.writer.pending_buffers[unsafe_offset=ci].unsafe_offset(sent)).unsafe_bitcast[NoneType](),
-                                remaining_total,
-                            )
-                            self.writer.pending_offsets[unsafe_offset=ci] = remaining_total
-                            self.writer.uring_inflight[unsafe_offset=ci] = remaining_total
-                            self.ring[].submit_send(fd, self.writer.pending_buffers[unsafe_offset=ci], remaining_total)
-
-                elif self.ring[].is_provide_buffers_completion(cqe.user_data):
-                    # ---- PROVIDE_BUFFERS completion (multishot buffer replenish) ----
-                    pass  # Nothing to do — buffers are now available to kernel
-
-                else:
-                    # ---- RECV completion ----
-                    var fd = self.ring[].fd_from_user_data(cqe.user_data)
-                    var ci = Int(fd)
-                    var n = Int(cqe.res)
-
-                    # Multishot: check F_MORE flag. If set, more CQEs will follow
-                    # without re-arming. If not set, multishot is exhausted — re-arm.
-                    var is_multishot = self.uring_recv_armed[unsafe_offset=ci] == 2
-                    if is_multishot:
-                        if IOUring.cqe_has_more(cqe.flags):
-                            pass  # multishot still active, don't touch uring_recv_armed
-                        else:
-                            self.uring_recv_armed[unsafe_offset=ci] = 0  # multishot exhausted
-                    else:
-                        self.uring_recv_armed[unsafe_offset=ci] = 0  # regular recv consumed
-
-                    # Multishot: copy data from provided buffer to per-fd client buffer
-                    if is_multishot and n > 0 and IOUring.cqe_has_buffer(cqe.flags):
-                        var bid = Int(IOUring.cqe_buffer_id(cqe.flags))
-                        var src_buf = self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE)
-                        var stored = self.client_buffer_lens[unsafe_offset=ci]
-                        if stored + n <= CLIENT_BUF_SIZE:
-                            unsafe_memcpy(dest=self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), src=src_buf, count=n)
-                        # Recycle: re-provide this single buffer to the kernel
-                        self.ring[].submit_provide_buffers(
-                            src_buf, PBUF_SIZE, 1, buf_group_id, UInt16(bid))
-
-                    if n <= 0:
-                        if is_multishot and n < 0:
-                            # Multishot error (e.g. -ENOBUFS when buffer pool exhausted).
-                            # Don't close — just re-arm. uring_recv_armed was already set to 0
-                            # above (F_MORE not set on error CQEs).
-                            if self.uring_recv_armed[unsafe_offset=ci] == 0:
-                                self.ring[].submit_recv_multishot(fd, buf_group_id)
-                                self.uring_recv_armed[unsafe_offset=ci] = 2
-                        else:
-                            self._uring_close_fd(fd, ci)
-                    else:
-                        # For both multishot (data copied above) and regular (kernel wrote
-                        # directly to client_buffers[ci] + stored), the buffer holds
-                        # stored + n bytes. gh #85: dispatch + drain is the shared body.
-                        var stored = self.client_buffer_lens[unsafe_offset=ci]
-                        self._dispatch_recv_buffer(
-                            fd, ci, stored, n, kq, hnsw, db_size,
-                        )
-                        # Arm next RECV immediately — overlap with in-flight SEND.
-                        # For multishot: re-arm only if exhausted (uring_recv_armed==0).
-                        # For regular: always re-arm (saves one io_uring_enter round-trip).
-                        # This is the genuinely poller-specific half; it stays here.
-                        # gh #390: a parked fd is re-armed by _service_parked_waits.
-                        if self.uring_recv_armed[unsafe_offset=ci] == 0 and not self.slow_path.parked_waits.is_parked(ci):
-                            var cur_len = self.client_buffer_lens[unsafe_offset=ci]
-                            if self.multishot_active:
-                                self.ring[].submit_recv_multishot(fd, buf_group_id)
-                                self.uring_recv_armed[unsafe_offset=ci] = 2
-                            else:
-                                self.ring[].submit_recv(fd, self.client_buffers[unsafe_offset=ci].unsafe_offset(cur_len), CLIENT_BUF_SIZE - cur_len)
-                                self.uring_recv_armed[unsafe_offset=ci] = 1
-
-            # Count all SQEs submitted during CQE processing (accept resubmit + recv + send via _flush_uring).
-            sqes_to_submit += Int32(self.ring[].sq_tail[] - sq_before)
+                elif kind == UD_TIMEOUT:
+                    # The tick timeout fired (res=-ETIME); its only job was to
+                    # wake the loop.
+                    uring_timeout_armed = False
+                # UD_PBUF (buffers are back with the kernel) and UD_CANCEL need
+                # nothing: a cancelled request reports through its own CQE.
 
             # gh #85b: KV_BUS routing was removed here — bus-drain and bus-serve
             # were gated by `comptime if KV_BUS_ENABLED` (False since gh #48).
@@ -1246,17 +1440,22 @@ struct NetworkEngine:
 
             # Cross-worker pub/sub broadcast drain
             if self.num_workers > 1:
-                self.slow_path.drain_pubsub_broadcast(self.server)
+                self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # Active TTL sweep + housekeeping counter.
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
-                self.fast_path.sweep_expired_keys(20)
+                if self.slow_path.clients.pause_until_ms == 0:   # #47: CLIENT PAUSE holds expiry too
+                    self.fast_path.sweep_expired_keys(20)
 
-            # Blocked XREAD timeout drain (every 8 ticks — ~8ms granularity, fine for second-scale timeouts)
-            if self.ttl_sweep_counter & 0x7 == 0:
-                self.slow_path.drain_blocked_readers(self.server)
+            # Parked XREAD BLOCK clients, every tick while any exist (the
+            # check is one load): answered when an XADD reached them or on timeout.
+            if self.slow_path.blocked_readers._count() > 0:
+                self._service_blocked_readers(Int32(-1), hnsw, db_size, Int(buf_group_id))
+            # #38: parked BLPOP & co., the same way.
+            if self.slow_path.blocked_clients._count() > 0:
+                self._service_blocked_clients(Int32(-1), hnsw, db_size, Int(buf_group_id))
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the LRU
             # cache. Cheap (atomic load, no-op when --moe-cache isn't on). gh #85:
@@ -1266,15 +1465,15 @@ struct NetworkEngine:
             # Deferred shard responses: drain every tick when queries are pending
             # (was gated to every 64 ticks — added 2×64-tick round-trip latency).
             if self.slow_path.deferred_count > 0:
-                var _sq_b3d = self.ring[].sq_tail[]
                 self.slow_path.drain_deferred_shard_responses(hnsw, self.writer, self.server, Int32(-1))
-                sqes_to_submit += Int32(self.ring[].sq_tail[] - _sq_b3d)
 
             # gh #390: answer parked WAITs (every tick while any is parked).
             if self.slow_path.parked_waits.count() > 0:
-                var _sq_pw = self.ring[].sq_tail[]
                 self._service_parked_waits(Int32(-1), hnsw, db_size, Int(buf_group_id))
-                sqes_to_submit += Int32(self.ring[].sq_tail[] - _sq_pw)
+            # #47: connections CLIENT PAUSE held, once it is over or changed
+            if self.slow_path.clients.pause_until_ms != 0 or self.slow_path.clients.pause_changed \
+               or len(self.slow_path.clients.released) > 0:
+                self._service_pause(Int32(-1), hnsw, db_size, Int(buf_group_id))
 
             # Periodic housekeeping: every 64 ticks (gh #85 — unified helper).
             if self.ttl_sweep_counter & 0x3F == 0:
@@ -1282,7 +1481,101 @@ struct NetworkEngine:
                 # gh #259: WAL is durably flushed; end the worker thread so
                 # main() can fall out of pthread_join and exit cleanly.
                 if self.shutting_down:
+                    self._uring_stop_accepting()
                     return
+
+    @always_inline
+    def _uring_arm_recv(mut self, fd: Int32, ci: Int, buf_group_id: UInt16):
+        """Arm the next RECV for a connection that has none armed. A plain RECV
+        reads straight into the client buffer after the bytes it already holds;
+        when an unfinished request has filled that buffer, the connection is
+        closed (a zero-length RECV used to stand in for that, by reading as EOF)."""
+        if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+            return
+        if self.multishot_active:
+            self.ring[].submit_recv_multishot(fd, buf_group_id)
+            self.uring_recv_armed[unsafe_offset=ci] = 2  # 2 = multishot (persistent)
+        else:
+            var stored = self.client_buffer_lens[unsafe_offset=ci]
+            if stored >= CLIENT_BUF_SIZE:
+                self._uring_close_fd(fd, ci)
+                return
+            self.ring[].submit_recv(fd, self.client_buffers[unsafe_offset=ci].unsafe_offset(stored), CLIENT_BUF_SIZE - stored)
+            self.uring_recv_armed[unsafe_offset=ci] = 1
+
+    @always_inline
+    def _uring_recycle_pbuf(mut self, cqe_flags: UInt32, buf_group_id: UInt16):
+        """Hand a provided buffer a RECV completion carried back to the kernel."""
+        var bid = Int(IOUring.cqe_buffer_id(cqe_flags))
+        self.ring[].submit_provide_buffers(
+            self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE), PBUF_SIZE, 1, buf_group_id, UInt16(bid))
+
+    def _uring_stop_accepting(mut self):
+        """#22: on a graceful stop, cancel this worker's ACCEPTs and wait for
+        them to complete before the worker returns. An ACCEPT in flight holds a
+        reference to the listening socket, and the kernel tears a ring down
+        asynchronously after the process exits, so the port used to keep
+        listening (and accepting into its backlog) for a moment after the
+        server was gone. With no request left on it, the socket closes with the
+        process. Bounded at ~200 ms: shutdown must not hang on it."""
+        var want = 1
+        self.ring[].submit_cancel((UD_ACCEPT << 32) | UInt64(UInt32(self.server.fd)))
+        if self.secondary_listen_fd >= 0:
+            self.ring[].submit_cancel((UD_ACCEPT << 32) | UInt64(UInt32(self.secondary_listen_fd)))
+            want += 1
+        if self.binary_listen_fd >= 0:
+            self.ring[].submit_cancel((UD_ACCEPT << 32) | UInt64(UInt32(self.binary_listen_fd)))
+            want += 1
+        var done = 0
+        var timeout_armed = False
+        for _ in range(200):
+            if done >= want:
+                break
+            if not timeout_armed:
+                self.ring[].submit_timeout(1)
+                timeout_armed = True
+            self.ring[].enter(Int32(1))
+            while True:
+                var peek = self.ring[].peek_cqe()
+                if not peek.found: break
+                var cqe = peek.cqe
+                self.ring[].advance_cq()
+                var kind = IOUring.ud_kind(cqe.user_data)
+                if kind == UD_ACCEPT:
+                    if cqe.res >= 0:
+                        # A connection that arrived first: it is not going to be served.
+                        _ = external_call["close", Int32](cqe.res)
+                    else:
+                        done += 1
+                elif kind == UD_TIMEOUT:
+                    timeout_armed = False
+
+    @always_inline
+    def _uring_close_fd(mut self, fd: Int32, ci: Int):
+        """Close a connection on the io_uring path, in two phases. This, the
+        first, stops it: shutdown() shows the peer the close at once and ends
+        its in-flight RECV and SEND, which are also cancelled. The second,
+        `_uring_finish_close`, runs once no RECV or SEND is in flight for the
+        fd: only then are its buffers freed and its number released, because
+        until then the kernel still owns them. The generation stamped on every
+        completion backs this up (see UD_* in io_uring.mojo)."""
+        if self.ring[].fd_closing[unsafe_offset=ci] == 0:
+            self.ring[].fd_closing[unsafe_offset=ci] = 1
+            _ = external_call["shutdown", Int32](fd, Int32(2))   # SHUT_RDWR
+            if self.uring_recv_armed[unsafe_offset=ci] != 0:
+                self.ring[].submit_cancel(self.ring[].make_ud(UD_RECV, fd))
+            if self.writer.uring_inflight[unsafe_offset=ci] != 0:
+                self.ring[].submit_cancel(self.ring[].make_ud(UD_SEND, fd))
+        self._uring_finish_close(fd, ci)
+
+    @always_inline
+    def _uring_finish_close(mut self, fd: Int32, ci: Int):
+        """Second phase of `_uring_close_fd`: nothing is in flight any more."""
+        if self.uring_recv_armed[unsafe_offset=ci] != 0 or self.writer.uring_inflight[unsafe_offset=ci] != 0:
+            return
+        self.ring[].retire_fd(fd)
+        self.ring[].fd_closing[unsafe_offset=ci] = 0
+        self._close_fd_common(fd, ci)
 
     def run_server_epoll(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
         """epoll event loop — lowest overhead Linux path for P=1 workloads.
@@ -1348,10 +1641,15 @@ struct NetworkEngine:
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
-                self.fast_path.sweep_expired_keys(20)
+                if self.slow_path.clients.pause_until_ms == 0:   # #47: CLIENT PAUSE holds expiry too
+                    self.fast_path.sweep_expired_keys(20)
 
-            if self.ttl_sweep_counter & 0x7 == 0:
-                self.slow_path.drain_blocked_readers(self.server)
+            # Parked XREAD BLOCK clients, every tick while any exist.
+            if self.slow_path.blocked_readers._count() > 0:
+                self._service_blocked_readers(kq, hnsw, db_size)
+            # #38: parked BLPOP & co., the same way.
+            if self.slow_path.blocked_clients._count() > 0:
+                self._service_blocked_clients(kq, hnsw, db_size)
 
             # MOE.EXPERT.* Stage 4b warming-completion drain (no-op without
             # --moe-cache). gh #85: aligned across all four loops.
@@ -1372,6 +1670,7 @@ struct NetworkEngine:
                 # EPOLLOUT: flush pending writes
                 if events[unsafe_offset=i].events & EPOLLOUT:
                     self.writer.flush_response(fd, self.server, kq)
+                    self._close_after_reply(fd)    # #47
                     # If both EPOLLIN and EPOLLOUT are set, also process EPOLLIN below
                     if not (events[unsafe_offset=i].events & EPOLLIN):
                         continue
@@ -1384,6 +1683,12 @@ struct NetworkEngine:
                     while True:
                         var new_fd = self.server.accept_from(fd)
                         if new_fd < 0: break
+                        if Int(new_fd) >= URING_MAX_FDS:
+                            # Every per-fd table holds 65536 entries; a client
+                            # that opened that many connections would index
+                            # past them.
+                            _ = external_call["close", Int32](new_fd)
+                            continue
                         self.server.set_nonblocking(new_fd)
                         self.server.set_tcp_nodelay(new_fd)
                         self.client_buffer_lens[unsafe_offset=Int(new_fd)] = 0
@@ -1398,6 +1703,7 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)].unsafe_free()
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=Int(new_fd)] = 0
+                        self.slow_path.clients.on_accept(new_fd)   # #47
                         # Register for EPOLLIN (level-triggered)
                         ev[unsafe_offset=0].events = EPOLLIN
                         ev[unsafe_offset=0].data = UInt64(new_fd)
@@ -1424,8 +1730,13 @@ struct NetworkEngine:
                     var stored_len = self.client_buffer_lens[unsafe_offset=client_idx]
                     var recv_size = CLIENT_BUF_SIZE - stored_len
                     if recv_size <= 0:
-                        # Buffer full — cannot recv. Process existing data first.
-                        # Do NOT call recv(size=0) which returns 0 and triggers false EOF close.
+                        # The buffer is full of one unfinished request (every
+                        # complete one was dispatched when it arrived), so it
+                        # can never complete. `continue` here spun the worker
+                        # forever: level-triggered epoll reports the fd again
+                        # at once. Close it, as kqueue and io_uring do.
+                        _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_DEL, fd, ev)
+                        self._close_fd_common(fd, client_idx)
                         continue
                     var n = self.server.recv(fd, client_buffer.unsafe_offset(stored_len), recv_size)
                     if n <= 0:
@@ -1451,7 +1762,7 @@ struct NetworkEngine:
             # Multi-worker housekeeping
             # gh #85b: KV_BUS routing was removed here (shared-nothing, gh #48).
             if self.num_workers > 1:
-                self.slow_path.drain_pubsub_broadcast(self.server)
+                self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # Deferred shard responses: drain every tick when queries are pending
             if self.slow_path.deferred_count > 0:
@@ -1460,6 +1771,10 @@ struct NetworkEngine:
             # gh #390: answer parked WAITs (every tick while any is parked).
             if self.slow_path.parked_waits.count() > 0:
                 self._service_parked_waits(kq, hnsw, db_size)
+            # #47: connections CLIENT PAUSE held, once it is over or changed
+            if self.slow_path.clients.pause_until_ms != 0 or self.slow_path.clients.pause_changed \
+               or len(self.slow_path.clients.released) > 0:
+                self._service_pause(kq, hnsw, db_size)
 
             # 64-tick gated housekeeping (gh #85 — unified helper).
             if self.ttl_sweep_counter & 0x3F == 0:
@@ -1554,11 +1869,16 @@ struct NetworkEngine:
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
-                self.fast_path.sweep_expired_keys(20)
+                if self.slow_path.clients.pause_until_ms == 0:   # #47: CLIENT PAUSE holds expiry too
+                    self.fast_path.sweep_expired_keys(20)
 
-            # Blocked XREAD timeout drain (every 8 ticks — ~8ms granularity, fine for second-scale timeouts)
-            if self.ttl_sweep_counter & 0x7 == 0:
-                self.slow_path.drain_blocked_readers(self.server)
+            # Parked XREAD BLOCK clients, every tick while any exist (the
+            # check is one load): answered when an XADD reached them or on timeout.
+            if self.slow_path.blocked_readers._count() > 0:
+                self._service_blocked_readers(kq, hnsw, db_size)
+            # #38: parked BLPOP & co., the same way.
+            if self.slow_path.blocked_clients._count() > 0:
+                self._service_blocked_clients(kq, hnsw, db_size)
 
             # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the
             # LRU cache. Cheap (atomic load, 0-N memcpy per tick); no-op
@@ -1571,6 +1891,7 @@ struct NetworkEngine:
                 var fd = Int32(events[unsafe_offset=i].ident)
                 if events[unsafe_offset=i].filter == -2:
                     self.writer.flush_response(fd, self.server, kq)
+                    self._close_after_reply(fd)    # #47
                     continue
                 var is_listen_fd = (fd == self.server.fd or (self.secondary_listen_fd >= 0 and fd == self.secondary_listen_fd) or (self.binary_listen_fd >= 0 and fd == self.binary_listen_fd))
                 if is_listen_fd:
@@ -1579,7 +1900,9 @@ struct NetworkEngine:
                     var _is_secondary = (self.secondary_listen_fd >= 0 and fd == self.secondary_listen_fd)
                     var is_binary = (self.binary_listen_fd >= 0 and fd == self.binary_listen_fd)
                     var new_fd = self.server.accept_from(fd)
-                    if new_fd >= 0:
+                    if new_fd >= 0 and Int(new_fd) >= URING_MAX_FDS:
+                        _ = external_call["close", Int32](new_fd)   # past the per-fd tables
+                    elif new_fd >= 0:
                         self.server.set_nonblocking(new_fd)
                         self.server.set_tcp_nodelay(new_fd)
                         # Clear stale buffer from previous connection on this FD (handles RST cleanup)
@@ -1598,6 +1921,7 @@ struct NetworkEngine:
                             self.writer.pending_buffers[unsafe_offset=Int(new_fd)] = null_ptr[UInt8, MutUntrackedOrigin]()
                         self.writer.pending_offsets[unsafe_offset=Int(new_fd)] = 0
                         # Register level-triggered READ for client
+                        self.slow_path.clients.on_accept(new_fd)   # #47
                         self.server.kevent_add_read(kq, new_fd, edge_triggered=False)
                 else:
                     var client_idx = Int(fd)
@@ -1638,7 +1962,7 @@ struct NetworkEngine:
 
             # Cross-worker pub/sub broadcast drain
             if self.num_workers > 1:
-                self.slow_path.drain_pubsub_broadcast(self.server)
+                self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # Deferred shard responses: drain every tick when queries are pending
             if self.slow_path.deferred_count > 0:
@@ -1647,6 +1971,10 @@ struct NetworkEngine:
             # gh #390: answer parked WAITs (every tick while any is parked).
             if self.slow_path.parked_waits.count() > 0:
                 self._service_parked_waits(kq, hnsw, db_size)
+            # #47: connections CLIENT PAUSE held, once it is over or changed
+            if self.slow_path.clients.pause_until_ms != 0 or self.slow_path.clients.pause_changed \
+               or len(self.slow_path.clients.released) > 0:
+                self._service_pause(kq, hnsw, db_size)
 
             # Periodic housekeeping: every 64 ticks (gh #85 — unified helper).
             # At P=1 (~1ms/tick) this is ~64ms granularity — fine for WAL sync,

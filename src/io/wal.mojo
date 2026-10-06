@@ -131,7 +131,8 @@ from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
 from src.common.bitmap import getbit, setbit
 from src.common.hll import HLL_REGISTERS, hll_add
-from src.common.stream_data import StreamData
+from src.common.stream_data import (StreamData, apply_stream_group_record, encode_meta_rec, encode_group_rec,
+                                    encode_consumer_rec, encode_nack_rec)
 from src.io.blob_store import BlobStore
 from src.common.vector_set import VectorSet, free_vset
 
@@ -251,7 +252,9 @@ def _replay_list(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
 
 def _replay_zset(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                  key: GenericValue, create: Bool, geo: Bool) -> Pointer[SlabSkipList, MutUntrackedOrigin]:
-    var vtype = ValueType.GEO if geo else ValueType.ZSET
+    # A geo key is a sorted set (as in Redis); cmd-15 records from before
+    # that, and old snapshots' geo values, load as one.
+    var vtype = ValueType.ZSET
     var val = keyspace[].get(key)
     if val.is_none():
         if not create:
@@ -322,11 +325,20 @@ def _owned_list_elems(lp: Pointer[SlabList, MutUntrackedOrigin]) -> List[Generic
 
 
 @always_inline
+@always_inline
+def _rec_len(p: Pointer[UInt8, MutUntrackedOrigin], width: Int) -> UInt32:
+    """A little-endian u16 (width 2) or u32 (width 4) length."""
+    if width == 4:
+        return (p.unsafe_bitcast[UInt32]())[]
+    return UInt32((p.unsafe_bitcast[UInt16]())[])
+
+
 def wal_is_aggregate(cmd_id: UInt8) -> Bool:
     """Record ids `wal_apply_aggregate` owns — one predicate for the WAL
     replayer and the snapshot loader, so a new record kind cannot reach one
     and be skipped by the other."""
-    return (cmd_id >= 5 and cmd_id <= 24) or (cmd_id >= 27 and cmd_id <= 33)
+    return (cmd_id >= 5 and cmd_id <= 24) or (cmd_id >= 27 and cmd_id <= 34) \
+        or (cmd_id >= 38 and cmd_id <= 45)      # #40: stream metadata and consumer groups
 
 
 def _replay_vset_field(vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int,
@@ -682,7 +694,10 @@ def wal_apply_aggregate(cmd_id: UInt8,
         return True
 
     # ── gh #174 ──────────────────────────────────────────────────────────
-    elif cmd_id == 23:   # XADD [8B id_ms][8B id_seq][packed pairs]
+    elif cmd_id == 23 or cmd_id == 34:
+        # XADD [8B id_ms][8B id_seq][packed pairs]. The pairs' lengths are u16
+        # in cmd 23 (logs and snapshots written by 0.9.4 and earlier) and u32 in
+        # cmd 34; the in-memory entry is always u32, so 23 is widened here.
         if vl < 16:
             return False
         var sd = _replay_stream(keyspace, key, True)
@@ -695,23 +710,38 @@ def wal_apply_aggregate(cmd_id: UInt8,
         # frees it), so the record bytes must be copied out of the mmap — the
         # WAL mapping is unmapped after replay and the snapshot buffer is
         # reused per record.
-        var pack = alloc[UInt8](plen if plen > 0 else 1)
-        if plen > 0:
-            unsafe_memcpy(dest=pack, src=vp.unsafe_offset(16), count=plen)
+        var lw = 4 if cmd_id == 34 else 2      # bytes per length in the record
+        var src = vp.unsafe_offset(16)
         # Recover num_fields by walking the packed pairs rather than trusting a
         # logged count: the walk is the same one the readers do, so a truncated
         # record yields a short entry instead of a reader running off the end.
         var nf = 0
         var w = 0
-        while w + 2 <= plen:
-            var fl = Int((pack.unsafe_offset(w)).unsafe_bitcast[UInt16]()[unsafe_offset=0]); w += 2 + fl
-            if w + 2 > plen:
+        var out_len = 0
+        while w + lw <= plen:
+            var fl = Int(_rec_len(src.unsafe_offset(w), lw)); w += lw + fl
+            if w + lw > plen:
                 break
-            var vlen2 = Int((pack.unsafe_offset(w)).unsafe_bitcast[UInt16]()[unsafe_offset=0]); w += 2 + vlen2
+            var vlen2 = Int(_rec_len(src.unsafe_offset(w), lw)); w += lw + vlen2
             if w > plen:
                 break
             nf += 1
-        sd[].append(id_ms, id_seq, pack, plen, nf)
+            out_len += 8 + fl + vlen2
+        # StreamData.append takes ownership of the payload pointer (StreamEntry
+        # frees it), so the record bytes must be copied out of the mmap — the
+        # WAL mapping is unmapped after replay and the snapshot buffer is
+        # reused per record. Copy the `nf` whole pairs, as u32 lengths.
+        var pack = alloc[UInt8](out_len if out_len > 0 else 1)
+        var r = 0
+        var o = 0
+        for _ in range(nf):
+            for _half in range(2):
+                var n = Int(_rec_len(src.unsafe_offset(r), lw)); r += lw
+                (pack.unsafe_offset(o)).unsafe_bitcast[UInt32]()[] = UInt32(n); o += 4
+                if n > 0:
+                    unsafe_memcpy(dest=pack.unsafe_offset(o), src=src.unsafe_offset(r), count=n)
+                r += n; o += n
+        sd[].append(id_ms, id_seq, pack, out_len, nf)
         return True
 
     elif cmd_id == 24:   # PFADD element
@@ -781,6 +811,14 @@ def wal_apply_aggregate(cmd_id: UInt8,
         vs[].attrs[slot] = String(StringSpan[MutUntrackedOrigin](
             unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=vp.unsafe_offset(ao), length=al)))
         return True
+
+    elif cmd_id >= 38 and cmd_id <= 45:
+        # #40: stream metadata (45, which creates an empty stream) and consumer
+        # groups (38-44); layouts in src/common/stream_data.mojo
+        var gsd = _replay_stream(keyspace, key, cmd_id == 45)
+        if is_null(gsd):
+            return False
+        return apply_stream_group_record(cmd_id, gsd, vp, vl)
 
     elif cmd_id == 27:   # XDEL [8B id_ms][8B id_seq]
         if vl < 16:
@@ -869,6 +907,11 @@ struct WAL(Movable):
     # before the mapping or its offsets change, and reattach after. Last field
     # on purpose (new fields go at the END of hot structs).
     var repl_handle: Pointer[NoneType, MutUntrackedOrigin]
+    # #45: the keyspace's queue of keys it removed as expired
+    # (StripedHashMap.expired_log). Each becomes a DEL record ahead of this
+    # log's next record, so replay never gives a key created again after it
+    # expired the old value or the old deadline. Null when not attached.
+    var expired_q: Pointer[List[UInt8], MutUntrackedOrigin]
 
     def __init__(out self, path: String, worker_id: Int = 0,
                  file_size: Int = WAL_FILE_SIZE,
@@ -893,6 +936,7 @@ struct WAL(Movable):
         self.seq = 0
         self.map = null_ptr[UInt8, MutUntrackedOrigin]()
         self.repl_handle = null_ptr[NoneType, MutUntrackedOrigin]()
+        self.expired_q = null_ptr[List[UInt8], MutUntrackedOrigin]()
 
         # --no-wal (gh #394): no file, no mapping. Every append already returns
         # False on a null map, so this is the whole switch. It used to gate only
@@ -980,10 +1024,35 @@ struct WAL(Movable):
         self.durability_lost = take.durability_lost
         self.refuse_when_full = take.refuse_when_full
         self.repl_handle = take.repl_handle
+        self.expired_q = take.expired_q
         self.compaction_threshold = take.compaction_threshold
         self.current_size = take.current_size
 
     # ── Entry append (hot path, zero syscalls) ─────────────────────────────
+
+    @always_inline
+    def _expired_queued(self) -> Bool:
+        return Int(self.expired_q) != 0 and len(self.expired_q[]) != 0
+
+    @no_inline
+    def log_expired(mut self):
+        """#45: a DEL record for each key the keyspace removed as expired since
+        the last record. Every appender calls this first, and the engine's
+        housekeeping too, for a keyspace that only reads."""
+        if not self._expired_queued():
+            return
+        var q = self.expired_q[].copy()
+        self.expired_q[].clear()        # before appending: append calls back here
+        var p = q.unsafe_ptr()
+        var n = len(q)
+        var off = 0
+        while off + 4 <= n:
+            var kl = Int(p[off]) | (Int(p[off + 1]) << 8) | (Int(p[off + 2]) << 16) | (Int(p[off + 3]) << 24)
+            if off + 4 + kl > n:
+                break
+            _ = self.append(2, p + (off + 4), kl)
+            off += 4 + kl
+        _ = q^
 
     @always_inline
     def append(mut self, cmd_id: UInt8,
@@ -991,6 +1060,8 @@ struct WAL(Movable):
         """Append with no value (DEL, INCR without value). False = not logged."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len   # 4+1+4+key+4
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
             if not self._make_room(entry_size):
@@ -1011,6 +1082,8 @@ struct WAL(Movable):
         """Append with value (SET). False = not logged (see gh #149)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
             if not self._make_room(entry_size):
@@ -1038,6 +1111,8 @@ struct WAL(Movable):
         deferring past it would stamp the header of the wrong segment."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len + val_len
         var rotated = False
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1075,8 +1150,10 @@ struct WAL(Movable):
 
     @always_inline
     def batch_fits(self, upper_bound: Int) -> Bool:
-        """True when `upper_bound` bytes are guaranteed to fit without rotating."""
-        if is_null(self.map):
+        """True when `upper_bound` bytes are guaranteed to fit without rotating.
+        False while expired keys wait to be logged (#45): the caller's
+        per-record path logs their DELs first."""
+        if is_null(self.map) or self._expired_queued():
             return False
         return self.tail_offset + UInt64(upper_bound) <= UInt64(self.data_size)
 
@@ -1159,6 +1236,8 @@ struct WAL(Movable):
         """gh #163: log a SET whose payload went to the blob arena. 24-byte value."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len + 24
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
             if not self._make_room(entry_size):
@@ -1197,6 +1276,8 @@ struct WAL(Movable):
         """Two-part value record: val = [4B f_len][f][4B v_len][v] (HSET, LINSERT pivot+elem)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 8 + f_len + v_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1224,6 +1305,8 @@ struct WAL(Movable):
         """Scored-member record: val = [8B f64 score][member] (ZADD, GEOADD)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 8 + m_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1249,6 +1332,8 @@ struct WAL(Movable):
         """u64-prefixed record: val = [8B n][bytes] (LSET index, LREM count, SETBIT offset+bit)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 8 + v_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1275,6 +1360,8 @@ struct WAL(Movable):
         Serves XADD ([id_ms][id_seq][packed pairs]) and XDEL ([id_ms][id_seq])."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 16 + v_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1300,6 +1387,8 @@ struct WAL(Movable):
         """cmd 22: val = [4B p_len | BEFORE<<31][pivot][4B v_len][element]. Cold path."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var val_len = 8 + p_len + v_len
         var entry_size = 13 + key_len + val_len
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
@@ -1329,6 +1418,8 @@ struct WAL(Movable):
         """Two-u64 record: val = [8B a][8B b] (LTRIM resolved range)."""
         if is_null(self.map):
             return False
+        if self._expired_queued():
+            self.log_expired()            # #45: the DELs go first
         var entry_size = 13 + key_len + 16
         if self.tail_offset + UInt64(entry_size) > UInt64(self.data_size):
             if not self._make_room(entry_size):
@@ -1730,6 +1821,17 @@ struct WAL(Movable):
             elif cmd_id == 2:  # DEL
                 _ = remove_and_free(keyspace, GenericValue.borrow(data.unsafe_offset(key_off), Int(kl)))
                 replayed += 1
+            elif cmd_id == 250:  # FLUSHALL / FLUSHDB: everything before it goes
+                keyspace[].reset()
+                if is_not_null(ttl_map):
+                    ttl_map[].reset()
+                replayed += 1
+            elif cmd_id >= 35 and cmd_id <= 37:
+                # #36: FUNCTION LOAD / DELETE / FLUSH, into this worker's Lua state
+                if external_call["pion_lua_wal_apply", Int64](
+                        Int64(cmd_id), data.unsafe_offset(key_off), Int64(kl),
+                        data.unsafe_offset(val_off), Int64(vl)) == 1:
+                    replayed += 1
             elif cmd_id == 4 and vl == 24 and is_not_null(blobs):
                 # gh #163: pointer record into the blob arena. ptr_at bounds-checks
                 # against the mapped segment, so a stale or truncated record drops
@@ -1766,6 +1868,11 @@ struct WAL(Movable):
         a full log tells the operator to SAVE."""
         if is_null(self.map):
             return
+        # #45: the snapshot holds none of the keys still waiting for their
+        # DEL, and a key created again since was logged (its record logged
+        # the DELs first), so the queue is moot from here on.
+        if Int(self.expired_q) != 0:
+            self.expired_q[].clear()
         self._repl_detach()   # gh #390: every stream offset is about to reset
         for n in range(1, self.sealed + 1):
             var seg = self._segment_path(n)
@@ -1866,8 +1973,9 @@ struct WAL(Movable):
         elif t == ValueType.VSET:
             self.append_vset_image(kp, kl, val.as_hash().unsafe_bitcast[VectorSet]())
         elif t == ValueType.STREAM:
-            # cmd 23: val = [8B id_ms][8B id_seq][packed field/values], live
-            # entries only (XDEL/XTRIM tombstones are compacted away).
+            # cmd 34: val = [8B id_ms][8B id_seq][packed field/values, u32
+            # lengths], live entries only (XDEL/XTRIM tombstones are compacted
+            # away).
             var sd = val.as_hash().unsafe_bitcast[StreamData]()
             for ei in range(sd[].count):
                 var e = sd[].entries[unsafe_offset=ei]
@@ -1877,10 +1985,30 @@ struct WAL(Movable):
                 rec.unsafe_bitcast[UInt64]()[unsafe_offset=0] = e.id_seq
                 if e.data_len > 0:
                     unsafe_memcpy(dest=rec.unsafe_offset(8), src=e.data, count=e.data_len)
-                _ = self.append_u64_val(23, kp, kl, e.id_ms, rec, 8 + e.data_len)
+                _ = self.append_u64_val(34, kp, kl, e.id_ms, rec, 8 + e.data_len)
                 rec.unsafe_free()
+            # #40: then its metadata and consumer groups, as the snapshot
+            # writes them (records 45, 38, 41, 43)
+            self.append_list(45, kp, kl, encode_meta_rec(sd))
+            for g in range(len(sd[].groups)):
+                ref grp = sd[].groups[g]
+                self.append_list(38, kp, kl, encode_group_rec(grp))
+                for c in range(grp.ncons()):
+                    self.append_list(41, kp, kl, encode_consumer_rec(grp.name, grp.consumers[grp.by_name[c]]))
+                for k in range(len(grp.pel)):
+                    var nk = grp.pel[k]
+                    var oi = grp.consumer_by_id(nk.consumer)
+                    if oi >= 0:
+                        self.append_list(43, kp, kl, encode_nack_rec(grp.name, grp.consumers[oi].name, nk.ms, nk.seq,
+                                                                      nk.delivery_time, nk.delivery_count))
         vbuf.unsafe_free()
         fbuf.unsafe_free()
+
+    def append_list(mut self, cmd_id: UInt8, kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
+                     payload: List[UInt8]):
+        _ = self.append_kv(cmd_id, kp, kl,
+                           Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(payload.unsafe_ptr())),
+                           len(payload))
 
     def log_key_image(mut self, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                       ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],

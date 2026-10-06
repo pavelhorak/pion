@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Generate src/commands/command_info.mojo (#47) from
+tools/redis_command_info.json (tools/capture_redis_admin.py) and Pion's
+command table.
+
+COMMAND, COMMAND INFO, COUNT, LIST, GETKEYS, GETKEYSANDFLAGS and DOCS, and
+ACL CAT, answer from what this writes:
+
+  * Redis's COMMAND INFO entry of every command Pion has that Redis has, as
+    Redis encodes it in RESP2 and in RESP3 (CMDINFO2 / CMDINFO3, and
+    cmdinfo_span() for where an entry is). A Pion-only command gets an entry
+    built from Pion's own table (handlers in src/commands/admin.mojo).
+  * each command's key specs in a compact form (cmd_keyspecs), which
+    COMMAND GETKEYS interprets as Redis's getKeysUsingKeySpecs does:
+        spec ; spec ...           (empty: no keys)
+        spec = BS FK ':' flags
+        BS   = 'I' <index>  |  'K' <startfrom> '=' <KEYWORD>  |  'U'
+        FK   = 'R' <lastkey> ',' <keystep> ',' <limit>
+             | 'N' <keynumidx> ',' <firstkey> ',' <keystep>  |  'U'
+        flags = comma-separated key-spec flags (RO, RW, OW, RM, access, ...)
+  * the ACL categories, and the Pion commands in each (ACL CAT);
+  * every Pion command name (COMMAND LIST, a tenant user's ACL rules).
+
+    python3 tools/gen_command_info.py
+"""
+import base64
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA = ROOT / "tools" / "redis_command_info.json"
+OUT = ROOT / "src" / "commands" / "command_info.mojo"
+
+
+def parse(b, i=0):
+    t = b[i:i + 1]
+    e = b.index(b"\r\n", i)
+    h = b[i + 1:e]
+    n = e + 2
+    if t in b"+-":
+        return h.decode(), n
+    if t == b":":
+        return int(h), n
+    if t == b"$":
+        L = int(h)
+        if L < 0:
+            return None, n
+        return b[n:n + L].decode(errors="replace"), n + L + 2
+    if t == b"*":
+        L = int(h)
+        out = []
+        for _ in range(L):
+            v, n = parse(b, n)
+            out.append(v)
+        return out, n
+    raise ValueError(t)
+
+
+def kv(lst):
+    return {lst[k]: lst[k + 1] for k in range(0, len(lst), 2)}
+
+
+def encode_specs(specs):
+    out = []
+    for s in specs:
+        d = kv(s)
+        bs = kv(d["begin_search"])
+        fk = kv(d["find_keys"])
+        bspec = kv(bs["spec"]) if bs["spec"] else {}
+        fspec = kv(fk["spec"]) if fk["spec"] else {}
+        if bs["type"] == "index":
+            b = "I%d" % bspec["index"]
+        elif bs["type"] == "keyword":
+            b = "K%d=%s" % (bspec["startfrom"], bspec["keyword"])
+        else:
+            b = "U"
+        if fk["type"] == "range":
+            f = "R%d,%d,%d" % (fspec["lastkey"], fspec["keystep"], fspec["limit"])
+        elif fk["type"] == "keynum":
+            f = "N%d,%d,%d" % (fspec["keynumidx"], fspec["firstkey"], fspec["keystep"])
+        else:
+            f = "U"
+        out.append("%s%s:%s" % (b, f, ",".join(d["flags"])))
+    return ";".join(out)
+
+
+def doc_group(cats):
+    order = [("@string", "string"), ("@list", "list"), ("@hash", "hash"), ("@sortedset", "sorted-set"),
+             ("@set", "set"), ("@stream", "stream"), ("@geo", "geo"), ("@hyperloglog", "hyperloglog"),
+             ("@bitmap", "bitmap"), ("@pubsub", "pubsub"), ("@transaction", "transactions"),
+             ("@scripting", "scripting"), ("@connection", "connection"), ("@keyspace", "generic")]
+    for c, g in order:
+        if c in cats:
+            return g
+    return "server"
+
+
+def mojo_str(b: bytes) -> str:
+    """A Mojo string literal of bytes (ASCII; CR/LF escaped)."""
+    s = b.decode("latin-1")
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n") + '"'
+
+
+def pion_names():
+    text = (ROOT / "src" / "commands" / "command_table.mojo").read_text()
+    return sorted(set(re.findall(r'_cmd_eq_ci\(tp, tl, "([^"]+)"\)', text)))
+
+
+def main():
+    d = json.loads(DATA.read_text())
+    ci = d["command_info"]
+    names = pion_names()
+    blob2, blob3 = [], []
+    off2 = off3 = 0
+    spans, specs, groups = {}, {}, {}
+    for n in names:
+        if n not in ci:
+            continue
+        r2 = base64.b64decode(ci[n]["resp2"])
+        r3 = base64.b64decode(ci[n]["resp3"])
+        spans[n] = (off2, len(r2), off3, len(r3))
+        blob2.append(r2)
+        blob3.append(r3)
+        off2 += len(r2)
+        off3 += len(r3)
+        v, _ = parse(r2)
+        specs[n] = encode_specs(v[8])
+        groups[n] = doc_group(v[6])
+    cats = d["acl_categories"]
+    # a subcommand is listed when its command is Pion's (ACL CAT, COMMAND LIST)
+    members = {c: sorted(m for m in d["acl_category_members"].get(c, []) if m.split("|")[0] in names)
+               for c in cats}
+    subnames = []
+    for n in names:
+        if n in ci:
+            v, _ = parse(base64.b64decode(ci[n]["resp2"]))
+            subnames += sorted(sub[0] for sub in (v[9] if len(v) > 9 and v[9] else []))
+
+    L = []
+    L.append('"""GENERATED by tools/gen_command_info.py from tools/redis_command_info.json.')
+    L.append("Do not edit; regenerate. See that script for what each table is (#47).")
+    L.append('"""')
+    L.append("from std.memory.unsafe_pointer import Pointer")
+    L.append("")
+    L.append("")
+    L.append("def _eq(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int, lit: StaticString) -> Bool:")
+    L.append("    if tl != lit.byte_length():")
+    L.append("        return False")
+    L.append("    var lp = lit.unsafe_ptr()")
+    L.append("    for k in range(tl):")
+    L.append("        var c = tp[k]")
+    L.append("        if c >= 65 and c <= 90:")
+    L.append("            c += 32")
+    L.append("        if c != lp[k]:")
+    L.append("            return False")
+    L.append("    return True")
+    L.append("")
+    L.append("")
+    L.append("comptime CMDINFO2: StaticString = " + " ".join(mojo_str(b) for b in blob2))
+    L.append("comptime CMDINFO3: StaticString = " + " ".join(mojo_str(b) for b in blob3))
+    L.append("")
+    L.append("")
+    L.append("struct InfoSpan(Copyable, Movable, ImplicitlyCopyable):")
+    L.append("    var off2: Int")
+    L.append("    var len2: Int")
+    L.append("    var off3: Int")
+    L.append("    var len3: Int")
+    L.append("")
+    L.append("    def __init__(out self, off2: Int, len2: Int, off3: Int, len3: Int):")
+    L.append("        self.off2 = off2")
+    L.append("        self.len2 = len2")
+    L.append("        self.off3 = off3")
+    L.append("        self.len3 = len3")
+    L.append("")
+    L.append("")
+    L.append("def cmdinfo_span(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> InfoSpan:")
+    L.append('    """Where the command\'s Redis COMMAND INFO entry is in CMDINFO2/3; len2 0')
+    L.append('    for a Pion-only command."""')
+    for n in names:
+        if n in spans:
+            a, b, c, e = spans[n]
+            L.append('    if _eq(tp, tl, "%s"): return InfoSpan(%d, %d, %d, %d)' % (n, a, b, c, e))
+    L.append("    return InfoSpan(0, 0, 0, 0)")
+    L.append("")
+    L.append("")
+    L.append("def cmd_keyspecs(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> StaticString:")
+    L.append('    """The command\'s key specs, encoded (see tools/gen_command_info.py)."""')
+    for n in names:
+        if specs.get(n):
+            L.append('    if _eq(tp, tl, "%s"): return "%s"' % (n, specs[n]))
+    L.append('    return ""')
+    L.append("")
+    L.append("")
+    L.append("def cmd_doc_group(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> StaticString:")
+    L.append('    """COMMAND DOCS\'s group of the command."""')
+    for n in names:
+        if n in groups and groups[n] != "server":
+            L.append('    if _eq(tp, tl, "%s"): return "%s"' % (n, groups[n]))
+    L.append('    return "server"')
+    L.append("")
+    L.append("")
+    L.append('comptime ACL_CATEGORIES: StaticString = "%s"' % " ".join(cats))
+    L.append("")
+    L.append("")
+    L.append("def acl_category_commands(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> StaticString:")
+    L.append('    """The Pion commands in ACL category `tp` (space-separated); "?" for a')
+    L.append('    category that does not exist."""')
+    for c in cats:
+        L.append('    if _eq(tp, tl, "%s"): return "%s"' % (c, " ".join(members[c])))
+    L.append('    return "?"')
+    L.append("")
+    L.append("")
+    nomand = sorted(n for n in names if n in ci and b"no_mandatory_keys" in base64.b64decode(ci[n]["resp2"]))
+    L.append("def cmd_no_mandatory_keys(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:")
+    L.append('    """The command may take no keys at all (Redis\'s no_mandatory_keys flag)."""')
+    for n in nomand:
+        L.append('    if _eq(tp, tl, "%s"): return True' % n)
+    L.append("    return False")
+    L.append("")
+    L.append("")
+    # CLIENT PAUSE WRITE holds Redis's write commands and its may-replicate
+    # ones. COMMAND INFO does not report may_replicate; these are the commands
+    # Redis flags so (commands.def), by name.
+    may_replicate = {"eval", "evalsha", "fcall", "publish", "spublish", "pfcount"}
+    top_write, sub_write = [], {}
+    for n in names:
+        if n not in ci:
+            continue
+        v, _ = parse(base64.b64decode(ci[n]["resp2"]))
+        if "write" in v[2] or n in may_replicate:
+            top_write.append(n)
+        for sub in (v[9] if len(v) > 9 and v[9] else []):
+            if "write" in sub[2]:
+                sub_write.setdefault(n, []).append(sub[0].split("|", 1)[1])
+    L.append("def cmd_pause_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,")
+    L.append("                    sp: Pointer[UInt8, MutUntrackedOrigin], sl: Int) -> Bool:")
+    L.append('    """Does CLIENT PAUSE WRITE hold this command (subcommand `sp`)? Redis\'s')
+    L.append('    write and may-replicate commands."""')
+    for n in top_write:
+        L.append('    if _eq(tp, tl, "%s"): return True' % n)
+    for n, subs in sorted(sub_write.items()):
+        L.append('    if _eq(tp, tl, "%s"):' % n)
+        L.append("        return " + " or ".join('_eq(sp, sl, "%s")' % x for x in sorted(subs)))
+    L.append("    return False")
+    L.append("")
+    L.append("")
+    containers = sorted(n for n in names if n in ci and (lambda v: len(v) > 9 and bool(v[9]))(
+        parse(base64.b64decode(ci[n]["resp2"]))[0]))
+    L.append("def cmd_is_container(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:")
+    L.append('    """Does the command have subcommands (CLIENT, CONFIG, ...)? ACL LOG names')
+    L.append('    those as `command|subcommand`, as Redis does."""')
+    for n in containers:
+        L.append('    if _eq(tp, tl, "%s"): return True' % n)
+    L.append("    return False")
+    L.append("")
+    L.append("")
+    L.append('comptime PION_COMMAND_NAMES: StaticString = "%s"' % " ".join(names))
+    L.append("")
+    L.append("")
+    L.append("# The subcommands of Pion's commands, as `command|subcommand` (COMMAND LIST")
+    L.append("# lists them after the commands, as Redis does).")
+    L.append('comptime PION_SUBCOMMAND_NAMES: StaticString = "%s"' % " ".join(subnames))
+    L.append("")
+    OUT.write_text("\n".join(L))
+    print(f"{OUT.relative_to(ROOT)}: {len(spans)} Redis entries, {len(names) - len(spans)} Pion-only, "
+          f"{len(blob2) and off2} + {off3} bytes")
+
+
+if __name__ == "__main__":
+    main()

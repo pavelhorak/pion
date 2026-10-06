@@ -39,6 +39,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid  # noqa: E402
+
 BINARY = os.path.abspath(
     sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server"))
 PORT = 6478
@@ -99,19 +102,12 @@ def port_open():
 def start(workdir):
     p = subprocess.Popen([BINARY, "-p", str(PORT), "-w", "1", "--no-auto-detect", "--no-auto-embed"],
                          cwd=workdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if port_open():
-            try:
-                c = Client()
-                if c.cmd("PING") == b"PONG":
-                    return p, c
-                c.close()
-            except OSError:
-                pass
-        time.sleep(0.2)
-    p.kill()
-    raise RuntimeError("server did not come up")
+    try:
+        wait_ready_pid(PORT, p, 30)   # this process, not a lingering listener (#27)
+    except RuntimeError:
+        p.kill()
+        raise
+    return p, Client()
 
 
 def sigkill(p):

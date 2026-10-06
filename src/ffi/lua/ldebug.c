@@ -636,3 +636,9 @@ void luaG_runerror (lua_State *L, const char *fmt, ...) {
   luaG_errormsg(L);
 }
 
+
+
+/* Pion: a write to a readonly table (the script sandbox). */
+void luaG_readonly_error (lua_State *L) {
+  luaG_runerror(L, "Attempt to modify a readonly table");
+}

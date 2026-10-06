@@ -37,6 +37,9 @@ import sys
 import time
 from typing import Optional
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid  # noqa: E402
+
 HOST = "127.0.0.1"
 PORT = 1974
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -65,14 +68,8 @@ def start_server(log_path: str) -> subprocess.Popen:
         cmd, cwd=PROJECT_ROOT, stdout=log_fp, stderr=log_fp,
         preexec_fn=os.setsid,
     )
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            s = socket.create_connection((HOST, PORT), timeout=1); s.close()
-            return proc
-        except OSError:
-            time.sleep(0.2)
-    raise RuntimeError("pion-server did not start")
+    wait_ready_pid(PORT, proc, 30)   # this process, not a lingering listener (#27)
+    return proc
 
 
 def stop_server(proc: Optional[subprocess.Popen]) -> None:

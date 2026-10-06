@@ -120,7 +120,7 @@ Two consequences for anyone measuring this:
 - **The default is `-w 1`**, and `-w N > 1` refuses to start without `--independent-workers`, which prints the semantics at startup. The flag is an acknowledgement, not a feature switch — it changes no behaviour beyond letting the server boot.
 - **Connections opened SERIALLY all land on one worker** and hide the split completely (0/12 nils in the same session that measured 41/90 concurrently). Any probe of cross-worker behaviour must open its connections concurrently, or it proves nothing.
 
-The same split runs through the rest of the surface: cross-worker `PUBLISH` delivers to zero subscribers, `FLUSHALL` clears one worker's slice, and replication covers worker 0 only.
+The same split runs through the rest of the surface: `FLUSHALL` clears one worker's slice, and replication covers worker 0 only. Pub/sub is the exception: a message reaches subscribers on every worker through per-worker inboxes, while PUBLISH counts its own worker's subscribers (#42).
 
 Vector data is an exception: after `FT.OPTIMIZE`, the index-building worker publishes read-only pointers via `SharedHNSWView`. Other workers borrow these pointers lazily on the first `FT.SEARCH`. All mutable per-search state (`visited_map`, `query_int8`, `cur_num`) remains per-worker.
 

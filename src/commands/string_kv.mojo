@@ -1,5 +1,6 @@
 """String/KV commands (slow path): SET variants, APPEND, STRLEN, GETRANGE, SETRANGE, GETSET, GETDEL, GETEX, UNLINK, MSETNX, INCRBY, DECRBY, INCRBYFLOAT, EXPIRETIME, PEXPIRETIME, multi-DEL."""
 from src.common.container_free import free_container
+from std.ffi import external_call
 from src.common.ptr import is_not_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.collections import Array
@@ -138,73 +139,53 @@ def handle_incrbyfloat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
         var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
-        # gh #393: Redis's string2ld rules — hex and "inf" parse, "nan",
-        # "1e5000" and surrounding spaces do not.
-        var _fdp = parse_redis_double(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length, DOUBLE_LONG)
-        if not _fdp.ok:
-            writer.append_error_response("ERR value is not a valid float")
-            return 2
-        var fdelta = _fdp.value   # gh #232: Float64
-        # A container falls through the FLOAT/INT/string chain below with
-        # cur_f = 0.0 and is then OVERWRITTEN by the new float — measured:
-        # `INCRBYFLOAT <list>` turned a 3-element list into the string "1.5"
-        # and orphaned the SlabList. Refuse before computing anything.
-        # gh #232: a BITMAP is a string, so this must fall through to the float
-        # parse and fail there with "not a valid float" — which is what Redis
-        # answers — instead of WRONGTYPE.
+        # Redis's incrbyfloatCommand order: the key's type, then the current
+        # value, then the increment.
+        # A container would otherwise be OVERWRITTEN by the new float —
+        # measured: `INCRBYFLOAT <list>` turned a 3-element list into the
+        # string "1.5" and orphaned the SlabList. gh #232: a BITMAP is a
+        # string, so it goes on to the float parse and fails there with "not
+        # a valid float", as in Redis.
         if (not val.is_none() and not val.is_string_like()
                 and val.type.value != ValueType.INT
                 and val.type.value != ValueType.FLOAT):
             writer.append_error_response(
                 "WRONGTYPE Operation against a key holding the wrong kind of value")
             return 2
-        # gh #232: Float64, not Float32 — see `format_float64_to_buf`. The old
-        # 24-bit mantissa could not hold 100000001, so a counter past ~16.7M
-        # stopped incrementing and still replied success.
-        var cur_f: Float64 = 0.0
-        if val.type.value == ValueType.FLOAT: cur_f = Float64(val.as_float())
-        elif val.type.value == ValueType.INT: cur_f = Float64(val.as_int())
+        # The arithmetic is Redis's: long double, in C (pion_ld_incr), so the
+        # range and the printed digits are the Redis-for-this-platform ones.
+        # gh #232 / #393 still hold — the stored value is validated as
+        # strictly as the argument, a non-finite result is refused and the
+        # value left alone — they now live in one place.
+        var cur_kind = 0
+        var cur_d: Float64 = 0.0
+        var cur_l = 0
+        var cbuf = alloc[UInt8](32)
+        var cur_p = cbuf
+        if val.type.value == ValueType.FLOAT:
+            cur_kind = 2
+            cur_d = Float64(val.as_float())
+        elif val.type.value == ValueType.INT:
+            cur_kind = 1
+            cur_l = format_int_to_buf(cbuf, 0, val.as_int())
         elif val.is_string_like():
-            # gh #232: `is_string_like`, not `is_string`. Widening only the
-            # OUTER type gate let a BITMAP reach here, skip this branch, and
-            # keep cur_f = 0.0 — so `SETBIT k 0 1; INCRBYFLOAT k 1.5` replied
-            # 1.5 and DESTROYED the bitmap. That is the exact bug this branch
-            # was written to stop, re-entering through a different door: a
-            # type-gate widening must widen every gate the value then meets,
-            # not just the first one.
-            #
-            # `as_string_safe` returns the payload pointer for any non-SSO
-            # shape, and a BITMAP is never SSO, so it is correct here.
-            var _sbuf = alloc[UInt8](24)
-            var sp2 = val.as_string_safe(_sbuf)
-            # gh #232: the STORED value needs the same validation as the
-            # argument. `parse_filter_float` is deliberately lenient (vector
-            # FILTER depends on that), so "hello" parsed as 0.0 and the key was
-            # then OVERWRITTEN with the delta — `SET k hello; INCRBYFLOAT k 1.5`
-            # replied `1.5` and destroyed the string. Redis errors and leaves
-            # the value alone. Same halves-disagree shape as gh #229, with the
-            # strict and lenient sides swapped.
-            var _cfp = parse_redis_double(sp2, val.string_len(), DOUBLE_LONG)   # gh #393
-            if not _cfp.ok:
-                _sbuf.unsafe_free()
-                writer.append_error_response("ERR value is not a valid float")
-                return 2
-            cur_f = _cfp.value
-            _sbuf.unsafe_free()
-        var new_f = cur_f + fdelta
-        # Redis refuses a non-finite result and leaves the value alone; Pion
-        # stored "inf" (or, via the Int64-saturating formatter, garbage).
-        if new_f != new_f or new_f > 1.7976931348623157e308 or new_f < -1.7976931348623157e308:
+            cur_kind = 1
+            cur_p = val.as_string_safe(cbuf)
+            cur_l = val.string_len()
+        var fbuf = alloc[UInt8](5200)    # Redis's MAX_LONG_DOUBLE_CHARS, and some
+        var flen = Int(external_call["pion_ld_incr", Int64](
+            Int32(cur_kind), cur_p, Int64(cur_l), cur_d,
+            tokens[unsafe_offset=i+2].ptr, Int64(tokens[unsafe_offset=i+2].length),
+            fbuf, Int64(5200)))
+        cbuf.unsafe_free()
+        if flen == -3:
             writer.append_error_response("ERR increment would produce NaN or Infinity")
-            return 2
-        var fbuf = alloc[UInt8](400)   # a finite double prints as up to 309 integer digits
-        var fbuf_ptr = fbuf
-        # format_float64_to_buf trims trailing zeros and a bare '.' itself.
-        var ftrim = format_float64_to_buf(fbuf_ptr, 0, new_f, 17)
-        var new_gv = GenericValue.from_ptr(fbuf_ptr, ftrim)
-        keyspace[].set(key_v, new_gv)
-        _ = wal[].append_kv(1, key_str.unsafe_ptr(), key_str.byte_length(), fbuf_ptr, ftrim)
-        writer.append_bulk_string_response(fbuf_ptr, ftrim)
+        elif flen < 0:
+            writer.append_error_response("ERR value is not a valid float")
+        else:
+            keyspace[].set(key_v, GenericValue.from_ptr(fbuf, flen))
+            _ = wal[].append_kv(1, key_str.unsafe_ptr(), key_str.byte_length(), fbuf, flen)
+            writer.append_bulk_string_response(fbuf, flen)
         fbuf.unsafe_free()
         return 2
     else:
@@ -773,3 +754,87 @@ def handle_unlink(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         j_ul += 1
     writer.append_int_response(Int64(del_count))
     return num_tokens - i - 1
+
+
+def _string_bytes(val: GenericValue, scratch: Pointer[UInt8, MutUntrackedOrigin],
+                  mut out_len: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+    """A read-only view of a string value's bytes: a heap STRING or BITMAP in
+    place, a short string or an integer written into `scratch` (>= 32 bytes)."""
+    if val.type.value == ValueType.INT:
+        out_len = format_int_to_buf(scratch, 0, val.as_int())
+        return scratch
+    return val.bitmap_view(scratch, out_len)
+
+
+def handle_lcs(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
+               mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Int:
+    """LCS key1 key2 [LEN] [IDX] [MINMATCHLEN len] [WITHMATCHLEN] (#39).
+
+    Redis's lcsCommand: both keys must hold strings (a missing key is the
+    empty string), then the options, then the work (src/ffi/redis_ports.c).
+    `num_tokens` is the command's end."""
+    if num_tokens - i < 3:
+        writer.append_error_response("ERR wrong number of arguments for 'lcs' command")
+        return 0
+    var ka = tokens[unsafe_offset=i + 1]
+    var kb = tokens[unsafe_offset=i + 2]
+    var va = keyspace[].get(GenericValue.borrow(ka.ptr, ka.length))
+    var vb = keyspace[].get(GenericValue.borrow(kb.ptr, kb.length))
+    var a_ok = va.is_none() or va.is_string_like() or va.type.value == ValueType.INT
+    var b_ok = vb.is_none() or vb.is_string_like() or vb.type.value == ValueType.INT
+    if not a_ok or not b_ok:
+        writer.append_error_response("ERR The specified keys must contain string values")
+        return 0
+    var getidx = False
+    var getlen = False
+    var withmatchlen = False
+    var minmatchlen = Int64(0)
+    var j = i + 3
+    while j < num_tokens:
+        var o = tokens[unsafe_offset=j]
+        var more = num_tokens - 1 - j
+        if arg_eq(o.ptr, o.length, "idx"):
+            getidx = True
+        elif arg_eq(o.ptr, o.length, "len"):
+            getlen = True
+        elif arg_eq(o.ptr, o.length, "withmatchlen"):
+            withmatchlen = True
+        elif arg_eq(o.ptr, o.length, "minmatchlen") and more > 0:
+            var m = tokens[unsafe_offset=j + 1]
+            var r = parse_int64_strict(m.ptr, m.length)
+            if not r.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return 0
+            minmatchlen = r.value if r.value > 0 else Int64(0)
+            j += 1
+        else:
+            writer.append_error_response("ERR syntax error")
+            return 0
+        j += 1
+    if getidx and getlen:
+        writer.append_error_response("ERR If you want both the length and indexes, please just use IDX.")
+        return 0
+    var sa = alloc[UInt8](32)
+    var sb = alloc[UInt8](32)
+    var alen = 0
+    var blen = 0
+    var pa = sa
+    var pb = sb
+    if not va.is_none():
+        pa = _string_bytes(va, sa, alen)
+    if not vb.is_none():
+        pb = _string_bytes(vb, sb, blen)
+    var out = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+    var mode = Int64(2) if getidx else (Int64(1) if getlen else Int64(0))
+    var n = external_call["pion_lcs", Int64](pa, Int64(alen), pb, Int64(blen), mode, minmatchlen,
+                                             Int64(1) if withmatchlen else Int64(0), Int64(Int(writer.proto)), out)
+    var reply = out[unsafe_offset=0]
+    if n < 0:
+        writer.append_error_response("ERR Insufficient memory, failed allocating transient memory for LCS")
+    else:
+        writer.append_to_response(reply, Int(n))
+    external_call["pion_lcs_free", NoneType](reply)
+    out.unsafe_free()
+    sa.unsafe_free()
+    sb.unsafe_free()
+    return 0

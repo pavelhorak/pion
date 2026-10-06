@@ -10,11 +10,16 @@
  * until a shutdown drain (gh #259) returns them — so everything ctx points at
  * outlives the workers.
  */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE   /* cpu_set_t, pthread_setaffinity_np */
+#endif
 #include <pthread.h>
+#include <sched.h>
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 
 typedef void (*pion_worker_fn)(int64_t* ctx, int64_t idx);
 
@@ -44,6 +49,56 @@ static void* _pion_worker_trampoline(void* p) {
     else
         fprintf(stderr, "[pion] worker %lld DIED (event loop returned)\n", (long long)a->idx);
     return NULL;
+}
+
+/* `--affinity` on Linux: pin the calling worker thread to one CPU. It picks
+ * the (cpu mod N)-th CPU of the thread's CURRENT mask, not CPU number `cpu`,
+ * so a container or taskset that hands the process CPUs 4-7 still pins inside
+ * them. Returns the CPU pinned to, or -1 when nothing was applied. Before
+ * #20 the flag was a no-op on Linux that still logged "pinned to CPU i". */
+int32_t pion_pin_current_thread(int32_t cpu) {
+#ifdef __linux__
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) return -1;
+    int n = CPU_COUNT(&allowed);
+    if (n <= 0 || cpu < 0) return -1;
+    int want = cpu % n;
+    for (int c = 0; c < CPU_SETSIZE; c++) {
+        if (!CPU_ISSET(c, &allowed)) continue;
+        if (want-- > 0) continue;
+        cpu_set_t one;
+        CPU_ZERO(&one);
+        CPU_SET(c, &one);
+        return pthread_setaffinity_np(pthread_self(), sizeof(one), &one) == 0 ? c : -1;
+    }
+    return -1;
+#else
+    (void)cpu;
+    return -1;
+#endif
+}
+
+/* Raise the open-file soft limit toward `want`, as Redis does at startup. A
+ * stock Linux login has a soft limit of 1024, which capped a server at about a
+ * thousand clients while every per-fd table holds 65536. Bounded by the hard
+ * limit, and on macOS by kern.maxfilesperproc (setrlimit answers EINVAL above
+ * it), so it steps down until one value is accepted. Returns the soft limit in
+ * force afterwards; *before receives the one found. */
+int64_t pion_raise_nofile(int64_t want, int64_t* before) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) return -1;
+    if (before) *before = (int64_t)rl.rlim_cur;
+    if (rl.rlim_cur != RLIM_INFINITY && (int64_t)rl.rlim_cur >= want) return (int64_t)rl.rlim_cur;
+    if (rl.rlim_cur == RLIM_INFINITY) return want;
+    rlim_t target = (rlim_t)want;
+    if (rl.rlim_max != RLIM_INFINITY && target > rl.rlim_max) target = rl.rlim_max;
+    while (target > rl.rlim_cur) {
+        struct rlimit nr = { target, rl.rlim_max };
+        if (setrlimit(RLIMIT_NOFILE, &nr) == 0) return (int64_t)target;
+        target -= target / 4 + 1;
+    }
+    return (int64_t)rl.rlim_cur;
 }
 
 int32_t pion_spawn_workers(int32_t n, int64_t* ctx) {

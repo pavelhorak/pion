@@ -189,16 +189,25 @@ def main():
     # --nle-embed keeps the test hermetic on macOS: in-process embedding, no
     # sidecar download and no Ollama dependency. The PyTorch sidecar is spawned
     # via paths relative to the repo root, so that path has to run there.
-    nle = sys.platform == "darwin"
+    # GH140_EMBED=sidecar runs the MiniLM sidecar on macOS too, which is
+    # what every Linux box runs.
+    nle = sys.platform == "darwin" and os.environ.get("GH140_EMBED") != "sidecar"
     flags = ["--nle-embed"] if nle else ["--auto-embed", "--no-auto-detect"]
     tmpdir = tempfile.mkdtemp(prefix="gh140_")
     workdir = tmpdir if nle else REPO
     proc, log, c, logpath = start(a.binary, a.port, flags, workdir)
     try:
         print("Part A — FT.SEARCHTEXT honours K beyond the old ef=32 beam")
+        # unique_doc, not doc_text (#27): doc_text's 72 templates differ only
+        # in an index number, which MiniLM embeds to the same INT8 codes. HNSW
+        # cannot keep exact duplicates connected (the neighbour heuristic keeps
+        # one of each), so on Linux K=200 found 150 of the 300 docs. That is
+        # the data, not the K plumbing this part checks; NLEmbedding happened
+        # to separate the templates. Offset ids, so no sentence here repeats
+        # one Part C stores.
         c.cmd("FT.CREATE", "gh140a", "SCHEMA", "body", "TEXT", "vec", "VECTOR")
         for i in range(300):
-            c.cmd("FT.ADDTEXT", "gh140a", str(i), doc_text(i))
+            c.cmd("FT.ADDTEXT", "gh140a", str(i), unique_doc(100_000 + i))
         c.cmd("FT.OPTIMIZE", "gh140a")
 
         q = "how is tail latency kept predictable"

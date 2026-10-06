@@ -1,5 +1,5 @@
 """List commands: LINDEX, LSET, LINSERT, LREM, LTRIM, LPOS, LMOVE."""
-from src.common.utils import strict_atol
+from src.common.utils import strict_atol, arg_eq, parse_int64_strict, ParsedInt
 from src.common.container_free import remove_and_free
 from src.common.ptr import is_not_null, is_null
 from std.memory.unsafe_pointer import Pointer
@@ -193,9 +193,14 @@ def handle_linsert(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     if i + 4 < num_tokens:
         var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
-        var val = keyspace[].get(key_v)
         var ins_tp = tokens[unsafe_offset=i+2].ptr; var ins_tl = tokens[unsafe_offset=i+2].length
-        var before = ins_tl == 6 and (ins_tp[unsafe_offset=0]|0x20)==98  # BEFORE
+        # BEFORE|AFTER, whole word, checked before the key as Redis does: a
+        # 6-byte word starting with "b" was BEFORE and anything else AFTER.
+        var before = arg_eq(ins_tp, ins_tl, "before")
+        if not before and not arg_eq(ins_tp, ins_tl, "after"):
+            writer.append_error_response("ERR syntax error")
+            return 4
+        var val = keyspace[].get(key_v)
         var pivot_tok = tokens[unsafe_offset=i+3]
         var val_tok2 = tokens[unsafe_offset=i+4]
         if val.is_none():
@@ -538,32 +543,44 @@ def handle_lpos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         var consumed = 2
         var lpos_rank = 1; var lpos_count = 1; var lpos_all = False
         var lpos_maxlen = 0   # 0 = unlimited, Redis's default
-        var opt_i = i + 2
-        while opt_i + 1 < num_tokens:
-            var opt_p = tokens[unsafe_offset=opt_i+1]; var op = opt_p.ptr; var ol2 = opt_p.length
-            if ol2 == 4 and (op[unsafe_offset=0]|0x20)==114 and opt_i + 2 < num_tokens:
-                lpos_rank = strict_atol(tokens[unsafe_offset=opt_i+2].value()); opt_i += 2; consumed += 2
-                # gh #393: Redis's rules — RANK 0 means nothing, and -2^63 cannot
-                # be negated to walk from the tail.
-                if lpos_rank == 0:
-                    raise Error("ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list")
-                if lpos_rank == Int(Int64(-9223372036854775807) - 1):
-                    raise Error("ERR value is out of range, value must between -9223372036854775807 and 9223372036854775807")
-            elif ol2 == 5 and (op[unsafe_offset=0]|0x20)==99 and (op[unsafe_offset=1]|0x20)==111 and opt_i + 2 < num_tokens:
-                lpos_count = strict_atol(tokens[unsafe_offset=opt_i+2].value()); lpos_all = lpos_count == 0; opt_i += 2; consumed += 2
-                if lpos_count < 0:   # gh #393
-                    raise Error("ERR COUNT can't be negative")
-            elif ol2 == 6 and (op[unsafe_offset=0]|0x20)==109 and (op[unsafe_offset=1]|0x20)==97 and opt_i + 2 < num_tokens:
-                # gh #232: MAXLEN was parsed and DISCARDED. It bounds how many
-                # elements are COMPARED, so ignoring it returns matches from
-                # beyond the window — more results than the caller allowed,
-                # which reads as success. `LPOS l a COUNT 0 MAXLEN 4` on
-                # [a,b,c,a,b,c,a] gave 0,3,6 where Redis gives 0,3.
-                lpos_maxlen = strict_atol(tokens[unsafe_offset=opt_i+2].value())
-                if lpos_maxlen < 0:
-                    raise Error("ERR MAXLEN can't be negative")
-                opt_i += 2; consumed += 2
-            else: break
+        # Redis's lposCommand: each option a whole word with its value, in
+        # any order; anything else is a syntax error. Unknown words used to end
+        # the scan silently and COUNT/MAXLEN were matched by their first
+        # letters, so `RANKQ 2` and `COUNTQ 2` ran as if the option were absent.
+        var opt_j = i + 3
+        while opt_j < num_tokens:
+            var ot = tokens[unsafe_offset=opt_j]
+            var more = opt_j + 1 < num_tokens
+            var ov = parse_int64_strict(tokens[unsafe_offset=opt_j + 1].ptr, tokens[unsafe_offset=opt_j + 1].length) \
+                if more else ParsedInt(0, False)
+            if arg_eq(ot.ptr, ot.length, "rank") and more:
+                if not ov.ok:
+                    writer.append_error_response("ERR value is not an integer or out of range")
+                    return num_tokens - 1 - i
+                # gh #393: -2^63 cannot be negated to walk from the tail.
+                if ov.value == Int64(-9223372036854775807) - 1:
+                    writer.append_error_response("ERR value is out of range, value must between -9223372036854775807 and 9223372036854775807")
+                    return num_tokens - 1 - i
+                if ov.value == 0:
+                    writer.append_error_response("ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list")
+                    return num_tokens - 1 - i
+                lpos_rank = Int(ov.value)
+            elif arg_eq(ot.ptr, ot.length, "count") and more:
+                if not ov.ok or ov.value < 0:
+                    writer.append_error_response("ERR COUNT can't be negative")
+                    return num_tokens - 1 - i
+                lpos_count = Int(ov.value); lpos_all = lpos_count == 0
+            elif arg_eq(ot.ptr, ot.length, "maxlen") and more:
+                # gh #232: MAXLEN bounds how many elements are COMPARED.
+                if not ov.ok or ov.value < 0:
+                    writer.append_error_response("ERR MAXLEN can't be negative")
+                    return num_tokens - 1 - i
+                lpos_maxlen = Int(ov.value)
+            else:
+                writer.append_error_response("ERR syntax error")
+                return num_tokens - 1 - i
+            opt_j += 2
+            consumed += 2
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered
         # identically, with an empty/zero reply. Redis distinguishes them, and
         # the conflation runs in the dangerous direction: a caller who stored
@@ -655,8 +672,17 @@ def handle_lmove(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     if i + 4 < num_tokens:
         var src_str4 = tokens[unsafe_offset=i+1].value()
         var dst_str4 = tokens[unsafe_offset=i+2].value()
-        var src_dir_tp = tokens[unsafe_offset=i+3].ptr; var src_dir_from_left = (src_dir_tp[unsafe_offset=0]|0x20)==108  # LEFT
-        var dst_dir_tp = tokens[unsafe_offset=i+4].ptr; var dst_dir_to_left = (dst_dir_tp[unsafe_offset=0]|0x20)==108  # LEFT
+        # LEFT|RIGHT, whole words, checked before either key as Redis does
+        # (getListPositionFromObjectOrReply). The first letter alone decided:
+        # "LEFTQ" was LEFT and any word not starting with "l" was RIGHT.
+        var src_dir_t = tokens[unsafe_offset=i+3]
+        var dst_dir_t = tokens[unsafe_offset=i+4]
+        var src_dir_from_left = arg_eq(src_dir_t.ptr, src_dir_t.length, "left")
+        var dst_dir_to_left = arg_eq(dst_dir_t.ptr, dst_dir_t.length, "left")
+        if (not src_dir_from_left and not arg_eq(src_dir_t.ptr, src_dir_t.length, "right")) \
+                or (not dst_dir_to_left and not arg_eq(dst_dir_t.ptr, dst_dir_t.length, "right")):
+            writer.append_error_response("ERR syntax error")
+            return 4
         var src_v4 = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var src_val = keyspace[].get(src_v4)
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered

@@ -27,6 +27,7 @@ struct ZAddOutcome(Copyable, Movable):
     var added: Int64        # 1 only when a NEW member was inserted
     var changed: Int64      # 1 when added OR the score actually moved (CH counts this)
     var new_score: Float64
+    var nan: Bool           # INCR would leave NaN (inf + -inf): an error, nothing written
 
 
 struct IntCmdResult:
@@ -293,7 +294,13 @@ struct CommandDispatcher:
 
     @always_inline
     def execute_info(self, send_stalls: UInt64 = 0, listen_port: Int = 1974, keys: Int = 0,
-                     expires: Int = 0, uptime_s: Int = 0, extra: String = String("")) -> String:
+                     expires: Int = 0, uptime_s: Int = 0, extra: String = String(""),
+                     repl_section: String = String("# Replication\r\nrole:master\r\nconnected_slaves:0\r\n"),
+                     cluster_enabled: Bool = False) -> String:
+        """INFO's body, every section; handle_info filters and frames it.
+        `repl_section` is built by the caller from the cluster state: this
+        used to print `role:master` and `cluster_enabled:0` whatever the
+        server was, and only `INFO replication` read the real role."""
         # gh #262: resolve first, then report. This used to hardcode
         # tcp_port:1974, used_memory:1048576 and an empty # Keyspace — values
         # dressed as measurements. redis_version stays 7.0.0 because client
@@ -308,6 +315,9 @@ struct CommandDispatcher:
         # the open reference. Asked of the library itself, not the build flag.
         body += "pion_vector:" + vector_backend_line() + "\r\n"
         body += "redis_mode:standalone\r\n"
+        # Redis's field: tells a client WHICH server answered (a restart test
+        # must not mistake a dying predecessor's listener for the new server).
+        body += "process_id:" + String(Int(external_call["getpid", Int32]())) + "\r\n"
         body += "tcp_port:" + String(listen_port) + "\r\n"
         body += "uptime_in_seconds:" + String(uptime_s) + "\r\n"
         body += "# Memory\r\n"
@@ -324,7 +334,8 @@ struct CommandDispatcher:
         body += "maxmemory_policy:noeviction\r\n"
         body += "maxmemory_refusing_writes:" + String(
             external_call["pion_maxmemory_check", Int32]()) + "\r\n"
-        body += "# Cluster\r\ncluster_enabled:0\r\n# Replication\r\nrole:master\r\nconnected_slaves:0\r\n"
+        body += "# Cluster\r\ncluster_enabled:" + ("1" if cluster_enabled else "0") + "\r\n"
+        body += repl_section
         # gh #149 / gh #163: persistence is where an operator finds out that
         # writes stopped being durable. The old code dropped WAL entries with no
         # counter, no log line and no INFO field — 4.6 GB of acknowledged SETs
@@ -381,7 +392,7 @@ struct CommandDispatcher:
         # Redis omits the db line when the db is empty; keys are THIS worker's.
         if keys > 0:
             body += "db0:keys=" + String(keys) + ",expires=" + String(expires) + ",avg_ttl=0\r\n"
-        return "$" + String(body.byte_length()) + "\r\n" + body + "\r\n"
+        return body
 
     @always_inline
     def execute_ft_search(self) -> String:
@@ -505,7 +516,7 @@ struct CommandDispatcher:
             if offset // 8 >= byte_len:
                 return IntCmdResult(0, True)
             else:
-                return IntCmdResult(Int64(getbit(bitmap_ptr, offset)), True)
+                return IntCmdResult(Int64(getbit(bitmap_ptr, byte_len, offset)), True)
         else:
             return IntCmdResult(0, False)
 
@@ -517,7 +528,7 @@ struct CommandDispatcher:
             var bitmap_ptr = alloc[UInt8](byte_len)
             unsafe_memset(bitmap_ptr, 0, byte_len)
             
-            var old_val = getbit(bitmap_ptr, offset)
+            var old_val = getbit(bitmap_ptr, byte_len, offset)
             
             var result = setbit(byte_len, bitmap_ptr, offset, value)
             var new_bitmap_ptr = result.ptr
@@ -535,7 +546,7 @@ struct CommandDispatcher:
         elif val.type.value == ValueType.BITMAP:
             var bitmap_ptr = val.as_bitmap()
             var byte_len = val.bitmap_len()
-            var old_val = getbit(bitmap_ptr, offset)
+            var old_val = getbit(bitmap_ptr, byte_len, offset)
 
             var result = setbit(byte_len, bitmap_ptr, offset, value)
             var new_bitmap_ptr = result.ptr
@@ -693,7 +704,7 @@ struct CommandDispatcher:
         if val.is_none():
             # XX must not CREATE the key — checked before allocating anything.
             if xx:
-                return ZAddOutcome(True, False, 0, 0, 0.0)
+                return ZAddOutcome(True, False, 0, 0, 0.0, False)
             zset_ptr = self.skip_list_pool[].acquire()
             zset_ptr.unsafe_write(SlabSkipList(16))
             var new_val = GenericValue()
@@ -703,7 +714,7 @@ struct CommandDispatcher:
         elif val.type.value == ValueType.ZSET:
             zset_ptr = val.as_zset().unsafe_bitcast[SlabSkipList]()
         else:
-            return ZAddOutcome(False, False, 0, 0, 0.0)
+            return ZAddOutcome(False, False, 0, 0, 0.0, False)
 
         var cur_gv = zset_ptr[].member_score(member_gv)
         var exists = not cur_gv.is_none()
@@ -713,16 +724,21 @@ struct CommandDispatcher:
         var target = (cur + score) if (incr and exists) else score
 
         if nx and exists:
-            return ZAddOutcome(True, False, 0, 0, 0.0)
+            return ZAddOutcome(True, False, 0, 0, 0.0, False)
         if xx and not exists:
-            return ZAddOutcome(True, False, 0, 0, 0.0)
+            return ZAddOutcome(True, False, 0, 0, 0.0, False)
+        # inf + -inf: Redis refuses with "resulting score is not a number" and
+        # changes nothing, checked after NX/XX and before GT/LT as it does. A
+        # NaN score has no place in the order at all.
+        if target != target:
+            return ZAddOutcome(True, False, 0, 0, 0.0, True)
         # GT/LT only gate an UPDATE; against a missing member they always allow
         # the insert (Redis treats "no member" as no bound, not as infinity —
         # the infinity rule is EXPIRE's, not ZADD's).
         if gt and exists and target <= cur:
-            return ZAddOutcome(True, False, 0, 0, 0.0)
+            return ZAddOutcome(True, False, 0, 0, 0.0, False)
         if lt and exists and target >= cur:
-            return ZAddOutcome(True, False, 0, 0, 0.0)
+            return ZAddOutcome(True, False, 0, 0, 0.0, False)
 
         # CH counts members ADDED plus members whose score actually moved. An
         # equal-score write is a no-op and must not count — `upsert` returns 0
@@ -732,7 +748,7 @@ struct CommandDispatcher:
         var added = zset_ptr[].upsert(target, member_gv)
         _ = self.wal[].append_scored(9, key.unsafe_ptr(), key.byte_length(),
                                      target, member.unsafe_ptr(), member.byte_length())
-        return ZAddOutcome(True, True, Int64(added), Int64(1) if moved else Int64(0), target)
+        return ZAddOutcome(True, True, Int64(added), Int64(1) if moved else Int64(0), target, False)
 
     @always_inline
     def execute_zpopmin(self, key: String) -> GenericValue:
@@ -759,10 +775,10 @@ struct CommandDispatcher:
             zset_ptr = self.skip_list_pool[].acquire()
             zset_ptr.unsafe_write(SlabSkipList(16))
             var new_val = GenericValue()
-            new_val.type = ValueType(ValueType.GEO)
+            new_val.type = ValueType(ValueType.ZSET)     # a geo key is a sorted set, as in Redis
             new_val.set_ptr(zset_ptr.unsafe_bitcast[NoneType]())
             self.keyspace[].set(key, new_val)
-        elif val.type.value == ValueType.GEO:
+        elif val.type.value == ValueType.GEO or val.type.value == ValueType.ZSET:
             zset_ptr = val.as_geo().unsafe_bitcast[SlabSkipList]()
         else:
             return IntCmdResult(0, False)
@@ -770,7 +786,7 @@ struct CommandDispatcher:
         var hash = geohash_encode(latitude, longitude, GEO_STEP_MAX)
         # gh #187: GEOADD counts new members only (Redis semantics)
         var geo_added = zset_ptr[].upsert(Float64(hash.bits), GenericValue.from_string(member))
-        _ = self.wal[].append_scored(15, key.unsafe_ptr(), key.byte_length(),
+        _ = self.wal[].append_scored(9, key.unsafe_ptr(), key.byte_length(),
                                      Float64(hash.bits), member.unsafe_ptr(),
                                      member.byte_length())
         return IntCmdResult(Int64(geo_added), True)

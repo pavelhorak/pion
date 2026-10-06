@@ -1,9 +1,11 @@
 """Key management commands: TYPE, RENAME, RENAMENX, COPY, OBJECT, SORT, SCAN, KEYS, RANDOMKEY, TOUCH, WAIT."""
 from src.common.container_free import deep_clone, free_container, remove_and_free, index_field_ttls
+from src.commands.scan_opts import parse_scan_opts
 from src.common.utils import strict_atol, _glob_match, _glob_all, arg_eq, parse_int64_strict, is_valid_float_arg, parse_float64, scan_cursor, scan_count
 from src.common.ptr import is_not_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
+from std.sys import CompilationTarget
 from std.collections import Array, Span, List
 from std.ffi import external_call
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
@@ -53,15 +55,17 @@ def handle_rename(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             writer.append_ok_response()
         else:
             var dst_v = GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
+            # Read src's TTL first: removing src drops it.
+            var exp_v2 = GenericValue()
+            if is_not_null(ttl_map):
+                exp_v2 = ttl_map[].get(src_v)
             # gh #123: dst gets its own buffer so remove(src) can free src's payload safely.
             keyspace[].set(dst_v, val.clone())
             _ = keyspace[].remove_generic(src_v)
             index_field_ttls(keyspace, dst_v, val)   # gh #392
             if is_not_null(ttl_map):
-                var exp_v2 = ttl_map[].get(src_v)
                 if not exp_v2.is_none():
                     ttl_map[].set(dst_v, exp_v2)
-                    _ = ttl_map[].remove_generic(src_v)
                 else:
                     # The renamed key carries src's TTL — or none. Keeping dst's
                     # old deadline made the moved value expire on schedule.
@@ -89,14 +93,16 @@ def handle_renamenx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
             var dst_existing = keyspace[].get(dst_v2)
             if not dst_existing.is_none(): writer.append_int_response(Int64(0))
             else:
+                # Read src's TTL first: removing src drops it.
+                var exp_v3 = GenericValue()
+                if is_not_null(ttl_map):
+                    exp_v3 = ttl_map[].get(src_v2)
                 keyspace[].set(dst_v2, val2.clone())  # gh #123: dst owns its buffer
                 _ = keyspace[].remove_generic(src_v2)
                 index_field_ttls(keyspace, dst_v2, val2)   # gh #392
                 if is_not_null(ttl_map):
-                    var exp_v3 = ttl_map[].get(src_v2)
                     if not exp_v3.is_none():
                         ttl_map[].set(dst_v2, exp_v3)
-                        _ = ttl_map[].remove_generic(src_v2)
                 writer.append_int_response(Int64(1))
         return 2
     else:
@@ -114,12 +120,31 @@ def handle_copy(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         var val3 = keyspace[].get(src_v3)
         var do_replace = False
         var j_cp = i + 3
+        var consumed = num_tokens - 1 - i
+        # Options as Redis parses them: REPLACE, and DB <n> — with one
+        # database, DB 0 or nothing. DB 1 used to be ignored, so the
+        # copy landed in DB 0 and REPLACE overwrote the key there.
         while j_cp < num_tokens:
             var opt_cp = tokens[unsafe_offset=j_cp]
-            if opt_cp.length == 7 and (opt_cp.ptr[unsafe_offset=0]|0x20)==114:  # REPLACE
+            if arg_eq(opt_cp.ptr, opt_cp.length, "replace"):
                 do_replace = True
+            elif arg_eq(opt_cp.ptr, opt_cp.length, "db") and j_cp + 1 < num_tokens:
+                var dbr = parse_int64_strict(tokens[unsafe_offset=j_cp + 1].ptr,
+                                             tokens[unsafe_offset=j_cp + 1].length)
+                if not dbr.ok:
+                    writer.append_error_response("ERR value is not an integer or out of range")
+                    return consumed
+                if dbr.value != 0:
+                    writer.append_error_response("ERR DB index is out of range")
+                    return consumed
+                j_cp += 1
+            else:
+                writer.append_error_response("ERR syntax error")
+                return consumed
             j_cp += 1
-        var consumed = j_cp - 1 - i
+        if src_str3 == dst_str3:
+            writer.append_error_response("ERR source and destination objects are the same")
+            return consumed
         if val3.is_none(): writer.append_int_response(Int64(0))
         else:
             var dst_v3 = GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
@@ -149,6 +174,132 @@ def handle_copy(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         return 0
 
 
+def _object_help(mut writer: ResponseWriter):
+    """OBJECT HELP: one status line per row, as Redis (it was one bulk string)."""
+    var lines = List[String]()
+    lines.append("OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:")
+    lines.append("ENCODING <key>")
+    lines.append("    Return the kind of internal representation used in order to store the value")
+    lines.append("    associated with a <key>.")
+    lines.append("FREQ <key>")
+    lines.append("    Return the access frequency index of the <key>. The returned integer is")
+    lines.append("    proportional to the logarithm of the recent access frequency of the key.")
+    lines.append("IDLETIME <key>")
+    lines.append("    Return the idle time of the <key>, that is the approximated number of")
+    lines.append("    seconds elapsed since the last access to the key.")
+    lines.append("REFCOUNT <key>")
+    lines.append("    Return the number of references of the value associated with the specified")
+    lines.append("    <key>.")
+    lines.append("HELP")
+    lines.append("    Print this help.")
+    writer.append_array_header(len(lines))
+    for k in range(len(lines)):
+        var line = String("+") + lines[k] + "\r\n"
+        writer.append_to_response(line.unsafe_ptr(), line.byte_length())
+
+
+def _is_redis_int(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    """Would Redis store these bytes as an integer (string2ll: no leading
+    zeros, no '+', at most 20 bytes)?"""
+    if n == 0 or n > 20:
+        return False
+    var k = 1 if p[0] == 45 else 0
+    if k >= n or (p[k] == 48 and n - k > 1) or (k == 1 and p[1] == 48):
+        return False
+    return parse_int64_strict(p, n).ok
+
+
+def _member_fits(v: GenericValue, buf: Pointer[UInt8, MutUntrackedOrigin], mut all_int: Bool) -> Bool:
+    """Is a member at most 64 bytes (a listpack entry), and is it an integer?"""
+    if not v.is_string():
+        return True
+    var n = v.string_len()
+    if all_int and not _is_redis_int(v.as_string_safe(buf), n):
+        all_int = False
+    return n <= 64
+
+
+def object_encoding(val: GenericValue, key_len: Int) -> String:
+    """OBJECT ENCODING, by Redis's rules for the size the value has (#47; a
+    small list said quicklist): an integer string is int, others embstr up to
+    44 bytes and raw beyond — and, as Redis 8 stores a value (kvobjSet), only
+    while the object, the key and the value share one cache line, which
+    Redis sizes at 128 bytes on Apple silicon and 64 elsewhere: a 44-byte
+    value under a 2-byte key is embstr on a Mac and raw on Linux; a list is a listpack while its elements' bytes
+    fit in 8 KB (list-max-listpack-size -2), else a quicklist; a hash is a
+    listpack up to 512 entries of at most 64 bytes (Redis 8's
+    hash-max-listpack-entries), a sorted set up to 128, else a hashtable or
+    skiplist; a set is an intset up to 512 integers, a listpack up to 128
+    short members, else a hashtable. Redis also keeps the encoding a
+    value grew into until it is rewritten, which Pion does not track."""
+    var t = val.type.value
+    var buf = alloc[UInt8](64)
+    var out = String("raw")
+    if t == ValueType.INT:
+        out = "int"
+    elif t == ValueType.STRING_SSO or t == ValueType.STRING:
+        var n = val.string_len()
+        var line = 64                                   # Redis's CACHE_LINE_SIZE
+        comptime if CompilationTarget.is_macos() and CompilationTarget.has_neon():
+            line = 128
+        if _is_redis_int(val.as_string_safe(buf), n):
+            out = "int"
+        elif n <= 44 and 16 + (key_len + 3) + (4 + n) <= line:
+            out = "embstr"
+    elif t == ValueType.FLOAT:
+        out = "embstr"
+    elif t == ValueType.LIST:
+        var l = val.as_list().bitcast[SlabList]()
+        out = "quicklist"
+        if l[].size <= 8192:
+            var elems = l[].get_all()
+            var bytes = 7
+            for k in range(len(elems)):
+                bytes += elems[k].string_len()
+            if bytes <= 8192:
+                out = "listpack"
+    elif t == ValueType.HASH or t == ValueType.SET:
+        var m = (val.as_hash() if t == ValueType.HASH else val.as_set()).bitcast[SlabHashMap]()
+        var all_int = t == ValueType.SET
+        var short = True
+        if m[].size <= 512:
+            for slot in range(m[].capacity):
+                var md = m[].metadata[slot]
+                if md == 0x80 or md == 0xFF:
+                    continue
+                if not _member_fits(m[].keys[slot], buf, all_int):
+                    short = False
+                if t == ValueType.HASH:
+                    var no_int = False
+                    if not _member_fits(m[].values[slot], buf, no_int):
+                        short = False
+        var lp_max = 512 if t == ValueType.HASH else 128   # Redis 8: hash-max-listpack-entries 512
+        if t == ValueType.SET and all_int and m[].size <= 512:
+            out = "intset"
+        elif m[].size <= lp_max and short:
+            out = "listpackex" if t == ValueType.HASH and is_not_null(m[].field_ttl) and m[].field_ttl[].size > 0 else "listpack"
+        else:
+            out = "hashtable"
+    elif t == ValueType.ZSET or t == ValueType.GEO:
+        var z = val.as_zset().bitcast[SlabSkipList]()
+        var short = z[].length <= 128
+        if short:
+            var no_int = False
+            var mm = z[].members.capacity
+            for slot in range(mm):
+                var md = z[].members.metadata[slot]
+                if md == 0x80 or md == 0xFF:
+                    continue
+                if not _member_fits(z[].members.keys[slot], buf, no_int):
+                    short = False
+                    break
+        out = "listpack" if short else "skiplist"
+    elif t == ValueType.STREAM:
+        out = "stream"
+    buf.free()
+    return out^
+
+
 @always_inline
 def handle_object(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
     """OBJECT subcommand key — inspect object internals."""
@@ -159,41 +310,36 @@ def handle_object(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         var val = keyspace[].get(key_v)
         var sub_p2 = sub_obj.ptr
         var sub_l2 = sub_obj.length
+        var _known = (arg_eq(sub_p2, sub_l2, "encoding") or arg_eq(sub_p2, sub_l2, "refcount")
+                      or arg_eq(sub_p2, sub_l2, "idletime") or arg_eq(sub_p2, sub_l2, "freq"))
+        # A missing key answers nil to every key subcommand, as Redis (#30):
+        # ENCODING said "raw", REFCOUNT 1, IDLETIME and FREQ 0.
+        if _known and val.is_none():
+            writer.append_null_response()
         # ENCODING subcommand
-        if sub_l2 == 8 and (sub_p2[unsafe_offset=0]|0x20)==101 and (sub_p2[unsafe_offset=1]|0x20)==110:
-            var enc_str: String
-            var vt2 = val.type.value
-            if vt2 == ValueType.INT: enc_str = "int"
-            elif vt2 == ValueType.STRING_SSO: enc_str = "embstr"
-            elif vt2 == ValueType.STRING: enc_str = "raw"
-            elif vt2 == ValueType.LIST: enc_str = "quicklist"
-            elif vt2 == ValueType.HASH: enc_str = "hashtable"
-            elif vt2 == ValueType.SET: enc_str = "hashtable"
-            elif vt2 == ValueType.ZSET or vt2 == ValueType.GEO: enc_str = "skiplist"
-            else: enc_str = "raw"
+        elif arg_eq(sub_p2, sub_l2, "encoding"):
+            var enc_str = object_encoding(val, tokens[unsafe_offset=i+2].length)
             writer.append_bulk_string_response(enc_str.unsafe_ptr(), enc_str.byte_length())
-        elif sub_l2 == 8 and (sub_p2[unsafe_offset=0]|0x20)==114 and (sub_p2[unsafe_offset=1]|0x20)==101:
-            # REFCOUNT
+        elif arg_eq(sub_p2, sub_l2, "refcount"):
             writer.append_int_response(Int64(1))
-        elif sub_l2 == 8 and (sub_p2[unsafe_offset=0]|0x20)==105 and (sub_p2[unsafe_offset=1]|0x20)==100:
-            # IDLETIME
-            writer.append_int_response(Int64(0))
-        elif sub_l2 == 4 and (sub_p2[unsafe_offset=0]|0x20)==102 and (sub_p2[unsafe_offset=1]|0x20)==114:
-            # FREQ
-            writer.append_int_response(Int64(0))
-        elif sub_l2 == 4 and (sub_p2[unsafe_offset=0]|0x20)==104 and (sub_p2[unsafe_offset=1]|0x20)==101:
-            # HELP
-            var help_str = String("OBJECT subcommands: ENCODING REFCOUNT IDLETIME FREQ HELP")
-            writer.append_bulk_string_response(help_str.unsafe_ptr(), help_str.byte_length())
+        elif arg_eq(sub_p2, sub_l2, "idletime"):
+            # #47: Pion keeps no per-key access time, so it refuses, as Redis
+            # refuses when its policy does not track idle time (this said 0)
+            writer.append_error_response("ERR Pion does not track key access times, idle time not tracked")
+        elif arg_eq(sub_p2, sub_l2, "freq"):
+            # Access frequency exists only under an LFU maxmemory policy, and
+            # Pion has none (noeviction): Redis refuses, it does not answer 0.
+            writer.append_error_response("ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.")
+        elif arg_eq(sub_p2, sub_l2, "help"):
+            _object_help(writer)
         else: writer.append_error_response("ERR unknown OBJECT subcommand")
         return 2
     else:
         # OBJECT with just subcommand, no key (e.g. OBJECT HELP)
         if i + 1 < num_tokens:
             var sub2 = tokens[unsafe_offset=i+1]
-            if sub2.length == 4 and (sub2.ptr[unsafe_offset=0]|0x20)==104 and (sub2.ptr[unsafe_offset=1]|0x20)==101:
-                var help_str = String("OBJECT subcommands: ENCODING REFCOUNT IDLETIME FREQ HELP")
-                writer.append_bulk_string_response(help_str.unsafe_ptr(), help_str.byte_length())
+            if arg_eq(sub2.ptr, sub2.length, "help"):
+                _object_help(writer)
                 return 1
         writer.append_error_response("ERR wrong number of arguments for 'object' command")
         return 0
@@ -424,6 +570,19 @@ def _key_ns_match(kv: GenericValue, ns_ptr: Pointer[UInt8, MutUntrackedOrigin],
     return klen
 
 
+def _type_is(v: GenericValue, tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
+    """SCAN TYPE: does `v` have the type TYPE reports by that name (any case)?
+    An unknown name matches nothing, as in Redis 8."""
+    var t = v.type.value
+    if t == ValueType.LIST: return arg_eq(tp, tl, "list")
+    if t == ValueType.SET: return arg_eq(tp, tl, "set")
+    if t == ValueType.ZSET or t == ValueType.GEO: return arg_eq(tp, tl, "zset")
+    if t == ValueType.HASH: return arg_eq(tp, tl, "hash")
+    if t == ValueType.STREAM: return arg_eq(tp, tl, "stream")
+    if t == ValueType.VSET: return arg_eq(tp, tl, "vectorset")
+    return arg_eq(tp, tl, "string")
+
+
 @always_inline
 def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin],
                 ns_ptr: Pointer[UInt8, MutUntrackedOrigin], ns_len: Int) raises -> Int:
@@ -433,29 +592,10 @@ def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     if i + 1 < num_tokens:
         var cursor_str = tokens[unsafe_offset=i+1].value()
         var cursor_i2 = scan_cursor(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)   # gh #393
-        var consumed = 1
-        var scan_pat_p = null_ptr[UInt8, MutUntrackedOrigin]()
-        var scan_pat_l = 0
-        # Skip any optional args
-        var j_scan = i + 2
-        while j_scan < num_tokens:
-            var nxt_t = tokens[unsafe_offset=j_scan]
-            var nxt_l = nxt_t.length; var nxt_p = nxt_t.ptr
-            if nxt_l == 5 and (nxt_p[unsafe_offset=0]|0x20)==109:
-                # gh #243: the pattern was parsed only to SKIP it, so
-                # `SCAN 0 MATCH cache:*` returned the whole keyspace. SCAN is the
-                # recommended way to iterate, so the classic
-                # "SCAN MATCH prefix:* then DEL each" loop deleted EVERY key.
-                if j_scan + 1 < num_tokens:
-                    scan_pat_p = tokens[unsafe_offset=j_scan+1].ptr
-                    scan_pat_l = tokens[unsafe_offset=j_scan+1].length
-                j_scan += 2; consumed += 2
-            elif nxt_l == 5 and (nxt_p[unsafe_offset=0]|0x20)==99 and (nxt_p[unsafe_offset=1]|0x20)==111:   # COUNT n
-                if j_scan + 1 >= num_tokens: raise Error("ERR syntax error")
-                _ = scan_count(tokens[unsafe_offset=j_scan+1].ptr, tokens[unsafe_offset=j_scan+1].length)
-                j_scan += 2; consumed += 2
-            elif nxt_l == 4 and (nxt_p[unsafe_offset=0]|0x20)==116 and (nxt_p[unsafe_offset=1]|0x20)==121: j_scan += 2; consumed += 2  # TYPE t
-            else: break
+        var consumed = num_tokens - 1 - i
+        var so = parse_scan_opts(tokens, i + 2, num_tokens, writer, True, False)
+        if not so.ok:
+            return consumed
         # cursor 0: return all keys; non-zero: return empty (single sweep)
         if cursor_i2 != 0:
             var scan_empty = "*2\r\n$1\r\n0\r\n*0\r\n"
@@ -463,42 +603,43 @@ def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         else:
             var kbuf = alloc[UInt8](24)
             var smbuf = alloc[UInt8](24)
-            var scan_all = scan_pat_l == 0 or _glob_all(scan_pat_p, scan_pat_l)
-            var total_keys = 0
+            # An empty MATCH pattern matches only the empty key, as in Redis;
+            # "no MATCH" is what matches everything.
+            var scan_all = not so.has_match or _glob_all(so.pat_p, so.pat_l)
+            # One pass decides which keys answer; the reply's header is their
+            # count, so the emit pass cannot disagree with it.
+            var hit_shard = List[Int]()
+            var hit_slot = List[Int]()
+            var hit_len = List[Int]()
             for shard_i in range(8):
                 var sp = keyspace[].shards.unsafe_offset(shard_i)
                 for slot in range(sp[].capacity):
                     var m = sp[].metadata[unsafe_offset=slot]
-                    if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
-                        var kl0 = _key_ns_match(sp[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
-                        if kl0 >= 0:
-                            if scan_all:
-                                total_keys += 1
-                            else:
-                                var kp0 = sp[].keys[unsafe_offset=slot].as_string_safe(smbuf)
-                                if _glob_match(scan_pat_p, scan_pat_l, 0, kp0.unsafe_offset(ns_len), kl0 - ns_len, 0):
-                                    total_keys += 1
-            var scan_hdr = String("*2\r\n$1\r\n0\r\n*") + String(total_keys) + String("\r\n")
-            writer.append_to_response(scan_hdr.unsafe_ptr(), scan_hdr.byte_length())
-            for shard_i in range(8):
-                var sp = keyspace[].shards.unsafe_offset(shard_i)
-                for slot in range(sp[].capacity):
-                    var m = sp[].metadata[unsafe_offset=slot]
-                    if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
-                        var klen = _key_ns_match(sp[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
-                        if klen < 0:
+                    if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
+                        continue
+                    if keyspace[].expire_stored_if_due(sp[].keys[unsafe_offset=slot]):
+                        continue              # #45: an expired key is removed, as Redis's SCAN does
+                    var klen = _key_ns_match(sp[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
+                    if klen < 0:
+                        continue
+                    if not scan_all:
+                        var kp1 = sp[].keys[unsafe_offset=slot].as_string_safe(smbuf)
+                        if not _glob_match(so.pat_p, so.pat_l, 0, kp1.unsafe_offset(ns_len), klen - ns_len, 0):
                             continue
-                        if not scan_all:
-                            # same predicate as the counting pass — a mismatch
-                            # would emit a different count than the header says
-                            var kp1 = sp[].keys[unsafe_offset=slot].as_string_safe(smbuf)
-                            if not _glob_match(scan_pat_p, scan_pat_l, 0, kp1.unsafe_offset(ns_len), klen - ns_len, 0):
-                                continue
-                        if ns_len == 0:
-                            writer.append_bulk_value_response(sp[].keys[unsafe_offset=slot])
-                        else:
-                            var kp = sp[].keys[unsafe_offset=slot].as_string_safe(kbuf)
-                            writer.append_bulk_string_response(kp.unsafe_offset(ns_len), klen - ns_len)
+                    if so.has_type and not _type_is(sp[].values[unsafe_offset=slot], so.type_p, so.type_l):
+                        continue
+                    hit_shard.append(shard_i)
+                    hit_slot.append(slot)
+                    hit_len.append(klen)
+            var scan_hdr = String("*2\r\n$1\r\n0\r\n*") + String(len(hit_slot)) + String("\r\n")
+            writer.append_to_response(scan_hdr.unsafe_ptr(), scan_hdr.byte_length())
+            for h in range(len(hit_slot)):
+                var sp = keyspace[].shards.unsafe_offset(hit_shard[h])
+                if ns_len == 0:
+                    writer.append_bulk_value_response(sp[].keys[unsafe_offset=hit_slot[h]])
+                else:
+                    var kp = sp[].keys[unsafe_offset=hit_slot[h]].as_string_safe(kbuf)
+                    writer.append_bulk_string_response(kp.unsafe_offset(ns_len), hit_len[h] - ns_len)
             kbuf.unsafe_free()
             smbuf.unsafe_free()
         return consumed
@@ -529,7 +670,8 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         var sp2 = keyspace[].shards.unsafe_offset(shard_i)
         for slot in range(sp2[].capacity):
             var m = sp2[].metadata[unsafe_offset=slot]
-            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
+            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
+                    and not keyspace[].is_expired(sp2[].keys[unsafe_offset=slot]):     # #45
                 var kl0 = _key_ns_match(sp2[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
                 if kl0 >= 0:
                     if match_all:
@@ -544,7 +686,8 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         var sp2 = keyspace[].shards.unsafe_offset(shard_i)
         for slot in range(sp2[].capacity):
             var m = sp2[].metadata[unsafe_offset=slot]
-            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
+            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
+                    and not keyspace[].is_expired(sp2[].keys[unsafe_offset=slot]):     # #45: as above
                 var klen = _key_ns_match(sp2[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
                 if klen < 0:
                     continue
@@ -567,17 +710,48 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 
 @always_inline
 def handle_randomkey(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
-    """RANDOMKEY — return a random key from the keyspace."""
-    var found_rk = False
+    """RANDOMKEY — a random key that has not expired (#45), nil when there is
+    none. It returned the first key in shard order, every time. A shard is
+    picked in proportion to its size, then the first live key from a random
+    slot; after 100 picks that found only expired keys, the first live key in
+    order (Redis also stops sampling after 100)."""
+    var total = 0
     for shard_i in range(8):
-        if found_rk: break
+        total += keyspace[].shards[unsafe_offset=shard_i].size
+    if total == 0:
+        writer.append_null_response()
+        return 0
+    for _ in range(100):
+        var r = Int(external_call["random", Int64]()) % total
+        var shard_i = 0
+        while shard_i < 7 and r >= keyspace[].shards[unsafe_offset=shard_i].size:
+            r -= keyspace[].shards[unsafe_offset=shard_i].size
+            shard_i += 1
+        var sp = keyspace[].shards.unsafe_offset(shard_i)
+        var cap = sp[].capacity
+        if cap == 0 or sp[].size == 0:
+            continue
+        var slot = Int(external_call["random", Int64]()) % cap
+        var occupied = False
+        for _step in range(cap):
+            var m = sp[].metadata[unsafe_offset=slot]
+            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
+                occupied = True
+                break
+            slot = (slot + 1) % cap
+        if not occupied or keyspace[].expire_stored_if_due(sp[].keys[unsafe_offset=slot]):
+            continue                 # #45: removed, as Redis's RANDOMKEY does
+        writer.append_bulk_value_response(sp[].keys[unsafe_offset=slot])
+        return 0
+    for shard_i in range(8):
         var sp3 = keyspace[].shards.unsafe_offset(shard_i)
         for slot in range(sp3[].capacity):
             var m = sp3[].metadata[unsafe_offset=slot]
-            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED:
+            if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
+                    and not keyspace[].is_expired(sp3[].keys[unsafe_offset=slot]):
                 writer.append_bulk_value_response(sp3[].keys[unsafe_offset=slot])
-                found_rk = True; break
-    if not found_rk: writer.append_null_response()
+                return 0
+    writer.append_null_response()
     return 0
 
 
@@ -601,12 +775,14 @@ struct ParkedWait(Copyable, Movable, ImplicitlyCopyable):
     var num_req: Int
     var target: UInt64      # WAL offset every counted replica must have applied
     var deadline_ns: Int64  # 0 = no deadline: `WAIT n 0` waits until n replicas ack
+    var unblock: UInt8      # CLIENT UNBLOCK (#47): UNBLOCK_TIMEOUT or UNBLOCK_ERROR, else 0
 
     def __init__(out self, fd: Int32, num_req: Int, target: UInt64, deadline_ns: Int64):
         self.fd = fd
         self.num_req = num_req
         self.target = target
         self.deadline_ns = deadline_ns
+        self.unblock = 0
 
 
 struct ParkedWaits(Movable):
@@ -616,16 +792,26 @@ struct ParkedWaits(Movable):
     its receive buffer. `flags[fd]` makes the per-buffer check one byte load."""
     var entries: List[ParkedWait]
     var flags: Pointer[UInt8, MutUntrackedOrigin]
+    # Connections parked by park_fd (an XREAD BLOCK): they have no
+    # entry, so `count()` does not see them; `any()` does.
+    var fd_parks: Int
 
     def __init__(out self):
         self.entries = List[ParkedWait]()
         self.flags = alloc[UInt8](65536)
         for i in range(65536):
             self.flags[unsafe_offset=i] = 0
+        self.fd_parks = 0
 
     @always_inline
     def count(self) -> Int:
         return len(self.entries)
+
+    @always_inline
+    def any(self) -> Bool:
+        """Any connection parked, by WAIT or by park_fd: the dispatch loop's
+        one-compare guard before the per-fd flag load."""
+        return len(self.entries) > 0 or self.fd_parks > 0
 
     @always_inline
     def is_parked(self, fd: Int) -> Bool:
@@ -634,6 +820,19 @@ struct ParkedWaits(Movable):
     def park(mut self, w: ParkedWait):
         self.entries.append(w)
         self.flags[unsafe_offset=Int(w.fd)] = 1
+
+    def park_fd(mut self, fd: Int32):
+        """Park a connection with no WAIT entry: an XREAD BLOCK,
+        answered by NetworkEngine._service_blocked_readers."""
+        if fd >= 0 and fd < 65536 and self.flags[unsafe_offset=Int(fd)] == 0:
+            self.flags[unsafe_offset=Int(fd)] = 2
+            self.fd_parks += 1
+
+    def unpark_fd(mut self, fd: Int32):
+        """Undo park_fd."""
+        if fd >= 0 and fd < 65536 and self.flags[unsafe_offset=Int(fd)] == 2:
+            self.flags[unsafe_offset=Int(fd)] = 0
+            self.fd_parks -= 1
 
     def unpark_at(mut self, k: Int):
         """Remove entry k (swap with the last)."""
@@ -644,8 +843,11 @@ struct ParkedWaits(Movable):
         _ = self.entries.pop()
 
     def remove_fd(mut self, fd: Int32):
-        """The connection closed while parked: drop its WAIT."""
+        """The connection closed while parked: drop its WAIT or its park."""
         if not self.is_parked(Int(fd)):
+            return
+        if self.flags[unsafe_offset=Int(fd)] == 2:
+            self.unpark_fd(fd)
             return
         var k = 0
         while k < len(self.entries):

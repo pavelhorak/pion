@@ -6,9 +6,10 @@ WATCH snapshots key versions; EXEC aborts if any watched key was modified.
 """
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.value import GenericValue
+from src.common.hash_map import StripedHashMap
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
-from std.collections import Array
+from std.collections import Array, Dict
 from std.memory import unsafe_memcpy, unsafe_memset
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
@@ -41,9 +42,13 @@ comptime KEY_VERSION_SLOTS = 65536  # hash-based version tracking (collisions ca
 struct WatchedKey(Copyable, Movable, ImplicitlyCopyable):
     var slot: UInt16      # index into key_versions array
     var version: UInt64   # version at WATCH time
+    # #45: the key's TTL deadline (ns) when it was watched, -1 for none or for
+    # a key already expired then. A key that expires after WATCH aborts EXEC,
+    # as in Redis 7: expiry is a change the client did not make.
+    var deadline: Int64
 
     def __init__(out self):
-        self.slot = 0; self.version = 0
+        self.slot = 0; self.version = 0; self.deadline = -1
 
 
 struct QueuedCommand(Copyable, Movable, ImplicitlyCopyable):
@@ -88,6 +93,9 @@ struct TransactionState(Movable):
     # to 2 in cleanup_fd so a reused fd never inherits the previous session's
     # protocol and start answering RESP3 to a RESP2 client.
     var resp_proto: Pointer[UInt8, MutUntrackedOrigin]     # [MAX_TX_FDS]
+    # #30: CLIENT SETNAME's name per fd (absent = none). SETNAME answered +OK
+    # and kept nothing, so CLIENT GETNAME was nil whatever was set.
+    var client_names: Dict[Int, String]
 
     def __init__(out self):
         self.in_multi = alloc[UInt8](MAX_TX_FDS)
@@ -115,6 +123,7 @@ struct TransactionState(Movable):
         unsafe_memset(self.tenant_id.unsafe_bitcast[UInt8](), 0xFF, MAX_TX_FDS * 2)
         self.resp_proto = alloc[UInt8](MAX_TX_FDS)
         unsafe_memset(self.resp_proto, 2, MAX_TX_FDS)
+        self.client_names = Dict[Int, String]()
 
     def is_multi(self, fd: Int32) -> Bool:
         return self.in_multi[unsafe_offset=Int(fd)] == 1
@@ -216,6 +225,11 @@ struct TransactionState(Movable):
         self.tenant_id[unsafe_offset=Int(fd)] = -1
         # gh #172: back to RESP2 so a reused fd never inherits RESP3.
         self.resp_proto[unsafe_offset=Int(fd)] = 2
+        if Int(fd) in self.client_names:
+            try:
+                _ = self.client_names.pop(Int(fd))
+            except:
+                pass
 
     # ── Key version tracking ──
 
@@ -278,7 +292,8 @@ struct TransactionState(Movable):
         return True
 
     @always_inline
-    def watch_key(mut self, fd: Int32, key_ptr: Pointer[UInt8, MutUntrackedOrigin], key_len: Int) -> Bool:
+    def watch_key(mut self, fd: Int32, key_ptr: Pointer[UInt8, MutUntrackedOrigin], key_len: Int,
+                  deadline: Int64 = -1) -> Bool:
         """Snapshot current version of a key for this fd.
 
         Returns False ONLY at the hard ceiling. This used to return silently
@@ -292,12 +307,14 @@ struct TransactionState(Movable):
         var slot = Self.key_slot(key_ptr, key_len)
         self.watch_keys[unsafe_offset=Int(fd)][unsafe_offset=wc].slot = UInt16(slot)
         self.watch_keys[unsafe_offset=Int(fd)][unsafe_offset=wc].version = self.key_versions[unsafe_offset=slot]
+        self.watch_keys[unsafe_offset=Int(fd)][unsafe_offset=wc].deadline = deadline
         self.watch_counts[unsafe_offset=Int(fd)] = Int32(wc + 1)
         return True
 
     @always_inline
-    def check_watch(self, fd: Int32) -> Bool:
-        """Check if any watched key was modified. Returns True if all clean (EXEC can proceed)."""
+    def check_watch(self, fd: Int32, now_ns: Int64 = 0) -> Bool:
+        """Check if any watched key was modified, or has expired since it was
+        watched (#45). Returns True if all clean (EXEC can proceed)."""
         var wc = Int(self.watch_counts[unsafe_offset=Int(fd)])
         if wc == 0: return True  # no watches = always clean
         if is_null(self.watch_keys[unsafe_offset=Int(fd)]): return True
@@ -305,6 +322,9 @@ struct TransactionState(Movable):
             var slot = Int(self.watch_keys[unsafe_offset=Int(fd)][unsafe_offset=i].slot)
             if self.key_versions[unsafe_offset=slot] != self.watch_keys[unsafe_offset=Int(fd)][unsafe_offset=i].version:
                 return False  # key was modified
+            var d = self.watch_keys[unsafe_offset=Int(fd)][unsafe_offset=i].deadline
+            if d >= 0 and now_ns > d:
+                return False  # key expired after WATCH
         return True
 
     @always_inline
@@ -369,7 +389,7 @@ def tx_queue_has_denyoom(fd: Int32, tx: TransactionState) -> Bool:
     return False
 
 
-def handle_exec_start(fd: Int32, mut tx: TransactionState, mut writer: ResponseWriter) -> Int:
+def handle_exec_start(fd: Int32, mut tx: TransactionState, mut writer: ResponseWriter, now_ns: Int64 = 0) -> Int:
     """EXEC → execute queued commands and return array of results.
     Returns the number of queued commands (caller must replay them).
     Returns -1 on error, -2 on WATCH abort."""
@@ -386,7 +406,7 @@ def handle_exec_start(fd: Int32, mut tx: TransactionState, mut writer: ResponseW
         )
         return -1
     # Check WATCH — abort if any watched key was modified
-    if not tx.check_watch(fd):
+    if not tx.check_watch(fd, now_ns):
         tx.in_multi[unsafe_offset=Int(fd)] = 0
         tx.queue_counts[unsafe_offset=Int(fd)] = 0
         tx.clear_watch(fd)
@@ -419,8 +439,11 @@ def handle_discard(fd: Int32, mut tx: TransactionState, mut writer: ResponseWrit
 
 
 @always_inline
-def handle_watch(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, fd: Int32, mut tx: TransactionState, mut writer: ResponseWriter) -> Int:
-    """WATCH key [key ...] → +OK (snapshot key versions for optimistic locking)."""
+def handle_watch(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, fd: Int32, mut tx: TransactionState, mut writer: ResponseWriter,
+                 keyspace: Pointer[StripedHashMap, MutUntrackedOrigin] = null_ptr[StripedHashMap, MutUntrackedOrigin](),
+                 now_ns: Int64 = 0) -> Int:
+    """WATCH key [key ...] → +OK (snapshot key versions for optimistic locking,
+    and each key's TTL deadline, #45)."""
     if tx.is_multi(fd):
         writer.append_error_response("ERR WATCH inside MULTI is not allowed")
         return num_tokens - i - 1
@@ -432,7 +455,12 @@ def handle_watch(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     for wi in range(n):
         var kp = tokens[unsafe_offset=i + 1 + wi].ptr
         var kl = tokens[unsafe_offset=i + 1 + wi].length
-        if not tx.watch_key(fd, kp, kl):
+        var dl = Int64(-1)
+        if is_not_null(keyspace):
+            dl = keyspace[].deadline(GenericValue.borrow(kp, kl))
+            if dl >= 0 and dl < now_ns:
+                dl = -1            # already expired when watched: not a change
+        if not tx.watch_key(fd, kp, kl, dl):
             all_watched = False
             break
     if not all_watched:

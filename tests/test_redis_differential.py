@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,11 +29,18 @@ import time
 HOST = "127.0.0.1"
 
 
+RESP3 = False   # set from --resp3: every connection, reconnects too, says HELLO 3
+
+
 class Conn:
     def __init__(self, port, timeout=6):
         self.s = socket.create_connection((HOST, port), timeout=timeout)
         self.s.settimeout(timeout)
         self.f = self.s.makefile("rb")
+        if RESP3:
+            kind, _ = self.cmd("HELLO", "3")
+            if kind != "map":
+                raise OSError(f"HELLO 3 on port {port} did not answer a map ({kind})")
 
     def cmd(self, *args):
         buf = f"*{len(args)}\r\n".encode()
@@ -51,8 +59,11 @@ class Conn:
             return ("status", body.decode())
         if t == b"-":
             # Compare only the error CODE (first word). Message wording differs
-            # between implementations and is not a compatibility contract.
-            return ("error", body.decode().split(" ", 1)[0])
+            # between implementations and is not a compatibility contract —
+            # except for scripts (#36): their error text IS the interface (a
+            # caller's pcall gets it), so those groups compare it whole.
+            text = body.decode(errors="replace")
+            return ("error", text if FULL_ERRORS else text.split(" ", 1)[0])
         if t == b":":
             return ("int", int(body))
         if t == b"$":
@@ -65,8 +76,26 @@ class Conn:
             return ("array", [self._read() for _ in range(n)])
         if t == b"_":
             return ("nil", None)
-        if t in (b"#", b",", b"("):
-            return ("scalar", body.decode())
+        # RESP3 (`--resp3`). Each type keeps its own kind, so a reply sent as
+        # an array where Redis sends a map, a set or a double is a divergence:
+        # the TYPE is what a RESP3 client decodes it into (#23).
+        if t == b"%":
+            n = int(body)
+            items = [self._read() for _ in range(2 * n)]
+            return ("map", list(zip(items[0::2], items[1::2])))
+        if t == b"~":
+            return ("set", [self._read() for _ in range(int(body))])
+        if t == b">":
+            return ("push", [self._read() for _ in range(int(body))])
+        if t == b"=":
+            n = int(body)
+            return ("verbatim", self.f.read(n + 2)[:-2])
+        if t == b",":
+            return ("double", body.decode())
+        if t == b"#":
+            return ("bool", body.decode())
+        if t == b"(":
+            return ("bignum", body.decode())
         return ("raw", body.decode(errors="replace"))
 
     def close(self):
@@ -188,16 +217,6 @@ def normalize(kind_val, cmd):
         cur, items = (list(val) + [("array", [])])[:2]
         elems = [repr(x) for x in (items[1] if items[0] == "array" else [])]
         return ("scan", cur[1] in (b"0", "0"), sorted(elems))
-    if kind == "bulk" and cmd[0] == "GEOPOS":
-        # GEOPOS coordinates come back as printed doubles and the two servers
-        # format the last digit differently (38.1155563954963 vs
-        # ...49629) — same value, C's %.17g against Mojo's shortest repr.
-        # Compared at 10 decimals: far tighter than geohash resolution (~0.6 m
-        # of error at 26 bits), so a genuinely wrong coordinate still fails.
-        try:
-            return ("geo-coord", round(float(val), 10))
-        except (TypeError, ValueError):
-            return (kind, val)
     if kind == "array" and cmd[0] in ("XRANGE", "XREVRANGE"):
         # Also before the generic array branch. The wrong-type fixture is built
         # with `XADD * `, so every entry carries a wall-clock id and the two
@@ -215,6 +234,38 @@ def normalize(kind_val, cmd):
             else:
                 out.append(normalize(e, cmd))
         return ("xrange", out)
+    if kind == "array" and cmd[0] == "TIME":
+        # The two servers read their clocks at different instants. The reply
+        # is still checked: two bulk strings, seconds near this machine's
+        # clock and microseconds below 1,000,000.
+        ok = len(val) == 2 and all(k == "bulk" and v.isdigit() for k, v in val)
+        if ok:
+            ok = abs(int(val[0][1]) - time.time()) < 60 and int(val[1][1]) < 1_000_000
+        return ("time", ok)
+    if kind == "array" and len(cmd) > 1 and cmd[0] == "FUNCTION" and str(cmd[1]).upper() == "LIST":
+        # Redis lists libraries, and each library's functions, in the order
+        # of a hash table seeded at random per process: not a contract. Both
+        # levels are sorted; everything else in the reply is compared as is.
+        def fns_sorted(v):
+            return ("array", sorted((normalize(f, cmd) for f in v[1]), key=repr)) if v[0] == "array" else v
+        libs = []
+        for lib in val:
+            if lib[0] == "array":            # RESP2: name, value, name, value ...
+                fields = list(lib[1])
+                for k in range(0, len(fields) - 1, 2):
+                    if fields[k] == ("bulk", b"functions"):
+                        fields[k + 1] = fns_sorted(fields[k + 1])
+                libs.append(("array", [normalize(x, cmd) if x[0] != "array" else x for x in fields]))
+            elif lib[0] == "map":            # RESP3: (name, value) pairs
+                pairs = [(k, fns_sorted(v) if k == ("bulk", b"functions") else normalize(v, cmd))
+                         for k, v in lib[1]]
+                libs.append(("map", sorted(pairs, key=repr)))
+            else:
+                libs.append(normalize(lib, cmd))
+        return ("function-list", sorted(libs, key=repr))
+    if kind in ("map", "set"):
+        # RESP3 map / set: order is unspecified, the type is not.
+        return (kind, sorted(repr(normalize(x, cmd)) for x in val))
     if kind == "array":
         # Order is unspecified for set-like replies. The RANDMEMBER family is
         # here for the same reason and is only ever probed in shapes whose
@@ -255,13 +306,28 @@ def main():
     ap.add_argument("--redis-port", type=int, default=6399)
     ap.add_argument("--start-redis", action="store_true")
     ap.add_argument("--show-agreements", action="store_true")
+    ap.add_argument("--mutate", action="store_true",
+                    help="also send every keyword argument of the semantic scripts "
+                         "mangled (last letter changed, a letter appended): Redis "
+                         "refuses those, so a prefix-matching keyword parser shows up")
+    ap.add_argument("--resp3", action="store_true",
+                    help="speak RESP3 (HELLO 3) to both servers and compare reply TYPES too")
     args = ap.parse_args()
+    global RESP3
+    RESP3 = args.resp3
 
     rproc = None
     if args.start_redis:
+        # #27: was /opt/homebrew/bin/redis-server — a Homebrew path, so the
+        # oracle never started on Linux.
+        exe = shutil.which("redis-server")
+        if exe is None:
+            print("FATAL: --start-redis needs redis-server on PATH")
+            return 2
         rproc = subprocess.Popen(
-            ["/opt/homebrew/bin/redis-server", "--port", str(args.redis_port),
-             "--save", "", "--appendonly", "no"],
+            [exe, "--port", str(args.redis_port), "--save", "", "--appendonly", "no",
+             # Pion has one database; so does this oracle.
+             "--databases", "1"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
 
@@ -366,6 +432,14 @@ def main():
             print(f"  {name[:34]:36} {' '.join(str(x) for x in cmd)[:36]:38} "
                   f"Pion {str(rp)[:24]:26} Redis {str(rr)[:28]}")
     diffs.extend(sd)
+
+    if args.mutate:
+        md, mn = run_mutations(pion, redis)
+        print(f"\nKEYWORD MUTATIONS: {mn} mangled keywords, {mn - len(md)} agree, {len(md)} differ\n")
+        for name, cmd, rp, rr in md:
+            print(f"  {name[:34]:36} {' '.join(str(x) for x in cmd)[:44]:46} "
+                  f"Pion {str(rp)[:22]:24} Redis {str(rr)[:24]}")
+        diffs.extend(md)
 
     pion.close()
     redis.close()
@@ -976,12 +1050,660 @@ SEMANTIC_SCRIPTS = [
         ["DEL", "%K3"], ["ZADD", "%K3", "1", "a1", "2", "a2", "3", "b1"],
         ["ZSCAN", "%K3", "0"], ["ZSCAN", "%K3", "0", "MATCH", "a*"],
         ["SSCAN", "nosuch:key", "0"], ["HSCAN", "nosuch:key", "0"]]),
+
+    # #18: sorted-set scores as Redis prints them (d2string), ±inf included,
+    # and the NaN refusals. Every reply also runs under --resp3.
+    ("zset: score formats, ±inf and NaN (#18)", [
+        ["DEL", "%K"],
+        ["ZADD", "%K", "inf", "pinf", "-inf", "minf", "1e-5", "small", "5e18", "big",
+         "9223372036854775807", "huge", "0.1", "dec", "3", "int", "1e15", "e15",
+         "1.5e-7", "tiny", "123456789.125", "frac"],
+        ["ZRANGE", "%K", "0", "-1", "WITHSCORES"],
+        ["ZRANGEBYSCORE", "%K", "-inf", "+inf", "WITHSCORES"],
+        ["ZREVRANGE", "%K", "0", "-1", "WITHSCORES"],
+        ["ZSCORE", "%K", "pinf"], ["ZSCORE", "%K", "minf"], ["ZSCORE", "%K", "small"],
+        ["ZMSCORE", "%K", "big", "huge", "nosuch"],
+        ["ZINCRBY", "%K", "-inf", "pinf"],                   # NaN: refused, unchanged
+        ["ZSCORE", "%K", "pinf"],
+        ["ZADD", "%K", "INCR", "-inf", "pinf"],
+        ["ZADD", "%K", "NX", "INCR", "-inf", "pinf"],        # NX before the NaN check
+        ["ZADD", "%K", "INCR", "0.3333333333333333", "third"],
+        ["ZADD", "%K", "NX", "XX", "1", "m"],
+        ["ZADD", "%K", "GT", "LT", "1", "m"],
+        ["ZADD", "%K", "INCR", "1", "m", "2", "n"],
+        ["ZPOPMIN", "%K"], ["ZPOPMAX", "%K"], ["ZPOPMIN", "%K", "2"], ["ZPOPMAX", "%K", "1"],
+        ["DEL", "%K2"], ["ZADD", "%K2", "inf", "m"], ["DEL", "%K3"], ["ZADD", "%K3", "-inf", "m"],
+        ["ZUNION", "2", "%K2", "%K3", "WITHSCORES"],
+        ["ZUNION", "1", "%K2", "WEIGHTS", "0", "WITHSCORES"],
+        ["ZINTER", "2", "%K2", "%K3", "WITHSCORES"]]),
+
+    # #30: ZRANK WITHSCORE, SINTER/SDIFF key types, OBJECT, CLIENT names.
+    ("rank WITHSCORE, set key types, OBJECT, CLIENT (#30)", [
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a", "2.5", "b"],
+        ["ZRANK", "%K", "b", "WITHSCORE"], ["ZREVRANK", "%K", "b", "WITHSCORE"],
+        ["ZRANK", "%K", "nosuch", "WITHSCORE"], ["ZRANK", "nosuch:key", "a", "WITHSCORE"],
+        ["ZRANK", "%K", "b", "WITHSCORES"], ["ZRANK", "%K", "b"],
+        ["DEL", "%K2"], ["SADD", "%K2", "a", "b"], ["DEL", "%K3"], ["SET", "%K3", "str"],
+        ["SINTER", "%K2", "%K3"], ["SDIFF", "%K2", "%K3"], ["SINTER", "nosuch:key", "%K3"],
+        ["SDIFF", "nosuch:key", "%K3"], ["SINTER", "%K2", "nosuch:key"],
+        ["OBJECT", "FREQ", "%K3"], ["OBJECT", "ENCODING", "nosuch:key"],
+        ["OBJECT", "REFCOUNT", "nosuch:key"],
+        ["CLIENT", "GETNAME"], ["CLIENT", "SETNAME", "dfname"], ["CLIENT", "GETNAME"],
+        ["CLIENT", "SETNAME", "has space"], ["CLIENT", "SETNAME", ""], ["CLIENT", "GETNAME"],
+        ["CLIENT", "NOSUCHSUB"], ["TIME"], ["TIME", "extra"]]),
+
+    # The bitmap option surface (#31): SETBIT past the end of an
+    # existing bitmap, BITPOS/BITCOUNT ranges in BYTE and BIT units, BITFIELD's
+    # types, `#` offsets, OVERFLOW modes and all-or-nothing refusal, BITOP's
+    # operations.
+    ("bitmap: SETBIT past the end, BITPOS / BITCOUNT ranges", [
+        ["DEL", "%K"], ["SETBIT", "%K", "0", "1"], ["SETBIT", "%K", "100", "0"],
+        ["SETBIT", "%K", "1000", "0"], ["STRLEN", "%K"], ["SETBIT", "%K", "9", "1"],
+        ["SETBIT", "%K", "23", "1"], ["GET", "%K"],
+        ["BITPOS", "%K", "1"], ["BITPOS", "%K", "0"], ["BITPOS", "%K", "1", "1"],
+        ["BITPOS", "%K", "1", "1", "1"], ["BITPOS", "%K", "1", "0", "-1", "BIT"],
+        ["BITPOS", "%K", "1", "1", "8", "BIT"], ["BITPOS", "%K", "1", "10", "22", "BIT"],
+        ["BITPOS", "%K", "0", "0", "0", "BIT"], ["BITPOS", "%K", "1", "0", "-1", "BYTE"],
+        ["BITPOS", "%K", "1", "0", "-1", "NOPE"], ["BITPOS", "%K", "2"],
+        ["BITPOS", "%K", "1", "x"], ["BITPOS", "%K", "1", "200"],
+        ["BITCOUNT", "%K", "0", "0"], ["BITCOUNT", "%K", "1", "2"], ["BITCOUNT", "%K", "0", "9", "BIT"],
+        ["BITCOUNT", "%K", "5", "30", "BIT"], ["BITCOUNT", "%K", "-8", "-1", "BIT"],
+        ["BITCOUNT", "%K", "0", "-1", "BYTE"], ["BITCOUNT", "%K", "0"], ["BITCOUNT", "%K", "0", "1", "NOPE"],
+        ["DEL", "%K2"], ["SETBIT", "%K2", "7", "1"], ["SETBIT", "%K2", "6", "1"],
+        ["BITPOS", "%K2", "0"], ["BITPOS", "%K2", "0", "0", "0"], ["BITPOS", "%K2", "0", "0"],
+        ["BITPOS", "nosuch:key", "0"], ["BITPOS", "nosuch:key", "1"],
+        ["BITPOS", "nosuch:key", "0", "0", "-1", "BIT"], ["BITCOUNT", "nosuch:key", "0", "-1", "BIT"]]),
+    ("bitmap: BITFIELD types, offsets, OVERFLOW, refusal", [
+        ["DEL", "%K"], ["BITFIELD", "%K", "GET", "u8", "0"], ["EXISTS", "%K"],
+        ["BITFIELD", "%K", "SET", "u8", "0", "255", "GET", "u8", "0"], ["STRLEN", "%K"],
+        ["BITFIELD", "%K", "INCRBY", "u8", "0", "10"],
+        ["BITFIELD", "%K", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "300"],
+        ["BITFIELD", "%K", "OVERFLOW", "FAIL", "INCRBY", "u8", "0", "1"],
+        ["BITFIELD", "%K", "OVERFLOW", "SAT", "INCRBY", "i8", "8", "-300"],
+        ["BITFIELD", "%K", "OVERFLOW", "WRAP", "INCRBY", "i8", "8", "200"],
+        ["BITFIELD", "%K", "OVERFLOW", "FAIL", "SET", "u4", "0", "16", "GET", "u4", "0"],
+        ["BITFIELD", "%K", "OVERFLOW", "SAT", "SET", "i4", "0", "100", "GET", "i4", "0"],
+        ["BITFIELD", "%K", "SET", "u8", "#1", "7", "GET", "u8", "#1", "GET", "u16", "#1"],
+        ["BITFIELD", "%K", "GET", "i64", "0"], ["BITFIELD", "%K", "GET", "u63", "0"],
+        ["BITFIELD", "%K", "GET", "u64", "0"], ["BITFIELD", "%K", "GET", "x8", "0"],
+        ["BITFIELD", "%K", "GET", "u0", "0"], ["BITFIELD", "%K", "GET", "i65", "0"],
+        ["BITFIELD", "%K", "GET", "u8", "-1"], ["BITFIELD", "%K", "GET", "u8", "#-1"],
+        ["BITFIELD", "%K", "SET", "u8", "0", "1", "GET", "u8", "x"], ["GET", "%K"],
+        ["BITFIELD", "%K", "SET", "u8", "0", "1", "NOPE"], ["GET", "%K"],
+        ["BITFIELD", "%K", "OVERFLOW", "NOPE"], ["BITFIELD", "%K", "SET", "u8", "0", "notint"],
+        ["BITFIELD", "%K", "INCRBY", "u8", "0"], ["BITFIELD", "%K"], ["BITFIELD", "%K", "OVERFLOW", "SAT"],
+        ["BITFIELD_RO", "%K", "GET", "u8", "0", "GET", "i4", "4"],
+        ["BITFIELD_RO", "%K", "SET", "u8", "0", "1"], ["BITFIELD_RO", "%K", "INCRBY", "u8", "0", "1"],
+        ["BITFIELD_RO", "nosuch:key", "GET", "u8", "0"],
+        ["DEL", "%K2"], ["SET", "%K2", "hello"], ["BITFIELD", "%K2", "GET", "u8", "0", "GET", "i16", "4"],
+        ["BITFIELD", "%K2", "SET", "u8", "0", "72"], ["GET", "%K2"],
+        ["BITFIELD", "%K2", "INCRBY", "u8", "8", "1"], ["GET", "%K2"]]),
+    ("bitmap: BITOP operations", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["SETBIT", "%K", "0", "1"], ["SETBIT", "%K", "9", "1"],
+        ["SETBIT", "%K2", "9", "1"], ["SETBIT", "%K2", "20", "1"],
+        ["BITOP", "AND", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "OR", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "XOR", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "NOT", "%K3", "%K"], ["GET", "%K3"],
+        ["BITOP", "and", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "NOT", "%K3", "%K", "%K2"], ["BITOP", "NOPE", "%K3", "%K"],
+        ["BITOP", "ANDX", "%K3", "%K"], ["BITOP", "AND", "%K3"],
+        ["BITOP", "AND", "%K3", "nosuch:a", "nosuch:b"], ["EXISTS", "%K3"],
+        ["SET", "%K3", "x"], ["BITOP", "OR", "%K3", "nosuch:a"], ["EXISTS", "%K3"],
+        ["SET", "dfs:str", "ab"], ["BITOP", "OR", "%K3", "%K", "dfs:str"], ["GET", "%K3"],
+        ["RPUSH", "dfs:lst", "x"], ["BITOP", "OR", "%K3", "%K", "dfs:lst"], ["DEL", "dfs:lst"],
+        ["BITOP", "DIFF", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "DIFF1", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "ANDOR", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "ONE", "%K3", "%K", "%K2"], ["GET", "%K3"],
+        ["BITOP", "DIFF", "%K3", "%K"], ["BITOP", "ONE", "%K3", "%K"], ["GET", "%K3"],
+        ["SET", "%K", "x"], ["SET", "%K", "y"], ["SETBIT", "%K", "100", "1"], ["SET", "%K", "z"],
+        ["GET", "%K"], ["DEL", "dfs:str"]]),
+
+    # A destination a command REPLACES loses its TTL; one it modifies in place
+    # keeps it.
+    ("TTL of a replaced or modified destination", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["SADD", "%K2", "a"], ["DEL", "%K3"], ["ZADD", "%K3", "1", "a"],
+        ["SET", "dfs:s1", "ab"], ["DEL", "dfs:g"], ["GEOADD", "dfs:g", "13.361389", "38.115556", "p"],
+        ["SET", "%K", "x", "EX", "100"], ["SUNIONSTORE", "%K", "%K2"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SINTERSTORE", "%K", "%K2"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SDIFFSTORE", "%K", "%K2"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SDIFFSTORE", "%K", "nosuch:key"], ["EXISTS", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["ZUNIONSTORE", "%K", "1", "%K3"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["ZINTERSTORE", "%K", "1", "%K3"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["ZDIFFSTORE", "%K", "1", "%K3"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["ZRANGESTORE", "%K", "%K3", "0", "-1"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["BITOP", "OR", "%K", "dfs:s1"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["BITOP", "OR", "%K", "nosuch:a"], ["EXISTS", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SORT", "%K2", "ALPHA", "STORE", "%K"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"],
+        ["GEOSEARCHSTORE", "%K", "dfs:g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["COPY", "dfs:s1", "%K", "REPLACE"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["RENAME", "dfs:s1", "%K"], ["TTL", "%K"], ["SET", "dfs:s1", "ab"],
+        ["SET", "%K", "x", "EX", "100"], ["SET", "%K", "y"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["GETSET", "%K", "y"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["MSET", "%K", "y"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SET", "%K", "y", "KEEPTTL"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["APPEND", "%K", "y"], ["TTL", "%K"],
+        ["SET", "%K", "1", "EX", "100"], ["INCR", "%K"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SETRANGE", "%K", "0", "y"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["SETBIT", "%K", "100", "1"], ["TTL", "%K"],
+        ["SET", "%K", "x", "EX", "100"], ["BITFIELD", "%K", "SET", "u8", "64", "1"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"],
+        ["LMOVE", "%K", "%K", "LEFT", "RIGHT"], ["TTL", "%K"],
+        ["DEL", "dfs:s1"], ["DEL", "dfs:g"]]),
+    # A key that goes away takes its TTL with it: a key created later under the
+    # same name starts without one.
+    ("a removed key leaves no TTL behind", [
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LPOP", "%K"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["RPOP", "%K", "5"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LREM", "%K", "0", "a"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LTRIM", "%K", "1", "0"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LMOVE", "%K", "%K2", "LEFT", "LEFT"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"], ["DEL", "%K2"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["RPOPLPUSH", "%K", "%K2"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"], ["DEL", "%K2"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["LMPOP", "1", "%K", "LEFT"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["RPUSH", "%K", "a"], ["EXPIRE", "%K", "100"], ["BLPOP", "%K", "1"],
+        ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SADD", "%K", "a"], ["EXPIRE", "%K", "100"], ["SREM", "%K", "a"],
+        ["SADD", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SADD", "%K", "a"], ["EXPIRE", "%K", "100"], ["SPOP", "%K"],
+        ["SADD", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SADD", "%K", "a"], ["EXPIRE", "%K", "100"], ["SPOP", "%K", "3"],
+        ["SADD", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SADD", "%K", "a"], ["EXPIRE", "%K", "100"], ["SMOVE", "%K", "%K2", "a"],
+        ["SADD", "%K", "b"], ["TTL", "%K"], ["DEL", "%K2"],
+        ["DEL", "%K"], ["HSET", "%K", "f", "v"], ["EXPIRE", "%K", "100"], ["HDEL", "%K", "f"],
+        ["HSET", "%K", "f", "v"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZREM", "%K", "a"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZPOPMIN", "%K"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZPOPMAX", "%K", "2"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZMPOP", "1", "%K", "MIN"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZREMRANGEBYSCORE", "%K", "-inf", "+inf"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZREMRANGEBYRANK", "%K", "0", "-1"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["ZADD", "%K", "1", "a"], ["EXPIRE", "%K", "100"], ["ZREMRANGEBYLEX", "%K", "-", "+"],
+        ["ZADD", "%K", "1", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SET", "%K", "x", "EX", "100"], ["GETDEL", "%K"], ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SET", "%K", "x", "EX", "100"], ["SDIFFSTORE", "%K", "nosuch:key"],
+        ["SADD", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SET", "%K", "x", "EX", "100"], ["RENAME", "%K", "%K2"], ["SET", "%K", "y"],
+        ["TTL", "%K"], ["TTL", "%K2"], ["RPUSH", "%K3", "z"], ["DEL", "%K3"],
+        ["SET", "%K3", "x", "EX", "100"], ["RENAME", "%K2", "%K3"], ["TTL", "%K3"], ["DEL", "%K2"],
+        ["DEL", "%K"], ["SET", "%K", "x", "EX", "100"], ["MOVE", "%K", "1"], ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["SET", "%K", "x", "PX", "100000"], ["UNLINK", "%K"], ["RPUSH", "%K", "b"], ["TTL", "%K"],
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"]]),
+    # One database, as Redis with `databases 1` (the oracle runs so).
+    ("one database: SELECT, SWAPDB, MOVE, COPY DB", [
+        ["SELECT", "0"], ["SELECT", "1"], ["SELECT", "-1"], ["SELECT", "x"], ["SELECT", "99999999999"],
+        ["SELECT"], ["SELECT", "0", "1"],
+        ["SWAPDB", "0", "0"], ["SWAPDB", "0", "1"], ["SWAPDB", "x", "0"], ["SWAPDB", "0", "x"], ["SWAPDB", "0"],
+        ["DEL", "%K"], ["DEL", "%K2"], ["SET", "%K", "v"],
+        ["MOVE", "%K", "0"], ["MOVE", "%K", "1"], ["MOVE", "%K", "x"], ["MOVE", "%K"],
+        ["COPY", "%K", "%K2", "DB", "0"], ["GET", "%K2"], ["COPY", "%K", "%K2", "DB", "1"],
+        ["COPY", "%K", "%K2", "DB", "x"], ["COPY", "%K", "%K2", "NOPE"], ["COPY", "%K", "%K2", "REPLACEX"],
+        ["COPY", "%K", "%K2", "REPLACE", "DB", "0"], ["COPY", "%K", "%K"], ["COPY", "%K", "%K", "REPLACE"],
+        ["COPY", "%K", "%K2", "DB"], ["CONFIG", "GET", "databases"], ["GET", "%K"]]),
+    ("zset lex ranges and range removal", [
+        ["DEL", "%K"], ["ZADD", "%K", "0", "a", "0", "b", "0", "c", "0", "d"],
+        ["ZRANGEBYLEX", "%K", "b", "+"], ["ZRANGEBYLEX", "%K", "", "+"], ["ZRANGEBYLEX", "%K", "-x", "+"],
+        ["ZRANGEBYLEX", "%K", "[b", "+x"], ["ZREVRANGEBYLEX", "%K", "+", "b"], ["ZLEXCOUNT", "%K", "[a", "c"],
+        ["ZRANGE", "%K", "b", "+", "BYLEX"], ["ZREMRANGEBYLEX", "%K", "b", "+"],
+        ["ZRANGEBYLEX", "%K", "(a", "[c"], ["ZREVRANGEBYLEX", "%K", "[c", "(a", "LIMIT", "0", "1"],
+        ["ZREVRANGEBYLEX", "%K", "[c", "(a", "LIMITX", "0", "1"],
+        ["ZREMRANGEBYLEX", "%K", "(a", "[c"], ["ZRANGE", "%K", "0", "-1"],
+        ["ZREMRANGEBYLEX", "%K", "-", "+"], ["EXISTS", "%K"],
+        ["ZADD", "%K", "1", "a", "2", "b", "3", "c"], ["ZREMRANGEBYRANK", "%K", "x", "1"],
+        ["ZREMRANGEBYRANK", "%K", "1", "1"], ["ZRANGE", "%K", "0", "-1"], ["ZREMRANGEBYRANK", "%K", "5", "9"],
+        ["ZREMRANGEBYRANK", "%K", "-100", "100"], ["EXISTS", "%K"],
+        ["ZADD", "%K", "1", "a", "2", "b", "3", "c"], ["ZREMRANGEBYSCORE", "%K", "(1", "2"],
+        ["ZRANGE", "%K", "0", "-1"], ["ZREMRANGEBYSCORE", "%K", "x", "2"],
+        ["ZREMRANGEBYSCORE", "%K", "-inf", "+inf"], ["EXISTS", "%K"],
+        ["SET", "%K", "s"], ["ZREMRANGEBYLEX", "%K", "x", "+"], ["ZREMRANGEBYLEX", "%K", "-", "+"],
+        ["ZLEXCOUNT", "%K", "x", "+"], ["ZRANGEBYLEX", "%K", "x", "+"],
+        ["LMPOP", "1", "%K2", "LEFT", "COUNTX", "2"], ["DEL", "%K"]]),
+    ("strings over a bitmap value", [
+        ["DEL", "%K"], ["SETBIT", "%K", "7", "1"], ["APPEND", "%K", "xy"], ["GET", "%K"],
+        ["SETRANGE", "%K", "1", "Z"], ["GET", "%K"], ["STRLEN", "%K"], ["GETRANGE", "%K", "0", "1"],
+        ["SETBIT", "%K", "7", "0"], ["GETDEL", "%K"], ["EXISTS", "%K"],
+        ["SETBIT", "%K", "7", "1"], ["INCR", "%K"], ["GETEX", "%K", "PX", "100000"], ["GETSET", "%K", "s"],
+        ["SETBIT", "%K", "3", "1"], ["SETBIT", "%K", "1", "1"], ["INCR", "%K"], ["INCRBYFLOAT", "%K", "1.5"],
+        ["SETBIT", "%K", "200", "1"], ["OBJECT", "ENCODING", "%K"], ["TYPE", "%K"],
+        ["DUMP", "nosuch:key"], ["SET", "%K", "abc"], ["SETBIT", "%K", "1", "1"],
+        ["GET", "%K"], ["SUBSTR", "%K", "0", "0"]]),
+
+    # Streams as Redis parses them: XADD/XTRIM trimming (MAXLEN/MINID, = and
+    # LIMIT, MAXLEN 0), `<ms>-*` ids, ids compared with the last id even after
+    # XDEL, exclusive `(` ranges, COUNT 0, strict XDEL.
+    ("streams: XADD / XTRIM options, ids, ranges", [
+        ["DEL", "%K"], ["XADD", "%K", "1-1", "a", "1"], ["XADD", "%K", "1-*", "b", "2"],
+        ["XADD", "%K", "2-*", "c", "3"], ["XADD", "%K", "2-1", "d", "4"], ["XADD", "%K", "1-5", "e", "5"],
+        ["XADD", "%K", "0-0", "f", "6"], ["XADD", "%K", "abc", "f", "6"], ["XADD", "%K", "1-x", "f", "6"],
+        ["XADD", "%K", "-", "f", "6"], ["XADD", "%K", "3-1", "f"], ["XADD", "%K", "3-1"],
+        ["XADD", "%K", "MAXLEN", "3-1", "f", "v"], ["XADD", "%K", "MAXLEN", "=", "4", "3-1", "f", "v"],
+        ["XLEN", "%K"], ["XADD", "%K", "MAXLEN", "-1", "4-1", "f", "v"], ["XADD", "%K", "MAXLEN", "x", "4-1", "f", "v"],
+        ["XADD", "%K", "MINID", "3-0", "4-1", "f", "v"], ["XRANGE", "%K", "-", "+"],
+        ["XADD", "%K", "MINID", "x", "5-1", "f", "v"], ["XADD", "%K", "MINID", "-", "5-1", "f", "v"],
+        ["XADD", "%K", "MAXLEN", "1", "MINID", "1", "5-1", "f", "v"],
+        ["XADD", "%K", "LIMIT", "5", "5-1", "f", "v"], ["XADD", "%K", "MAXLEN", "1", "LIMIT", "5", "5-1", "f", "v"],
+        ["XADD", "%K", "MAXLEN", "~", "1", "LIMIT", "-1", "5-1", "f", "v"],
+        ["XADD", "%K", "NOMKSTREAM", "KEEPREF", "5-1", "f", "v"], ["XLEN", "%K"],
+        ["XADD", "%K", "MAXLEN", "0", "6-1", "f", "v"], ["XLEN", "%K"], ["XADD", "%K", "6-1", "f", "v"],
+        ["XADD", "%K", "6-2", "f", "v"], ["XADD", "%K", "6-3", "f", "v"], ["XADD", "%K", "7-1", "f", "v"],
+        ["XRANGE", "%K", "(6-1", "+"], ["XRANGE", "%K", "-", "(7-1"], ["XRANGE", "%K", "6", "6"],
+        ["XRANGE", "%K", "(6", "+"], ["XREVRANGE", "%K", "+", "(6-2"], ["XREVRANGE", "%K", "(7", "-"],
+        ["XRANGE", "%K", "-", "+", "COUNT", "0"], ["XRANGE", "%K", "-", "+", "COUNT", "-5"],
+        ["XRANGE", "%K", "-", "+", "COUNT", "2"], ["XREVRANGE", "%K", "+", "-", "COUNT", "2"],
+        ["XRANGE", "%K", "-", "+", "COUNT"], ["XRANGE", "%K", "-", "+", "NOPE", "1"],
+        ["XRANGE", "%K", "(-", "+"], ["XRANGE", "%K", "x", "+"], ["XRANGE", "%K", "-", "(0-0"],
+        ["XRANGE", "%K", "(18446744073709551615-18446744073709551615", "+"],
+        ["XRANGE", "nosuch:key", "x", "+"], ["XRANGE", "%K", "01", "+"], ["XRANGE", "%K", " 6", "+"],
+        ["XRANGE", "%K", "+6", "+"],
+        ["XDEL", "%K", "6-2", "bad"], ["XLEN", "%K"], ["XDEL", "%K", "6-2", "6-3"], ["XDEL", "nosuch:key", "bad"],
+        ["XADD", "%K", "6-9", "f", "v"], ["XADD", "%K", "8-*", "f", "v"],
+        # `~` is not probed for its count: Redis trims whole internal nodes
+        # only (so a small stream keeps everything) and Pion trims exactly —
+        # both inside the "at least N kept" contract (doc/command_matrix.md).
+        ["XTRIM", "%K", "MINID", "7"], ["XRANGE", "%K", "-", "+"],
+        ["XTRIM", "%K", "MAXLEN", "=", "1"], ["XLEN", "%K"], ["XTRIM", "%K"], ["XTRIM", "%K", "LIMIT", "1"],
+        ["XTRIM", "%K", "NOPE", "1"], ["XTRIM", "%K", "MAXLEN", "1", "LIMIT", "1"],
+        ["XTRIM", "%K", "MINID", "~", "x"], ["XTRIM", "nosuch:key", "MAXLEN", "1"],
+        ["XTRIM", "nosuch:key", "NOPE"], ["XREAD", "STREAMS", "%K", ">"], ["XREAD", "STREAMS", "%K", "-"],
+        ["XREAD", "STREAMS", "%K", "01"]]),
+
+    # Geo as Redis's geo.c: a geo key is a sorted set; GEOADD NX/XX/CH and
+    # all-or-nothing validation; the search family's options, errors, STORE /
+    # STOREDIST, WITHHASH, ANY, BYBOX, the _RO forms; coordinates printed as
+    # Redis prints a double.
+    ("geo: GEOADD options, search family, stores", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["GEOADD", "%K", "13.361389", "38.115556", "Palermo", "15.087269", "37.502669", "Catania",
+         "12.496365", "41.902782", "Rome", "0", "0", "Null", "-0.1278", "51.5074", "London"],
+        ["GEOPOS", "%K", "Palermo", "Null", "nosuch"], ["GEOPOS", "%K"], ["GEOPOS", "nosuch:key", "a"],
+        ["GEOHASH", "%K", "Palermo", "Null", "London"], ["GEOHASH", "%K"],
+        ["GEODIST", "%K", "Palermo", "Catania"], ["GEODIST", "%K", "Palermo", "Catania", "km"],
+        ["GEODIST", "%K", "Palermo", "Catania", "parsecs"], ["GEODIST", "%K", "Palermo", "Catania", "km", "x"],
+        ["GEODIST", "%K", "Palermo", "nosuch"], ["GEODIST", "nosuch:key", "a", "b"],
+        ["GEOADD", "%K", "NX", "13.4", "38.1", "Palermo", "1", "1", "New"], ["GEOPOS", "%K", "Palermo", "New"],
+        ["GEOADD", "%K", "XX", "CH", "13.5", "38.2", "Palermo", "2", "2", "Newer"], ["GEOPOS", "%K", "Palermo", "Newer"],
+        ["GEOADD", "%K", "NX", "XX", "1", "1", "x"], ["GEOADD", "%K", "CH", "1", "1"],
+        ["GEOADD", "%K", "1", "1", "a", "200", "1", "b"], ["ZSCORE", "%K", "a"],
+        ["GEOADD", "%K", "1", "86", "a"], ["GEOADD", "%K", "x", "1", "a"], ["GEOADD", "%K", "NOPE", "1", "1", "a"],
+        ["ZCARD", "%K"], ["ZRANGE", "%K", "0", "-1", "WITHSCORES"], ["TYPE", "%K"], ["ZSCORE", "%K", "Rome"],
+        ["ZADD", "%K2", "3479099956230698", "Palermo"], ["GEOPOS", "%K2", "Palermo"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km"], ["GEORADIUS", "%K", "15", "37", "200", "km", "ASC"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km", "DESC", "WITHDIST", "WITHHASH", "WITHCOORD"],
+        ["GEORADIUS", "%K", "15", "37", "1000", "km", "COUNT", "2"],
+        ["GEORADIUS", "%K", "15", "37", "1000", "km", "COUNT", "1", "ANY"],
+        ["GEORADIUS", "%K", "15", "37", "1000", "km", "ANY"], ["GEORADIUS", "%K", "15", "37", "1000", "km", "COUNT", "0"],
+        ["GEORADIUS", "%K", "15", "37", "-1", "km"], ["GEORADIUS", "%K", "15", "37", "x", "km"],
+        ["GEORADIUS", "%K", "15", "37", "1", "parsecs"], ["GEORADIUS", "%K", "200", "37", "1", "km"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km", "STORE", "%K3"], ["ZRANGE", "%K3", "0", "-1", "WITHSCORES"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km", "STOREDIST", "%K3"], ["ZRANGE", "%K3", "0", "-1", "WITHSCORES"],
+        ["GEORADIUS", "%K", "15", "37", "200", "km", "STORE", "%K3", "WITHDIST"],
+        ["GEORADIUS", "%K", "15", "37", "1", "m", "STORE", "%K3"], ["EXISTS", "%K3"],
+        ["GEORADIUS", "nosuch:key", "15", "37", "1", "m", "STORE", "%K3"], ["GEORADIUS", "nosuch:key", "15", "37", "1", "m"],
+        ["GEORADIUS_RO", "%K", "15", "37", "200", "km", "WITHDIST"],
+        ["GEORADIUS_RO", "%K", "15", "37", "200", "km", "STORE", "%K3"],
+        ["GEORADIUSBYMEMBER", "%K", "Palermo", "300", "km", "ASC"], ["GEORADIUSBYMEMBER", "%K", "nosuch", "300", "km"],
+        ["GEORADIUSBYMEMBER", "nosuch:key", "nosuch", "300", "km"],
+        ["GEORADIUSBYMEMBER_RO", "%K", "Palermo", "300", "km", "ASC", "WITHCOORD"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "BYBOX", "400", "400", "km", "ASC", "WITHDIST"],
+        ["GEOSEARCH", "%K", "FROMMEMBER", "Palermo", "BYRADIUS", "200", "km", "DESC"],
+        ["GEOSEARCH", "%K", "FROMMEMBER", "nosuch", "BYRADIUS", "200", "km"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "FROMMEMBER", "Palermo", "BYRADIUS", "200", "km"],
+        ["GEOSEARCH", "%K", "BYRADIUS", "200", "km"], ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "ASC"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "BYBOX", "1", "1", "km"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "BYBOX", "-1", "1", "km"],
+        ["GEOSEARCH", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "STORE", "%K3"],
+        ["GEOSEARCHSTORE", "%K3", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "STOREDIST"],
+        ["ZRANGE", "%K3", "0", "-1", "WITHSCORES"],
+        ["GEOSEARCHSTORE", "%K3", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "WITHDIST"],
+        ["GEOSEARCHSTORE", "%K3", "%K", "FROMLONLAT", "15", "37", "BYBOX", "10", "10", "m"], ["EXISTS", "%K3"],
+        ["GEOSEARCHSTORE", "%K3", "%K", "FROMLONLAT", "15", "37", "BYRADIUS", "1000", "km", "COUNT", "2", "ANY"],
+        ["ZCARD", "%K3"], ["ZREM", "%K", "Null"], ["GEORADIUS", "%K", "0", "0", "10", "km"],
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"]]),
+
+    # #30, #34: XREAD lists only streams with data, parses
+    # strictly, and a value past 64 KB survives.
+    ("streams: XREAD shape and parsing, big values", [
+        ["DEL", "%K"], ["DEL", "%K2"],
+        ["XADD", "%K", "1-1", "f", "v"], ["XADD", "%K", "2-1", "g", "w"],
+        ["XREAD", "STREAMS", "%K", "%K2", "0", "0"],
+        ["XREAD", "COUNT", "1", "STREAMS", "%K", "0"],
+        ["XREAD", "STREAMS", "%K", "+"],
+        ["XREAD", "STREAMS", "%K", "$"],
+        ["XREAD", "STREAMS", "nosuch:key", "0"],
+        ["XREAD", "STREAMS", "%K", "%K2", "0"],
+        ["XREAD", "COUNT", "x", "STREAMS", "%K", "0"],
+        ["XREAD", "STREAMS", "%K", "abc"],
+        ["XREAD", "NOSUCH", "STREAMS", "%K", "0"],
+        ["XREAD", "%K", "0"],
+        ["DEL", "%K3"], ["SET", "%K3", "str"], ["XREAD", "STREAMS", "%K3", "0"],
+        ["DEL", "%K2"], ["XADD", "%K2", "1-1", "f", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
+        ["XRANGE", "%K2", "-", "+"], ["XREAD", "STREAMS", "%K2", "0"]]),
+
+    # #36: scripts, as Redis runs them. redis.call() goes through the server's
+    # own dispatcher; errors carry Redis's suffix; Lua <-> RESP conversions,
+    # the sandbox's globals and libraries, shebang flags, the _RO forms, SCRIPT
+    # and FUNCTION. (Not here: REDIS_VERSION, which reports Pion's 7.0.0;
+    # SCRIPT DEBUG YES, which needs Redis's debugger; FUNCTION DUMP, whose
+    # payload is Pion's own format.)
+    ("scripting: EVAL basics and conversions", [
+        ["DEL", "%K"], ["DEL", "%K2"],
+        ["EVAL", "return 1", "0"],
+        ["EVAL", "return redis.call('SET', KEYS[1], ARGV[1])", "1", "%K", "v"],
+        ["EVAL", "return redis.call('GET', KEYS[1])", "1", "%K"],
+        ["EVAL", "return {1, 2, 3.5, -3.99, 'x', true, false, {ok='y'}, {err='z'}}", "0"],
+        ["EVAL", "return {1, 2, nil, 4}", "0"], ["EVAL", "return nil", "0"],
+        ["EVAL", "return false", "0"], ["EVAL", "return true", "0"],
+        ["EVAL", "return {double=3.5}", "0"], ["EVAL", "return {map={a=1}}", "0"],
+        ["EVAL", "return {set={a=true}}", "0"], ["EVAL", "return {big_number='123'}", "0"],
+        ["EVAL", "return {verbatim_string={format='txt', string='hi'}}", "0"],
+        ["EVAL", "return {err=5}", "0"], ["EVAL", "return {map={a=1}, ok='x'}", "0"],
+        ["EVAL", "return redis.status_reply('FINE')", "0"],
+        ["EVAL", "return redis.error_reply('My Error')", "0"],
+        ["EVAL", "return redis.error_reply('-My Error')", "0"],
+        ["EVAL", "return {err='custom'}", "0"], ["EVAL", "return {err='ERR custom'}", "0"],
+        ["EVAL", "return redis.status_reply('a\\r\\nb')", "0"], ["EVAL", "return {err='a\\r\\nb'}", "0"],
+        ["EVAL", "return redis.status_reply()", "0"], ["EVAL", "return redis.error_reply(5)", "0"],
+        ["EVAL", "return redis.call('GET', 'dfs:nosuch')", "0"],
+        ["EVAL", "return type(redis.call('GET', 'dfs:nosuch'))", "0"],
+        ["EVAL", "return {redis.call('GET', 'dfs:nosuch')}", "0"],
+        ["EVAL", "return redis.call('SET', KEYS[1], 'v').ok", "1", "%K"],
+        ["EVAL", "return type(redis.call('SET', KEYS[1], 'v'))", "1", "%K"],
+        ["EVAL", "return #KEYS + #ARGV", "2", "%K", "%K2", "a", "b"],
+        ["EVAL", "return ARGV[1]", "0", "x\x00y"],
+        ["EVAL", "KEYS[1] = 'z'; return KEYS[1]", "1", "%K"],
+        ["EVAL", "return redis.call('SET', KEYS[1], 3.5)", "1", "%K"], ["GET", "%K"],
+        ["EVAL", "return redis.call('SET', KEYS[1], 1/3)", "1", "%K"], ["GET", "%K"],
+        ["EVAL", "return redis.call('SET', KEYS[1], 1e15)", "1", "%K"], ["GET", "%K"],
+        ["EVAL", "return redis.call('SET', KEYS[1], -0.0)", "1", "%K"], ["GET", "%K"],
+        ["EVAL", "return redis.call('SET', KEYS[1], 2^53)", "1", "%K"], ["GET", "%K"],
+        ["EVAL", "return 1/0", "0"], ["EVAL", "return -1/0", "0"], ["EVAL", "return 3.99", "0"],
+        ["EVAL", "return redis.call('HSET', KEYS[1], 'a', '1')", "1", "%K2"],
+        ["EVAL", "return redis.call('HGETALL', KEYS[1])", "1", "%K2"],
+        ["EVAL", "redis.setresp(3); return redis.call('HGETALL', KEYS[1])", "1", "%K2"],
+        ["EVAL", "redis.setresp(3); return type(redis.call('HGETALL', KEYS[1]).map)", "1", "%K2"],
+        ["EVAL", "redis.setresp(3); return redis.call('GET', 'dfs:nosuch')", "0"],
+        ["EVAL", "redis.setresp(3); return type(redis.call('GET', 'dfs:nosuch'))", "0"],
+        ["EVAL", "redis.setresp(3); return false", "0"], ["EVAL", "redis.setresp(3); return true", "0"],
+        ["DEL", "%K2"], ["EVAL", "redis.setresp(3); return redis.call('SMEMBERS', KEYS[1])", "1", "%K2"],
+        ["EVAL", "redis.setresp(3); return redis.call('ZADD', KEYS[1], '1.5', 'm')", "1", "%K2"],
+        ["EVAL", "redis.setresp(3); local r = redis.call('ZSCORE', KEYS[1], 'm'); return {type(r), r.double}", "1", "%K2"],
+        ["EVAL", "redis.setresp(4)", "0"], ["EVAL", "redis.setresp()", "0"],
+        ["DEL", "%K"], ["DEL", "%K2"]]),
+    ("scripting: errors and the commands a script may call", [
+        ["DEL", "%K"], ["SET", "%K", "str"],
+        ["EVAL", "return redis.call('INCR', KEYS[1])", "1", "%K"],
+        ["EVAL", "\n\nreturn redis.call('INCR', KEYS[1])", "1", "%K"],
+        ["EVAL", "return redis.pcall('INCR', KEYS[1])", "1", "%K"],
+        ["EVAL", "local ok, e = pcall(redis.call, 'INCR', KEYS[1]); return {ok and 1 or 0, type(e), e}", "1", "%K"],
+        ["EVAL", "local r = redis.pcall('GET'); return {type(r), r.err}", "0"],
+        ["EVAL", "error('boom')", "0"], ["EVAL", "error({err='MYERR custom'})", "0"],
+        ["EVAL", "error({foo=1})", "0"], ["EVAL", "error(42)", "0"], ["EVAL", "error()", "0"],
+        ["EVAL", "error(true)", "0"], ["EVAL", "error('a\\nb')", "0"],
+        ["EVAL", "local x = nil; return x.y", "0"],
+        ["EVAL", "local function f(n) return f(n+1)+1 end; return f(0)", "0"],
+        ["EVAL", "return setmetatable({},{__index=function() error(1) end})", "0"],
+        ["EVAL", "return redis.call('nosuchcmd')", "0"], ["EVAL", "return redis.pcall('nosuchcmd')", "0"],
+        ["EVAL", "return redis.call('GET')", "0"], ["EVAL", "return redis.call('GET', 'a', 'b')", "0"],
+        ["EVAL", "return redis.call()", "0"], ["EVAL", "return redis.pcall()", "0"],
+        ["EVAL", "return redis.call(1)", "0"], ["EVAL", "return redis.call('SET', 'dfs:x', {})", "0"],
+        ["EVAL", "return redis.pcall('SET', 'dfs:x', {})", "0"],
+        ["EVAL", "return redis.call('SET', 'dfs:x', true)", "0"],
+        ["EVAL", "return redis.call('MULTI')", "0"], ["EVAL", "return redis.call('EXEC')", "0"],
+        ["EVAL", "return redis.call('EVAL', 'return 1', '0')", "0"],
+        ["EVAL", "return redis.call('SUBSCRIBE', 'ch')", "0"],
+        ["EVAL", "return redis.call('CLIENT', 'ID')", "0"], ["EVAL", "return redis.call('CONFIG', 'GET', 'x')", "0"],
+        ["EVAL", "return redis.call('SCRIPT', 'LOAD', 'return 1')", "0"],
+        ["EVAL", "return redis.call('FUNCTION', 'LIST')", "0"], ["EVAL", "return redis.call('WATCH', 'x')", "0"],
+        ["EVAL", "return redis.call('SAVE')", "0"], ["EVAL", "return redis.call('HELLO', '3')", "0"],
+        ["EVAL", "return redis.call('AUTH', 'x')", "0"], ["EVAL", "return redis.call('QUIT')", "0"],
+        ["EVAL", "return redis.call('SELECT', '1')", "0"], ["EVAL", "return redis.call('SELECT', '0')", "0"],
+        ["EVAL", "return redis.call('PING')", "0"], ["EVAL", "return redis.call('ECHO', 'x')", "0"],
+        ["EVAL", "return redis.call('TYPE', KEYS[1])", "1", "%K"],
+        ["EVAL", "return redis.call('OBJECT', 'ENCODING', 'dfs:nosuch')", "0"],
+        ["EVAL", "return redis.call('BLPOP', 'dfs:nolist', '0')", "0"],
+        ["EVAL", "return redis.call('XREAD', 'BLOCK', '10', 'STREAMS', 'dfs:nostream', '$')", "0"],
+        ["EVAL", "return redis.call('EXPIRE', 'dfs:nosuch', 100)", "0"],
+        ["EVAL", "return redis.call('SET', KEYS[1], 'v', 'EX', '100')", "1", "%K"],
+        ["EVAL", "return redis.call('TTL', KEYS[1])", "1", "%K"],
+        ["EVAL", "return redis.call('ZADD', KEYS[1], 'NX', '1', 'a')", "1", "%K"],
+        ["DEL", "%K"], ["EVAL", "return redis.call('ZADD', KEYS[1], 'NX', '1', 'a')", "1", "%K"],
+        ["EVAL", "return redis.call('ZRANGE', KEYS[1], '0', '-1', 'WITHSCORES')", "1", "%K"],
+        ["EVAL", "return redis.sha1hex('')", "0"], ["EVAL", "return redis.sha1hex()", "0"],
+        ["EVAL", "return redis.log()", "0"], ["EVAL", "return redis.log('x', 'y')", "0"],
+        ["EVAL", "redis.log(99, 'hi'); return 1", "0"], ["EVAL", "return redis.set_repl(99)", "0"],
+        ["EVAL", "return redis.set_repl()", "0"],
+        ["EVAL", "return {redis.REPL_ALL, redis.REPL_AOF, redis.REPL_SLAVE, redis.REPL_REPLICA, redis.REPL_NONE}", "0"],
+        ["EVAL", "return {redis.LOG_DEBUG, redis.LOG_VERBOSE, redis.LOG_NOTICE, redis.LOG_WARNING}", "0"],
+        ["EVAL", "return redis.acl_check_cmd('nosuch')", "0"], ["EVAL", "return redis.acl_check_cmd()", "0"],
+        ["EVAL", "return redis.acl_check_cmd('get', 'x')", "0"],
+        ["EVAL", "return redis.replicate_commands()", "0"], ["EVAL", "return redis.breakpoint()", "0"],
+        ["EVAL", "return redis.debug('x')", "0"],
+        ["DEL", "%K"]]),
+    ("scripting: the sandbox", [
+        ["EVAL", "x = 5", "0"], ["EVAL", "return _G.x", "0"], ["EVAL", "return tostring(io)", "0"],
+        ["EVAL", "return tostring(print)", "0"], ["EVAL", "return tostring(require)", "0"],
+        ["EVAL", "string.foo = 1", "0"], ["EVAL", "redis.call = nil", "0"],
+        ["EVAL", "rawset(_G, 'zz', 1)", "0"], ["EVAL", "setmetatable(_G, nil)", "0"],
+        ["EVAL", "KEYS = {}", "0"], ["EVAL", "getmetatable('').__index = nil", "0"],
+        ["EVAL", "local t = {} t.x = 1 return t.x", "0"],
+        ["EVAL", "return getmetatable('').__index == string", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(_G) do t[#t+1] = k .. ':' .. type(v) end table.sort(t) return t", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(redis) do t[#t+1] = k end table.sort(t) return t", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(os) do t[#t+1] = k end table.sort(t) return t", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(string) do t[#t+1] = k end table.sort(t) return t", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(math) do t[#t+1] = k end table.sort(t) return t", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(table) do t[#t+1] = k end table.sort(t) return t", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(coroutine) do t[#t+1] = k end table.sort(t) return t", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(bit) do t[#t+1] = k end table.sort(t) return t", "0"],
+        ["EVAL", "local t = {} for k,v in pairs(struct) do t[#t+1] = k end table.sort(t) return t", "0"],
+        ["EVAL", "return _VERSION", "0"], ["EVAL", "return os.clock ~= nil", "0"],
+        ["EVAL", "return cjson.encode({1,2})", "0"], ["EVAL", "return cjson.decode('[1,2,3]')", "0"],
+        ["EVAL", "return cmsgpack.unpack(cmsgpack.pack({1, 'a'}))", "0"],
+        ["EVAL", "return bit.band(7, 3)", "0"], ["EVAL", "return bit.tohex(255)", "0"],
+        ["EVAL", "return struct.pack('>I2', 258)", "0"],
+        ["EVAL", "return struct.unpack('>I2', '\x01\x02')", "0"],
+        ["EVAL", "local co = coroutine.create(function() return redis.call('PING') end) return {coroutine.resume(co)}", "0"],
+        ["EVAL", "return coroutine.wrap(function() coroutine.yield(5) end)()", "0"],
+        ["EVAL", "return gcinfo() > 0", "0"], ["EVAL", "return collectgarbage('count') > 0", "0"]]),
+    ("scripting: shebang flags, _RO forms, numkeys, SCRIPT", [
+        ["DEL", "%K"], ["SCRIPT", "FLUSH"],
+        ["EVAL", "#!lua\nreturn redis.call('SET', KEYS[1], '1')", "1", "%K"],
+        ["EVAL", "#!lua flags=no-writes\nreturn redis.call('SET', KEYS[1], '1')", "1", "%K"],
+        ["EVAL", "#!lua flags=no-writes\nreturn redis.call('GET', KEYS[1])", "1", "%K"],
+        ["EVAL_RO", "#!lua\nreturn 1", "0"], ["EVAL_RO", "#!lua flags=no-writes\nreturn 1", "0"],
+        ["EVAL", "#!lua flags=bogus\nreturn 1", "0"], ["EVAL", "#!js\nreturn 1", "0"],
+        ["EVAL", "#!lua foo=bar\nreturn 1", "0"], ["EVAL", "#!lua\nerror('x')", "0"],
+        ["EVAL", "#!lua name=x\nreturn 1", "0"],
+        ["EVAL_RO", "return redis.call('SET', KEYS[1], 'b')", "1", "%K"],
+        ["EVAL_RO", "return redis.call('GET', KEYS[1])", "1", "%K"],
+        ["EVAL", "return 1", "-1"], ["EVAL", "return 1", "2", "a"], ["EVAL", "return 1", "x"],
+        ["EVAL", "return 1", "1"], ["EVAL", "syntax error here", "0"], ["EVAL", "return 1"], ["EVAL"],
+        ["EVAL_RO", "return 1"],
+        ["SCRIPT", "LOAD", "return 1"],
+        ["EVALSHA", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0"],
+        ["EVALSHA", "E0E1F9FABFC9D4800C877A703B823AC0578FF8DB", "0"],
+        ["EVALSHA_RO", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0"],
+        ["EVALSHA", "ffffffffffffffffffffffffffffffffffffffff", "0"], ["EVALSHA", "short", "0"],
+        ["EVALSHA", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "x"],
+        ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "ffff",
+         "E0E1F9FABFC9D4800C877A703B823AC0578FF8DB"],
+        ["SCRIPT", "EXISTS"], ["SCRIPT", "FLUSH", "NOPE"], ["SCRIPT", "FLUSH", "A", "B"],
+        ["SCRIPT", "FLUSH", "ASYNC"], ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
+        ["SCRIPT", "KILL"], ["SCRIPT", "NOPE"], ["SCRIPT", "LOAD", "syntax error"], ["SCRIPT", "LOAD"],
+        ["SCRIPT", "HELP"], ["SCRIPT", "DEBUG", "NO"], ["SCRIPT", "DEBUG", "MAYBE"], ["SCRIPT", "DEBUG"],
+        ["SCRIPT"], ["DEL", "%K"]]),
+    ("scripting: FUNCTION and FCALL", [
+        ["FUNCTION", "FLUSH"], ["DEL", "%K"], ["SET", "%K", "str"],
+        ["FUNCTION", "LOAD", "#!lua name=dfslib\nredis.register_function('dfs_f1', function(keys, args) return redis.call('GET', keys[1]) end)\nredis.register_function{function_name='dfs_f2', callback=function(keys, args) return #args end, flags={'no-writes'}, description='counts'}\nredis.register_function('dfs_boom', function(keys, args)\n  return redis.call('INCR', keys[1])\nend)\n"],
+        ["FUNCTION", "LOAD", "#!lua name=dfslib\nredis.register_function('dfs_x', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "REPLACE", "#!lua name=dfslib\nredis.register_function('dfs_f1', function(keys, args) return redis.call('GET', keys[1]) end)\nredis.register_function{function_name='dfs_f2', callback=function(keys, args) return #args end, flags={'no-writes'}, description='counts'}\nredis.register_function('dfs_boom', function(keys, args)\n  return redis.call('INCR', keys[1])\nend)\n"],
+        ["FCALL", "dfs_f1", "1", "%K"], ["FCALL", "dfs_f2", "0", "a", "b"],
+        ["FCALL", "dfs_boom", "1", "%K"], ["FCALL", "dfs_nosuch", "0"], ["FCALL", "dfs_f1", "x"],
+        ["FCALL", "dfs_f1", "5"], ["FCALL", "dfs_f1", "-1"], ["FCALL", "dfs_nosuch", "-1"],
+        ["FCALL_RO", "dfs_f1", "1", "%K"], ["FCALL_RO", "dfs_f2", "0"], ["FCALL"], ["FCALL", "dfs_f1"],
+        ["FUNCTION", "LIST"], ["FUNCTION", "LIST", "WITHCODE"], ["FUNCTION", "LIST", "LIBRARYNAME", "dfs*"],
+        ["FUNCTION", "LIST", "LIBRARYNAME", "nomatch*"], ["FUNCTION", "LIST", "NOPE"],
+        ["FUNCTION", "LIST", "LIBRARYNAME"], ["FUNCTION", "LIST", "WITHCODE", "WITHCODE"],
+        ["FUNCTION", "STATS"], ["FUNCTION", "STATS", "x"],
+        ["FUNCTION", "LOAD", "#!lua name=bad\nreturn 1"],
+        ["FUNCTION", "LOAD", "#!lua\nredis.register_function('x', function() end)"],
+        ["FUNCTION", "LOAD", "#!lua name=lib2\nredis.register_function('dfs_f1', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "#!lua name=lib3\nredis.call('PING')"],
+        ["FUNCTION", "LOAD", "#!lua name=lib4\nsyntax error"],
+        ["FUNCTION", "LOAD", "#!js name=lib5\n"], ["FUNCTION", "LOAD", "no shebang"],
+        ["FUNCTION", "LOAD", "#!lua name=a-b\nredis.register_function('f', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "#!lua name=a foo=bar\nredis.register_function('f', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "#!lua name=a\nredis.register_function('f', function() return 1 end, 'x')"],
+        ["FUNCTION", "LOAD", "#!lua name=a\nredis.register_function{function_name='f'}"],
+        ["FUNCTION", "LOAD", "#!lua name=a\nredis.register_function{function_name='f', callback=function() end, flags={'nope'}}"],
+        ["FUNCTION", "LOAD", "#!lua name=a\nredis.register_function{function_name='f', callback=function() end, bogus=1}"],
+        ["FUNCTION", "LOAD", "#!lua name=a\nredis.register_function('f-x', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "#!lua name=a\nredis.register_function('f', function() return 1 end)\nredis.register_function('f', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "#!lua name=k\nlocal x = string\nredis.register_function('kf', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "#!lua name=k\nlocal x = pcall\nredis.register_function('kf', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "#!lua name=k\nredis.setresp(3) redis.register_function('kf', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "#!lua name=k2\nredis.log(redis.LOG_DEBUG, 'x') redis.register_function('kf2', function() return string.format('%d', 7) end)"],
+        ["FCALL", "kf2", "0"],
+        ["FUNCTION", "LOAD", "#!lua name=k3\nredis.register_function('kf3', function(keys, args) x = 1 end)"],
+        ["FCALL", "kf3", "0"],
+        ["FUNCTION", "LOAD", "#!lua name=k4\nredis.register_function('kf4', function(keys, args) return KEYS end)"],
+        ["FCALL", "kf4", "0"],
+        ["FUNCTION", "LOAD", "#!lua name=k5\nlocal n = 0\nredis.register_function('kf5', function() n = n + 1; return n end)"],
+        ["FCALL", "kf5", "0"], ["FCALL", "kf5", "0"],
+        ["FUNCTION", "LOAD", "#!LUA name=up\nredis.register_function('dfs_up', function() return 1 end)"],
+        ["FUNCTION", "LOAD", "NOPE", "x"], ["FUNCTION", "LOAD", "REPLACE"], ["FUNCTION", "LOAD"],
+        ["FUNCTION", "DELETE", "nosuch"], ["FUNCTION", "DELETE", "dfslib"], ["FUNCTION", "DELETE", "dfslib"],
+        ["FUNCTION", "DELETE"], ["FCALL", "dfs_f1", "1", "%K"],
+        ["FUNCTION", "RESTORE", "x"], ["FUNCTION", "RESTORE", "x", "NOPE"],
+        ["FUNCTION", "FLUSH", "NOPE"], ["FUNCTION", "NOPE"], ["FUNCTION", "KILL"], ["FUNCTION", "HELP"],
+        ["FUNCTION", "DUMP", "x"], ["FUNCTION"], ["FUNCTION", "FLUSH", "SYNC"], ["FUNCTION", "LIST"],
+        ["DEL", "%K"]]),
+
+    # #38: the blocking commands' immediate answers: served at once, the
+    # argument and timeout errors in Redis's order. (Blocking itself, and the
+    # wake, are tests/test_blocking.py.) Steps that wait out a timeout come
+    # last and carry no keyword: Redis resolves blocking timeouts on its 100 ms
+    # cron, and --mutate replays every step before a mangled keyword.
+    ("blocking commands: immediate replies and errors", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["BLPOP", "%K", "x"], ["BLPOP", "%K", "-1"], ["BLPOP", "%K", "1e100"], ["BLPOP", "%K", "inf"],
+        ["BLPOP", "%K", "nan"], ["BLPOP", "%K", " 0.01"], ["BLPOP", "%K", "0.01 "], ["BLPOP", "%K", ""],
+        ["BLPOP", "%K"],
+        ["BLMOVE", "%K", "%K2", "LEFT", "NOPE", "x"], ["BLMOVE", "%K", "%K2", "LEFT", "RIGHT", "x"],
+        ["BLMOVE", "%K", "%K2", "LEFT"], ["BRPOPLPUSH", "%K", "%K2", "-1"], ["BRPOPLPUSH", "%K", "%K2"],
+        ["BLMPOP", "x", "1", "%K", "LEFT"], ["BLMPOP", "0.01", "0", "%K", "LEFT"], ["BLMPOP", "x", "0", "%K", "LEFT"],
+        ["BLMPOP", "0.01", "1", "%K", "NOPE"], ["BLMPOP", "0.01", "1", "%K", "LEFT", "COUNT", "0"],
+        ["BLMPOP", "0.01", "2", "%K", "LEFT"], ["BLMPOP", "-1", "1", "%K", "LEFT"],
+        ["BZPOPMAX", "%K", "x"], ["BZPOPMIN", "%K"],
+        ["BZMPOP", "0.01", "1", "%K", "NOPE"], ["BZMPOP", "-1", "1", "%K", "MIN"],
+        ["RPUSH", "%K", "a", "b", "c"], ["BLPOP", "%K", "0"], ["BRPOP", "%K", "%K2", "0"],
+        ["BLMOVE", "%K", "%K2", "LEFT", "RIGHT", "0"], ["LRANGE", "%K2", "0", "-1"],
+        ["RPUSH", "%K", "x", "y"], ["BRPOPLPUSH", "%K", "%K2", "0"], ["LRANGE", "%K2", "0", "-1"],
+        ["BLMPOP", "0", "2", "%K3", "%K", "RIGHT", "COUNT", "5"],
+        ["SET", "%K3", "str"], ["BLPOP", "%K3", "0"],
+        ["RPUSH", "%K", "z"], ["BRPOPLPUSH", "%K", "%K3", "0"], ["LRANGE", "%K", "0", "-1"],
+        ["BLMOVE", "%K", "%K3", "LEFT", "LEFT", "0"], ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["ZADD", "%K", "1", "a", "2", "b", "3", "c"], ["BZPOPMIN", "%K", "0"], ["BZPOPMAX", "%K2", "%K", "0"],
+        ["BZMPOP", "0", "1", "%K", "MAX", "COUNT", "5"],
+        ["SET", "%K2", "str"], ["BZPOPMIN", "%K2", "0"], ["BZMPOP", "0.01", "1", "%K2", "MIN"],
+        ["DEL", "%K"], ["DEL", "%K2"]]),
+    ("blocking commands: a short timeout answers nil", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["SET", "%K3", "str"],
+        ["BLMOVE", "%K", "%K2", "LEFT", "RIGHT", "0.001"], ["BLMPOP", "0.001", "1", "%K", "LEFT"],
+        ["BZMPOP", "0.001", "1", "%K", "MIN"],
+        ["BLPOP", "%K", "0.001"], ["BRPOP", "%K", "%K2", "0.001"], ["BRPOPLPUSH", "%K", "%K2", "0.001"],
+        ["BZPOPMIN", "%K", "0.001"], ["BLPOP", "%K", "%K3", "0.001"], ["DEL", "%K3"]]),
+
+    # #39: LCS, as Redis's lcsCommand (src/ffi/redis_ports.c). Option values
+    # are lower case so that --mutate leaves them alone.
+    ("missing commands: LCS", [
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"],
+        ["LCS", "%K", "%K2"], ["LCS", "%K", "%K2", "LEN"], ["LCS", "%K", "%K2", "IDX"],
+        ["SET", "%K", "ohmytext"], ["SET", "%K2", "mynewtext"],
+        ["LCS", "%K", "%K2"], ["LCS", "%K", "%K2", "LEN"], ["LCS", "%K", "%K2", "IDX"],
+        ["LCS", "%K", "%K2", "IDX", "MINMATCHLEN", "4"],
+        ["LCS", "%K", "%K2", "IDX", "MINMATCHLEN", "4", "WITHMATCHLEN"],
+        ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"], ["LCS", "%K", "%K2", "WITHMATCHLEN"],
+        ["LCS", "%K", "%K2", "IDX", "MINMATCHLEN", "-5"], ["LCS", "%K", "%K2", "MINMATCHLEN", "2", "LEN"],
+        ["LCS", "%K", "%K2", "LEN", "IDX"], ["LCS", "%K", "%K2", "idx", "len"],
+        ["LCS", "%K", "%K2", "MINMATCHLEN"], ["LCS", "%K", "%K2", "MINMATCHLEN", "x"],
+        ["LCS", "%K", "%K2", "MINMATCHLEN", "1.5"], ["LCS", "%K", "%K2", "NOPE"],
+        ["LCS", "%K", "%K2", "LEN", "LEN"], ["LCS", "%K"], ["LCS"],
+        ["LCS", "%K", "nosuchkey"], ["LCS", "nosuchkey", "%K", "IDX"],
+        ["RPUSH", "%K3", "a"], ["LCS", "%K", "%K3"], ["LCS", "%K3", "%K", "NOPE"],
+        ["LCS", "%K3", "%K3", "LEN", "IDX"], ["DEL", "%K3"],
+        ["SET", "%K", "12345"], ["SET", "%K2", "1x3y5"], ["LCS", "%K", "%K2"], ["LCS", "%K", "%K2", "IDX"],
+        ["INCR", "%K"], ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SET", "%K", "aaaa"], ["SET", "%K2", "aa"], ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SET", "%K", "abcdefghij"], ["SET", "%K2", "abcdefghij"], ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SET", "%K", "abc"], ["SET", "%K2", "xyz"], ["LCS", "%K", "%K2", "IDX"], ["LCS", "%K", "%K2"],
+        ["SET", "%K", ""], ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SET", "%K", "a\x00b\xffc"], ["SET", "%K2", "\x00\xffc"], ["LCS", "%K", "%K2"],
+        ["LCS", "%K", "%K2", "IDX", "WITHMATCHLEN"],
+        ["SETBIT", "%K3", "1", "1"], ["SET", "%K", "@ab"], ["LCS", "%K3", "%K", "IDX"],
+        ["SET", "%K", "the quick brown fox jumps over the lazy dog"],
+        ["SET", "%K2", "a quick brown dog jumps over the fox, lazily"],
+        ["LCS", "%K", "%K2"], ["LCS", "%K", "%K2", "IDX", "MINMATCHLEN", "3", "WITHMATCHLEN"],
+        ["DEL", "%K"], ["DEL", "%K2"], ["DEL", "%K3"]]),
+
+    # #39: the rest of the commands Redis 7 has that Pion lacked. What cannot
+    # be compared is elsewhere: LOLWUT's art (random) and default text (the
+    # server's own name and version), PFDEBUG on a HyperLogLog (Pion's
+    # registers differ: the documented HyperLogLog fence), REPLCONF ACK (no
+    # reply), REPLICAOF host port and SYNC/PSYNC (Redis would start
+    # replicating). tests/test_missing_commands.py covers those.
+    ("missing commands: ROLE, PF*, LOLWUT, the replication commands", [
+        ["DEL", "%K"], ["DEL", "%K2"],
+        ["ROLE"], ["ROLE", "x"],
+        ["LOLWUT", "VERSION", "x"], ["LOLWUT", "VERSION", "5", "x"], ["LOLWUT", "VERSION", "6", "1", "y"],
+        ["PFSELFTEST"], ["PFSELFTEST", "x"],
+        ["PFDEBUG", "GETREG", "%K"], ["PFDEBUG", "NOPE", "%K"], ["PFDEBUG", "x"], ["PFDEBUG"],
+        ["SET", "%K", "str"], ["PFDEBUG", "GETREG", "%K"], ["PFDEBUG", "ENCODING", "%K"],
+        ["RPUSH", "%K2", "a"], ["PFDEBUG", "TODENSE", "%K2"], ["PFDEBUG", "GETREG", "%K2", "x"],
+        ["PFADD", "%K3", "a"], ["PFDEBUG", "NOPE", "%K3"], ["DEL", "%K3"],
+        ["REPLICAOF", "NO", "ONE"], ["REPLICAOF", "no", "one"], ["SLAVEOF", "NO", "ONE"],
+        ["REPLICAOF", "localhost", "x"], ["REPLICAOF", "localhost", "70000"], ["REPLICAOF", "localhost", "-1"],
+        ["REPLICAOF", "localhost"], ["SLAVEOF"],
+        ["FAILOVER"], ["FAILOVER", "ABORT"], ["FAILOVER", "ABORT", "x"], ["FAILOVER", "TIMEOUT", "0"],
+        ["FAILOVER", "TIMEOUT", "x"], ["FAILOVER", "TIMEOUT", "5"], ["FAILOVER", "TIMEOUT", "5", "TIMEOUT", "5"],
+        ["FAILOVER", "TO", "localhost", "x"], ["FAILOVER", "TO", "localhost", "6379"], ["FAILOVER", "TO", "localhost"],
+        ["FAILOVER", "FORCE"], ["FAILOVER", "FORCE", "FORCE"], ["FAILOVER", "NOPE"],
+        ["FAILOVER", "TO", "localhost", "1", "FORCE", "TIMEOUT", "10"],
+        ["REPLCONF"], ["REPLCONF", "x"], ["REPLCONF", "listening-port", "6380"],
+        ["REPLCONF", "listening-port", "x"], ["REPLCONF", "capa", "eof", "capa", "psync2"],
+        ["REPLCONF", "nope", "1"], ["REPLCONF", "ip-address", "10.0.0.1"],
+        ["REPLCONF", "rdb-only", "1"], ["REPLCONF", "rdb-only", "2"], ["REPLCONF", "rdb-only", "x"],
+        ["REPLCONF", "rdb-filter-only", "functions"], ["REPLCONF", "rdb-filter-only", "nope"],
+        ["REPLCONF", "rdb-filter-only", ""], ["REPLCONF", "capa", "eof", "nope", "1"],
+        ["RESTORE-ASKING", "%K", "0", "x"], ["RESTORE-ASKING", "%K"],
+        ["DEL", "%K"], ["DEL", "%K2"]]),
 ]
 
 
+FULL_ERRORS = False
+
+
 def run_semantics(pion, redis):
+    global FULL_ERRORS
     diffs, same, n = [], 0, 0
     for name, script in SEMANTIC_SCRIPTS:
+        FULL_ERRORS = name.startswith(("scripting:", "missing commands:"))
         for step, cmd in enumerate(script):
             c = [{"%K": "dfs:k", "%K2": "dfs:k2", "%K3": "dfs:k3"}.get(p, p)
                  for p in cmd]
@@ -1003,7 +1725,60 @@ def run_semantics(pion, redis):
                 same += 1
             else:
                 diffs.append((name, c, rp, rr))
+    FULL_ERRORS = False
     return diffs, same, n
+
+
+def _is_keyword(tok):
+    """An option keyword as the scripts spell them: upper-case letters (and _),
+    two or more. Values are written in lower case, so they are left alone."""
+    return (isinstance(tok, str) and len(tok) >= 2 and not tok.startswith("%")
+            and all(c.isupper() or c == "_" for c in tok))
+
+
+def _mangled(tok):
+    last = "Z" if tok[-1] == "Q" else "Q"
+    return [tok[:-1] + last, tok + "Q"]
+
+
+# Commands whose answer to an unknown keyword cannot be compared: LOLWUT
+# ignores arguments it does not know and prints the server's own art (Redis 8:
+# a random poem). Its keyword matching is checked in test_missing_commands.py.
+NO_MUTATE = {"LOLWUT"}
+
+
+def run_mutations(pion, redis):
+    """Every keyword argument of every semantic-script step, mangled. Each
+    variant runs on a fresh replay of the script up to that step, so a variant
+    one server wrongly accepted cannot leave state behind for the next.
+    Redis answers a mangled keyword with an error; a server that matches a
+    keyword by its length and first letters runs it as the real one."""
+    subst = {"%K": "dfs:k", "%K2": "dfs:k2", "%K3": "dfs:k3"}
+    diffs, n = [], 0
+    for name, script in SEMANTIC_SCRIPTS:
+        steps = [[subst.get(p, p) for p in cmd] for cmd in script]
+        for si, cmd in enumerate(steps):
+            if cmd[0].upper() in NO_MUTATE:
+                continue
+            for pos in range(1, len(cmd)):
+                if not _is_keyword(script[si][pos]):
+                    continue
+                for variant in _mangled(cmd[pos]):
+                    mutated = cmd[:pos] + [variant] + cmd[pos + 1:]
+                    n += 1
+                    try:
+                        for conn in (pion, redis):
+                            conn.cmd("FLUSHALL")
+                            for prev in steps[:si]:
+                                conn.cmd(*prev)
+                        rp = normalize(pion.cmd(*mutated), mutated)
+                        rr = normalize(redis.cmd(*mutated), mutated)
+                    except (EOFError, socket.timeout) as e:
+                        diffs.append((name, mutated, f"TRANSPORT {type(e).__name__}", "-"))
+                        return diffs, n
+                    if rp != rr:
+                        diffs.append((name, mutated, rp, rr))
+    return diffs, n
 
 
 if __name__ == "__main__":

@@ -22,7 +22,8 @@ from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 from std.collections import List
-from std.math import sqrt, fma
+from std.math import sqrt
+from src.vector.fma_mad import fma_mad
 
 from src.network.response_writer import ResponseWriter
 from src.network.server import TCPServer
@@ -286,7 +287,7 @@ struct SpeculativeRAG(Movable):
                 var cur = current.load[width=W](d)
                 var p = cur + alpha_v * (cur - previous.load[width=W](d))
                 pred_ptr.store(d, p)
-                nsq_v = fma(p, p, nsq_v)
+                nsq_v = fma_mad[W](p, p, nsq_v)
                 d += W
             norm_sq = nsq_v.reduce_add()
             while d < dim:  # scalar tail (empty for dim % 8 == 0)

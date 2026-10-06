@@ -15,6 +15,8 @@ from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.network.gossip import GossipManager
 from src.network.replication import PrimaryReplicator, ReplicaReceiver, apply_wal_entries
 from src.common.hash_map import SlabHashMap, StripedHashMap
+from src.common.vec_tomb import VecTomb
+from src.network.vector_ingest import restore_index_state
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
 from src.memory.slab_allocator import SlabAllocator
@@ -61,6 +63,8 @@ struct Pion:
     var hash_map_pool: Pointer[ObjectPool[SlabHashMap], MutUntrackedOrigin]
     var skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]
     var list_pool: Pointer[ObjectPool[SlabList], MutUntrackedOrigin]
+    # #46: this worker's view of the vector index's tombstones
+    var vec_tomb: Pointer[VecTomb, MutUntrackedOrigin]
 
     def __init__(out self, var node_list: List[String], config: PionConfig, shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin], shared_listen_fd: Int32 = -1, worker_id: Int = 0, num_workers: Int = 1, secondary_listen_fd: Int32 = Int32(-1), binary_listen_fd: Int32 = Int32(-1), cluster: Pointer[ClusterState, MutUntrackedOrigin] = null_ptr[ClusterState, MutUntrackedOrigin]()):
         self.nodes = node_list.copy()
@@ -78,6 +82,14 @@ struct Pion:
         self.list_pool = alloc[ObjectPool[SlabList]](1)
         self.ai_queue = alloc[LockFreeRingBuffer](1)
         _ = self.ai_queue[].__init__(1024)
+        self.vec_tomb = alloc[VecTomb](1)
+        if is_not_null(shared_hnsw):
+            self.vec_tomb.unsafe_write(VecTomb(shared_hnsw[].vec_dead, shared_hnsw[].vec_dead_count,
+                                               shared_hnsw[].hk_max_elements, shared_hnsw[].vec_gen))
+        else:
+            self.vec_tomb.unsafe_write(VecTomb(null_ptr[UInt8, MutUntrackedOrigin](),
+                                               null_ptr[UInt64, MutUntrackedOrigin](), 0,
+                                               null_ptr[UInt64, MutUntrackedOrigin]()))
 
         # === Phase 2: Lightweight value-type init ===
         self.config = config
@@ -118,6 +130,8 @@ struct Pion:
             cluster=cluster,
             ttl_map=self.ttl_map,
         )
+        self.engine.fast_path.vec_tomb = self.vec_tomb   # #46
+        self.engine.slow_path.vec_tomb = self.vec_tomb
         if shared_listen_fd >= 0:
             # V3.1: use the single shared listen socket created in main() before parallelize.
             # All workers register this fd with their own kqueue and race to accept().
@@ -173,6 +187,7 @@ struct Pion:
         self.keyspace.unsafe_write(StripedHashMap(65536))
         # TTL map: starts small (opt-in feature), grows on demand.
         self.ttl_map.unsafe_write(SlabHashMap(256))
+        self.keyspace[].ttl_map = self.ttl_map    # a removed key drops its TTL
 
         self.hash_map_pool.unsafe_write(ObjectPool[SlabHashMap](1000))
         for i in range(1000):
@@ -211,6 +226,12 @@ struct Pion:
                 print("Blob tier: compaction re-index FAILED (snapshot error) — "
                       + "the WAL still names pre-compaction offsets")
 
+        # #45: from here on, a key removed as expired is logged as a DEL ahead
+        # of the next record (replay above ran with lazy expiry off).
+        if is_not_null(self.wal[].map):
+            self.keyspace[].enable_expiry_log()
+            self.wal[].expired_q = self.keyspace[].expired_log
+
         # === Phase 6: HNSW load from disk (skips FT.OPTIMIZE on warm restart) ===
         # gh #211: thread the shared slot→key buffer through the load so the
         # persisted map lands in the cross-worker resolver, and publish the
@@ -226,6 +247,30 @@ struct Pion:
         if self.hnsw.load_from_disk(hnsw_path, _hk_buf, _hk_max):
             if is_not_null(self.shared_hnsw):
                 self.hnsw.publish_to_shared(self.shared_hnsw)
+        # #19: this worker's share of the startup load is done (published, or
+        # refused as stale). Then wait for every other loader: a worker that
+        # loads nothing used to serve at once and answer FT.SEARCH with "no
+        # such index" until the loader had published. Clients that connect
+        # meanwhile wait in the listen backlog, as they do during WAL replay.
+        if is_not_null(self.shared_hnsw) and is_not_null(self.shared_hnsw[].warm_load_pending):
+            var _wp = self.shared_hnsw[].warm_load_pending
+            if _wp[unsafe_offset=1 + worker_id] == 1:
+                # + (2^64 - 1) is - 1: the loader is done.
+                _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELEASE](_wp, UInt64.MAX)
+            var _waited_ms = 0
+            while Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](_wp, UInt64(0)) > 0:
+                _ = external_call["usleep", Int32](Int32(1000))
+                _waited_ms += 1
+                if _waited_ms == 2000:
+                    print("Worker " + String(worker_id) + ": waiting for the persisted vector index to load")
+                if _waited_ms >= 600_000:
+                    # A loader that died never decrements; serving without
+                    # the index beats never serving.
+                    print("Worker " + String(worker_id) + ": gave up waiting for the vector index load after 600 s")
+                    break
+        # #46: the index has loaded (or there is none): apply this worker's
+        # recorded tombstones for its build and relink the hashes to their slots
+        restore_index_state(self.shared_hnsw, self.keyspace, self.vec_tomb)
 
         # === Phase 7: Gossip + Replication (worker 0 only) ===
         # Only worker 0 starts background threads; other workers read shared ClusterState.
@@ -249,7 +294,7 @@ struct Pion:
                 # Replica mode: connect to primary's replication port
                 var repl_port = config.cluster.primary_port + REPL_PORT_OFFSET
                 cluster[].repl_drain_buf = alloc[UInt8](4194304)  # 4MB drain buffer
-                var recv_ok = self.replica_recv.setup(config.cluster.primary_host, repl_port)
+                var recv_ok = self.replica_recv.setup(config.cluster.primary_host, repl_port, config.server.port)
                 if recv_ok:
                     cluster[].repl_replica_handle = self.replica_recv.handle
                     # The receiver THREAD started; it connects (and retries)

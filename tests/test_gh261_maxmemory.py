@@ -34,6 +34,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
+
 BINARY = os.path.abspath(
     sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server"))
 PORT = 6473
@@ -92,21 +95,24 @@ def start(args, port=PORT):
     p = subprocess.Popen([BINARY, "-p", str(port), "--no-auto-detect", "--no-auto-embed",
                           "--no-wal", *args], cwd=d, stdout=open(log, "w"),
                          stderr=subprocess.STDOUT)
-    for _ in range(300):
-        if p.poll() is not None:
-            break
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-            break
-        except OSError:
-            time.sleep(0.1)
+    # #27: ready means THIS process answers. A connect that succeeded used to
+    # count, and right after the previous server was killed it could reach
+    # that server's lingering listener (section [9] failed that way on Linux).
+    try:
+        wait_ready_pid(port, p, 30)
+    except RuntimeError:
+        pass        # a server expected to refuse to start; callers check p.poll()
     return p, d, log
 
 
-def stop(p, d):
+def stop(p, d, port=PORT):
     if p.poll() is None:
         p.kill()
         p.wait()
+    try:
+        wait_port_free(port)
+    except RuntimeError:
+        pass
     shutil.rmtree(d, ignore_errors=True)
 
 

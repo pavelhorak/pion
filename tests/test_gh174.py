@@ -14,7 +14,7 @@ permanent, which is worse than losing them because it is silent.
 """
 import os, socket, subprocess, sys, time, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from resp_strict import reader  # noqa: E402  (strict one-reply reads)
+from resp_strict import reader, wait_ready_pid  # noqa: E402  (strict one-reply reads)
 
 BINARY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server")
 PORT = 1979
@@ -47,7 +47,9 @@ def send(sock, *args):
     return reader(sock).read_raw().decode(errors="replace")
 
 
-def connect():
+def connect(proc):
+    # Ready = THIS process answering, not a killed server's lingering listener (#27).
+    wait_ready_pid(PORT, proc, 60)
     deadline = time.monotonic() + 25
     while time.monotonic() < deadline:
         s = socket.socket()
@@ -173,7 +175,7 @@ def run_mode(mode):
     os.makedirs(WORKDIR, exist_ok=True)
 
     proc = start()
-    sock = connect()
+    sock = connect(proc)
     facts = populate(sock)
     if mode == "A":
         send(sock, "SAVE")
@@ -181,7 +183,7 @@ def run_mode(mode):
     kill(proc)
 
     proc = start()
-    sock = connect()
+    sock = connect(proc)
     try:
         verify(sock, facts, mode)
     finally:

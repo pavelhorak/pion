@@ -1,4 +1,4 @@
-from src.common.ptr import null_ptr
+from src.common.ptr import null_ptr, is_null, is_not_null
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
@@ -6,12 +6,28 @@ from std.sys import CompilationTarget
 
 from src.network.server import TCPServer
 from src.common.value import GenericValue, ValueType
-from src.common.utils import int_string_len, format_int_to_buf
+from src.common.utils import int_string_len, format_int_to_buf, score_prints_as_int, format_score
 from src.io.io_uring import IOUring
 
 # Response buffer size. Kept at 4MB for cache-friendly vector search performance.
 # LMCache large-value GET uses writev to bypass this buffer entirely.
 comptime RESP_BUF_SIZE = 4 * 1024 * 1024  # 4 MB
+
+
+@always_inline
+def _send_errno() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return external_call["__errno_location", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
+    else:
+        return external_call["__error", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
+
+
+@always_inline
+def _EAGAIN() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return 11
+    else:
+        return 35
 
 
 def _write_overflow_error_bytes(dst: Pointer[UInt8, MutUntrackedOrigin]):
@@ -68,6 +84,10 @@ struct ResponseWriter(Movable):
     # so plain increments are lockless. Exposed as INFO send_eagain_stalls —
     # the kill-test/observability signal for the substrate large-send path.
     var send_stalls: UInt64
+    # #47: how many times the writer flushed. CLIENT REPLY OFF drops a
+    # command's reply by cutting the buffer back to where the reply began,
+    # which is only right when nothing was sent in between.
+    var flush_count: Int
 
     def __init__(out self):
         self.buffer = alloc[UInt8](RESP_BUF_SIZE)
@@ -80,10 +100,31 @@ struct ResponseWriter(Movable):
         self.overflow_emitted = False
         self.proto = 2
         self.send_stalls = 0
+        self.flush_count = 0
         for i in range(65536):
             self.pending_offsets[unsafe_offset=i] = 0
             self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
             self.uring_inflight[unsafe_offset=i] = 0
+
+    def __init__(out self, *, capture_only: Bool):
+        """#36: a writer that never sends, for a script's redis.call(): its
+        reply stays in `buffer` for the engine to read. It has no per-connection
+        output state, which is how the paths that would write to a connection
+        recognise it (`is_null(pending_offsets)`), and its flushes are given
+        kq = -1, the no-op flush the XDP lane uses. (A `capture` field on every
+        writer cost the MSET and GET helpers, which take the writer, about 1%
+        more instructions.)"""
+        self.buffer = alloc[UInt8](RESP_BUF_SIZE)
+        self.offset = 0
+        self.pending_offsets = null_ptr[Int, MutUntrackedOrigin]()
+        self.pending_buffers = null_ptr[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]()
+        self.use_uring = False
+        self.ring = null_ptr[IOUring, MutUntrackedOrigin]()
+        self.uring_inflight = null_ptr[Int, MutUntrackedOrigin]()
+        self.overflow_emitted = False
+        self.proto = 2
+        self.send_stalls = 0
+        self.flush_count = 0
 
     @always_inline
     def bind_ring(mut self, ring_ptr: Pointer[IOUring, MutUntrackedOrigin]):
@@ -129,6 +170,7 @@ struct ResponseWriter(Movable):
 
     @always_inline
     def flush_response(mut self, fd: Int32, server: TCPServer, kq: Int32):
+        self.flush_count += 1
         if self.use_uring:
             self._flush_uring(fd)
         elif kq == -1:
@@ -143,6 +185,54 @@ struct ResponseWriter(Movable):
         if self.offset == 0:
             self.overflow_emitted = False
 
+    def deliver_to(mut self, fd: Int32, data: Pointer[UInt8, MutUntrackedOrigin], length: Int,
+                   server: TCPServer, kq: Int32):
+        """Send a whole frame to ANOTHER connection: a published message, a
+        MONITOR line (#39, #42). The bytes queued for the current connection
+        are not touched. Always the engine's writer, never a script's.
+
+        What the socket cannot take now waits in that connection's pending
+        buffer, behind what is already there, and goes out on its write event.
+        A frame that fits neither is never cut: the connection is shut down
+        instead, as Redis disconnects a client past its output-buffer limit,
+        because a subscriber that received half a frame is out of sync for
+        good. (Delivery used to send() once and drop the rest at EAGAIN.)
+        Not on the XDP lane (kq == -1), which sends nothing over TCP."""
+        if length <= 0 or (kq == -1 and not self.use_uring):
+            return
+        var ci = Int(fd)
+        var limit = RESP_BUF_SIZE - 194304
+        var p = data
+        var left = length
+        if not self.use_uring and self.pending_offsets[unsafe_offset=ci] == 0:
+            while left > 0:
+                var n = server.send(fd, p, left)
+                if n <= 0:
+                    break
+                p = p.unsafe_offset(n)
+                left -= n
+            if left == 0:
+                return
+            var err = _send_errno()
+            if left == length and err != _EAGAIN():
+                return                  # a dead connection: its close is the engine's
+        var cur = self.pending_offsets[unsafe_offset=ci]
+        if self.use_uring and self.ring[].fd_closing[unsafe_offset=ci] != 0:
+            return
+        if cur + left > limit:
+            _ = external_call["shutdown", Int32](fd, Int32(2))   # SHUT_RDWR: the engine sees EOF
+            return
+        if self.pending_buffers[unsafe_offset=ci] == null_ptr[UInt8, MutUntrackedOrigin]():
+            self.pending_buffers[unsafe_offset=ci] = alloc[UInt8](RESP_BUF_SIZE)
+        unsafe_memcpy(dest=self.pending_buffers[unsafe_offset=ci].unsafe_offset(cur), src=p, count=left)
+        self.pending_offsets[unsafe_offset=ci] = cur + left
+        if self.use_uring:
+            if self.uring_inflight[unsafe_offset=ci] == 0:
+                self.uring_inflight[unsafe_offset=ci] = self.pending_offsets[unsafe_offset=ci]
+                self.ring[].submit_send(fd, self.pending_buffers[unsafe_offset=ci], self.uring_inflight[unsafe_offset=ci])
+        else:
+            server.kevent_add_write(kq, fd)
+
     @always_inline
     def _flush_uring(mut self, fd: Int32):
         """io_uring send path. Copies response buffer into pending_buffers[fd] and submits
@@ -152,6 +242,12 @@ struct ResponseWriter(Movable):
             self.overflow_emitted = False
             return
         var ci = Int(fd)
+        if self.ring[].fd_closing[unsafe_offset=ci] != 0:
+            # The engine is closing this connection and waits for its last
+            # SEND to complete before freeing the buffer a new one would read.
+            self.offset = 0
+            self.overflow_emitted = False
+            return
         if self.pending_buffers[unsafe_offset=ci] == null_ptr[UInt8, MutUntrackedOrigin]():
             self.pending_buffers[unsafe_offset=ci] = alloc[UInt8](RESP_BUF_SIZE)
         var cur = self.pending_offsets[unsafe_offset=ci]
@@ -278,6 +374,12 @@ struct ResponseWriter(Movable):
                 self.offset = 0
 
     @always_inline
+    def append_status_response(mut self, msg: String):
+        """`+msg` — a simple string (status) reply, e.g. one HELP line."""
+        var line = String("+") + msg + "\r\n"
+        self.append_to_response(line.unsafe_ptr(), line.byte_length())
+
+    @always_inline
     def append_ok_response(mut self):
         # gh #82: hot path — keep the original constant guard. Fixed-byte writes
         # are protected by the safe-zone invariant maintained by variable-length
@@ -339,6 +441,50 @@ struct ResponseWriter(Movable):
         self.offset = off + 5
 
     @always_inline
+    def append_verbatim_response[origin: Origin](mut self, data: Pointer[UInt8, origin], length: Int):
+        """RESP3 verbatim string `=<len + 4>\r\ntxt:<data>\r\n`, as Redis
+        sends INFO and CLIENT INFO / LIST; RESP2 has no such type and gets the
+        same text as a bulk string."""
+        if self.proto != 3:
+            self.append_bulk_string_response(data, length)
+            return
+        if self._check_overflow(length + 32): return
+        self.buffer[unsafe_offset=self.offset] = 61   # '='
+        self.offset += 1
+        self.offset = format_int_to_buf(self.buffer, self.offset, Int64(length + 4))
+        self.buffer[unsafe_offset=self.offset] = 13
+        self.buffer[unsafe_offset=self.offset + 1] = 10
+        self.buffer[unsafe_offset=self.offset + 2] = 116   # 't'
+        self.buffer[unsafe_offset=self.offset + 3] = 120   # 'x'
+        self.buffer[unsafe_offset=self.offset + 4] = 116   # 't'
+        self.buffer[unsafe_offset=self.offset + 5] = 58    # ':'
+        self.offset += 6
+        unsafe_memcpy(dest=self.buffer.unsafe_offset(self.offset), src=data, count=length)
+        self.offset += length
+        self.buffer[unsafe_offset=self.offset] = 13
+        self.buffer[unsafe_offset=self.offset + 1] = 10
+        self.offset += 2
+
+    @always_inline
+    def append_null_array_response(mut self):
+        """A nil ARRAY: `*-1` under RESP2, `_` under RESP3. Commands whose
+        reply is an array (XREAD with no data, a blocking pop that timed out)
+        answer nil this way in Redis, not with a nil bulk string (`$-1`)."""
+        if self.offset + 8 > RESP_BUF_SIZE - 194304: return
+        if self.proto == 3:
+            self.buffer[unsafe_offset=self.offset] = 95   # '_'
+            self.buffer[unsafe_offset=self.offset + 1] = 13
+            self.buffer[unsafe_offset=self.offset + 2] = 10
+            self.offset += 3
+        else:
+            self.buffer[unsafe_offset=self.offset] = 42   # '*'
+            self.buffer[unsafe_offset=self.offset + 1] = 45   # '-'
+            self.buffer[unsafe_offset=self.offset + 2] = 49   # '1'
+            self.buffer[unsafe_offset=self.offset + 3] = 13
+            self.buffer[unsafe_offset=self.offset + 4] = 10
+            self.offset += 5
+
+    @always_inline
     def append_array_header(mut self, count: Int):
         """`*<count>\r\n`. Identical in RESP2 and RESP3 — provided so callers
         stop hand-rolling the bytes (several already did, inconsistently)."""
@@ -368,6 +514,45 @@ struct ResponseWriter(Movable):
         self.buffer[unsafe_offset=self.offset] = 13 # '\r'
         self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
         self.offset += 2
+
+    @always_inline
+    def append_set_header(mut self, count: Int):
+        """RESP3 set `~<count>` (SMEMBERS, SINTER, SUNION, SDIFF, SPOP with a
+        count). RESP2 has no set type and sends the same members as an array."""
+        if self.offset + 16 > RESP_BUF_SIZE - 194304: return
+        self.buffer[unsafe_offset=self.offset] = 126 if self.proto == 3 else 42   # '~' / '*'
+        self.offset += 1
+        self.offset = format_int_to_buf(self.buffer, self.offset, Int64(count))
+        self.buffer[unsafe_offset=self.offset] = 13 # '\r'
+        self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
+        self.offset += 2
+
+    @always_inline
+    def append_scored_header(mut self, members: Int, with_scores: Bool):
+        """Header of a reply that lists `members` sorted-set members, with their
+        scores when `with_scores` (WITHSCORES, ZPOPMIN/ZPOPMAX with a count,
+        ZRANDMEMBER). RESP2 sends one flat array, member then score; RESP3 an
+        array of [member, score] pairs, as Redis does. Pair each call with
+        append_scored_member."""
+        if with_scores and self.proto != 3:
+            self.append_array_header(members * 2)
+        else:
+            self.append_array_header(members)
+
+    @always_inline
+    def append_scored_member(mut self, member: GenericValue, score: Float64, with_scores: Bool):
+        """One member of an append_scored_header reply: the member, then its
+        score as a bulk string (RESP2) or inside a [member, double] pair (RESP3)."""
+        if not with_scores:
+            self.append_bulk_value_response(member)
+            return
+        if self.proto == 3:
+            self.append_array_header(2)
+            self.append_bulk_value_response(member)
+            self.append_score_response(score)
+        else:
+            self.append_bulk_value_response(member)
+            self.append_bulk_score_response(score)
 
     @always_inline
     def append_push_header(mut self, count: Int):
@@ -431,8 +616,8 @@ struct ResponseWriter(Movable):
         Scoped to the two commands real Redis answers with the double type:
         INCRBYFLOAT / HINCRBYFLOAT / GEODIST stay bulk strings even under
         RESP3 in Redis 8 (probed 2026-08-03) — do not route them here."""
-        var si = Int64(score)
-        if Float64(si) == score:
+        if score_prints_as_int(score):   # #18: never Int64() an inf
+            var si = Int64(score)
             if self.proto != 3:
                 self.append_bulk_int_response(si)
                 return
@@ -445,8 +630,20 @@ struct ResponseWriter(Movable):
             self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
             self.offset += 2
         else:
-            var ss = String(score)
+            var ss = format_score(score)
             self.append_double_response(ss.unsafe_ptr(), ss.byte_length())
+
+    @always_inline
+    def append_bulk_score_response(mut self, score: Float64):
+        """A sorted-set score inside an array reply (WITHSCORES, the ZPOP and
+        ZMPOP families, ZMSCORE, ZSCAN): a bulk string, digits as Redis prints
+        them. Every such site used to carry its own `Int64(score)` round trip,
+        which read ±inf back as INT64_MIN on x86 (#18)."""
+        if score_prints_as_int(score):
+            self.append_bulk_int_response(Int64(score))
+        else:
+            var ss = format_score(score)
+            self.append_bulk_string_response(ss.unsafe_ptr(), ss.byte_length())
 
     @always_inline
     def append_empty_array_response(mut self):
@@ -600,7 +797,9 @@ struct ResponseWriter(Movable):
         4 bytes = 5 MB) → SIGSEGV in process_slow_path.
         """
         # Fits in buffer (with the same safety margin used elsewhere) → fast path.
-        if self.offset + length + 32 <= RESP_BUF_SIZE - 194304:
+        # A capture writer (a script's redis.call) never writes to the fd: a
+        # reply too large for it becomes the overflow error.
+        if is_null(self.pending_offsets) or self.offset + length + 32 <= RESP_BUF_SIZE - 194304:
             self.append_bulk_string_response(data, length)
             return
         # Build RESP header `$<len>\r\n` in self.buffer.
@@ -640,6 +839,7 @@ struct ResponseWriter(Movable):
 
         crlf.unsafe_free()
         self.offset = 0
+        self.flush_count += 1   # #47: sent directly, not through flush_response
 
     @always_inline
     def append_large_value_response_writev(mut self, fd: Int32, val: GenericValue):
@@ -648,7 +848,7 @@ struct ResponseWriter(Movable):
         Used by GET fast path for LMCache-size blobs (1-16MB)."""
         # Only use writev for values > 3MB that won't fit in the 4MB response buffer.
         # Smaller values go through the normal buffer path (faster, handles pipelining).
-        if val.type.value == ValueType.STRING and val.string_len() > 3 * 1024 * 1024 and val.type.value != ValueType.STRING_SSO:
+        if is_not_null(self.pending_offsets) and val.type.value == ValueType.STRING and val.string_len() > 3 * 1024 * 1024 and val.type.value != ValueType.STRING_SSO:
             # Build RESP header in response buffer: $<len>\r\n
             self.buffer[unsafe_offset=self.offset] = 36 # '$'
             self.offset += 1
@@ -688,6 +888,7 @@ struct ResponseWriter(Movable):
 
             crlf.unsafe_free()
             self.offset = 0
+            self.flush_count += 1   # #47: sent directly, not through flush_response
         else:
             self.append_bulk_value_response(val)
 

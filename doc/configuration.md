@@ -173,6 +173,28 @@ breadcrumbs in `doc/operations.md` §1 will show.
 
 ---
 
+## Scripts (`--lua-time-limit`, `--lua-memory-limit`)
+
+```bash
+./pion-server --lua-time-limit 2000      # ms; default 5000, 0 = never
+./pion-server --lua-memory-limit 256mb   # per Lua state; default 1gb, 0 = no cap
+```
+
+A worker runs one thing at a time, so while a script runs it cannot answer
+another client. That includes the `SCRIPT KILL` and the `BUSY` reply that Redis
+uses for a slow script.
+
+Instead, a script that has run for `--lua-time-limit` milliseconds without
+writing anything is stopped with
+`ERR Script killed: it ran longer than lua-time-limit (… ms) without writing`,
+which is when Redis's SCRIPT KILL would be allowed to stop it. A script that has
+written keeps running, as an unkillable script does in Redis.
+
+`--lua-memory-limit` caps each Lua state's heap: a worker has one state for EVAL
+scripts and one for FUNCTION libraries. Redis has no such cap.
+
+---
+
 ## Current Defaults
 
 What `./pion-server --no-auto-detect` printed at startup on a 10-core Apple

@@ -329,6 +329,22 @@ void pion_request_shutdown(void) {
     }
 }
 
+/* #47: a worker has started draining (it saw the latch): from here a
+   shutdown cannot be aborted. */
+static volatile sig_atomic_t g_shutdown_draining = 0;
+void pion_shutdown_begin_drain(void) { g_shutdown_draining = 1; }
+
+/* #47: SHUTDOWN ABORT. 1 when a requested shutdown was cancelled before any
+   worker began to drain; 0 when there is none to cancel. */
+int pion_abort_shutdown(void) {
+    if (g_shutdown_requested && !g_shutdown_draining) {
+        g_shutdown_requested = 0;
+        alarm(0);
+        return 1;
+    }
+    return 0;
+}
+
 static void _pion_crash_handler(int sig) {
     char line[PION_STATUS_RECORD_LEN];
     int o = 0;

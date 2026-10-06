@@ -63,7 +63,8 @@ from .kernels import (
     l2_int8_sabd_udot_batch8,
 )
 from std.random import random_float64
-from std.math import log, min, fma
+from std.math import log, min
+from src.vector.fma_mad import fma_mad
 from std.collections import List, Array
 from std.sys.intrinsics import prefetch
 from std.ffi import external_call
@@ -79,27 +80,16 @@ comptime CALIBRATION_SAMPLE_MAX = 65536
 def fma_or_muladd(a: SIMD[DType.float32, 8], b: SIMD[DType.float32, 8],
                   c: SIMD[DType.float32, 8]) -> SIMD[DType.float32, 8]:
     """`fma(a, b, c)` where the target has a fused multiply-add, `a * b + c`
-    where it does not. An x86 target without FMA, the release's x86-64-v2
-    build among them, has no instruction for an exactly rounded fma, so LLVM
-    lowers each lane of a vector `fma` to a libm `fmaf` call. In metric_scores
-    that came to about 300K calls and 1.3 ms per FT.SEARCH on an EPYC 8124P,
-    more than the search itself (profiled 2026-10-05). `has_fma()` names an
-    x86 feature and reads False on AArch64, so the test is x86-only and every
-    other target compiles exactly as before. Two overloads, not one generic
-    function: Mojo 1.1 does not infer a SIMD width parameter from an argument."""
-    comptime if CompilationTarget.is_x86() and not CompilationTarget.has_fma():
-        return a * b + c
-    else:
-        return fma(a, b, c)
+    where it does not (src/vector/fma_mad.mojo, #15): the x86-64-v2 build
+    has no FMA, and LLVM lowers a vector `fma` there to a libm `fmaf` call
+    per lane. Width-8 and scalar spellings of fma_mad for this file's
+    many call sites."""
+    return fma_mad[8](a, b, c)
 
 
 @always_inline
 def fma_or_muladd(a: Float32, b: Float32, c: Float32) -> Float32:
-    comptime if CompilationTarget.is_x86() and not CompilationTarget.has_fma():
-        return a * b + c
-    else:
-        return fma(a, b, c)
-
+    return fma_mad[1](a, b, c)
 
 
 struct HNSWGraph(Movable):
@@ -311,6 +301,10 @@ struct HNSWGraph(Movable):
     # At END of struct per the field-ordering rule.
     var residual_scratch: UnsafePointer[Float32, MutUntrackedOrigin]
     var residual_scratch_cap: Int
+    # #46: this build's id, random per FT.OPTIMIZE (index header word 31; 0
+    # for a file that predates it). Tombstones record it, so replay applies
+    # them to the build they were made against. At END per the field rule.
+    var build_id: UInt64
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
@@ -414,6 +408,7 @@ struct HNSWGraph(Movable):
         self.fp32_norm_scratch_cap = 0
         self.fp32_norm_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.residual_scratch_cap = 0
+        self.build_id = 0
         self.residual_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.gpu_slot_ext_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.gpu_distances = null_ptr[Float32, MutUntrackedOrigin]()
@@ -878,6 +873,8 @@ struct HNSWGraph(Movable):
             shared[].pre_vector_field_len = self.vector_field_len
             for i in range(self.vector_field_len):
                 shared[].pre_vector_field_name[i] = self.vector_field_name[i]
+        if is_not_null(shared[].build_id):
+            shared[].build_id[] = self.build_id   # #46
         shared[].ready = True  # legacy plain-Bool, kept for diagnostics
         # Real visibility barrier: atomic Release store after all field writes.
         # FT.SEARCH borrow check uses Atomic Acquire load to pair with this
@@ -1020,7 +1017,7 @@ struct HNSWGraph(Movable):
         # resolution tier misses after restart and FT.SEARCH emits raw slot
         # numbers: the silent recall ≈ 0.002). v2 files are refused loudly —
         # they reproduce exactly that bug.
-        hdr[1] = UInt64(3)                   # version
+        hdr[1] = UInt64(4)                   # version (v4: node_map and pool trimmed to the index)
         hdr[2] = UInt64(self.num_nodes)
         hdr[3] = UInt64(self.dim)
         hdr[4] = UInt64(self.M)
@@ -1072,6 +1069,7 @@ struct HNSWGraph(Movable):
         # 27-30) = up to 32 bytes. Same no-bump reasoning as words 24/25: an
         # older file reads length 0 and keeps the default field.
         hdr[26] = UInt64(self.vector_field_len) if self.vector_field_len <= 32 else UInt64(0)
+        hdr[31] = self.build_id                  # #46
         var vf_dst = hdr.bitcast[UInt8]() + 216
         if self.vector_field_len <= 32:
             for i in range(self.vector_field_len):
@@ -1088,13 +1086,27 @@ struct HNSWGraph(Movable):
         var compact_bytes = self.num_nodes * self.compact_stride
         self._pion_write_all(fd, self.compact_buffer.bitcast[UInt8](), compact_bytes)
 
-        var node_map_bytes = self.max_elements * 8
-        self._pion_write_all(fd, self.node_map.bitcast[UInt8](), node_map_bytes)
+        # v4: node_map up to the highest external id the index holds (its
+        # count first), and the neighbor blocks of its num_nodes nodes. v3
+        # wrote both for the server's whole capacity: 329 MB for a 100-vector
+        # index at the default 1M elements, every FT.OPTIMIZE — ~400 ms a
+        # build, and multi-second stalls on a busy disk.
+        var map_ids = 0
+        for i in range(self.num_nodes):
+            if self.nodes[i].id + 1 > map_ids:
+                map_ids = self.nodes[i].id + 1
+        if map_ids > self.max_elements:
+            map_ids = self.max_elements
+        var map_count = alloc[UInt64](1)
+        map_count[0] = UInt64(map_ids)
+        self._pion_write_all(fd, map_count.bitcast[UInt8](), 8)
+        map_count.free()
+        self._pion_write_all(fd, self.node_map.bitcast[UInt8](), map_ids * 8)
 
         var l0_bytes = self.num_nodes * 33 * 4
         self._pion_write_all(fd, self.l0_compact.bitcast[UInt8](), l0_bytes)
 
-        var pool_bytes = self.max_elements * self.neighbor_pool_per_node * 4
+        var pool_bytes = self.num_nodes * self.neighbor_pool_per_node * 4
         self._pion_write_all(fd, self.neighbor_pool.bitcast[UInt8](), pool_bytes)
 
         # Node id+level array (2×Int per node = 16 bytes per node)
@@ -1206,11 +1218,12 @@ struct HNSWGraph(Movable):
             hdr.free(); return False
         if hdr[0] != UInt64(0x574E534E4F494E50):  # magic check
             hdr.free(); return False
-        if hdr[1] != UInt64(3):  # version check (v3 = group calibration + slot→key map)
+        var version = Int(hdr[1])
+        if version != 3 and version != 4:  # v3 = group calibration + slot→key map; v4 = trimmed sections
             # v1 files were tail-corrupt; v2 files lack the slot→key map, so a
             # warm restart serves recall ≈ 0.002 silently (gh #211) — refuse
             # both loudly rather than load an index that returns wrong keys.
-            print("HNSW snapshot version " + String(hdr[1]) + " unsupported (want 3) — cold rebuild (re-ingest + FT.OPTIMIZE)")
+            print("HNSW snapshot version " + String(hdr[1]) + " unsupported (want 3 or 4) — cold rebuild (re-ingest + FT.OPTIMIZE)")
             hdr.free(); return False
         var saved_stride = Int(hdr[20])
         var saved_slot_hdr = Int(hdr[21])
@@ -1238,6 +1251,7 @@ struct HNSWGraph(Movable):
         var saved_metric    = UInt8(hdr[24]) if hdr[24] <= 1 else UInt8(0)  # gh #271
         var saved_qsec      = hdr[25]        # gh #350: optional quant sections
         var saved_vf_len    = Int(hdr[26])   # gh #407: 0 = file predates the field
+        self.build_id = hdr[31]                  # #46: 0 = file predates it
 
         # Sanity checks: must match this worker's config
         if saved_dim != self.dim or saved_M != self.M or saved_max_elem != self.max_elements:
@@ -1277,9 +1291,21 @@ struct HNSWGraph(Movable):
         if not self._pion_read_all(fd, self.compact_buffer.bitcast[UInt8](), saved_num_nodes * saved_stride):
             return False
 
-        # node_map
-        if not self._pion_read_all(fd, self.node_map.bitcast[UInt8](), self.max_elements * 8):
+        # node_map: v3 holds every element, v4 the ids up to the highest one
+        # the index holds (the rest are -1, as a fresh graph has them)
+        var map_ids = self.max_elements
+        if version >= 4:
+            var map_count = alloc[UInt64](1)
+            if not self._pion_read_all(fd, map_count.bitcast[UInt8](), 8):
+                map_count.free(); return False
+            map_ids = Int(map_count[0])
+            map_count.free()
+            if map_ids < 0 or map_ids > self.max_elements:
+                return False
+        if not self._pion_read_all(fd, self.node_map.bitcast[UInt8](), map_ids * 8):
             return False
+        for i in range(map_ids, self.max_elements):
+            self.node_map[i] = -1
 
         # l0_compact
         if is_not_null(self.l0_compact):
@@ -1288,8 +1314,9 @@ struct HNSWGraph(Movable):
         if not self._pion_read_all(fd, self.l0_compact.bitcast[UInt8](), saved_num_nodes * 33 * 4):
             return False
 
-        # neighbor_pool
-        if not self._pion_read_all(fd, self.neighbor_pool.bitcast[UInt8](), self.max_elements * saved_pool_per * 4):
+        # neighbor_pool: v3 holds every element's block, v4 the index's nodes'
+        if not self._pion_read_all(fd, self.neighbor_pool.bitcast[UInt8](),
+                                   (self.max_elements if version < 4 else saved_num_nodes) * saved_pool_per * 4):
             return False
 
         # Node id+level

@@ -16,8 +16,10 @@ import os
 import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 # Prefer whichever binary is newer (release vs dev). A stale -dev binary
@@ -61,15 +63,12 @@ def spawn(port: int, moe_snap: Path):
          "--moe-cache", str(moe_snap), "--moe-cache-mib", "256"],
         stdout=log, stderr=subprocess.STDOUT,
     )
-    for _ in range(80):
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                time.sleep(0.3)
-                return proc
-        except (ConnectionRefusedError, socket.timeout, OSError):
-            time.sleep(0.5)
-    proc.kill()
-    raise RuntimeError(f"pion-server did not come up on port {port}")
+    try:
+        wait_ready_pid(port, proc, 40)   # this process, not a lingering listener (#27)
+    except RuntimeError:
+        proc.kill()
+        raise
+    return proc
 
 
 def resp_call(port: int, *args, timeout: float = 60.0):

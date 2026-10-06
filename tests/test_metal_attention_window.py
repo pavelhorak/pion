@@ -36,19 +36,11 @@ import time
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
+
 HOST = "127.0.0.1"
 PORT = 7799  # avoid collision with the iOS PionMesh app on 1974
-
-
-def _wait_port(port: int, timeout: float = 15.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with socket.create_connection((HOST, port), timeout=0.5):
-                return True
-        except OSError:
-            time.sleep(0.1)
-    return False
 
 
 def _spawn_server(window: int, fp16: bool, port: int) -> subprocess.Popen:
@@ -61,7 +53,9 @@ def _spawn_server(window: int, fp16: bool, port: int) -> subprocess.Popen:
     if window > 0:
         cmd += ["--fa-window", str(window)]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if not _wait_port(port):
+    try:
+        wait_ready_pid(port, proc, 15)   # this process, not a lingering listener (#27)
+    except RuntimeError:
         proc.terminate()
         print(f"FAIL: server failed to bind {HOST}:{port} within 15s")
         sys.exit(2)
@@ -209,6 +203,7 @@ def run_one(window: int, H: int, N: int, D: int, fp16: bool, threshold: float) -
         except subprocess.TimeoutExpired:
             server.kill()
             server.wait()
+        wait_port_free(PORT)   # the next sub-gate's server reuses the port
     return ok
 
 

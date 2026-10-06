@@ -1,8 +1,8 @@
 library: libpion_vector
 platform: linux-x86_64 (target-cpu x86-64-v2; icelake-server (VNNI) by default where the CPU has it, PION_VECTOR_VNNI=0 opts out)
 abi: 1
-source: ba3b54842685eff0 (sha256 of the held sources + the open view/ABI files)
-built: 2026-10-05T05:18:49Z with Mojo 1.1.0 (8189361e)
+source: e4feb0bd0f0e6282 (sha256 of the held sources + the open view/ABI files)
+built: 2026-10-05T22:47:01Z with Mojo 1.1.0 (8189361e)
 exports:
   pion_v_abi_version
   pion_v_abi_version_v2
@@ -43,7 +43,6 @@ undefined:
   fclose
   fdopen
   fflush
-  fmaf
   getenv
   memcpy
   memmove

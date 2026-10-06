@@ -1,8 +1,8 @@
 library: libpion_vector
 platform: linux-aarch64 (target-cpu neoverse-n1)
 abi: 1
-source: 5d37c744df566e45 (sha256 of the held sources + the open view/ABI files)
-built: 2026-10-02T20:20:14Z with Mojo 1.1.0 (8189361e)
+source: e4feb0bd0f0e6282 (sha256 of the held sources + the open view/ABI files)
+built: 2026-10-05T22:47:02Z with Mojo 1.1.0 (8189361e)
 exports:
   pion_v_abi_version
   pion_v_beam_1536

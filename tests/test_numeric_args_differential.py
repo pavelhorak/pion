@@ -96,7 +96,17 @@ KNOWN: set = set()   # filled from KNOWN_FILE when present
 KNOWN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "numeric_args_known.tsv")
 
 
+# Redis's getExpireMillisecondsOrReply adds now to a relative TTL and then
+# checks for overflow by testing the sum for <= 0: a signed overflow, which a
+# clang build (Homebrew's macOS redis-server) may optimize away, answering +OK
+# with the key already expired. Linux builds answer "invalid expire time",
+# which is the check's intent and what Pion answers.
+KNOWN_DARWIN = {("PSETEX k # v", "9223372036854775807"), ("SET k v PX #", "9223372036854775807")}
+
+
 def load_known():
+    if sys.platform == "darwin":
+        KNOWN.update(KNOWN_DARWIN)
     if os.path.exists(KNOWN_FILE):
         for line in open(KNOWN_FILE, encoding="utf-8"):
             line = line.rstrip("\n")
@@ -141,7 +151,8 @@ def main():
     if args.start_redis:
         rdir = tempfile.mkdtemp(prefix="num-redis-")
         rproc = subprocess.Popen(["redis-server", "--port", str(args.redis_port), "--save", "",
-                                  "--appendonly", "no", "--dir", rdir],
+                                  "--appendonly", "no", "--dir", rdir,
+                                  "--databases", "1"],  # Pion has one database
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_ready(args.redis_port, 15, proc=rproc)

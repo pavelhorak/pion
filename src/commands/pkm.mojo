@@ -449,9 +449,7 @@ def handle_neuron_pkm_info(
     info += " valtype=" + ("f16" if pkm.tables[slot].val_type == PKM_VT_F16 else "f32")
     info += " val_rows=" + String(pkm.tables[slot].val_rows)
     info += " queries=" + String(pkm.tables[slot].queries)
-    var bytes = info.as_bytes()
-    var info_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(bytes.unsafe_ptr()))
-    writer.append_bulk_string_response(info_ext, len(bytes))
+    writer.append_bulk_string_response(info.unsafe_ptr(), info.byte_length())
     return 1
 
 

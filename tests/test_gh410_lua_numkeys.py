@@ -44,7 +44,10 @@ def main():
     import redis
     d = tempfile.mkdtemp(prefix="pion_gh410_")
     p = subprocess.Popen(
-        [BINARY, "-p", str(PORT), "-w", "1", "--no-wal", "--no-auto-detect", "--no-auto-embed"],
+        # A 1 MB Lua heap (the old fixed cap; --lua-memory-limit since #36), so
+        # the memory-cap routes below are reachable with small scripts.
+        [BINARY, "-p", str(PORT), "-w", "1", "--no-wal", "--no-auto-detect", "--no-auto-embed",
+         "--lua-memory-limit", "1mb"],
         cwd=d, stdout=open(os.path.join(d, "log"), "w"), stderr=subprocess.STDOUT)
 
     def fresh():
@@ -85,7 +88,11 @@ def main():
             ck(f"EVAL numkeys {label} -> error", k == "err" and "number of" in v.lower(), v[:48])
             ck(f"  server alive after EVAL numkeys {label}", fresh())
 
-        k, v = err_of(lambda: r.execute_command("FCALL", "nofn", 1000000))
+        # Redis looks the function up before it reads numkeys (#36), so the
+        # numkeys guard needs a function that exists.
+        r.execute_command("FUNCTION", "LOAD", "REPLACE",
+                          "#!lua name=gh410\nredis.register_function('gh410f', function() return 1 end)")
+        k, v = err_of(lambda: r.execute_command("FCALL", "gh410f", 1000000))
         ck("FCALL numkeys 1e6 -> error", k == "err" and "number of" in v.lower(), v[:48])
         ck("  server alive after FCALL numkeys 1e6", fresh())
 

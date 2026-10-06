@@ -1,4 +1,5 @@
 from src.common.env import Environment
+from std.sys import CompilationTarget
 
 @fieldwise_init
 struct VectorConfig(Copyable, Movable, ImplicitlyCopyable):
@@ -99,6 +100,9 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # default ConnectionPool included). `-w N` for N > 1 is refused unless this
     # flag is also passed, so nobody reaches that semantics by accident.
     var independent_workers: Bool
+    # #45: DEBUG, as Redis's enable-debug-command: 0 no (the default, as
+    # Redis 7 and later), 1 yes, 2 local (loopback connections only).
+    var enable_debug_command: Int
     # gh #258: the interface to bind every listener to (RESP, port+1 binary lane,
     # port+10000 replication, gossip/Raft). Empty means "decide from the security
     # posture at parse time": loopback when no password is set, all interfaces
@@ -147,6 +151,7 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         self.status_file = ""
         self.rss_warn_pct = 70
         self.independent_workers = False
+        self.enable_debug_command = 0
         self.bind_addr = ""
         self.maxmemory = 0
 
@@ -338,8 +343,16 @@ struct PionConfig(Copyable, Movable, ImplicitlyCopyable):
             # read-your-writes — so the throughput default is now opt-in
             # (`-w 16 --independent-workers`), not inherited from the environment.
             self.server.workers = 1
-            self.server.use_huge_pages = True
-            self.server.strict_affinity = True
+            # MAP_HUGETLB needs pages reserved by the admin, which a stock Linux
+            # box does not have; `--huge-pages` opts in.
+            self.server.use_huge_pages = not CompilationTarget.is_linux()
+            # #20: until the CPU count was fixed, no Linux machine ever ran this
+            # profile, and `--affinity` did nothing on Linux. Pinning there has
+            # never been measured, so on Linux it stays opt-in (`--affinity`).
+            comptime if CompilationTarget.is_linux():
+                self.server.strict_affinity = False
+            else:
+                self.server.strict_affinity = True
             # Was `use_int4 = True` from the first smart-config commit; V13
             # abandoned naive INT4 (recall 0.74) and fixed only the desktop
             # branch below. Worse than low recall: INT4 stores dim/2-byte rows
@@ -352,7 +365,7 @@ struct PionConfig(Copyable, Movable, ImplicitlyCopyable):
         else:
             self.server.profile = "desktop"
             self.server.workers = 1   # gh #253: was 8 — see ServerConfig.independent_workers
-            self.server.use_huge_pages = True
+            self.server.use_huge_pages = not CompilationTarget.is_linux()   # as in `cloud`
             self.server.strict_affinity = False
             self.vector.M = 16  # V10: restored to M=16 (M=12 tested V38C: ef=150 recall=0.9235 fails gate; ef=175 recall ok but QPS regresses vs M=16 ef=150)
             self.vector.use_int4 = False  # V13 INT4 ABANDONED: recall=0.74 (16-level quant too coarse for 1536-dim cosine)

@@ -105,7 +105,7 @@ Vector index persistence for warm restarts — skips the expensive `FT.OPTIMIZE`
 
 | Operation | File | When |
 |---|---|---|
-| `save_to_disk("pion.hnsw.{worker_id}")` | **Index file v3**: per-node compact slots, the slot→key map, and the INT8 calibration. Older files are refused loudly and rebuilt cold. | After `FT.OPTIMIZE`, from whichever worker handled the request |
+| `save_to_disk("pion.hnsw.{worker_id}")` | **Index file v4**: per-node compact slots, the slot→key map, and the INT8 calibration; the node map and neighbor lists cover the index's own nodes (v3 wrote them for the server's whole capacity: 329 MB for 100 vectors). v3 files still load; older ones are refused loudly and rebuilt cold. | After `FT.OPTIMIZE`, from whichever worker handled the request |
 | `load_from_disk("pion.hnsw.{worker_id}")` | Reads header, restores index, sets `index_ready=True` | At startup |
 
 Header: magic, version, num_nodes, M, ef_construction, global_min/max, etc.

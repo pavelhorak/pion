@@ -1,4 +1,5 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
+from src.common.vec_tomb import VecTomb
 from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc, unsafe_memcpy, unsafe_memset, stack_allocation
 from std.collections import Array, List
@@ -17,7 +18,7 @@ from src.common.skip_list import SlabSkipList
 from src.common.list import SlabList
 from src.memory.slab_allocator import SlabAllocator
 from src.common.value import GenericValue, ValueType
-from src.common.utils import strict_atol, format_int_to_buf, format_float_to_buf, int_string_len, arg_eq, parse_int64_strict, parse_redis_double, DOUBLE_VALUE, DOUBLE_RANGE, DOUBLE_LONG, format_float64_to_buf, set_expiry, SETEXP_INVALID, SETEXP_EXPIRED
+from src.common.utils import bytes_to_string, strict_atol, format_int_to_buf, format_float_to_buf, int_string_len, arg_eq, parse_int64_strict, parse_redis_double, DOUBLE_VALUE, DOUBLE_RANGE, DOUBLE_LONG, set_expiry, SETEXP_INVALID, SETEXP_EXPIRED
 from src.common.metrics import ValueLedger
 from src.common.config import PionConfig
 from src.common.geohash import geohash_encode, geohash_decode, GeoHashBits, GEO_STEP_MAX
@@ -48,25 +49,40 @@ from src.common.hll import hll_add, hll_count, hll_merge, HLL_REGISTERS
 
 # Command modules (Phase 1 extraction)
 from src.commands.transaction import TransactionState, QueuedCommand, handle_multi, handle_exec_start, handle_discard, handle_watch, handle_unwatch, tx_queue_has_denyoom
-from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, PION_COMMAND_COUNT
+from src.commands.command_table import command_exists, command_arity, command_is_write, command_is_denyoom, command_is_noscript, command_hidden_from_monitor, command_touches_keyspace, command_monitor_first, PION_COMMAND_COUNT
 from src.commands.tenant import TenantTable, tenant_keyspec, apply_tenant_rewrite, TENANT_SCRATCH_CAP, MAX_TENANT_NAME
-from src.commands.stream import handle_xadd, handle_xlen, handle_xack, handle_xdel, handle_xread, handle_xtrim, handle_xinfo, handle_xrange, handle_xgroup, handle_xclaim, handle_xpending, handle_xrevrange, handle_xautoclaim, handle_xreadgroup, BlockedReaderRegistry, notify_blocked_readers
-from src.commands.pubsub import PubSubRegistry, PubSubBroadcast, handle_pubsub, handle_publish, handle_subscribe, handle_unsubscribe, handle_psubscribe, handle_punsubscribe, handle_ssubscribe, handle_sunsubscribe, handle_spublish
+from src.commands.stream import handle_xadd, handle_xlen, handle_xdel, handle_xread, handle_xtrim, handle_xrange, handle_xrevrange, BlockedReaderRegistry, write_xread_reply
+from src.commands.stream_groups import (handle_xgroup, handle_xreadgroup, handle_xack, handle_xpending, handle_xclaim,
+                                        handle_xautoclaim, handle_xsetid, handle_xinfo, handle_xdelex, handle_xackdel,
+                                        XRG_BLOCK)
+from src.commands.pubsub import PubSubRegistry, handle_pubsub, handle_publish_kind, handle_subscribe_kind, handle_unsubscribe_kind, pubsub_drain, KIND_CHANNEL, KIND_PATTERN, KIND_SHARD
 from src.commands.ttl import handle_expire, handle_pexpire, handle_expireat, handle_pexpireat, handle_ttl, handle_pttl, handle_persist
 # Command modules (Phase 2 extraction)
 from src.commands.list import handle_lindex, handle_lset, handle_linsert, handle_lrem, handle_ltrim, handle_lpos, handle_lmove
-from src.commands.bitmap import handle_bitop, handle_bitpos, handle_pfmerge, handle_bitfield, handle_bitfield_ro
+from src.commands.mpop import parse_mpop
+from src.commands.blocking import BlockedClientRegistry, parse_block_timeout, new_blocked_client, blocked_client_ready, UNBLOCK_TIMEOUT, UNBLOCK_ERROR
+from src.commands.command_cmd import handle_command
+from src.commands.slowlog import SlowLog, handle_slowlog
+from src.commands.acl import AclLog, AclUsers, handle_acl
+from src.commands.client import (ClientRegistry, ClientView, client_line, client_type_of, peer_addr, local_addr,
+                                 heapsort_u64, lower_bytes, client_help, CLIENT_MAX_FDS,
+                                 REPLY_ON, REPLY_OFF, REPLY_SKIP_NEXT, REPLY_SKIP_NOW)
+from src.commands.command_info import cmd_pause_write, cmd_is_container
+from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro, handle_pfselftest, handle_pfdebug
+from src.commands.monitor import MonitorRegistry, monitor_line
+from src.network.vector_ingest import ingest_hash_vector, record_all_dead, ingest_whole_hash, hash_addr, after_rename
+from src.commands.replication_cmds import handle_role, handle_replicaof, handle_failover, handle_sync, handle_replconf
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
-from src.commands.geo import handle_geopos, handle_geodist, handle_geohash, handle_georadius, handle_geosearch, handle_geosearchstore, handle_georadiusbymember
+from src.commands.geo import handle_geoadd, handle_geopos, handle_geodist, handle_geohash, handle_georadius, handle_geosearch, handle_geosearchstore, handle_georadiusbymember
 from src.commands.hash import handle_hmget, handle_hgetall, handle_hkeys, handle_hvals, handle_hlen, handle_hdel, handle_hexists, handle_hincrby, handle_hincrbyfloat, handle_hrandfield, handle_hscan, handle_hsetnx, handle_hexpire, handle_hpexpire, handle_hexpireat, handle_hpexpireat, handle_httl, handle_hpttl, handle_hpersist, handle_hexpiretime, handle_hpexpiretime
-from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_bgrewriteaof, handle_command, handle_debug, handle_slowlog, handle_latency, handle_memory, handle_module, handle_acl, handle_reset, handle_client
+from src.commands.admin import handle_xgpu_info, handle_ping, handle_echo, handle_hello, handle_flushall, handle_save, handle_bgsave, handle_lastsave, handle_info, handle_pion_stats, handle_config, handle_quit, handle_auth, handle_flushdb, handle_dbsize, handle_select, handle_swapdb, handle_move, handle_bgrewriteaof, handle_debug, handle_latency, handle_memory, handle_module, handle_reset, handle_time, handle_lolwut
 from src.commands.lua_engine import LuaEngine, handle_eval, handle_evalsha, handle_script, handle_function, handle_fcall
 from src.commands.cluster import handle_cluster
 from src.commands.migrate import handle_dump, handle_restore, handle_migrate
-from src.commands.string_kv import handle_incrby, handle_decrby, handle_incrbyfloat, handle_append, handle_strlen, handle_getset, handle_getdel, handle_getex, handle_setnx, handle_setex, handle_psetex, handle_msetnx, handle_msetex, handle_getrange, handle_substr, handle_setrange, handle_expiretime, handle_pexpiretime, handle_unlink
+from src.commands.string_kv import handle_incrby, handle_decrby, handle_incrbyfloat, handle_append, handle_strlen, handle_getset, handle_getdel, handle_getex, handle_setnx, handle_setex, handle_psetex, handle_msetnx, handle_msetex, handle_getrange, handle_substr, handle_setrange, handle_expiretime, handle_pexpiretime, handle_unlink, handle_lcs
 from src.commands.ai import handle_ai_chat, handle_ai_flare, handle_ai_complete, handle_ai_semantic_cache, handle_ai_embed, handle_ai_generate, handle_ai_loadmodel, handle_ai_memory
-from src.commands.sorted_set import handle_zrem, handle_zcard, handle_zrank, handle_zrevrank, handle_zscore, handle_zcount, handle_zincrby, handle_zrange, handle_zrevrange, handle_zrangebyscore, handle_zrevrangebyscore, handle_zunion, handle_zinter, handle_zunionstore, handle_zinterstore, handle_zlexcount, handle_zrangebylex, handle_zrevrangebylex, handle_zpopmax, handle_zmpop, handle_zrandmember, handle_zmscore, handle_zscan, handle_zrangestore, handle_zintercard, handle_zdiff, handle_zdiffstore, handle_zremrangebylex, handle_zremrangebyrank, handle_zremrangebyscore
+from src.commands.sorted_set import zmpop_pop, handle_zrem, handle_zcard, handle_zrank, handle_zrevrank, handle_zscore, handle_zcount, handle_zincrby, handle_zrange, handle_zrevrange, handle_zrangebyscore, handle_zrevrangebyscore, handle_zunion, handle_zinter, handle_zunionstore, handle_zinterstore, handle_zlexcount, handle_zrangebylex, handle_zrevrangebylex, handle_zpopmax, handle_zmpop, handle_zrandmember, handle_zmscore, handle_zscan, handle_zrangestore, handle_zintercard, handle_zdiff, handle_zdiffstore, handle_zremrangebylex, handle_zremrangebyrank, handle_zremrangebyscore
 from src.commands.vector import handle_ft_info, handle_ft_dropindex, handle_ft_optimize, handle_ft_create, handle_ft_addtext, handle_ft_searchtext, handle_ft_search, handle_ft_hybrid, write_ft_search_response
 from src.commands.kv_cache import handle_kv_store, handle_kv_fetch, handle_kv_info
 from src.commands.attend import handle_attend_create, handle_attend_store, handle_attend_query, handle_attend_finalize, handle_attend_info, ATTEND_MAX_K
@@ -203,8 +219,6 @@ struct SlowPathHandler:
     var blocked_readers: BlockedReaderRegistry
     # Pub/Sub registry (per-worker) + cross-worker broadcast ring
     var pubsub: PubSubRegistry
-    var pubsub_broadcast: UnsafePointer[PubSubBroadcast, MutUntrackedOrigin]
-    var pubsub_tail: UInt64  # per-worker cursor into broadcast ring
     # Transaction state (per-fd MULTI/EXEC queuing)
     var tx_state: TransactionState
     # Phase 4: LLM client for AI.CHAT (HTTP proxy to MAX Serve / OpenAI-compatible)
@@ -277,6 +291,58 @@ struct SlowPathHandler:
     # sends through the packet engine and cannot reply to a parked fd later.
     var parked_waits: ParkedWaits
     var can_park_wait: Bool
+    # #36: a script's redis.call() re-enters process_slow_path (script_dispatch).
+    # The nested call parses into its own token tables, so the EVAL and any
+    # command pipelined behind it keep theirs, and writes its reply into
+    # script_writer, a capture-only writer (flush keeps the bytes). The
+    # script_* context is the outer call's, set by _script_context before a run.
+    var script_depth: Int
+    var script_tokens_buf: UnsafePointer[RESP3Token, MutUntrackedOrigin]
+    var script_cmd_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
+    var script_cmd_byte_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
+    var script_writer: UnsafePointer[ResponseWriter, MutUntrackedOrigin]
+    var script_frame: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var script_frame_cap: Int
+    var script_fd: Int32
+    var script_server: UnsafePointer[TCPServer, MutUntrackedOrigin]
+    var script_kq: Int32
+    var script_hnsw: UnsafePointer[HNSWGraph, MutUntrackedOrigin]
+    var script_db_size: UnsafePointer[Int, MutUntrackedOrigin]
+    var script_config: UnsafePointer[PionConfig, MutUntrackedOrigin]
+    var script_allow_oom: Bool
+    # #38: BLPOP & co. parked until a key they wait on has data or they time
+    # out; the engine wakes them (NetworkEngine._service_blocked_clients).
+    var blocked_clients: BlockedClientRegistry
+    # #39 MONITOR (src/commands/monitor.mojo). `fast_path_off` is read by the
+    # engine's three process_data_plane call sites (update_dispatch_gate):
+    # true while memory is over --maxmemory (gh #261), a client monitors
+    # (commands are fed from here) or one is subscribed (#42: a RESP2
+    # subscriber may run only the pub/sub commands); then fast_path_ok(fd)
+    # decides per connection. `monitor_skip` is set while the engine re-runs a woken
+    # blocking command, which monitors saw when it first ran.
+    # `monitor_exec_line` holds EXEC's line until the commands it ran are out.
+    var monitors: MonitorRegistry
+    var fast_path_off: Bool
+    var monitor_skip: Bool
+    var monitor_exec_line: List[UInt8]
+    # The engine's per-fd affinity bytes (3 = READONLY), which RESET clears.
+    var local_affinity: UnsafePointer[UInt8, MutUntrackedOrigin]
+    # The engine's writer while a script runs: a script's PUBLISH reaches
+    # subscribers through it (the script's own writer only captures replies).
+    var script_main_writer: UnsafePointer[ResponseWriter, MutUntrackedOrigin]
+    # #46: the worker's vector-index tombstones (state.mojo sets it)
+    var vec_tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]
+    # #47: CLIENT's per-connection state and CLIENT PAUSE, SLOWLOG, ACL LOG,
+    # and the engine's receive-buffer lengths and capacity (CLIENT LIST qbuf)
+    var clients: ClientRegistry
+    var slowlog: SlowLog
+    var acl_log: AclLog
+    var client_buffer_lens: UnsafePointer[Int, MutUntrackedOrigin]
+    var client_buf_cap: Int
+    var kill_after_reply: Int32       # CLIENT KILL of itself: shut down once its reply is out
+    var slowlog_all: Bool             # slowlog-log-slower-than < 1 ms: every command is timed here
+    var slowlog_thr: Int64            # slowlog-log-slower-than as last read (process-wide, in C)
+    var slowlog_thr_ticks: UInt64     # the same in pion_ticks units; max when off
 
     def __init__(
         out self,
@@ -328,6 +394,39 @@ struct SlowPathHandler:
         self.over_maxmemory = False
         self.parked_waits = ParkedWaits()
         self.can_park_wait = not config.server.use_xdp
+        self.script_depth = 0
+        self.script_tokens_buf = alloc[RESP3Token](MAX_CMD_TOKENS)
+        self.script_cmd_ends_buf = alloc[Int](MAX_CMD_ENDS)
+        self.script_cmd_byte_ends_buf = alloc[Int](MAX_CMD_ENDS)
+        unsafe_memset(self.script_cmd_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        unsafe_memset(self.script_cmd_byte_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        self.script_writer = null_ptr[ResponseWriter, MutUntrackedOrigin]()
+        self.script_frame = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.script_frame_cap = 0
+        self.script_fd = -1
+        self.script_server = null_ptr[TCPServer, MutUntrackedOrigin]()
+        self.script_kq = -1
+        self.script_hnsw = null_ptr[HNSWGraph, MutUntrackedOrigin]()
+        self.script_db_size = null_ptr[Int, MutUntrackedOrigin]()
+        self.script_config = null_ptr[PionConfig, MutUntrackedOrigin]()
+        self.script_allow_oom = False
+        self.blocked_clients = BlockedClientRegistry()
+        self.monitors = MonitorRegistry()
+        self.fast_path_off = False
+        self.monitor_skip = False
+        self.monitor_exec_line = List[UInt8]()
+        self.local_affinity = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.script_main_writer = null_ptr[ResponseWriter, MutUntrackedOrigin]()
+        self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
+        self.clients = ClientRegistry()
+        self.slowlog = SlowLog()
+        self.acl_log = AclLog()
+        self.client_buffer_lens = null_ptr[Int, MutUntrackedOrigin]()
+        self.client_buf_cap = 0
+        self.kill_after_reply = -1
+        self.slowlog_all = False
+        self.slowlog_thr = 10000
+        self.slowlog_thr_ticks = UInt64(Float64(10000) * self.slowlog.ticks_per_us)
         self.cluster = cluster
         self.shard_query_seq = alloc[UInt64](1)
         self.shard_query_seq[0] = 1
@@ -384,8 +483,6 @@ struct SlowPathHandler:
         self.spec_rag = SpeculativeRAG(config.embedding.dimensions, config.server.kvcache_enabled)
         self.blocked_readers = BlockedReaderRegistry()
         self.pubsub = PubSubRegistry()
-        self.pubsub_broadcast = null_ptr[PubSubBroadcast, MutUntrackedOrigin]()
-        self.pubsub_tail = UInt64(0)
         self.tx_state = TransactionState()
         # Phase 4: LLM client for AI.CHAT (disabled by default; opt-in via --llm-host/port)
         self.llm_client = LLMClient(
@@ -420,7 +517,9 @@ struct SlowPathHandler:
         self.deferred_count        = 0
         self.deferred_drain_ticks  = Array[Int32, 16](fill=Int32(0))
         self.snapshot_engine = SnapshotEngine("pion.snapshot")
-        self.last_save_time  = Int64(0)
+        # #47: Redis counts the dataset as saved at startup (LASTSAVE), and
+        # so does Pion: what a restart restores is what was on disk then.
+        self.last_save_time  = external_call["pion_unix_ms", Int64]() // 1000
         # M1: Inference bridge
         self.inference_bridge = InferenceBridge(config.inference.enabled, config.inference.socket_path)
         if config.inference.enabled:
@@ -722,6 +821,39 @@ struct SlowPathHandler:
             _binary_send_all(server, fd, resp_buf, resp_len)
         return BINARY_HEADER_SIZE + Int(req.body_len)
 
+    def _info_replication_section(self) -> String:
+        """INFO's `# Replication` section from the cluster state: a replica's
+        role, primary and offset; a primary's replicas and offset; a
+        standalone server is a primary with none."""
+        var out = String("# Replication\r\n")
+        var _cl = self.cluster
+        if is_null(_cl) or not _cl[].enabled:
+            out += "role:master\r\nconnected_slaves:0\r\n"
+            return out
+        if _cl[].is_replica:
+            out += "role:slave\r\nmaster_host:"
+            if _cl[].primary_peer_idx >= 0 and _cl[].primary_peer_idx < 16:
+                var _ph_off = _cl[].primary_peer_idx * 64
+                var _ph_len = 0
+                while _ph_len < 63 and _cl[].peer_hosts[_ph_off + _ph_len] != 0:
+                    out += chr(Int(_cl[].peer_hosts[_ph_off + _ph_len]))
+                    _ph_len += 1
+            out += "\r\nslave_repl_offset:"
+            if is_not_null(_cl[].repl_replica_handle):
+                out += String(Int(external_call["pion_repl_replica_bytes_received", Int64](_cl[].repl_replica_handle)))
+            else:
+                out += "0"
+            out += "\r\n"
+        else:
+            out += "role:master\r\nconnected_slaves:"
+            if is_not_null(_cl[].repl_primary_handle):
+                out += String(Int(external_call["pion_repl_primary_connected_count", Int32](_cl[].repl_primary_handle)))
+            else:
+                out += "0"
+            out += "\r\nmaster_repl_offset:" + String(Int(self.dispatcher.wal[].tail_offset)) + "\r\n"
+        out += "repl_backlog_size:268435456\r\n"
+        return out
+
     def _value_receipt_info(self) -> String:
         """gh #262: the `# Pion` INFO section — THIS worker's value receipt."""
         var s = String("# Pion\r\n")
@@ -740,6 +872,854 @@ struct SlowPathHandler:
         s += "moe_misses:" + String(self.moe_tier.misses) + "\r\n"
         s += "vector_queries:" + String(self.ledger.vector_queries) + "\r\n"
         return s
+
+    def update_dispatch_gate(mut self):
+        """Recompute `fast_path_off` after anything it depends on changed."""
+        # #47: a SLOWLOG threshold under 1 ms is a request to see ordinary
+        # commands, which the fast path does not time: they all come here
+        var slt = external_call["pion_slowlog_get_slower_than", Int64]()
+        self.slowlog_all = slt >= 0 and slt < 1000
+        self.slowlog_thr = slt
+        # (a threshold past the counter's range means never: a Float64 too
+        # large for UInt64 converts to anything on x86)
+        var thr_f = Float64(slt) * self.slowlog.ticks_per_us
+        self.slowlog_thr_ticks = UInt64(thr_f) if slt >= 0 and thr_f < 1.8e19 else UInt64(0xFFFFFFFFFFFFFFFF)
+        self.fast_path_off = (self.over_maxmemory or self.monitors.count() > 0
+                              or self.pubsub.subscribed_fds > 0
+                              or self.clients.reply_off_count > 0         # #47 CLIENT REPLY OFF / SKIP
+                              or self.clients.pause_until_ms != 0         # #47 CLIENT PAUSE
+                              or self.slowlog_all)                        # #47 SLOWLOG
+
+    def fast_path_ok(self, ci: Int) -> Bool:
+        """Under the gate: may this connection's commands take the fast path?
+        Not while memory is over the limit or a client monitors, nor for a
+        subscribed connection, whose commands the slow path checks."""
+        return (not self.over_maxmemory and self.monitors.count() == 0
+                and not self.pubsub.subscribed(Int32(ci))
+                and self.clients.reply[ci] == REPLY_ON and self.clients.pause_until_ms == 0
+                and not self.slowlog_all)
+
+    def _reset_connection(mut self, fd: Int32, mut writer: ResponseWriter):
+        """RESET, as Redis's clearClientConnectionState (#39): out of MONITOR,
+        MULTI discarded and WATCH dropped, every subscription gone, back to
+        RESP2 and the default user (unauthenticated when a password is set,
+        and no longer bound to a tenant), no name, READONLY off. It answered
+        +RESET and reset none of it."""
+        _ = self.monitors.remove(fd)
+        self.tx_state.cleanup_fd(fd)
+        self.pubsub.cleanup_fd(fd)
+        # #47: REPLY back ON, NO-EVICT and NO-TOUCH off (the library name stays)
+        self.clients.set_reply(fd, REPLY_ON)
+        if Int(fd) >= 0 and Int(fd) < CLIENT_MAX_FDS:
+            self.clients.no_evict[Int(fd)] = 0
+            self.clients.no_touch[Int(fd)] = 0
+        self.update_dispatch_gate()
+        if is_not_null(self.local_affinity) and self.local_affinity[Int(fd)] == 3:
+            self.local_affinity[Int(fd)] = 0
+        writer.proto = 2
+        writer.append_status_response("RESET")
+
+    def _monitor_line_for(self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int,
+                          fd: Int32) -> List[UInt8]:
+        """#39: the MONITOR line for tokens[i:end], or nothing when Redis
+        would not show the command: unknown, a wrong argument count (refused
+        before it ran), or `admin`."""
+        var tp = tokens[i].ptr
+        var tl = tokens[i].length
+        if not command_exists(tp, tl):
+            return List[UInt8]()
+        var argc = end - i
+        var ar = command_arity(tp, tl)
+        if (ar > 0 and argc != ar) or (ar < 0 and argc < -ar):
+            return List[UInt8]()
+        var sp = tokens[i + 1].ptr if argc > 1 else tp
+        var sl = tokens[i + 1].length if argc > 1 else 0
+        if command_hidden_from_monitor(tp, tl, sp, sl):
+            return List[UInt8]()
+        return monitor_line(tokens, i, end, Int32(-1) if self.script_depth > 0 else fd)
+
+    def _monitor_feed(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int,
+                      fd: Int32, mut writer: ResponseWriter, server: TCPServer, kq: Int32):
+        """#39: show a command to the monitors. A script's commands wait in
+        `monitors.pending` until the script's own line is out."""
+        var line = self._monitor_line_for(tokens, i, end, fd)
+        if len(line) == 0:
+            return
+        if self.script_depth > 0:
+            for b in range(len(line)):
+                self.monitors.pending.append(line[b])
+            return
+        self._monitor_send(line, fd, writer, server, kq)
+
+    def _monitor_send(mut self, line: List[UInt8], fd: Int32, mut writer: ResponseWriter,
+                      server: TCPServer, kq: Int32):
+        """#39: lines to every monitor. A connection that monitors gets them
+        after its own reply; the others through their output buffers."""
+        var n = len(line)
+        if n == 0:
+            return
+        var lp = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(line.unsafe_ptr()))
+        for k in range(self.monitors.count()):
+            var m = self.monitors.fds[k]
+            if m == fd:
+                writer.append_to_response(lp, n)
+            else:
+                writer.deliver_to(m, lp, n, server, kq)
+
+    def _rpoplpush(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
+                   mut writer: ResponseWriter) raises:
+        """RPOPLPUSH tokens[i+1] tokens[i+2] (BRPOPLPUSH runs it once its source
+        has an element)."""
+        var rpl_src = tokens[i+1].value()
+        var rpl_dst = tokens[i+2].value()
+        # gh #232: neither key was type-checked, and the pop
+        # happened first. With a wrong-type DESTINATION the
+        # element was popped, answered as a normal success,
+        # and then silently dropped — never pushed anywhere.
+        # RPOPLPUSH is THE reliable-queue primitive
+        # (`RPOPLPUSH work processing`), so that is a job
+        # vanishing with a reply that says it moved. Redis
+        # validates both keys before touching either.
+        var rpl_sv = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+        var rpl_dv = self.keyspace[].get(GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length))
+        # Redis's precedence, and it is observable: wrong-type
+        # SOURCE errors; a MISSING source is nil and the
+        # destination is never examined; only then does a
+        # wrong-type destination error.
+        var rpl_src_bad = (not rpl_sv.is_none()
+                           and rpl_sv.type.value != ValueType.LIST)
+        var rpl_dst_bad = (not rpl_sv.is_none() and not rpl_dv.is_none()
+                           and rpl_dv.type.value != ValueType.LIST)
+        # No `continue` here: the loop tail runs the gh #240
+        # forward clamp and `i += 1`, and skipping them is
+        # the very desync this arm is being fixed for.
+        if rpl_src_bad or rpl_dst_bad:
+            writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+        else:
+            var rpl_val = self.dispatcher.execute_rpop(rpl_src)
+            if rpl_val.is_none():
+                writer.append_null_response()
+            else:
+                # Push the value directly; both String(gv) and
+                # gv.__str__() stringify the internal pointer for
+                # heap/SSO string values, corrupting the element.
+                writer.append_bulk_value_response(rpl_val)
+                _ = self.dispatcher.execute_lpush_value(rpl_dst, rpl_val)
+                # gh #234 remainder (found via gh #265):
+                # remove the source once its last element
+                # leaves, or `EXISTS` lies and the key
+                # cannot be reused as another type. gh #234
+                # fixed the LPOP/RPOP handlers; this arm
+                # reimplements the pop and so was missed.
+                #
+                # AFTER the push: `src == dst` is a legal
+                # rotation and is size 1 again by here.
+                var rpl_after = self.keyspace[].get(
+                    GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                if (not rpl_after.is_none()
+                        and rpl_after.type.value == ValueType.LIST
+                        and rpl_after.as_list()
+                            .unsafe_bitcast[SlabList]()[].size == 0):
+                    _ = remove_and_free(self.keyspace, 
+                        GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                    _ = self.dispatcher.wal[].append(
+                        2, tokens[i+1].ptr, tokens[i+1].length)
+
+    def _park_blocked(mut self, fd: Int32, buffer: UnsafePointer[UInt8, MutUntrackedOrigin],
+                      cmd_idx: Int, num_cmds: Int, cmd_byte_ends: UnsafePointer[Int, MutUntrackedOrigin],
+                      on_primary: Bool, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+                      key_first: Int, key_end: Int, deadline_ms: Int64, zset: Bool,
+                      nil_bulk: Bool = False, group_at: Int = -1) -> Bool:
+        """#38: park a blocking command that found nothing: register it with a
+        copy of its frame and its keys, and stop the batch at its end (the
+        caller does that when this returns True). False where it cannot park
+        (MULTI/EXEC replay, a script, the XDP lane): the caller answers nil."""
+        if not (self.can_park_wait and on_primary and cmd_idx < num_cmds and fd >= 0):
+            return False
+        var start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
+        var end = cmd_byte_ends[cmd_idx]
+        var bc = new_blocked_client(fd, deadline_ms, zset, nil_bulk, buffer + start, end - start,
+                                    tokens, key_first, key_end)
+        if group_at >= 0:              # #40: XREADGROUP waits for its group
+            for b in range(tokens[group_at].length):
+                bc.group.append(tokens[group_at].ptr[b])
+        self.blocked_clients.add(bc^)
+        self.parked_waits.park_fd(fd)
+        return True
+
+    def _bpop_lists(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+                    left: Bool, mut writer: ResponseWriter) raises -> Bool:
+        """BLPOP/BRPOP's pop: the keys left to right, a missing one skipped, a
+        wrong-type one an error, from the first list an element, replied
+        [key, element]. True when it replied."""
+        for _bk in range(first, end):
+            var _bkey = tokens[_bk].value()
+            var _bval = self.keyspace[].get(GenericValue.borrow(tokens[_bk].ptr, tokens[_bk].length))
+            if _bval.is_none():
+                continue
+            if _bval.type.value != ValueType.LIST:
+                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                return True
+            var _blp = _bval.as_list().unsafe_bitcast[SlabList]()
+            if _blp[].size == 0:
+                continue
+            var _bpopped = self.dispatcher.execute_lpop(_bkey) if left else self.dispatcher.execute_rpop(_bkey)
+            if _bpopped.is_none():
+                continue
+            writer.append_array_header(2)
+            writer.append_bulk_string_response(tokens[_bk].ptr, tokens[_bk].length)
+            writer.append_bulk_value_response(_bpopped)
+            _bpopped.free_str_payload()   # owned by the caller once popped
+            # gh #234: drop an emptied list, and only AFTER the reply.
+            if self.dispatcher.execute_llen(_bkey) == 0:
+                _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[_bk].ptr, tokens[_bk].length))
+                if is_not_null(self.dispatcher.wal):
+                    _ = self.dispatcher.wal[].append(2, tokens[_bk].ptr, tokens[_bk].length)
+            return True
+        return False
+
+    def _bzpop(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+               from_min: Bool, mut writer: ResponseWriter) raises -> Bool:
+        """BZPOPMIN/BZPOPMAX's pop: from the first sorted set, one member,
+        replied [key, member, score]. True when it replied."""
+        for k in range(first, end):
+            var kv = self.keyspace[].get(GenericValue.borrow(tokens[k].ptr, tokens[k].length))
+            if kv.is_none():
+                continue
+            if kv.type.value != ValueType.ZSET:
+                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                return True
+            var zp = kv.as_zset().bitcast[SlabSkipList]()
+            if zp[].length == 0:
+                continue
+            var r = zp[].pop_min() if from_min else zp[].pop_max()
+            if not r.valid:
+                continue
+            writer.append_array_header(3)
+            writer.append_bulk_string_response(tokens[k].ptr, tokens[k].length)
+            writer.append_bulk_value_response(r.obj)
+            writer.append_score_response(r.score)
+            if is_not_null(self.dispatcher.wal):            # gh #170: the resolved effect, a ZREM
+                var wb = alloc[UInt8](64)
+                var wl = 0
+                var wp = gv_bytes(r.obj, wb, wl)
+                _ = self.dispatcher.wal[].append_kv(12, tokens[k].ptr, tokens[k].length, wp, wl)
+                wb.free()
+            r.obj.free_str_payload()
+            if zp[].length == 0:                             # gh #234
+                _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[k].ptr, tokens[k].length))
+                if is_not_null(self.dispatcher.wal):
+                    _ = self.dispatcher.wal[].append(2, tokens[k].ptr, tokens[k].length)
+            return True
+        return False
+
+    def _mpop_lists(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first_key: Int,
+                    numkeys: Int, left: Bool, count: Int, mut writer: ResponseWriter) -> Bool:
+        """LMPOP's pop, as Redis's mpopGenericCommand: the keys in order, a
+        missing one skipped, a wrong-type one an error, and from the first
+        non-empty list up to `count` elements, replied `[key, [elements]]`. An
+        emptied list is removed (gh #234). True when it replied; False when no
+        key held anything, which the caller answers (a null array for LMPOP)."""
+        for k in range(numkeys):
+            var kt = tokens[first_key + k]
+            var kv = GenericValue.borrow(kt.ptr, kt.length)
+            var v = self.keyspace[].get(kv)
+            if v.is_none():
+                continue
+            if v.type.value != ValueType.LIST:
+                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                return True
+            var lp = v.as_list().bitcast[SlabList]()
+            if lp[].size == 0:
+                continue
+            var n = min(count, lp[].size)
+            var key_str = kt.value()
+            writer.append_array_header(2)
+            writer.append_bulk_string_response(kt.ptr, kt.length)
+            writer.append_array_header(n)
+            for _ in range(n):
+                var popped = self.dispatcher.execute_lpop(key_str) if left else self.dispatcher.execute_rpop(key_str)
+                writer.append_bulk_value_response(popped)
+                popped.free_str_payload()   # the pop handed back an owned value; the reply copied it
+            if self.dispatcher.execute_llen(key_str) == 0:
+                _ = remove_and_free(self.keyspace, kv)
+                if is_not_null(self.dispatcher.wal):
+                    _ = self.dispatcher.wal[].append(2, kt.ptr, kt.length)
+            return True
+        return False
+
+    # ── #47: CLIENT, CLIENT PAUSE / REPLY, SLOWLOG, ACL ─────────────────────
+
+    def _user_of(self, fd: Int32) -> Int:
+        """The connection's user: -1 default, else its tenant."""
+        if self.tenant_table.count == 0:
+            return -1
+        return Int(self.tx_state.tenant_id[Int(fd)])
+
+    def _user_name(self, fd: Int32) -> String:
+        var u = self._user_of(fd)
+        if u < 0:
+            return "default"
+        return bytes_to_string(self.tenant_table.name_ptr(u), self.tenant_table.name_len(u))
+
+    def _acl_users(mut self, config: PionConfig) -> AclUsers:
+        return AclUsers(config.server.requirepass,
+                        UnsafePointer[TenantTable, MutUntrackedOrigin](unsafe_from_address=Int(UnsafePointer(to=self.tenant_table))))
+
+    def _client_view(mut self, fd: Int32, caller: Int32, qbuf_self: Int, resp_self: Int,
+                     pending: Bool) raises -> ClientView:
+        """What CLIENT LIST says about connection fd."""
+        var f = Int(fd)
+        var name = self.tx_state.client_names[f] if f in self.tx_state.client_names else String("")
+        var flags = String("")
+        if self.monitors.contains(fd):
+            flags += "O"
+        if self.pubsub.subscribed(fd):
+            flags += "P"
+        if self.tx_state.is_multi(fd):
+            flags += "x"
+        if self.parked_waits.is_parked(f):
+            flags += "b"
+        if is_not_null(self.local_affinity) and self.local_affinity[f] == 3:
+            flags += "r"
+        if self.clients.no_evict[f] != 0:
+            flags += "e"
+        if self.clients.no_touch[f] != 0:
+            flags += "T"
+        if flags.byte_length() == 0:
+            flags = "N"
+        var sub = len(self.pubsub.names_of(KIND_CHANNEL, fd))
+        var psub = len(self.pubsub.names_of(KIND_PATTERN, fd))
+        var ssub = self.pubsub.get_shard_count(fd)
+        var multi = Int(self.tx_state.queue_counts[f]) if self.tx_state.is_multi(fd) else -1
+        var watch = Int(self.tx_state.watch_counts[f])
+        var qbuf = qbuf_self
+        if fd != caller:
+            qbuf = self.client_buffer_lens[f] if is_not_null(self.client_buffer_lens) else 0
+        var qfree = self.client_buf_cap - qbuf if self.client_buf_cap > qbuf else 0
+        var resp = resp_self if fd == caller else Int(self.tx_state.resp_proto[f])
+        if resp != 3:
+            resp = 2
+        return ClientView(fd, name^, flags^, sub, psub, ssub, multi, watch, qbuf, qfree,
+                          String("rw") if pending else String("r"), self._user_name(fd), resp, self.worker_id)
+
+    def _client_fds(self) -> List[Int32]:
+        """This worker's connections in the order they connected (by ID)."""
+        var keys = List[UInt64]()
+        for f in range(CLIENT_MAX_FDS):
+            var id = self.clients.ids[f]
+            if id != 0:
+                keys.append((id << 16) | UInt64(f))
+        heapsort_u64(keys)
+        var fds = List[Int32]()
+        for k in range(len(keys)):
+            fds.append(Int32(Int(keys[k] & 0xFFFF)))
+        return fds^
+
+    def _client_line_of(mut self, fd: Int32, caller: Int32, qbuf_self: Int, resp_self: Int,
+                        mut writer: ResponseWriter) raises -> String:
+        var pending = is_not_null(writer.pending_offsets) and writer.pending_offsets[Int(fd)] > 0
+        return client_line(self.clients, self._client_view(fd, caller, qbuf_self, resp_self, pending))
+
+    def _client_type(self, fd: Int32) -> Int:
+        """Redis's getClientType: pubsub when subscribed, else normal (a
+        monitor is normal too)."""
+        return 2 if self.pubsub.subscribed(fd) else 0
+
+    def _kill_client(mut self, f: Int32, caller: Int32):
+        """CLIENT KILL: shut the connection down; the event loop of the worker
+        that serves it sees the end of input and closes it. The caller itself
+        is closed after its reply (only its read side is shut). A parked
+        connection is answered first, so that its loop reads again."""
+        if f == caller:
+            self.kill_after_reply = f        # process_slow_path shuts it down after the flush
+            return
+        _ = external_call["pion_kill_fd", Int32](f)
+        _ = self._unblock_client(f, UNBLOCK_TIMEOUT, True)
+        self.clients.release(f)
+
+    def _unblock_client(mut self, f: Int32, reason: UInt8, force: Bool) -> Bool:
+        """CLIENT UNBLOCK: a client parked by a blocking command or by WAIT is
+        answered as its timeout would (or with an error). Not one CLIENT PAUSE
+        holds (Redis answers 0 there too), nor one whose key already holds
+        what it waits for: Redis would have served it already, and the engine
+        will on its next tick. `force` (CLIENT KILL) skips that check."""
+        for k in range(self.blocked_clients._count()):
+            if self.blocked_clients.clients[k].fd == f:
+                if self.blocked_clients.clients[k].unblock != 0:
+                    return False
+                if not force and blocked_client_ready(self.keyspace, self.blocked_clients.clients[k]):
+                    return False
+                self.blocked_clients.clients[k].unblock = reason
+                return True
+        for k in range(self.blocked_readers._count()):
+            if self.blocked_readers.readers[k].fd == f:
+                if self.blocked_readers.readers[k].unblock != 0 or (self.blocked_readers.readers[k].ready and not force):
+                    return False
+                self.blocked_readers.readers[k].unblock = reason
+                return True
+        for k in range(self.parked_waits.count()):
+            if self.parked_waits.entries[k].fd == f:
+                if self.parked_waits.entries[k].unblock != 0:
+                    return False
+                self.parked_waits.entries[k].unblock = reason
+                return True
+        return False
+
+    def _tx_has_write(self, fd: Int32) -> Bool:
+        """CLIENT PAUSE WRITE holds an EXEC whose transaction writes."""
+        var f = Int(fd)
+        var q = self.tx_state.queues[f]
+        if is_null(q):
+            return False
+        for k in range(Int(self.tx_state.queue_counts[f])):
+            var d = q[k].data
+            var l = q[k].length
+            # *N\r\n$L\r\nNAME\r\n[$L\r\nSUB\r\n]: the name and the first argument
+            var at = 0
+            while at < l and d[at] != 10:
+                at += 1
+            var np = d
+            var nl = 0
+            var sp = d
+            var sl = 0
+            for arg in range(2):
+                if at + 1 >= l or d[at + 1] != 36:
+                    break
+                var x = at + 2
+                var alen = 0
+                while x < l and d[x] != 13:
+                    alen = alen * 10 + Int(d[x] - 48)
+                    x += 1
+                var start = x + 2
+                if start + alen > l:
+                    break
+                if arg == 0:
+                    np = d + start
+                    nl = alen
+                else:
+                    sp = d + start
+                    sl = alen
+                at = start + alen + 1
+            if nl > 0 and (cmd_pause_write(np, nl, sp, sl) or command_is_denyoom(np, nl)):
+                return True
+        return False
+
+    def _pause_holds(mut self, fd: Int32, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+                     i: Int, end: Int) -> Bool:
+        """Does CLIENT PAUSE hold this command? ALL: every command. WRITE:
+        Redis's write and may-replicate commands (and Pion's ingest ones), an
+        EXEC whose transaction writes. Never a MONITOR connection, which Redis
+        treats as a replica."""
+        if external_call["pion_unix_ms", Int64]() >= self.clients.pause_until_ms:
+            return False                     # over: the engine lifts it on its next tick
+        if self.monitors.contains(fd):
+            return False
+        if self.clients.pause_all:
+            return True
+        var tp = tokens[i].ptr
+        var tl = tokens[i].length
+        var sp = tokens[i + 1].ptr if end - i > 1 else tp
+        var sl = tokens[i + 1].length if end - i > 1 else 0
+        if cmd_pause_write(tp, tl, sp, sl) or command_is_denyoom(tp, tl):
+            return True
+        if cmd_eq(tp, tl, "exec") and self.tx_state.is_multi(fd):
+            return self._tx_has_write(fd)
+        return False
+
+    def _reply_gate(mut self, fd: Int32, mut writer: ResponseWriter, start: Int, flushes: Int):
+        """CLIENT REPLY, once a command's reply is complete: OFF drops it; SKIP
+        drops the reply of the command after CLIENT REPLY SKIP. A reply that
+        was already (partly) sent cannot be taken back and stays."""
+        var f = Int(fd)
+        var m = self.clients.reply[f]
+        if m == REPLY_ON:
+            return
+        if m == REPLY_SKIP_NEXT:
+            self.clients.reply[f] = REPLY_SKIP_NOW   # the next command's reply goes
+            return
+        if writer.flush_count == flushes and start <= writer.offset:
+            writer.offset = start
+        if m == REPLY_SKIP_NOW:
+            self.clients.set_reply(fd, REPLY_ON)
+            self.update_dispatch_gate()
+
+    def _slowlog_push(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+                      us: Int64, fd: Int32) raises:
+        var f = Int(fd)
+        var name = self.tx_state.client_names[f] if f in self.tx_state.client_names else String("")
+        self.slowlog.push(tokens, first, end, us, peer_addr(fd), name^)
+
+    def _acl_log(mut self, var reason: String, var object: String, var username: String, fd: Int32,
+                 qbuf_self: Int, mut writer: ResponseWriter) raises:
+        """An ACL LOG entry for this connection (a failed AUTH, a command a
+        tenant may not run)."""
+        var ctx = String("multi") if self.tx_state.is_multi(fd) else String("toplevel")
+        var info = self._client_line_of(fd, fd, qbuf_self, Int(writer.proto), writer)
+        # client-info is the line without its newline, as Redis records it
+        var il = info.byte_length()
+        if il > 0:
+            var line = bytes_to_string(
+                UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(info.unsafe_ptr())), il - 1)
+            _ = info^   # alive until the copy above is made: the pointer does not keep it
+            info = line^
+        self.acl_log.add(reason^, ctx^, object^, username^, info^)
+
+    def _wrote_wrongpass(self, mut writer: ResponseWriter, start: Int) -> Bool:
+        """Did the command just run answer -WRONGPASS (a failed AUTH)?"""
+        comptime W = "-WRONGPASS"
+        if start < 0 or writer.offset - start < 10:
+            return False
+        var p = W.unsafe_ptr()
+        for k in range(10):
+            if writer.buffer[start + k] != p[k]:
+                return False
+        return True
+
+    def _client_cmd(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32,
+                    mut writer: ResponseWriter, qbuf_self: Int, config: PionConfig) raises -> Bool:
+        """CLIENT (#47). True when the caller killed itself: the rest of its
+        input is dropped and the connection closes after this reply, as
+        Redis's CLIENT_CLOSE_AFTER_REPLY."""
+        var argc = end - i
+        if argc < 2:
+            writer.append_error_response("ERR wrong number of arguments for 'client' command")
+            return False
+        var sub = tokens[i + 1]
+        var sp = sub.ptr
+        var sl = sub.length
+        var f = Int(fd)
+        if arg_eq(sp, sl, "id"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|id' command")
+            else:
+                writer.append_int_response(Int64(self.clients.id_of(fd)))
+        elif arg_eq(sp, sl, "setname"):
+            if argc != 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|setname' command")
+                return False
+            var nt = tokens[i + 2]
+            for k in range(nt.length):
+                var c = nt.ptr[k]
+                if c < 33 or c > 126:
+                    writer.append_error_response("ERR Client names cannot contain spaces, newlines or special characters.")
+                    return False
+            if nt.length == 0:
+                if f in self.tx_state.client_names:
+                    _ = self.tx_state.client_names.pop(f)
+            else:
+                self.tx_state.client_names[f] = bytes_to_string(nt.ptr, nt.length)
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "getname"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|getname' command")
+            elif f in self.tx_state.client_names:
+                var nm = self.tx_state.client_names[f]
+                writer.append_bulk_string_response(nm.unsafe_ptr(), nm.byte_length())
+            else:
+                writer.append_null_response()
+        elif arg_eq(sp, sl, "info"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|info' command")
+                return False
+            var line = self._client_line_of(fd, fd, qbuf_self, Int(writer.proto), writer)
+            writer.append_verbatim_response(line.unsafe_ptr(), line.byte_length())
+        elif arg_eq(sp, sl, "list"):
+            var want_type = -1
+            var ids = List[UInt64]()
+            var by_id = False
+            if argc == 4 and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "type"):
+                want_type = client_type_of(tokens[i + 3].ptr, tokens[i + 3].length)
+                if want_type == -1:
+                    writer.append_error_response("ERR Unknown client type '" + bytes_to_string(tokens[i + 3].ptr, tokens[i + 3].length) + "'")
+                    return False
+            elif argc > 3 and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "id"):
+                by_id = True
+                for k in range(i + 3, end):
+                    var v = parse_int64_strict(tokens[k].ptr, tokens[k].length)
+                    if not v.ok:
+                        writer.append_error_response("ERR Invalid client ID")
+                        return False
+                    ids.append(UInt64(v.value) if v.value > 0 else UInt64(0))
+            elif argc != 2:
+                writer.append_error_response("ERR syntax error")
+                return False
+            var out = String("")
+            if by_id:
+                for k in range(len(ids)):
+                    var t = self.clients.fd_of(ids[k])
+                    if t >= 0:
+                        out += self._client_line_of(t, fd, qbuf_self, Int(writer.proto), writer)
+            else:
+                var fds = self._client_fds()
+                for k in range(len(fds)):
+                    if want_type == -1 or self._client_type(fds[k]) == want_type:
+                        out += self._client_line_of(fds[k], fd, qbuf_self, Int(writer.proto), writer)
+            writer.append_verbatim_response(out.unsafe_ptr(), out.byte_length())
+        elif arg_eq(sp, sl, "kill"):
+            return self._client_kill(tokens, i, end, fd, writer, config)
+        elif arg_eq(sp, sl, "pause"):
+            if argc != 3 and argc != 4:
+                writer.append_error_response("ERR wrong number of arguments for 'client|pause' command")
+                return False
+            if config.server.use_xdp:
+                # The XDP lane serves without parking a connection, and a pause
+                # is a parked connection: refused rather than ignored
+                writer.append_error_response("ERR CLIENT PAUSE is not supported with --xdp")
+                return False
+            var all = True
+            if argc == 4:
+                var m = tokens[i + 3]
+                if arg_eq(m.ptr, m.length, "write"):
+                    all = False
+                elif not arg_eq(m.ptr, m.length, "all"):
+                    writer.append_error_response("ERR CLIENT PAUSE mode must be WRITE or ALL")
+                    return False
+            var tv = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+            if not tv.ok:
+                writer.append_error_response("ERR timeout is not an integer or out of range")
+                return False
+            if tv.value < 0:
+                writer.append_error_response("ERR timeout is negative")
+                return False
+            var now = external_call["pion_unix_ms", Int64]()
+            if tv.value > 0 and tv.value > Int64(9223372036854775807) - now:
+                writer.append_error_response("ERR timeout is out of range")
+                return False
+            self.clients.pause(now + tv.value if tv.value > 0 else Int64(0), all)
+            self.update_dispatch_gate()
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "unpause"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|unpause' command")
+                return False
+            self.clients.unpause()
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "reply"):
+            if argc != 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|reply' command")
+                return False
+            var m = tokens[i + 2]
+            if arg_eq(m.ptr, m.length, "on"):
+                self.clients.set_reply(fd, REPLY_ON)
+                writer.append_ok_response()
+            elif arg_eq(m.ptr, m.length, "off"):
+                self.clients.set_reply(fd, REPLY_OFF)
+            elif arg_eq(m.ptr, m.length, "skip"):
+                if self.clients.reply[f] != REPLY_OFF:
+                    self.clients.set_reply(fd, REPLY_SKIP_NEXT)
+            else:
+                writer.append_error_response("ERR syntax error")
+            self.update_dispatch_gate()
+        elif arg_eq(sp, sl, "unblock"):
+            if argc != 3 and argc != 4:
+                writer.append_error_response("ERR wrong number of arguments for 'client|unblock' command")
+                return False
+            var reason = UNBLOCK_TIMEOUT
+            if argc == 4:
+                var r = tokens[i + 3]
+                if arg_eq(r.ptr, r.length, "error"):
+                    reason = UNBLOCK_ERROR
+                elif not arg_eq(r.ptr, r.length, "timeout"):
+                    writer.append_error_response("ERR CLIENT UNBLOCK reason should be TIMEOUT or ERROR")
+                    return False
+            var idv = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+            if not idv.ok:
+                writer.append_error_response("ERR value is not an integer or out of range")
+                return False
+            var t = self.clients.fd_of(UInt64(idv.value)) if idv.value > 0 else Int32(-1)
+            writer.append_int_response(Int64(1) if t >= 0 and self._unblock_client(t, reason, False) else Int64(0))
+        elif arg_eq(sp, sl, "no-evict") or arg_eq(sp, sl, "no-touch"):
+            if argc != 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|" + lower_bytes(sub.ptr, sub.length) + "' command")
+                return False
+            var m = tokens[i + 2]
+            var on = arg_eq(m.ptr, m.length, "on")
+            if not on and not arg_eq(m.ptr, m.length, "off"):
+                writer.append_error_response("ERR syntax error")
+                return False
+            if arg_eq(sp, sl, "no-evict"):
+                self.clients.no_evict[f] = 1 if on else 0
+            else:
+                self.clients.no_touch[f] = 1 if on else 0
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "setinfo"):
+            if argc != 4:
+                writer.append_error_response("ERR wrong number of arguments for 'client|setinfo' command")
+                return False
+            var attr = tokens[i + 2]
+            var v = tokens[i + 3]
+            var is_name = arg_eq(attr.ptr, attr.length, "lib-name")
+            if not is_name and not arg_eq(attr.ptr, attr.length, "lib-ver"):
+                writer.append_error_response("ERR Unrecognized option '" + bytes_to_string(attr.ptr, attr.length) + "'")
+                return False
+            for k in range(v.length):
+                var c = v.ptr[k]
+                if c < 33 or c > 126:
+                    writer.append_error_response("ERR " + bytes_to_string(attr.ptr, attr.length)
+                                                 + " cannot contain spaces, newlines or special characters.")
+                    return False
+            if is_name:
+                if v.length == 0:
+                    if f in self.clients.lib_name:
+                        _ = self.clients.lib_name.pop(f)
+                else:
+                    self.clients.lib_name[f] = bytes_to_string(v.ptr, v.length)
+            else:
+                if v.length == 0:
+                    if f in self.clients.lib_ver:
+                        _ = self.clients.lib_ver.pop(f)
+                else:
+                    self.clients.lib_ver[f] = bytes_to_string(v.ptr, v.length)
+            writer.append_ok_response()
+        elif arg_eq(sp, sl, "tracking"):
+            if argc < 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|tracking' command")
+                return False
+            var m = tokens[i + 2]
+            if argc == 3 and arg_eq(m.ptr, m.length, "off"):
+                writer.append_ok_response()          # it is off, and stays off
+            else:
+                writer.append_error_response("ERR CLIENT TRACKING is not supported: Pion does not send "
+                                             + "client-side caching invalidations")
+        elif arg_eq(sp, sl, "caching"):
+            if argc != 3:
+                writer.append_error_response("ERR wrong number of arguments for 'client|caching' command")
+                return False
+            writer.append_error_response("ERR CLIENT CACHING can be called only when the client is in tracking "
+                                         + "mode with OPTIN or OPTOUT mode enabled")
+        elif arg_eq(sp, sl, "getredir"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|getredir' command")
+            else:
+                writer.append_int_response(-1)
+        elif arg_eq(sp, sl, "trackinginfo"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|trackinginfo' command")
+                return False
+            writer.append_map_header(3)
+            writer.append_bulk_string_response("flags".unsafe_ptr(), 5)
+            writer.append_set_header(1)
+            writer.append_bulk_string_response("off".unsafe_ptr(), 3)
+            writer.append_bulk_string_response("redirect".unsafe_ptr(), 8)
+            writer.append_int_response(-1)
+            writer.append_bulk_string_response("prefixes".unsafe_ptr(), 8)
+            writer.append_array_header(0)
+        elif arg_eq(sp, sl, "help"):
+            if argc != 2:
+                writer.append_error_response("ERR wrong number of arguments for 'client|help' command")
+                return False
+            client_help(writer)
+        else:
+            writer.append_error_response("ERR unknown subcommand '" + bytes_to_string(sp, sl) + "'. Try CLIENT HELP.")
+        return False
+
+    def _client_kill(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32,
+                     mut writer: ResponseWriter, config: PionConfig) raises -> Bool:
+        """CLIENT KILL <ip:port> | CLIENT KILL <filter> <value> ..., as Redis:
+        the old form answers +OK or "No such client" and may kill the caller;
+        the new form answers how many it killed and skips the caller unless
+        SKIPME no."""
+        var argc = end - i
+        var addr = String("")
+        var has_addr = False
+        var laddr = String("")
+        var has_laddr = False
+        var want_type = -1
+        var want_id = UInt64(0)
+        var want_user = -3
+        var skipme = True
+        var maxage = Int64(0)
+        if argc == 3:
+            addr = bytes_to_string(tokens[i + 2].ptr, tokens[i + 2].length)
+            has_addr = True
+            skipme = False
+        elif argc > 3:
+            var j = i + 2
+            while j < end:
+                var o = tokens[j]
+                var more = j + 1 < end
+                if arg_eq(o.ptr, o.length, "id") and more:
+                    var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+                    if not v.ok or v.value < 1:
+                        writer.append_error_response("ERR client-id should be greater than 0")
+                        return False
+                    want_id = UInt64(v.value)
+                elif arg_eq(o.ptr, o.length, "type") and more:
+                    want_type = client_type_of(tokens[j + 1].ptr, tokens[j + 1].length)
+                    if want_type == -1:
+                        writer.append_error_response("ERR Unknown client type '"
+                                                     + bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length) + "'")
+                        return False
+                elif arg_eq(o.ptr, o.length, "addr") and more:
+                    addr = bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length)
+                    has_addr = True
+                elif arg_eq(o.ptr, o.length, "laddr") and more:
+                    laddr = bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length)
+                    has_laddr = True
+                elif arg_eq(o.ptr, o.length, "user") and more:
+                    var users = self._acl_users(config)
+                    want_user = users.find(tokens[j + 1].ptr, tokens[j + 1].length)
+                    if want_user == -2:
+                        writer.append_error_response("ERR No such user '"
+                                                     + bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length) + "'")
+                        return False
+                elif arg_eq(o.ptr, o.length, "skipme") and more:
+                    var v = tokens[j + 1]
+                    if arg_eq(v.ptr, v.length, "yes"):
+                        skipme = True
+                    elif arg_eq(v.ptr, v.length, "no"):
+                        skipme = False
+                    else:
+                        writer.append_error_response("ERR syntax error")
+                        return False
+                elif arg_eq(o.ptr, o.length, "maxage") and more:
+                    var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+                    if not v.ok:
+                        writer.append_error_response("ERR maxage is not an integer or out of range")
+                        return False
+                    if v.value <= 0:
+                        writer.append_error_response("ERR maxage should be greater than 0")
+                        return False
+                    maxage = v.value
+                else:
+                    writer.append_error_response("ERR syntax error")
+                    return False
+                j += 2
+        else:
+            writer.append_error_response("ERR wrong number of arguments for 'client|kill' command")
+            return False
+        var killed = 0
+        var self_kill = False
+        var fds = self._client_fds()
+        for k in range(len(fds)):
+            var t = fds[k]
+            if has_addr and peer_addr(t) != addr:
+                continue
+            if has_laddr and local_addr(t) != laddr:
+                continue
+            if want_type != -1 and self._client_type(t) != want_type:
+                continue
+            if want_id != 0 and self.clients.id_of(t) != want_id:
+                continue
+            if want_user != -3 and self._user_of(t) != want_user:
+                continue
+            if t == fd and skipme:
+                continue
+            if maxage != 0 and self.clients.age_s(t) < maxage:
+                continue
+            if t == fd:
+                self_kill = True
+            self._kill_client(t, fd)
+            killed += 1
+        if argc == 3:
+            if killed == 0:
+                writer.append_error_response("ERR No such client")
+            else:
+                writer.append_ok_response()
+        else:
+            writer.append_int_response(Int64(killed))
+        return self_kill
 
     def process_slow_path(
         mut self,
@@ -765,17 +1745,21 @@ struct SlowPathHandler:
         # would be a 16 KB memset on every slow-path frame; parse_stream writes
         # each entry before the dispatch loop reads it, and reads are bounded by
         # num_cmds, so the one-time zeroing at construction is sufficient.
-        var cmd_byte_ends = self.cmd_byte_ends_buf
+        var cmd_byte_ends = self.cmd_byte_ends_buf if self.script_depth == 0 else self.script_cmd_byte_ends_buf
         var i = 0
         var cmd_idx = 0
         var num_cmds = 0
         var on_primary = True
         var cmd_write_start = 0
+        # #47 CLIENT REPLY: where the current primary command's reply began,
+        # and the writer's flush count then
+        var _rg_start = -1
+        var _rg_flushes = 0
         try:
-            var tokens = self.tokens_buf
+            var tokens = self.tokens_buf if self.script_depth == 0 else self.script_tokens_buf
             var num_tokens = 0
             var consumed_bytes = 0
-            var cmd_ends = self.cmd_ends_buf
+            var cmd_ends = self.cmd_ends_buf if self.script_depth == 0 else self.script_cmd_ends_buf
             self.parser.parse_stream(buffer, n, tokens, num_tokens, consumed_bytes, cmd_ends, cmd_byte_ends, num_cmds)
             if num_tokens == TOKENS_OVERFLOW:
                 # gh #153: a single complete command with more than
@@ -809,7 +1793,17 @@ struct SlowPathHandler:
                     # gh #162: where this command's response starts, so the
                     # recovery `except` can drop a half-written frame before
                     # emitting its error.
+                    # #47 CLIENT REPLY OFF / SKIP: the previous command's reply
+                    # is complete, so drop it here when the mode says so (this
+                    # also covers a command that `continue`d: +QUEUED, -NOAUTH)
+                    if on_primary and self.script_depth == 0:
+                        if self.clients.reply_off_count > 0 and _rg_start >= 0:
+                            self._reply_gate(fd, writer, _rg_start, _rg_flushes)
+                        _rg_start = writer.offset
+                        _rg_flushes = writer.flush_count
                     cmd_write_start = writer.offset
+                    # #47 SLOWLOG: when this command started (a counter read)
+                    var _sl_t0 = external_call["pion_ticks", UInt64]()
                     # cmd_ends holds MAX_CMD_ENDS == MAX_CMD_TOKENS entries and a
                     # command is at least one token, so this can't run off the
                     # end of a real batch (gh #156 — it used to, at 16, and the
@@ -818,13 +1812,71 @@ struct SlowPathHandler:
                     # degenerate no-command parse.
                     var cmd_end_tok = cmd_ends[cmd_idx] if cmd_idx < num_cmds else num_tokens
 
+                    # #47 CLIENT PAUSE: a command the pause holds is not run;
+                    # the connection is parked in front of it until the pause
+                    # ends (NetworkEngine._service_pause), as Redis postpones it.
+                    if self.clients.pause_until_ms != 0 and on_primary and self.script_depth == 0 \
+                       and self.can_park_wait and self._pause_holds(fd, tokens, i, cmd_end_tok):
+                        self.clients.hold(fd)
+                        self.parked_waits.park_fd(fd)
+                        primary_consumed = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
+                        _rg_start = -1          # nothing of this command was written
+                        break
+
+                    # #39: a connection in MONITOR mode may not touch the
+                    # keyspace, as in Redis (where a monitor is a kind of replica).
+                    if self.script_depth == 0 and self.monitors.count() > 0 and self.monitors.contains(fd):
+                        var _msp = tokens[i + 1].ptr if cmd_end_tok - i > 1 else tp
+                        var _msl = tokens[i + 1].length if cmd_end_tok - i > 1 else 0
+                        if command_touches_keyspace(tp, tl, _msp, _msl):
+                            writer.append_error_response("ERR Replica can't interact with the keyspace")
+                            i = cmd_end_tok
+                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                                cmd_idx += 1
+                            continue
+
+                    # #42: a RESP2 connection with subscriptions may run only the
+                    # pub/sub commands, PING (answered [pong, msg]), QUIT and
+                    # RESET, as in Redis. RESP3 has no such limit.
+                    if self.script_depth == 0 and writer.proto == 2 and self.pubsub.subscribed(fd):
+                        if cmd_eq(tp, tl, "ping"):
+                            if cmd_end_tok - i > 2:
+                                writer.append_error_response("ERR wrong number of arguments for 'ping' command")
+                            else:
+                                writer.append_array_header(2)
+                                writer.append_bulk_string_response("pong".unsafe_ptr(), 4)
+                                if cmd_end_tok - i == 2:
+                                    writer.append_bulk_string_response(tokens[i + 1].ptr, tokens[i + 1].length)
+                                else:
+                                    writer.append_bulk_string_response("".unsafe_ptr(), 0)
+                            i = cmd_end_tok
+                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                                cmd_idx += 1
+                            continue
+                        if not (cmd_eq(tp, tl, "subscribe") or cmd_eq(tp, tl, "unsubscribe")
+                                or cmd_eq(tp, tl, "psubscribe") or cmd_eq(tp, tl, "punsubscribe")
+                                or cmd_eq(tp, tl, "ssubscribe") or cmd_eq(tp, tl, "sunsubscribe")
+                                or cmd_eq(tp, tl, "quit") or cmd_eq(tp, tl, "reset")):
+                            writer.append_error_response("ERR Can't execute '" + token.value().lower()
+                                                         + "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context")
+                            i = cmd_end_tok
+                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                                cmd_idx += 1
+                            continue
+
                     # ── MULTI mode interception: queue commands instead of executing ──
-                    if self.tx_state.is_multi(fd):
+                    # (never for a script's redis.call: it runs inside an EXEC or
+                    # on its own, and MULTI is refused inside scripts)
+                    if self.script_depth == 0 and self.tx_state.is_multi(fd):
                         # Allow EXEC, DISCARD, MULTI (error), WATCH, UNWATCH through
                         var is_tx_cmd = False
                         if tl == 4 and cmd_matches_4(tp, 101, 120, 101, 99): is_tx_cmd = True   # exec
                         elif tl == 5 and cmd_matches_5(tp, 109, 117, 108, 116, 105): is_tx_cmd = True  # multi
                         elif tl == 7 and cmd_matches_7(tp, 100, 105, 115, 99, 97, 114, 100): is_tx_cmd = True  # discard
+                        # Redis runs these at once inside MULTI too (#39): WATCH
+                        # to refuse itself, QUIT and RESET to end the transaction.
+                        elif cmd_eq(tp, tl, "watch") or cmd_eq(tp, tl, "quit") or cmd_eq(tp, tl, "reset"):
+                            is_tx_cmd = True
                         if not is_tx_cmd:
                             # gh #219: queue THIS command's frame only. This used to
                             # enqueue (buffer, n) — the whole recv buffer — and then
@@ -958,6 +2010,7 @@ struct SlowPathHandler:
                     # Redis's exact error; reads, DEL and the POP family still
                     # run, so a client can free memory under the limit.
                     if self.over_maxmemory and command_is_denyoom(tp, tl) \
+                       and not (self.script_depth > 0 and self.script_allow_oom) \
                        and external_call["pion_maxmemory_check", Int32]() != 0:
                         writer.append_error_response("OOM command not allowed when used memory > 'maxmemory'.")
                         i = cmd_end_tok
@@ -992,12 +2045,28 @@ struct SlowPathHandler:
                                     writer.append_error_response("ERR tenant key rewrite exceeds scratch buffer")
                                     _treject = True
                             else:
-                                writer.append_error_response("NOPERM this command is not allowed for tenant connections")
+                                # #47: Redis's NOPERM text, and an ACL LOG entry
+                                var _tobj = lower_bytes(tp, tl)
+                                if cmd_is_container(tp, tl) and cmd_end_tok - i > 1:
+                                    _tobj += "|" + lower_bytes(tokens[i + 1].ptr, tokens[i + 1].length)
+                                writer.append_error_response("NOPERM User " + self._user_name(fd)
+                                                             + " has no permissions to run the '" + _tobj + "' command")
+                                self._acl_log("command", _tobj^, self._user_name(fd), fd,
+                                              n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                             if _treject:
                                 i = cmd_end_tok
                                 while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
                                     cmd_idx += 1
                                 continue
+
+                    # #39 MONITOR: a command is shown once it has run (the loop
+                    # tail), except a script command, shown before it runs so
+                    # that what the script calls follows it.
+                    var _mon_i = i
+                    var _mon_done = self.monitors.count() == 0 or self.monitor_skip
+                    if not _mon_done and command_monitor_first(tp, tl):
+                        self._monitor_feed(tokens, i, cmd_end_tok, fd, writer, server, kq)
+                        _mon_done = True
 
                     # ── XGPU ──
                     if tl == 4 and cmd_matches_4(tp, 120, 103, 112, 117): # XGPU (x=120, g=103, p=112, u=117)
@@ -1017,6 +2086,14 @@ struct SlowPathHandler:
                                          rebind[UnsafePointer[TenantTable, MutUntrackedOrigin]](UnsafePointer(to=self.tenant_table)),
                                          self.tx_state.tenant_id,
                                          self.tx_state.resp_proto)
+                        # #47: a rejected AUTH clause goes to ACL LOG, under the user it named
+                        if self._wrote_wrongpass(writer, cmd_write_start):
+                            var _hu = String("default")
+                            for _hk in range(i + 1, cmd_end_tok - 2):
+                                if arg_eq(tokens[_hk].ptr, tokens[_hk].length, "auth"):
+                                    _hu = bytes_to_string(tokens[_hk + 1].ptr, tokens[_hk + 1].length)
+                                    break
+                            self._acl_log("auth", "AUTH", _hu^, fd, n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                         i = cmd_end_tok - 1  # consume all HELLO args (incl. AUTH clause)
                     # ── SET (slow path) ──
                     elif tl == 3 and cmd_matches_3(tp, 115, 101, 116):
@@ -1570,6 +2647,10 @@ struct SlowPathHandler:
                                     hs_ok = False
                                     break
                                 hs_added += res.value
+                                # #43: the index's vector field is indexed here too
+                                _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,
+                                                       tokens[i+1].ptr, tokens[i+1].length, tokens[j_hs].ptr,
+                                                       tokens[j_hs].length, tokens[j_hs+1].ptr, tokens[j_hs+1].length)
                                 j_hs += 2
                             if hs_ok: writer.append_int_response(hs_added)
                             else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -1608,6 +2689,9 @@ struct SlowPathHandler:
                                 if not hmset_res.is_valid:
                                     hmset_wrong = True
                                     break
+                                _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,   # #43
+                                                       tokens[i+1].ptr, tokens[i+1].length, tokens[j_hmset].ptr,
+                                                       tokens[j_hmset].length, tokens[j_hmset+1].ptr, tokens[j_hmset+1].length)
                                 j_hmset += 2
                             if hmset_wrong: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             else: writer.append_ok_response()
@@ -1679,12 +2763,20 @@ struct SlowPathHandler:
                             var _zchanged = Int64(0)
                             var _zincr_score = Float64(0.0)
                             var _zincr_applied = False
+                            var _zincr_nan = False
                             var _zbadopt = False
-                            # Redis rejects these combinations outright.
-                            if (_znx and _zxx) or (_znx and (_zgt or _zlt)) or (_zgt and _zlt):
+                            var _zbadmsg = String("")
+                            # Redis rejects these combinations outright, each
+                            # with its own message.
+                            if _znx and _zxx:
                                 _zbadopt = True
+                                _zbadmsg = "ERR XX and NX options at the same time are not compatible"
+                            elif (_znx and (_zgt or _zlt)) or (_zgt and _zlt):
+                                _zbadopt = True
+                                _zbadmsg = "ERR GT, LT, and/or NX options at the same time are not compatible"
                             elif _zincr and (j_zadd + 2) < cmd_end_tok:
                                 _zbadopt = True   # INCR takes exactly one pair
+                                _zbadmsg = "ERR INCR option supports a single increment-element pair"
                             # gh #393: every score is parsed — Redis's rules, "inf"
                             # included — BEFORE any pair is applied. A bad score in
                             # pair N used to leave pairs 1..N-1 applied behind the
@@ -1707,26 +2799,28 @@ struct SlowPathHandler:
                                     _zpair += 1
                                     if not _zo.ok:
                                         zadd_wrongtype = True; break
+                                    if _zo.nan:
+                                        _zincr_nan = True; break
                                     if _zo.applied:
                                         zadd_added += _zo.added
                                         _zchanged += _zo.changed
                                         _zincr_score = _zo.new_score
                                         _zincr_applied = True
                                     j_zadd += 2
-                            if _zbadopt: writer.append_error_response("ERR GT, LT, and/or NX options at the same time are not compatible")
+                            if _zbadopt: writer.append_error_response(_zbadmsg)
                             elif zadd_badfloat: writer.append_error_response("ERR value is not a valid float")
                             elif zadd_wrongtype: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
+                            elif _zincr_nan: writer.append_error_response("ERR resulting score is not a number (NaN)")
                             elif _zincr:
                                 # INCR replies with the NEW score, or nil when a
                                 # flag suppressed the write.
                                 if _zincr_applied:
-                                    # Float64, 17 significant digits: this went through
-                                    # Float32 with 6 decimals, so `ZADD z INCR 123456789 m`
-                                    # answered 123456792.
-                                    var _zsb = alloc[UInt8](48)
-                                    var _zt = format_float64_to_buf(_zsb, 0, _zincr_score)
-                                    writer.append_bulk_string_response(_zsb, _zt)
-                                    _zsb.unsafe_free()
+                                    # Redis answers with addReplyDouble, as ZINCRBY
+                                    # does: d2string digits, and a RESP3 double.
+                                    # This went through Float32 once (`ZADD z INCR
+                                    # 123456789 m` answered 123456792), then through
+                                    # 17 fixed decimals (1/3 as 0.33333333333333331).
+                                    writer.append_score_response(_zincr_score)
                                 else:
                                     writer.append_null_response()
                             elif _zch: writer.append_int_response(_zchanged)
@@ -1759,15 +2853,14 @@ struct SlowPathHandler:
                             elif not sp_v.is_none() and sp_v.type.value != ValueType.SET:
                                 writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             elif sp_v.is_none():
-                                if sp_has_count: writer.append_empty_array_response()
+                                if sp_has_count: writer.append_set_header(0)   # RESP3 `~0`
                                 else: writer.append_null_response()
                             else:
                                 var sp_set = sp_v.as_set().bitcast[SlabHashMap]()
                                 var sp_n = 1
                                 if sp_has_count:
                                     sp_n = Int(min(sp_count, Int64(sp_set[].size)))
-                                    var sp_hdr = String("*") + String(sp_n) + String("\r\n")
-                                    writer.append_to_response(sp_hdr.unsafe_ptr(), sp_hdr.byte_length())
+                                    writer.append_set_header(sp_n)   # RESP3: a set, as Redis
                                 for _ in range(sp_n):
                                     var popped = self.dispatcher.execute_spop(key)   # logs the SREM
                                     writer.append_bulk_value_response(popped)
@@ -1781,7 +2874,7 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── FLUSHALL ──
                     elif tl == 8 and cmd_matches_8(tp, 102, 108, 117, 115, 104, 97, 108, 108):
-                        _ = handle_flushall(self.keyspace, writer)
+                        _ = handle_flushall(tokens, i, cmd_end_tok, self.keyspace, writer, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── SAVE ──
                     elif tl == 4 and cmd_matches_4(tp, 115, 97, 118, 101):
@@ -1810,20 +2903,44 @@ struct SlowPathHandler:
                     # SAVE runs synchronously first so its reply ordering is
                     # irrelevant, then the latch is set and we write nothing.
                     elif tl == 8 and cmd_eq(tp, tl, "shutdown"):
+                        # #47: Redis's options, in any order. ABORT used to be
+                        # read as "save and shut down", and it stopped the
+                        # server; it now cancels a shutdown that has not begun
+                        # to drain, or says there is none.
                         var _sd_nosave = False
-                        if i + 1 < cmd_end_tok:
-                            var _ap = tokens[unsafe_offset=i+1].ptr
-                            var _al = tokens[unsafe_offset=i+1].length
+                        var _sd_save = False
+                        var _sd_abort = False
+                        var _sd_other = False
+                        var _sd_bad = False
+                        for _sj in range(i + 1, cmd_end_tok):
+                            var _ap = tokens[unsafe_offset=_sj].ptr
+                            var _al = tokens[unsafe_offset=_sj].length
                             if cmd_eq(_ap, _al, "nosave"):
                                 _sd_nosave = True
-                        if not _sd_nosave:
-                            _ = handle_save(self.snapshot_engine, self.keyspace,
-                                            self.worker_id, self.dispatcher,
-                                            self.last_save_time, writer, self.ttl_map)
-                            # handle_save wrote +OK; SHUTDOWN must not reply, so
-                            # roll that back rather than desyncing the client.
-                            writer.offset = cmd_write_start
-                        external_call["pion_request_shutdown", NoneType]()
+                            elif cmd_eq(_ap, _al, "save"):
+                                _sd_save = True
+                            elif cmd_eq(_ap, _al, "now") or cmd_eq(_ap, _al, "force"):
+                                _sd_other = True
+                            elif cmd_eq(_ap, _al, "abort"):
+                                _sd_abort = True
+                            else:
+                                _sd_bad = True
+                        if _sd_bad or (_sd_abort and (_sd_nosave or _sd_save or _sd_other)) or (_sd_nosave and _sd_save):
+                            writer.append_error_response("ERR syntax error")
+                        elif _sd_abort:
+                            if external_call["pion_abort_shutdown", Int32]() == 1:
+                                writer.append_ok_response()
+                            else:
+                                writer.append_error_response("ERR No shutdown in progress.")
+                        else:
+                            if not _sd_nosave:
+                                _ = handle_save(self.snapshot_engine, self.keyspace,
+                                                self.worker_id, self.dispatcher,
+                                                self.last_save_time, writer, self.ttl_map)
+                                # handle_save wrote +OK; SHUTDOWN must not reply, so
+                                # roll that back rather than desyncing the client.
+                                writer.offset = cmd_write_start
+                            external_call["pion_request_shutdown", NoneType]()
                         i = cmd_end_tok - 1
                     # ── TTL/Expiry Commands (src/commands/ttl.mojo) ──
                     elif tl == 6 and cmd_matches_6(tp, 101, 120, 112, 105, 114, 101):
@@ -1845,71 +2962,28 @@ struct SlowPathHandler:
                         _ = handle_pttl(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
                         i = cmd_end_tok - 1
                     elif tl == 7 and cmd_matches_7(tp, 112, 101, 114, 115, 105, 115, 116):
-                        _ = handle_persist(tokens, i, cmd_end_tok, writer, self.ttl_map, self.dispatcher.wal)
+                        _ = handle_persist(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── INFO ──
                     elif tl == 4 and cmd_matches_4(tp, 105, 110, 102, 111):
-                        # N3: INFO REPLICATION — expose replication lag
-                        var _info_is_repl = False
-                        if i + 1 < cmd_end_tok:
-                            var _isub = tokens[i+1]
-                            if _isub.length == 11 and (_isub.ptr[0]|0x20) == 114:  # r=replication
-                                _info_is_repl = True
-                        if _info_is_repl and is_not_null(self.cluster) and self.cluster[].enabled:
-                            var _cl = self.cluster
-                            var _rb = alloc[UInt8](512)
-                            var _rp = _rb
-                            var _ro = 0
-                            def _ri_s(s: StringLiteral, b: UnsafePointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                                var sl = s.byte_length(); unsafe_memcpy(dest=b + o, src=s.unsafe_ptr(), count=sl); o += sl
-                            def _ri_n(n: Int, b: UnsafePointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                                o += format_int_to_buf(b + o, 0, Int64(n))
-                            def _ri_nl(b: UnsafePointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                                b[o] = 13; b[o+1] = 10; o += 2
-                            _ri_s("# Replication", _rp, _ro); _ri_nl(_rp, _ro)
-                            if _cl[].is_replica:
-                                _ri_s("role:slave", _rp, _ro); _ri_nl(_rp, _ro)
-                                _ri_s("master_host:", _rp, _ro)
-                                if _cl[].primary_peer_idx >= 0 and _cl[].primary_peer_idx < 16:
-                                    var _ph_off = _cl[].primary_peer_idx * 64
-                                    var _ph_len = 0
-                                    while _ph_len < 63 and _cl[].peer_hosts[_ph_off + _ph_len] != 0:
-                                        _rp[_ro] = _cl[].peer_hosts[_ph_off + _ph_len]
-                                        _ro += 1; _ph_len += 1
-                                _ri_nl(_rp, _ro)
-                                _ri_s("slave_repl_offset:", _rp, _ro)
-                                if is_not_null(_cl[].repl_replica_handle):
-                                    var _rr = UnsafePointer[ReplicaReceiver, MutUntrackedOrigin](unsafe_from_address=Int(_cl[].repl_replica_handle))
-                                    # Can't call methods on raw handle — use FFI directly
-                                    _ri_n(Int(external_call["pion_repl_replica_bytes_received", Int64](_cl[].repl_replica_handle)), _rp, _ro)
-                                else:
-                                    _ri_n(0, _rp, _ro)
-                                _ri_nl(_rp, _ro)
-                            else:
-                                _ri_s("role:master", _rp, _ro); _ri_nl(_rp, _ro)
-                                _ri_s("connected_slaves:", _rp, _ro)
-                                if is_not_null(_cl[].repl_primary_handle):
-                                    _ri_n(Int(external_call["pion_repl_primary_connected_count", Int32](_cl[].repl_primary_handle)), _rp, _ro)
-                                else:
-                                    _ri_n(0, _rp, _ro)
-                                _ri_nl(_rp, _ro)
-                                _ri_s("master_repl_offset:", _rp, _ro)
-                                _ri_n(Int(self.dispatcher.wal[].tail_offset), _rp, _ro)
-                                _ri_nl(_rp, _ro)
-                            _ri_s("repl_backlog_size:268435456", _rp, _ro); _ri_nl(_rp, _ro)
-                            writer.append_bulk_string_response(_rp, _ro)
-                            _rb.free()
-                            i += 1  # consume "replication" token
-                        else:
-                            # gh #262: resolve the real numbers, then report.
-                            var _ik = 0
-                            for _is in range(8):
-                                _ik += self.keyspace[].shards[unsafe_offset=_is].size
-                            var _ie = 0
-                            if is_not_null(self.ttl_map): _ie = self.ttl_map[].size
-                            _ = handle_info(self.dispatcher, writer, self.listen_port, _ik, _ie,
-                                            self.ledger.uptime_seconds(), self._value_receipt_info())
-                            i = cmd_end_tok - 1
+                        # INFO [section ...]. One body for every form (#30):
+                        # the Replication and Cluster sections now come from the
+                        # cluster state for plain INFO too, which printed
+                        # role:master on a replica; `INFO replication` was the
+                        # only form that read it. Sections filter as in Redis.
+                        var _isecs = List[String]()
+                        for _ij in range(i + 1, cmd_end_tok):
+                            _isecs.append(tokens[_ij].value())
+                        var _ik = 0
+                        for _is in range(8):
+                            _ik += self.keyspace[].shards[unsafe_offset=_is].size
+                        var _ie = 0
+                        if is_not_null(self.ttl_map): _ie = self.ttl_map[].size
+                        var _icl = is_not_null(self.cluster) and self.cluster[].enabled
+                        _ = handle_info(self.dispatcher, writer, self.listen_port, _ik, _ie,
+                                        self.ledger.uptime_seconds(), self._value_receipt_info(),
+                                        self._info_replication_section(), _icl, _isecs)
+                        i = cmd_end_tok - 1
                     # ── GETBIT ──
                     elif tl == 6 and cmd_matches_6(tp, 103, 101, 116, 98, 105, 116):
                         if i + 2 < cmd_end_tok:
@@ -1970,130 +3044,65 @@ struct SlowPathHandler:
                         else:
                             writer.append_error_response("ERR wrong number of arguments for 'pfcount' command")
                             i = cmd_end_tok - 1
-                    # ── BITCOUNT (whole-key form; range args unsupported here — the
-                    #    fast path owns the hot form, this is gh #101 slow-path coverage) ──
+                    # ── BITCOUNT, every form (public #31). The fast path answers the
+                    #    whole-key form outside transactions. ──
                     elif tl == 8 and cmd_matches_8(tp, 98, 105, 116, 99, 111, 117, 110, 116):
-                        if cmd_end_tok - i == 2:
-                            var bc_res = self.dispatcher.execute_bitcount(tokens[i+1].value())
-                            if bc_res.is_valid: writer.append_int_response(bc_res.value)
-                            else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            i += 1
-                        elif cmd_end_tok - i == 4 or cmd_end_tok - i == 5:
-                            # gh #232: `BITCOUNT key start end [BYTE|BIT]` — the
-                            # documented ranged form — used to answer
-                            # "range arguments are not supported on this path",
-                            # on strings AND bitmaps. Only the whole-key form
-                            # worked, so every range query failed outright.
-                            var _bcv = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                            if _bcv.is_none():
-                                writer.append_int_response(0)
-                            elif not _bcv.is_string_like():
-                                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            else:
-                                var _bcsc = stack_allocation[32, UInt8]()
-                                var _bclen = 0
-                                var _bcp = _bcv.bitmap_view(_bcsc, _bclen)
-                                var _bc_bit = False
-                                if cmd_end_tok - i == 5:
-                                    var _up = tokens[i+4].ptr; var _ul = tokens[i+4].length
-                                    _bc_bit = _ul == 3 and (_up[0]|0x20) == 98   # BIT
-                                var _total = _bclen * 8 if _bc_bit else _bclen
-                                var _s = Int(strict_atol(tokens[i+2].value()))
-                                var _e = Int(strict_atol(tokens[i+3].value()))
-                                if _s < 0: _s += _total
-                                if _e < 0: _e += _total
-                                # Redis clamps BOTH ends up to 0 after the
-                                # negative-index adjustment, so a range far off
-                                # the left edge collapses to [0,0] rather than
-                                # to an empty range: `BITCOUNT foobar -100 -99`
-                                # is 4 (byte 0), not 0.
-                                if _s < 0: _s = 0
-                                if _e < 0: _e = 0
-                                if _e >= _total: _e = _total - 1
-                                var _cnt = 0
-                                if _total > 0 and _s <= _e:
-                                    var _fb = _s if _bc_bit else _s * 8
-                                    var _lb = _e if _bc_bit else _e * 8 + 7
-                                    for _b in range(_fb, _lb + 1):
-                                        var _by = _b // 8
-                                        # gh #232: Redis numbers bits MSB-first
-                                        # within each byte.
-                                        if (_bcp[_by] >> UInt8(7 - (_b % 8))) & 1 == 1:
-                                            _cnt += 1
-                                writer.append_int_response(Int64(_cnt))
-                            i = cmd_end_tok - 1
-                        elif i + 1 < cmd_end_tok:
-                            writer.append_error_response("ERR syntax error")
-                            i = cmd_end_tok - 1
-                        else:
-                            writer.append_error_response("ERR wrong number of arguments for 'bitcount' command")
-                            i = cmd_end_tok - 1
-                    # ── GEOADD ──
-                    # gh #162: authoritative skip on every path (see the GEO
-                    # block below for why). gh #181: loops over every
-                    # (lon, lat, member) triple — the old arm stored only the
-                    # first triple and silently ignored the rest — and routes
-                    # through execute_geoadd so each member is WAL-logged.
+                        _ = handle_bitcount(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        i = cmd_end_tok - 1
+                    # ── GEOADD ── (src/commands/geo.mojo: validates every triple
+                    #    first, NX/XX/CH, a sorted set as in Redis)
                     elif tl == 6 and cmd_matches_6(tp, 103, 101, 111, 97, 100, 100):
-                        if i + 4 < cmd_end_tok and (cmd_end_tok - i - 2) % 3 == 0:
-                            var key = tokens[i+1].value()
-                            var geo_added = Int64(0)
-                            var geo_wrongtype = False
-                            var geo_badfloat = False
-                            var j_geo = i + 2
-                            while j_geo + 2 < cmd_end_tok:
-                                var glon_tok = tokens[j_geo]
-                                var glat_tok = tokens[j_geo+1]
-                                var gc0 = glon_tok.ptr[0] if glon_tok.length > 0 else UInt8(0)
-                                var gc1 = glat_tok.ptr[0] if glat_tok.length > 0 else UInt8(0)
-                                # Coordinates must start with a digit, sign, or decimal
-                                # point; anything else (a flag like NX) is a validation error.
-                                if not ((gc0 >= 48 and gc0 <= 57) or gc0 == 45 or gc0 == 43 or gc0 == 46
-                                        ) or not ((gc1 >= 48 and gc1 <= 57) or gc1 == 45 or gc1 == 43 or gc1 == 46):
-                                    geo_badfloat = True; break
-                                var gres = self.dispatcher.execute_geoadd(key, atof(glon_tok.value()), atof(glat_tok.value()), tokens[j_geo+2].value())
-                                if gres.is_valid: geo_added += gres.value
-                                else:
-                                    geo_wrongtype = True; break
-                                j_geo += 3
-                            if geo_badfloat: writer.append_error_response("ERR value is not a valid float")
-                            elif geo_wrongtype: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            else: writer.append_int_response(geo_added)
-                        elif i + 4 < cmd_end_tok: writer.append_error_response("ERR syntax error")
-                        else:
-                            writer.append_error_response("ERR wrong number of arguments for 'geoadd' command")
-                            i = cmd_end_tok - 1
+                        _ = handle_geoadd(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── CONFIG ──
                     elif tl == 6 and cmd_matches_6(tp, 99, 111, 110, 102, 105, 103):
-                        _ = handle_config(tokens, i, cmd_end_tok, writer, config)
+                        var _cfg_reset = False
+                        _ = handle_config(tokens, i, cmd_end_tok, writer, config, _cfg_reset)
+                        if _cfg_reset:
+                            self.ledger.reset()       # CONFIG RESETSTAT: the counters INFO reports
+                        self.update_dispatch_gate()   # #47: a SLOWLOG threshold may move the fast path
                         i = cmd_end_tok - 1
                     # ── CLUSTER ──
                     elif tl == 7 and cmd_matches_7(tp, 99, 108, 117, 115, 116, 101, 114):
-                        _ = handle_cluster(tokens, i, cmd_end_tok, writer, self.cluster, self.keyspace, self.dispatcher.raft, self.shared_hnsw, self.v_store, self.attn_idx, self.worker_id, self.num_workers)
+                        # #47: outside cluster mode Redis answers every CLUSTER
+                        # subcommand with this error; Pion keeps only its own
+                        # CLUSTER STATS. KEYSLOT answered 0 and COUNTKEYSINSLOT 0
+                        # for any key, REPLICATE and RESET +OK, doing nothing.
+                        if not (is_not_null(self.cluster) and self.cluster[].enabled) \
+                           and not (cmd_end_tok - i >= 2 and arg_eq(tokens[i + 1].ptr, tokens[i + 1].length, "stats")):
+                            writer.append_error_response("ERR This instance has cluster support disabled")
+                        else:
+                            _ = handle_cluster(tokens, i, cmd_end_tok, writer, self.cluster, self.keyspace, self.dispatcher.raft, self.shared_hnsw, self.v_store, self.attn_idx, self.worker_id, self.num_workers)
                         i = cmd_end_tok - 1
                     # ── REPLCONF ──
                     elif cmd_eq(tp, tl, "replconf"):
-                        # REPLCONF ACK <offset> — handled transparently, just consume args
-                        var _rc_extra = cmd_end_tok - i - 1 if i + 1 < cmd_end_tok else 0
-                        i += _rc_extra
-                        writer.append_ok_response()
+                        # #39: Redis's answers for a client that is not a replica
+                        # (ACK/GETACK answer nothing). It answered +OK to all.
+                        handle_replconf(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
                     # ── PSYNC ──
-                    elif tl == 5 and (tp[0]|0x20)==112 and (tp[1]|0x20)==115 and (tp[2]|0x20)==121 and (tp[3]|0x20)==110 and (tp[4]|0x20)==99:
-                        # PSYNC repl_id offset — stub for RESP-based PSYNC (real PSYNC uses replication port)
-                        if i + 2 < cmd_end_tok: i += 2
-                        writer.append_ok_response()
+                    elif cmd_eq(tp, tl, "psync"):
+                        # #39: refused. It answered +OK, and a Redis replica
+                        # then waited forever for an RDB that never came.
+                        handle_sync(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
                     # ── DUMP ──
                     elif tl == 4 and cmd_matches_4(tp, 100, 117, 109, 112):
-                        _ = handle_dump(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        _ = handle_dump(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     # ── RESTORE ──
                     elif tl == 7 and cmd_matches_7(tp, 114, 101, 115, 116, 111, 114, 101):
-                        _ = handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        if handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal):
+                            self.tx_state.bump_key_version(tokens[i + 1].ptr, tokens[i + 1].length)
+                            _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #46
+                                                  self.vec_tomb, tokens[i + 1].ptr, tokens[i + 1].length)
                         i = cmd_end_tok - 1
                     # ── MIGRATE ──
                     elif tl == 7 and cmd_matches_7(tp, 109, 105, 103, 114, 97, 116, 101):
-                        _ = handle_migrate(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        var _moved = handle_migrate(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map,
+                                                    self.dispatcher.wal, is_not_null(self.cluster) and self.cluster[].enabled)
+                        for _mk in range(len(_moved)):
+                            self.tx_state.bump_key_version(tokens[_moved[_mk]].ptr, tokens[_moved[_mk]].length)
                         i = cmd_end_tok - 1
                     # ── FT.* command family ──
                     # gh #156/#162 family: every handler gets `cmd_end_tok` as its
@@ -2114,6 +3123,10 @@ struct SlowPathHandler:
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.optimize"): # FT.OPTIMIZE
                             _ = handle_ft_optimize(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, self.keyspace, self.worker_id, writer)
+                            # #46: the slots already dead, under the new build's id
+                            if is_not_null(self.shared_hnsw) and is_not_null(self.shared_hnsw[].ready_atomic) \
+                                    and self.shared_hnsw[].ready_atomic[] != 0:
+                                record_all_dead(self.shared_hnsw, self.vec_tomb, self.dispatcher)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.create"): # FT.CREATE
                             _ = handle_ft_create(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, config, writer, self.worker_id)
@@ -2562,7 +3575,11 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── RENAME ──
                     elif tl == 6 and cmd_matches_6(tp, 114, 101, 110, 97, 109, 101):
+                        var _vmv = hash_addr(self.keyspace, tokens[i + 1].ptr, tokens[i + 1].length) if i + 2 < cmd_end_tok else 0
                         _ = handle_rename(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        if _vmv != 0:   # #46: a renamed hash's slot names its old key
+                            after_rename(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb, _vmv,
+                                         tokens[i + 1].ptr, tokens[i + 1].length, tokens[i + 2].ptr, tokens[i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
@@ -2570,7 +3587,11 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── RENAMENX ──
                     elif tl == 8 and cmd_matches_8(tp, 114, 101, 110, 97, 109, 101, 110, 120):
+                        var _vmv = hash_addr(self.keyspace, tokens[i + 1].ptr, tokens[i + 1].length) if i + 2 < cmd_end_tok else 0
                         _ = handle_renamenx(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        if _vmv != 0:   # #46: a renamed hash's slot names its old key
+                            after_rename(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb, _vmv,
+                                         tokens[i + 1].ptr, tokens[i + 1].length, tokens[i + 2].ptr, tokens[i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
@@ -2579,6 +3600,9 @@ struct SlowPathHandler:
                     # ── COPY ──
                     elif tl == 4 and cmd_matches_4(tp, 99, 111, 112, 121):
                         _ = handle_copy(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
+                        if i + 2 < cmd_end_tok:   # #46: the copy's vector, as HSET's
+                            _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,
+                                                  tokens[i + 2].ptr, tokens[i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                         i = cmd_end_tok - 1
@@ -2683,7 +3707,8 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── HSETNX ──
                     elif tl == 6 and cmd_matches_6(tp, 104, 115, 101, 116, 110, 120):
-                        _ = handle_hsetnx(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher)
+                        _ = handle_hsetnx(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher, self.shared_hnsw,
+                                          self.vec_tomb)
                         i = cmd_end_tok - 1
                     # ── R3: HEXPIRE (7 bytes: h=104,e=101,x=120,p=112,i=105,r=114,e=101) ──
                     elif tl == 7 and (tp[0]|0x20)==104 and (tp[1]|0x20)==101 and (tp[2]|0x20)==120 and (tp[3]|0x20)==112 and (tp[4]|0x20)==105 and (tp[5]|0x20)==114 and (tp[6]|0x20)==101:
@@ -2752,60 +3777,7 @@ struct SlowPathHandler:
                     # ── RPOPLPUSH (≡ LMOVE src dst RIGHT LEFT; gh #101 slow-path coverage) ──
                     elif cmd_eq(tp, tl, "rpoplpush"):
                         if i + 2 < cmd_end_tok:
-                            var rpl_src = tokens[i+1].value()
-                            var rpl_dst = tokens[i+2].value()
-                            # gh #232: neither key was type-checked, and the pop
-                            # happened first. With a wrong-type DESTINATION the
-                            # element was popped, answered as a normal success,
-                            # and then silently dropped — never pushed anywhere.
-                            # RPOPLPUSH is THE reliable-queue primitive
-                            # (`RPOPLPUSH work processing`), so that is a job
-                            # vanishing with a reply that says it moved. Redis
-                            # validates both keys before touching either.
-                            var rpl_sv = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                            var rpl_dv = self.keyspace[].get(GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length))
-                            # Redis's precedence, and it is observable: wrong-type
-                            # SOURCE errors; a MISSING source is nil and the
-                            # destination is never examined; only then does a
-                            # wrong-type destination error.
-                            var rpl_src_bad = (not rpl_sv.is_none()
-                                               and rpl_sv.type.value != ValueType.LIST)
-                            var rpl_dst_bad = (not rpl_sv.is_none() and not rpl_dv.is_none()
-                                               and rpl_dv.type.value != ValueType.LIST)
-                            # No `continue` here: the loop tail runs the gh #240
-                            # forward clamp and `i += 1`, and skipping them is
-                            # the very desync this arm is being fixed for.
-                            if rpl_src_bad or rpl_dst_bad:
-                                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            else:
-                                var rpl_val = self.dispatcher.execute_rpop(rpl_src)
-                                if rpl_val.is_none():
-                                    writer.append_null_response()
-                                else:
-                                    # Push the value directly; both String(gv) and
-                                    # gv.__str__() stringify the internal pointer for
-                                    # heap/SSO string values, corrupting the element.
-                                    writer.append_bulk_value_response(rpl_val)
-                                    _ = self.dispatcher.execute_lpush_value(rpl_dst, rpl_val)
-                                    # gh #234 remainder (found via gh #265):
-                                    # remove the source once its last element
-                                    # leaves, or `EXISTS` lies and the key
-                                    # cannot be reused as another type. gh #234
-                                    # fixed the LPOP/RPOP handlers; this arm
-                                    # reimplements the pop and so was missed.
-                                    #
-                                    # AFTER the push: `src == dst` is a legal
-                                    # rotation and is size 1 again by here.
-                                    var rpl_after = self.keyspace[].get(
-                                        GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                    if (not rpl_after.is_none()
-                                            and rpl_after.type.value == ValueType.LIST
-                                            and rpl_after.as_list()
-                                                .unsafe_bitcast[SlabList]()[].size == 0):
-                                        _ = remove_and_free(self.keyspace, 
-                                            GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                        _ = self.dispatcher.wal[].append(
-                                            2, tokens[i+1].ptr, tokens[i+1].length)
+                            self._rpoplpush(tokens, i, writer)
                             i += 2
                         else:
                             writer.append_error_response("ERR wrong number of arguments for 'rpoplpush' command")
@@ -2813,78 +3785,15 @@ struct SlowPathHandler:
                     # ── LMPOP (stub — same pattern as old code) ──
                     elif cmd_eq(tp, tl, "lmpop"):
                         # LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
-                        if i + 3 < cmd_end_tok:
-                            var _lmpop_nk = strict_atol(tokens[i+1].value())
-                            var _lmpop_ci = i + 2
-                            # 1..(keys given, leaving LEFT|RIGHT): unbounded, a
-                            # huge numkeys spun ~2^63 times, and the walk used
-                            # num_tokens — the whole pipeline — so the NEXT
-                            # command's tokens were taken as keys.
-                            var _lmpop_bad = _lmpop_nk < 1 or _lmpop_nk > cmd_end_tok - _lmpop_ci - 1
-                            if _lmpop_bad:
-                                writer.append_error_response("ERR numkeys should be greater than 0 and at most the number of keys given")
-                            else:
-                                _lmpop_ci += _lmpop_nk
-                            if not _lmpop_bad and _lmpop_ci < cmd_end_tok:
-                                var _lmpop_dir_tp = tokens[_lmpop_ci].ptr
-                                var _lmpop_from_left = (_lmpop_dir_tp[0]|0x20) == 108
-                                _lmpop_ci += 1
-                                var _lmpop_count2 = 1
-                                if _lmpop_ci + 1 < cmd_end_tok and tokens[_lmpop_ci].length == 5 and (tokens[_lmpop_ci].ptr[0]|0x20)==99:
-                                    _lmpop_count2 = strict_atol(tokens[_lmpop_ci+1].value()); _lmpop_ci += 2
-                                # gh #232: type-check every candidate key first.
-                                # Skipping a wrong-type key silently falls
-                                # through to the next one and pops from THAT
-                                # list, so the caller gets a plausible answer
-                                # from a key it did not mean.
-                                var _lmpop_wt = False
-                                for _wtk in range(_lmpop_nk):
-                                    if i + 2 + _wtk >= num_tokens: break
-                                    var _wtv = self.keyspace[].get(
-                                        GenericValue.borrow(tokens[i+2+_wtk].ptr, tokens[i+2+_wtk].length))
-                                    if not _wtv.is_none() and _wtv.type.value != ValueType.LIST:
-                                        _lmpop_wt = True
-                                        break
-                                # Try each key in order
-                                var _lmpop_found = _lmpop_wt
-                                if _lmpop_wt:
-                                    writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                                for _ki in range(_lmpop_nk):
-                                    if _lmpop_found: break
-                                    var _kstr = tokens[i+2+_ki].value()
-                                    var _kv = GenericValue.borrow(tokens[i+2+_ki].ptr, tokens[i+2+_ki].length)
-                                    var _kval = self.keyspace[].get(_kv)
-                                    if not _kval.is_none() and _kval.type.value == ValueType.LIST:
-                                        var _lp = _kval.as_list().bitcast[SlabList]()
-                                        if _lp[].size > 0:
-                                            var _out_n = min(_lmpop_count2, _lp[].size)
-                                            var _lmpop_h = "*2\r\n"
-                                            writer.append_to_response(_lmpop_h.unsafe_ptr(), _lmpop_h.byte_length())
-                                            writer.append_bulk_string_response(_kstr.unsafe_ptr(), _kstr.byte_length())
-                                            var _arr_h2 = "*" + String(_out_n) + "\r\n"
-                                            writer.append_to_response(_arr_h2.unsafe_ptr(), _arr_h2.byte_length())
-                                            for _ in range(_out_n):
-                                                var _popped: GenericValue
-                                                if _lmpop_from_left: _popped = self.dispatcher.execute_lpop(_kstr)
-                                                else: _popped = self.dispatcher.execute_rpop(_kstr)
-                                                if _popped.is_none(): break
-                                                writer.append_bulk_value_response(_popped)
-                                                _popped.free_str_payload()   # the pop handed back an owned value; the reply copied it
-                                            _lmpop_found = True
-                                if not _lmpop_found: writer.append_null_response()
-                                i = _lmpop_ci - 1
-                            elif not _lmpop_bad: writer.append_null_response(); i += 2
-                            # The loop's forward clamp consumes the rest of the frame.
-                            i = cmd_end_tok - 1
-                        else:
-                            # Short LMPOP replied a bare null and left `i` where it
-                            # was, so the loop advanced one token and dispatched
-                            # this command's ARGUMENT as a command name
-                            # (`LMPOP k` + `PING` -> $-1, then
-                            # -ERR unknown command 'k', then PONG: three replies
-                            # for two commands).
+                        if cmd_end_tok - i < 4:
                             writer.append_error_response("ERR wrong number of arguments for 'lmpop' command")
-                            i = cmd_end_tok - 1
+                        else:
+                            var _mp = parse_mpop(tokens, i + 1, cmd_end_tok, False)
+                            if _mp.error.byte_length() > 0:
+                                writer.append_error_response(_mp.error)
+                            elif not self._mpop_lists(tokens, i + 2, _mp.numkeys, _mp.first, _mp.count, writer):
+                                writer.append_null_array_response()
+                        i = cmd_end_tok - 1
                     # ── ZMPOP (gh #251) ──
                     elif cmd_eq(tp, tl, "zmpop"):
                         _ = handle_zmpop(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
@@ -2978,7 +3887,7 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── BITOP ──
                     elif tl == 5 and cmd_matches_5(tp, 98, 105, 116, 111, 112):
-                        _ = handle_bitop(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        _ = handle_bitop(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                         i = cmd_end_tok - 1
@@ -3038,23 +3947,26 @@ struct SlowPathHandler:
                                 if zpmin_out <= 0:
                                     writer.append_empty_array_response()
                                 else:
-                                    var zpmin_hdr = String("*") + String(zpmin_out * 2) + String("\r\n")
-                                    writer.append_to_response(zpmin_hdr.unsafe_ptr(), zpmin_hdr.byte_length())
+                                    # RESP3, as Redis: [member, score] without a
+                                    # count, a list of such pairs with one.
+                                    if zpmin_has_cnt:
+                                        writer.append_scored_header(zpmin_out, True)
+                                    else:
+                                        writer.append_array_header(2)
                                     # heap, not stack_allocation: gv_bytes writes it
                                     # out of line (the gh #349 tail-call hazard).
                                     var _zpm_wb = alloc[UInt8](64)
                                     for _ in range(zpmin_out):
                                         var zpmin_res = zpmin_ptr[].pop_min()
                                         if not zpmin_res.valid or zpmin_res.obj.is_none(): break
-                                        writer.append_bulk_value_response(zpmin_res.obj)
                                         # gh #251: was Int64(...), which truncated
                                         # a fractional score (1.5 -> "1").
-                                        var _zpi = Int64(zpmin_res.score)
-                                        if Float64(_zpi) == zpmin_res.score:
-                                            writer.append_bulk_int_response(_zpi)
+                                        # #18: nor through Int64() (±inf).
+                                        if zpmin_has_cnt:
+                                            writer.append_scored_member(zpmin_res.obj, zpmin_res.score, True)
                                         else:
-                                            var _zps = String(zpmin_res.score)
-                                            writer.append_bulk_string_response(_zps.unsafe_ptr(), _zps.byte_length())
+                                            writer.append_bulk_value_response(zpmin_res.obj)
+                                            writer.append_score_response(zpmin_res.score)
                                         # The fast path logs the resolved effect (ZREM of
                                         # the popped member, cmd 12); this path logged
                                         # nothing, so a replay resurrected every member
@@ -3212,21 +4124,25 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── GEORADIUS ──
                     elif tl == 9 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==114 and (tp[4]|0x20)==97 and (tp[5]|0x20)==100 and (tp[6]|0x20)==105 and (tp[7]|0x20)==117 and (tp[8]|0x20)==115:
-                        _ = handle_georadius(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
+                        _ = handle_georadius(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "georadius_ro"):
+                        _ = handle_georadius(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map, True)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "georadiusbymember_ro"):
+                        _ = handle_georadiusbymember(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map, True)
                         i = cmd_end_tok - 1
                     # ── GEOSEARCH ──
                     elif tl == 9 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==115 and (tp[4]|0x20)==101 and (tp[5]|0x20)==97 and (tp[6]|0x20)==114 and (tp[7]|0x20)==99 and (tp[8]|0x20)==104:
-                        _ = handle_geosearch(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
+                        _ = handle_geosearch(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── GEOSEARCHSTORE ──
                     elif tl == 14 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==115 and (tp[4]|0x20)==101 and (tp[5]|0x20)==97 and (tp[6]|0x20)==114 and (tp[7]|0x20)==99 and (tp[8]|0x20)==104 and (tp[9]|0x20)==115 and (tp[10]|0x20)==116 and (tp[11]|0x20)==111 and (tp[12]|0x20)==114 and (tp[13]|0x20)==101:
-                        _ = handle_geosearchstore(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
-                        if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
-                            self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
+                        _ = handle_geosearchstore(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── GEORADIUSBYMEMBER ──
                     elif tl == 17 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==114 and (tp[4]|0x20)==97 and (tp[5]|0x20)==100 and (tp[6]|0x20)==105 and (tp[7]|0x20)==117 and (tp[8]|0x20)==115 and (tp[9]|0x20)==98 and (tp[10]|0x20)==121 and (tp[11]|0x20)==109 and (tp[12]|0x20)==101 and (tp[13]|0x20)==109 and (tp[14]|0x20)==98 and (tp[15]|0x20)==101 and (tp[16]|0x20)==114:
-                        _ = handle_georadiusbymember(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
+                        _ = handle_georadiusbymember(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── Stream Commands (src/commands/stream.mojo) ──
                     elif cmd_eq(tp, tl, "xlen"):
@@ -3242,76 +4158,117 @@ struct SlowPathHandler:
                             _xadd_key_len = tokens[i + 1].length
                         _ = handle_xadd(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
+                        # The readers are answered by the event loop's next
+                        # tick, not here: this connection is mid-batch.
                         if self.blocked_readers.count_ptr[0] > 0 and _xadd_key_len > 0:
-                            notify_blocked_readers(self.blocked_readers, self.keyspace, _xadd_key_ptr, _xadd_key_len, server)
+                            self.blocked_readers.mark_ready(_xadd_key_ptr, _xadd_key_len)
                     elif cmd_eq(tp, tl, "xack"):
-                        # XACK (x=120,a=97,c=99,k=107)
-                        _ = handle_xack(tokens, i, cmd_end_tok, writer)
+                        handle_xack(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xdel"):
                         _ = handle_xdel(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xread"):
-                        _ = handle_xread(tokens, i, cmd_end_tok, writer, self.keyspace, self.blocked_readers, fd, server)
-                        i = cmd_end_tok - 1
+                        # A BLOCK that found no data parks the
+                        # connection, as WAIT does (gh #390): no reply yet, and
+                        # nothing pipelined behind it may run first. Stop at its
+                        # byte end; the engine answers it and resumes the rest.
+                        var can_block = self.can_park_wait and on_primary and cmd_idx < num_cmds and fd >= 0
+                        if handle_xread(tokens, i, cmd_end_tok, writer, self.keyspace, self.blocked_readers, fd, can_block):
+                            self.parked_waits.park_fd(fd)
+                            primary_consumed = cmd_byte_ends[cmd_idx]
+                            i = num_tokens
+                        else:
+                            i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xtrim"):
                         _ = handle_xtrim(tokens, i, cmd_end_tok, writer, self.keyspace)
                         if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xinfo"):
-                        _ = handle_xinfo(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        handle_xinfo(tokens, i, cmd_end_tok, writer, self.keyspace)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xrange"):
                         _ = handle_xrange(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xgroup"):
-                        _ = handle_xgroup(tokens, i, cmd_end_tok, writer)
+                        handle_xgroup(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xclaim"):
-                        _ = handle_xclaim(tokens, i, cmd_end_tok, writer)
+                        handle_xclaim(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xpending"):
-                        _ = handle_xpending(tokens, i, cmd_end_tok, writer)
+                        handle_xpending(tokens, i, cmd_end_tok, writer, self.keyspace)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xrevrange"):
                         _ = handle_xrevrange(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xautoclaim"):
-                        # XAUTOCLAIM (x,a,...)
-                        _ = handle_xautoclaim(tokens, i, cmd_end_tok, writer)
+                        handle_xautoclaim(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xreadgroup"):
-                        # XREADGROUP (x,r,...) — was silently routing to handle_xautoclaim (gh #81)
-                        _ = handle_xreadgroup(tokens, i, cmd_end_tok, writer)
+                        # #40: a BLOCK that found nothing parks the connection as
+                        # BLPOP does (#38): the engine runs it again once a stream
+                        # has an entry for the group, the stream or group is gone,
+                        # or the timeout passes (a nil array, as Redis).
+                        var _xrg_dl = Int64(0)
+                        var _xrg_k = -1
+                        var _xrg_n = 0
+                        var _xrg_g = -1
+                        var _xrg_can = self.can_park_wait and on_primary and cmd_idx < num_cmds and fd >= 0
+                        var _xrg_r = handle_xreadgroup(tokens, i, cmd_end_tok, writer, self.keyspace,
+                                                       self.dispatcher.wal, _xrg_can, _xrg_dl, _xrg_k, _xrg_n, _xrg_g)
                         i = cmd_end_tok - 1
+                        if _xrg_r == XRG_BLOCK:
+                            if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                  tokens, _xrg_k, _xrg_k + _xrg_n, _xrg_dl, False, False, _xrg_g):
+                                primary_consumed = cmd_byte_ends[cmd_idx]
+                                i = num_tokens
+                            else:
+                                writer.append_null_array_response()   # cannot wait: the timeout's nil
                     # ── Pub/Sub Commands (src/commands/pubsub.mojo) ──
                     elif cmd_eq(tp, tl, "pubsub"):
                         _ = handle_pubsub(tokens, i, cmd_end_tok, writer, self.pubsub)
                         i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "publish"):
-                        _ = handle_publish(tokens, i, cmd_end_tok, writer, self.pubsub, server, self.pubsub_broadcast, self.worker_id, self.tx_state.resp_proto)
+                    elif cmd_eq(tp, tl, "publish") or cmd_eq(tp, tl, "spublish"):
+                        # Deliveries go through the engine's writer, also from a
+                        # script (whose own writer only captures the reply).
+                        # Outside a script that is `writer` itself, passed as
+                        # null: a second pointer to a `mut` argument breaks
+                        # its exclusivity, and at -O3 the reply then lands on
+                        # a stale offset, over the message delivered to self.
+                        var _dw = null_ptr[ResponseWriter, MutUntrackedOrigin]()
+                        var _dkq = kq
+                        if self.script_depth > 0:
+                            _dw = self.script_main_writer
+                            _dkq = self.script_kq
+                        _ = handle_publish_kind(tokens, i, cmd_end_tok, writer, _dw, _dkq, fd, self.pubsub, server,
+                                                self.tx_state.resp_proto, self.worker_id, self.num_workers,
+                                                cmd_eq(tp, tl, "spublish"))
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "subscribe"):
-                        _ = handle_subscribe(tokens, i, cmd_end_tok, writer, fd, self.pubsub)
+                        _ = handle_subscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_CHANNEL)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "unsubscribe"):
-                        _ = handle_unsubscribe(tokens, i, cmd_end_tok, writer, fd, self.pubsub)
+                        _ = handle_unsubscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_CHANNEL)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "psubscribe"):
-                        _ = handle_psubscribe(tokens, i, cmd_end_tok, writer, fd, self.pubsub)
+                        _ = handle_subscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_PATTERN)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "punsubscribe"):
-                        _ = handle_punsubscribe(tokens, i, cmd_end_tok, writer, fd, self.pubsub)
+                        _ = handle_unsubscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_PATTERN)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "ssubscribe"):
-                        _ = handle_ssubscribe(tokens, i, cmd_end_tok, writer)
+                        _ = handle_subscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_SHARD)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "sunsubscribe"):
-                        _ = handle_sunsubscribe(tokens, i, cmd_end_tok, writer)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "spublish"):
-                        _ = handle_spublish(tokens, i, cmd_end_tok, writer)
+                        _ = handle_unsubscribe_kind(tokens, i, cmd_end_tok, writer, fd, self.pubsub, KIND_SHARD)
+                        self.update_dispatch_gate()
                         i = cmd_end_tok - 1
                     # ── Transaction Commands (src/commands/transaction.mojo) ──
                     elif tl == 5 and cmd_matches_5(tp, 109, 117, 108, 116, 105):
@@ -3344,7 +4301,7 @@ struct SlowPathHandler:
                                 "EXECABORT Transaction discarded because of: " + "OOM command not allowed when used memory > 'maxmemory'.")
                             exec_replay_count = -1
                         else:
-                            exec_replay_count = handle_exec_start(fd, self.tx_state, writer)
+                            exec_replay_count = handle_exec_start(fd, self.tx_state, writer, self._expiry_now())
                         if exec_replay_count > 0:
                             exec_replay_q = self.tx_state.queues[Int(fd)]
                             exec_replay_qi = 0
@@ -3370,7 +4327,7 @@ struct SlowPathHandler:
                         _ = handle_discard(fd, self.tx_state, writer)
                         i = cmd_end_tok - 1
                     elif tl == 5 and cmd_matches_5(tp, 119, 97, 116, 99, 104):
-                        _ = handle_watch(tokens, i, cmd_end_tok, fd, self.tx_state, writer)
+                        _ = handle_watch(tokens, i, cmd_end_tok, fd, self.tx_state, writer, self.keyspace, self._expiry_now())
                         i = cmd_end_tok - 1
                     elif tl == 7 and cmd_matches_7(tp, 117, 110, 119, 97, 116, 99, 104):
                         _ = handle_unwatch(fd, self.tx_state, writer)
@@ -3383,9 +4340,15 @@ struct SlowPathHandler:
                         _ = handle_auth(tokens, i, cmd_end_tok, writer, config.server.requirepass, self.tx_state.authed, fd,
                                          rebind[UnsafePointer[TenantTable, MutUntrackedOrigin]](UnsafePointer(to=self.tenant_table)),
                                          self.tx_state.tenant_id)
+                        # #47: a failed AUTH goes to ACL LOG, under the user it named
+                        if self._wrote_wrongpass(writer, cmd_write_start):
+                            var _au = String("default")
+                            if cmd_end_tok - i == 3:
+                                _au = bytes_to_string(tokens[i + 1].ptr, tokens[i + 1].length)
+                            self._acl_log("auth", "AUTH", _au^, fd, n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "flushdb"):
-                        _ = handle_flushdb(tokens, i, cmd_end_tok, self.keyspace, writer)
+                        _ = handle_flushdb(tokens, i, cmd_end_tok, self.keyspace, writer, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # All six bytes: `tl == 6 and 'd','b'` matched ANY six-byte
                     # command starting "db" (DBSIZ\0 ran DBSIZE), which is the
@@ -3394,22 +4357,29 @@ struct SlowPathHandler:
                         _ = handle_dbsize(self.keyspace, writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "select"):
-                        _ = handle_select(tokens, i, cmd_end_tok, writer)
+                        _ = handle_select(tokens, i, cmd_end_tok, writer,
+                                          is_not_null(self.cluster) and self.cluster[].enabled)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "swapdb"):
-                        _ = handle_swapdb(tokens, i, cmd_end_tok, writer)
+                        _ = handle_swapdb(tokens, i, cmd_end_tok, writer,
+                                          is_not_null(self.cluster) and self.cluster[].enabled)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "move"):
+                        _ = handle_move(tokens, i, cmd_end_tok, writer,
+                                        is_not_null(self.cluster) and self.cluster[].enabled)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "bgrewriteaof"):
                         _ = handle_bgrewriteaof(self.dispatcher, self.keyspace, writer, self.ttl_map)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "command"):
-                        _ = handle_command(tokens, i, cmd_end_tok, writer)
+                        _ = handle_command(tokens, i, cmd_end_tok, writer)   # #47
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "debug"):
-                        _ = handle_debug(tokens, i, cmd_end_tok, writer)
+                        _ = handle_debug(tokens, i, cmd_end_tok, writer, self.keyspace,
+                                         config.server.enable_debug_command, fd)   # #45
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "slowlog"):
-                        _ = handle_slowlog(tokens, i, cmd_end_tok, writer)
+                        handle_slowlog(tokens, i, cmd_end_tok, writer, self.slowlog)   # #47
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "latency"):
                         _ = handle_latency(tokens, i, cmd_end_tok, writer)
@@ -3421,137 +4391,65 @@ struct SlowPathHandler:
                         _ = handle_module(tokens, i, cmd_end_tok, writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "acl"):
-                        _ = handle_acl(tokens, i, cmd_end_tok, writer)
+                        handle_acl(tokens, i, cmd_end_tok, writer, self._acl_users(config), self.acl_log,
+                                   self._user_of(fd))   # #47
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "reset"):
-                        _ = handle_reset(writer)
+                        if cmd_end_tok - i != 1:
+                            writer.append_error_response("ERR wrong number of arguments for 'reset' command")
+                        else:
+                            self._reset_connection(fd, writer)
                         i = cmd_end_tok - 1
                     # ── CLIENT ── (6 bytes: c=99,l=108,i=105,e=101,n=110,t=116)
                     elif tl == 6 and cmd_matches_6(tp, 99, 108, 105, 101, 110, 116):
-                        _ = handle_client(tokens, i, cmd_end_tok, fd, writer)
-                        i = cmd_end_tok - 1
-                    # ── BLPOP / BRPOP ── (gh #318)
-                    #
-                    # These used to be stubs in admin.mojo that replied nil
-                    # unconditionally, with a comment claiming blocking "would
-                    # deadlock Pion's non-blocking event loop". They did not
-                    # deadlock — they answered, wrongly, even against a list
-                    # that had elements. `BLPOP key 0` in a loop is THE
-                    # queue-consumer idiom, so a worker written that way
-                    # consumed nothing forever while producers filled the list,
-                    # with no error anywhere. A plausible reply that is wrong is
-                    # worse than -ERR unknown command, which at least raises in
-                    # the client.
-                    #
-                    # Now: scan the keys left to right, pop from the first
-                    # non-empty list, reply *2 <key> <element>. The TIMEOUT
-                    # argument is parsed and ignored — we never block, so an
-                    # empty set of keys answers nil immediately rather than
-                    # waiting. That is a real deviation from Redis and it is
-                    # documented in doc/command_matrix.md; it is not a silently
-                    # wrong answer.
+                        # #47: a client that kills itself is closed after this
+                        # reply; what it sent after the command is dropped
+                        var _cl_start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
+                        if self._client_cmd(tokens, i, cmd_end_tok, fd, writer, n - _cl_start, config) and on_primary:
+                            primary_consumed = n
+                            i = num_tokens
+                        else:
+                            i = cmd_end_tok - 1
+                    # ── BLPOP / BRPOP ── (gh #318, #38)
                     # gh #423: both name literals stay on the `elif` line so
-                    # gen_command_table.py sees BRPOP too — its regex skips
-                    # `or`-continuation lines, so a pattern moved off this line
-                    # drops that command from the table and it EXECABORTs inside
-                    # MULTI while working fine on its own.
+                    # gen_command_table.py sees BRPOP too.
                     elif tl == 5 and (cmd_matches_5(tp, 98, 108, 112, 111, 112) or cmd_matches_5(tp, 98, 114, 112, 111, 112)):
                         var _bpop_left = cmd_matches_5(tp, 98, 108, 112, 111, 112)
-                        # BLPOP key [key ...] timeout — at least one key and a
-                        # timeout, so the last token is never a key.
-                        if i + 2 < cmd_end_tok:
-                            var _bpop_done = False
-                            var _bpop_wrongtype = False
-                            for _bk in range(i + 1, cmd_end_tok - 1):
-                                var _bkey = tokens[_bk].value()
-                                var _bval = self.keyspace[].get(_bkey)
-                                if _bval.is_none():
-                                    continue
-                                if _bval.type.value != ValueType.LIST:
-                                    # Redis checks type per key and errors on the
-                                    # first wrong one rather than skipping to the
-                                    # next list (gh #232's precedence rule).
-                                    _bpop_wrongtype = True
-                                    break
-                                var _blp = _bval.as_list().unsafe_bitcast[SlabList]()
-                                if _blp[].size == 0:
-                                    continue
-                                var _bpopped: GenericValue
-                                if _bpop_left:
-                                    _bpopped = self.dispatcher.execute_lpop(_bkey)
-                                else:
-                                    _bpopped = self.dispatcher.execute_rpop(_bkey)
-                                if _bpopped.is_none():
-                                    continue
-                                var _bhdr = "*2\r\n"
-                                writer.append_to_response(_bhdr.unsafe_ptr(), _bhdr.byte_length())
-                                writer.append_bulk_string_response(_bkey.unsafe_ptr(), _bkey.byte_length())
-                                writer.append_bulk_value_response(_bpopped)
-                                _bpopped.free_str_payload()   # owned by the caller once popped
-                                # gh #234: drop an emptied list, and only AFTER
-                                # the reply — the popped value borrows into the
-                                # container being removed.
-                                if self.dispatcher.execute_llen(_bkey) == 0:
-                                    _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[_bk].ptr, tokens[_bk].length))
-                                    _ = self.dispatcher.wal[].append(2, tokens[_bk].ptr, tokens[_bk].length)
-                                _bpop_done = True
-                                break
-                            if _bpop_wrongtype:
-                                writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
-                            elif not _bpop_done:
-                                writer.append_null_response()
+                        if cmd_end_tok - i < 3:
+                            writer.append_error_response("ERR wrong number of arguments for '"
+                                                         + String("blpop" if _bpop_left else "brpop") + "' command")
                         else:
-                            if _bpop_left:
-                                writer.append_error_response("ERR wrong number of arguments for 'blpop' command")
-                            else:
-                                writer.append_error_response("ERR wrong number of arguments for 'brpop' command")
-                        i = cmd_end_tok - 1
-                    # ── EVAL ── (4 bytes: e=101,v=118,a=97,l=108)
+                            var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                            if _bdl >= 0 and not self._bpop_lists(tokens, i + 1, cmd_end_tok - 1, _bpop_left, writer):
+                                if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                      tokens, i + 1, cmd_end_tok - 1, _bdl, False):
+                                    primary_consumed = cmd_byte_ends[cmd_idx]
+                                    i = num_tokens
+                                else:
+                                    writer.append_null_array_response()
+                        if i < num_tokens:
+                            i = cmd_end_tok - 1
+                    # ── EVAL / EVALSHA / FCALL and their _RO forms, SCRIPT, FUNCTION (#36) ──
+                    # A script's redis.call() runs through this dispatcher
+                    # (script_dispatch), so every command it calls logs its own
+                    # WAL record; the old images of the KEYS[] keys are gone.
                     elif tl == 4 and cmd_matches_4(tp, 101, 118, 97, 108):
-                        _ = handle_eval(tokens, i, cmd_end_tok, writer, self.lua_engine, self.keyspace, self.ttl_map, self.dispatcher.hash_map_pool, self.dispatcher.list_pool)
-                        # Lua's redis.call runs the engine's own command copies, which log
-                        # nothing: a script's writes vanished on restart and never reached a
-                        # replica. Scripts must declare the keys they touch (KEYS[]), so log
-                        # each declared key's resulting value.
-                        if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:
-                            var _nk = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-                            if _nk.ok and _nk.value > 0:
-                                for _lk in range(i + 3, min(i + 3 + Int(_nk.value), cmd_end_tok)):
-                                    self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=_lk].ptr, tokens[unsafe_offset=_lk].length)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
+                        _ = handle_eval(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
-                    # ── EVALSHA ── (7 bytes: e=101,v=118,a=97,l=108,s=115,h=104,a=97)
                     elif tl == 7 and cmd_matches_7(tp, 101, 118, 97, 108, 115, 104, 97):
-                        _ = handle_evalsha(tokens, i, cmd_end_tok, writer, self.lua_engine, self.keyspace, self.ttl_map, self.dispatcher.hash_map_pool, self.dispatcher.list_pool)
-                        # Lua's redis.call runs the engine's own command copies, which log
-                        # nothing: a script's writes vanished on restart and never reached a
-                        # replica. Scripts must declare the keys they touch (KEYS[]), so log
-                        # each declared key's resulting value.
-                        if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:
-                            var _nk = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-                            if _nk.ok and _nk.value > 0:
-                                for _lk in range(i + 3, min(i + 3 + Int(_nk.value), cmd_end_tok)):
-                                    self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=_lk].ptr, tokens[unsafe_offset=_lk].length)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
+                        _ = handle_evalsha(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
-                    # ── SCRIPT ── (6 bytes: s=115,c=99,r=114,i=105,p=112,t=116)
                     elif tl == 6 and cmd_matches_6(tp, 115, 99, 114, 105, 112, 116):
                         _ = handle_script(tokens, i, cmd_end_tok, writer, self.lua_engine)
                         i = cmd_end_tok - 1
-                    # ── FCALL ── (5 bytes: f=102,c=99,a=97,l=108,l=108)
                     elif tl == 5 and cmd_matches_5(tp, 102, 99, 97, 108, 108):
-                        _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self.keyspace, self.ttl_map, self.dispatcher.hash_map_pool, self.dispatcher.list_pool)
-                        # Lua's redis.call runs the engine's own command copies, which log
-                        # nothing: a script's writes vanished on restart and never reached a
-                        # replica. Scripts must declare the keys they touch (KEYS[]), so log
-                        # each declared key's resulting value.
-                        if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:
-                            var _nk = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
-                            if _nk.ok and _nk.value > 0:
-                                for _lk in range(i + 3, min(i + 3 + Int(_nk.value), cmd_end_tok)):
-                                    self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=_lk].ptr, tokens[unsafe_offset=_lk].length)
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
+                        _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), False)
                         i = cmd_end_tok - 1
-                    # ── FUNCTION ── (8 bytes: f=102,u=117,n=110,c=99,t=116,i=105,o=111,n=110)
                     elif tl == 8 and cmd_matches_8(tp, 102, 117, 110, 99, 116, 105, 111, 110):
-                        _ = handle_function(tokens, i, cmd_end_tok, writer, self.lua_engine)
+                        _ = handle_function(tokens, i, cmd_end_tok, writer, self.lua_engine, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── VSET commands ── (v=118)
                     # gh #156: the handler return value is NOT the token skip.
@@ -3672,6 +4570,177 @@ struct SlowPathHandler:
                             _ = handle_pion_stats(writer, self.ledger, self.scache.hits, self.scache.misses,
                                                   self.moe_tier.hits, self.moe_tier.misses, self.worker_id)
                         i = cmd_end_tok - 1
+                    # ── TIME (#30) ── at the tail: see the elif-order note above
+                    elif cmd_eq(tp, tl, "time"):
+                        if i + 1 < cmd_end_tok:
+                            writer.append_error_response("ERR wrong number of arguments for 'time' command")
+                        else:
+                            handle_time(writer)
+                        i = cmd_end_tok - 1
+                    # ── EVAL_RO / EVALSHA_RO / FCALL_RO (#36) ── at the tail
+                    elif cmd_eq(tp, tl, "eval_ro"):
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
+                        _ = handle_eval(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "evalsha_ro"):
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
+                        _ = handle_evalsha(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "fcall_ro"):
+                        self._script_context(fd, server, kq, hnsw, db_size, config, writer)
+                        _ = handle_fcall(tokens, i, cmd_end_tok, writer, self.lua_engine, self._host(), True)
+                        i = cmd_end_tok - 1
+                    # ── BRPOPLPUSH / BLMOVE / BLMPOP / BZPOPMIN / BZPOPMAX / BZMPOP (#38) ──
+                    # A blocking command that finds nothing parks (_park_blocked)
+                    # and stops the batch at its end; the engine runs it again
+                    # once a key it waits on has data or its timeout passes.
+                    elif cmd_eq(tp, tl, "brpoplpush") or cmd_eq(tp, tl, "blmove"):
+                        var _blm = cmd_eq(tp, tl, "blmove")
+                        var _bn = 6 if _blm else 4
+                        if cmd_end_tok - i != _bn:
+                            writer.append_error_response("ERR wrong number of arguments for '"
+                                                         + String("blmove" if _blm else "brpoplpush") + "' command")
+                        else:
+                            var _bdir_ok = True
+                            if _blm:
+                                for _d in range(i + 3, i + 5):
+                                    if not arg_eq(tokens[_d].ptr, tokens[_d].length, "left") \
+                                       and not arg_eq(tokens[_d].ptr, tokens[_d].length, "right"):
+                                        _bdir_ok = False
+                            if not _bdir_ok:
+                                writer.append_error_response("ERR syntax error")
+                            else:
+                                var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                                if _bdl >= 0:
+                                    var _bsv = self.keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+                                    if not _bsv.is_none():
+                                        # the source exists: the move runs (or errors) now
+                                        if _blm:
+                                            _ = handle_lmove(tokens, i, i + 5, writer, self.keyspace, self.dispatcher)
+                                        else:
+                                            self._rpoplpush(tokens, i, writer)
+                                    elif self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                            tokens, i + 1, i + 2, _bdl, False, True):
+                                        primary_consumed = cmd_byte_ends[cmd_idx]
+                                        i = num_tokens
+                                    else:
+                                        writer.append_null_response()
+                        if i < num_tokens:
+                            i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "blmpop") or cmd_eq(tp, tl, "bzmpop"):
+                        # B?MPOP timeout numkeys key [key ...] LEFT|RIGHT / MIN|MAX [COUNT count]:
+                        # the arguments first, then the timeout, as Redis parses them.
+                        var _bz = cmd_eq(tp, tl, "bzmpop")
+                        if cmd_end_tok - i < 5:
+                            writer.append_error_response("ERR wrong number of arguments for '"
+                                                         + String("bzmpop" if _bz else "blmpop") + "' command")
+                        else:
+                            var _bmp = parse_mpop(tokens, i + 2, cmd_end_tok, _bz)
+                            if _bmp.error.byte_length() > 0:
+                                writer.append_error_response(_bmp.error)
+                            else:
+                                var _bdl = parse_block_timeout(tokens[i + 1], Int64(_get_now_ns() // 1_000_000), writer)
+                                if _bdl >= 0:
+                                    var _served: Bool
+                                    if _bz:
+                                        _served = zmpop_pop(tokens, i + 3, _bmp.numkeys, _bmp.first, _bmp.count,
+                                                            writer, self.keyspace, self.dispatcher.wal)
+                                    else:
+                                        _served = self._mpop_lists(tokens, i + 3, _bmp.numkeys, _bmp.first, _bmp.count, writer)
+                                    if not _served:
+                                        if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                              tokens, i + 3, i + 3 + _bmp.numkeys, _bdl, _bz):
+                                            primary_consumed = cmd_byte_ends[cmd_idx]
+                                            i = num_tokens
+                                        else:
+                                            writer.append_null_array_response()
+                        if i < num_tokens:
+                            i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "bzpopmin") or cmd_eq(tp, tl, "bzpopmax"):
+                        var _bmin = cmd_eq(tp, tl, "bzpopmin")
+                        if cmd_end_tok - i < 3:
+                            writer.append_error_response("ERR wrong number of arguments for '"
+                                                         + String("bzpopmin" if _bmin else "bzpopmax") + "' command")
+                        else:
+                            var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                            if _bdl >= 0 and not self._bzpop(tokens, i + 1, cmd_end_tok - 1, _bmin, writer):
+                                if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
+                                                      tokens, i + 1, cmd_end_tok - 1, _bdl, True):
+                                    primary_consumed = cmd_byte_ends[cmd_idx]
+                                    i = num_tokens
+                                else:
+                                    writer.append_null_array_response()
+                        if i < num_tokens:
+                            i = cmd_end_tok - 1
+                    # ── #39: commands Redis 7 has that Pion lacked ──
+                    elif cmd_eq(tp, tl, "lcs"):
+                        _ = handle_lcs(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "role"):
+                        var _role_tail = Int(self.dispatcher.wal[].tail_offset) if is_not_null(self.dispatcher.wal) else 0
+                        handle_role(tokens, i, cmd_end_tok, writer, self.cluster, _role_tail)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "lolwut"):
+                        handle_lolwut(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "monitor"):
+                        if cmd_end_tok - i != 1:
+                            writer.append_error_response("ERR wrong number of arguments for 'monitor' command")
+                        elif not on_primary:
+                            # queued by MULTI: Redis refuses it at EXEC
+                            writer.append_error_response("ERR MONITOR isn't allowed for DENY BLOCKING client")
+                        elif not self.monitors.contains(fd):
+                            self.monitors.add(fd)
+                            self.update_dispatch_gate()
+                            writer.append_ok_response()
+                        # already monitoring: Redis ignores it, with no reply
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "pfselftest"):
+                        _ = handle_pfselftest(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "pfdebug"):
+                        _ = handle_pfdebug(tokens, i, cmd_end_tok, writer, self.keyspace)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "replicaof") or cmd_eq(tp, tl, "slaveof"):
+                        handle_replicaof(tokens, i, cmd_end_tok, writer, self.cluster)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "failover"):
+                        handle_failover(tokens, i, cmd_end_tok, writer, self.cluster)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "sync"):
+                        handle_sync(tokens, i, cmd_end_tok, writer)
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "restore-asking"):
+                        # RESTORE, as a cluster's MIGRATE sends it mid-resharding
+                        if handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal):
+                            self.tx_state.bump_key_version(tokens[i + 1].ptr, tokens[i + 1].length)
+                            _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #46
+                                                  self.vec_tomb, tokens[i + 1].ptr, tokens[i + 1].length)
+                        i = cmd_end_tok - 1
+                    # #47: READONLY / READWRITE / ASKING outside cluster mode (the
+                    # fast path answers them in cluster mode), or with arguments
+                    elif cmd_eq(tp, tl, "readonly") or cmd_eq(tp, tl, "readwrite") or cmd_eq(tp, tl, "asking"):
+                        if cmd_end_tok - i != 1:
+                            writer.append_error_response("ERR wrong number of arguments for '" + lower_bytes(tp, tl)
+                                                         + "' command")
+                        elif not (is_not_null(self.cluster) and self.cluster[].enabled):
+                            writer.append_error_response("ERR This instance has cluster support disabled")
+                        else:
+                            if is_not_null(self.local_affinity) and cmd_eq(tp, tl, "readonly"):
+                                self.local_affinity[Int(fd)] = 3
+                            elif is_not_null(self.local_affinity) and cmd_eq(tp, tl, "readwrite"):
+                                self.local_affinity[Int(fd)] = 0
+                            writer.append_ok_response()
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "xsetid"):
+                        handle_xsetid(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "xdelex"):
+                        handle_xdelex(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
+                        i = cmd_end_tok - 1
+                    elif cmd_eq(tp, tl, "xackdel"):
+                        handle_xackdel(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)  # #40
+                        i = cmd_end_tok - 1
                     else:
                         writer.append_error_response("ERR unknown command '" + token.value() + "'")
                         # Skip remaining tokens of this command
@@ -3692,6 +4761,27 @@ struct SlowPathHandler:
                     # untouched, because the guard only fires when i fell SHORT.
                     if i < cmd_end_tok - 1:
                         i = cmd_end_tok - 1
+                    # #39 MONITOR: show the command that just ran. EXEC waits
+                    # until the commands it runs (the replay below) are out.
+                    if not _mon_done:
+                        if exec_replay_count > 0 and tl == 4 and cmd_matches_4(tp, 101, 120, 101, 99):
+                            self.monitor_exec_line = self._monitor_line_for(tokens, _mon_i, cmd_end_tok, fd)
+                        else:
+                            self._monitor_feed(tokens, _mon_i, cmd_end_tok, fd, writer, server, kq)
+                    if self.script_depth == 0 and len(self.monitors.pending) > 0:
+                        var _mpend = self.monitors.pending.copy()
+                        self.monitors.pending.clear()
+                        self._monitor_send(_mpend, fd, writer, server, kq)
+                    # #47 SLOWLOG: a command that ran at least
+                    # slowlog-log-slower-than. Not EXEC (Redis flags it
+                    # skip_slowlog: the commands it ran are logged instead),
+                    # nor a script's redis.call (the script is).
+                    if self.script_depth == 0:
+                        var _sl_t1 = external_call["pion_ticks", UInt64]()
+                        if _sl_t1 - _sl_t0 >= self.slowlog_thr_ticks and _sl_t1 >= _sl_t0 \
+                           and not (tl == 4 and cmd_matches_4(tp, 101, 120, 101, 99)):
+                            self._slowlog_push(tokens, _mon_i, cmd_end_tok,
+                                               self.slowlog.elapsed_us(_sl_t0, _sl_t1), fd)
                     i += 1
                     # Advance command index
                     while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
@@ -3734,8 +4824,28 @@ struct SlowPathHandler:
                 # No more replay frames. If we replayed anything, free the queue.
                 if exec_replay_count > 0:
                     self.tx_state.discard(fd)
+                    if len(self.monitor_exec_line) > 0:      # #39: EXEC after what it ran
+                        var _mexec = self.monitor_exec_line.copy()
+                        self.monitor_exec_line.clear()
+                        self._monitor_send(_mexec, fd, writer, server, kq)
                 break
+            # #47 CLIENT REPLY: the batch's last command
+            if self.script_depth == 0 and self.clients.reply_off_count > 0 and _rg_start >= 0:
+                self._reply_gate(fd, writer, _rg_start, _rg_flushes)
             writer.flush_response(fd, server, kq)
+            # #47 CLIENT KILL of itself: closed once its reply is out, as Redis's
+            # CLOSE_AFTER_REPLY; what it sends meanwhile is dropped. With the
+            # reply already in the kernel (kqueue / epoll, no EAGAIN), shut it
+            # down now: the peer reads the reply, then the end of the stream,
+            # and the event loop closes it. Otherwise (io_uring's SEND is still
+            # queued, or the reply is pending) the engine does it when the
+            # reply has gone out (`clients.close_after`).
+            if self.kill_after_reply == fd:
+                self.kill_after_reply = -1
+                self.clients.close_after[Int(fd)] = 1
+                if not writer.use_uring and kq != -1 and is_not_null(writer.pending_offsets) \
+                   and writer.pending_offsets[Int(fd)] == 0:
+                    _ = external_call["pion_kill_fd", Int32](fd)
             return primary_consumed
         except e:
             # gh #162: a handler (or a pre-pass) raised mid-batch. Recover at
@@ -3768,6 +4878,8 @@ struct SlowPathHandler:
                 writer.append_error_response(emsg)
             else:
                 writer.append_error_response("ERR internal error executing command")
+            if self.script_depth == 0 and self.clients.reply_off_count > 0 and on_primary:   # #47
+                self._reply_gate(fd, writer, cmd_write_start, _rg_flushes)
             writer.flush_response(fd, server, kq)
             if on_primary and cmd_idx < num_cmds:
                 var skip_to = cmd_byte_ends[cmd_idx]
@@ -3775,17 +4887,116 @@ struct SlowPathHandler:
                     return skip_to
             return n
 
-    def drain_blocked_readers(mut self, server: TCPServer):
-        """Check for timed-out XREAD BLOCK readers. Called per event loop tick."""
-        if self.blocked_readers.count_ptr[0] == 0: return
-        var now_ms = Int64(_get_now_ns() // 1000000)
-        self.blocked_readers.check_timeouts(now_ms, server)
+    @always_inline
+    def _expiry_now(self) -> Int64:
+        """#45: the time a deadline is compared with: the batch clock, or the
+        wall clock when no key has a TTL (the clock is then off)."""
+        var c = self.keyspace[].clock_ns
+        return c if c != 0 else Int64(_get_now_ns())
 
-    def drain_pubsub_broadcast(mut self, server: TCPServer):
-        """Drain cross-worker pub/sub broadcast ring. Called per event loop tick."""
-        if is_null(self.pubsub_broadcast): return
-        if not self.pubsub_broadcast[].ready: return
-        self.pubsub_broadcast[].drain(self.worker_id, self.pubsub_tail, self.pubsub, server, self.tx_state.resp_proto)
+    @always_inline
+    def _host(mut self) -> UnsafePointer[NoneType, MutUntrackedOrigin]:
+        """This handler's address: the context pion_script_dispatch is given back."""
+        return UnsafePointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(UnsafePointer(to=self)))
+
+    def _script_context(mut self, fd: Int32, server: TCPServer, kq: Int32, mut hnsw: HNSWGraph,
+                        mut db_size: Int, config: PionConfig, mut writer: ResponseWriter):
+        """Remember the outer call's context for script_dispatch. Valid for this
+        command only: the script runs synchronously inside it."""
+        self.script_fd = fd
+        self.script_main_writer = UnsafePointer[ResponseWriter, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=writer)))
+        self.script_server = UnsafePointer[TCPServer, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=server)))
+        self.script_kq = kq
+        self.script_hnsw = UnsafePointer[HNSWGraph, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=hnsw)))
+        self.script_db_size = UnsafePointer[Int, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=db_size)))
+        self.script_config = UnsafePointer[PionConfig, MutUntrackedOrigin](
+            unsafe_from_address=Int(UnsafePointer(to=config)))
+
+    def script_dispatch(mut self, argc: Int,
+                        argv: UnsafePointer[UnsafePointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                        lens: UnsafePointer[Int64, MutUntrackedOrigin], flags: Int, resp: Int,
+                        reply: UnsafePointer[UnsafePointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                        wrote: UnsafePointer[Int64, MutUntrackedOrigin]) -> Int:
+        """One redis.call() from a running script (#36): argv runs as a command
+        through process_slow_path, and its reply comes back (reply[0], length)
+        from the capture-only script writer. Redis's script checks come first:
+        an unknown command, the arity, `noscript`, a write from a read-only
+        script. flags: 1 read-only, 2 existence check only, 4 allow-oom."""
+        var np = argv[0]
+        var nl = Int(lens[0])
+        if flags & 2 != 0:
+            return 1 if command_exists(np, nl) else 0
+        if is_null(self.script_writer):
+            self.script_writer = alloc[ResponseWriter](1)
+            self.script_writer.unsafe_write(ResponseWriter(capture_only=True))
+        var w = self.script_writer
+        w[].offset = 0
+        w[].overflow_emitted = False
+        w[].proto = UInt8(resp)
+        reply[0] = w[].buffer
+        var ar = command_arity(np, nl)
+        var sp = argv[1] if argc > 1 else np
+        var sl = Int(lens[1]) if argc > 1 else 0
+        if not command_exists(np, nl):
+            w[].append_error_response("ERR Unknown Redis command called from script")
+        elif (ar > 0 and argc != ar) or (ar < 0 and argc < -ar):
+            w[].append_error_response("ERR Wrong number of args calling Redis command from script")
+        elif command_is_noscript(np, nl, sp, sl):
+            w[].append_error_response("ERR This Redis command is not allowed from script")
+        elif flags & 1 != 0 and command_is_write(np, nl):
+            w[].append_error_response("ERR Write commands are not allowed from read-only scripts.")
+        else:
+            var need = 16
+            for k in range(argc):
+                need += Int(lens[k]) + 24
+            if need > self.script_frame_cap:
+                if is_not_null(self.script_frame):
+                    self.script_frame.free()
+                self.script_frame = alloc[UInt8](need)
+                self.script_frame_cap = need
+            var f = self.script_frame
+            var o = 0
+            f[o] = 42
+            o += 1
+            o += format_int_to_buf(f + o, 0, Int64(argc))
+            f[o] = 13
+            f[o + 1] = 10
+            o += 2
+            for k in range(argc):
+                f[o] = 36
+                o += 1
+                o += format_int_to_buf(f + o, 0, lens[k])
+                f[o] = 13
+                f[o + 1] = 10
+                o += 2
+                unsafe_memcpy(dest=f + o, src=argv[k], count=Int(lens[k]))
+                o += Int(lens[k])
+                f[o] = 13
+                f[o + 1] = 10
+                o += 2
+            var park = self.can_park_wait
+            self.can_park_wait = False        # WAIT and XREAD BLOCK answer at once
+            self.script_allow_oom = flags & 4 != 0
+            self.script_depth += 1
+            # kq = -1: the capture writer's flushes are no-ops (the XDP-lane
+            # flush), so the reply stays in its buffer for the script.
+            _ = self.process_slow_path(f, o, self.script_fd, w[], self.script_server[], Int32(-1),
+                                       self.script_hnsw[], self.script_db_size[], self.script_config[])
+            self.script_depth -= 1
+            self.script_allow_oom = False
+            self.can_park_wait = park
+            if command_is_write(np, nl):
+                wrote[0] = 1
+        return w[].offset
+
+    def drain_pubsub(mut self, mut writer: ResponseWriter, server: TCPServer, kq: Int32):
+        """#42: deliver what other workers published since the last tick.
+        Called per event-loop tick when there is more than one worker."""
+        pubsub_drain(self.pubsub, self.worker_id, writer, server, kq, self.tx_state.resp_proto)
 
     def drain_deferred_shard_responses(mut self, mut hnsw: HNSWGraph, mut writer: ResponseWriter,
                                        server: TCPServer, kq: Int32) raises:

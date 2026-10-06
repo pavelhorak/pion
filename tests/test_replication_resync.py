@@ -21,6 +21,10 @@ CASES
      written meanwhile must arrive.
   4. WAIT — counts a caught-up replica fast, and when it cannot be satisfied
      returns after its timeout measured on the clock, not 4.7x it.
+  5. WAIT and a FULLRESYNC — the replica ACKs a snapshot only once it has
+     APPLIED it, so whatever WAIT counted is readable on the replica.
+  (4b) ROLE on both sides, and REPLICAOF / FAILOVER refused in cluster mode,
+     as Redis refuses them (#39).
 
     python3 tests/test_replication_resync.py [--port 2451]
 """
@@ -177,6 +181,43 @@ def main():
         t0 = time.time(); r = a.cmd("WAIT", "2", "300"); dt = time.time() - t0
         check("WAIT 2 300 with one replica answers 1", r == 1, repr(r))
         check("... after ~300 ms, not ~1.4 s", 0.25 <= dt < 0.8, f"{dt:.2f} s")
+
+        # ── 4b. ROLE on both sides (#39) ─────────────────────────────────────
+        print("=== 4b. ROLE ===")
+        ra = a.cmd("ROLE")
+        check("the primary's ROLE: master, its offset, and the replica [ip, port, acked]",
+              isinstance(ra, list) and len(ra) == 3 and ra[0] == b"master" and isinstance(ra[1], int)
+              and ra[2] and ra[2][0][0] == b"127.0.0.1" and ra[2][0][1] == str(pb).encode()
+              and ra[2][0][2].isdigit(), repr(ra))
+        rb = b.cmd("ROLE")
+        check("the replica's ROLE: slave, its primary, connected, its offset",
+              isinstance(rb, list) and rb[:4] == [b"slave", b"127.0.0.1", pa, b"connected"] and isinstance(rb[4], int),
+              repr(rb))
+        r = a.cmd("REPLICAOF", "NO", "ONE")
+        check("REPLICAOF in cluster mode is refused, as Redis does", "not allowed in cluster mode" in str(r), repr(r))
+        r = a.cmd("FAILOVER")
+        check("FAILOVER in cluster mode is refused, as Redis does", "not allowed in cluster mode" in str(r), repr(r))
+
+        # ── 5. WAIT must not count a snapshot the replica has not applied ────
+        print("=== 5. WAIT during a FULLRESYNC ===")
+        replica.stop()
+        N = 300_000      # ~12 MB of snapshot: several 4 MB drains on the replica
+        for base in range(0, N, 5000):
+            a.pipeline([("SET", f"{{r}}big:{i}", f"value-{i}") for i in range(base, base + 5000)])
+        b = replica.start()
+        b.cmd("READONLY")
+        deadline, r = time.time() + 60, 0
+        while time.time() < deadline:
+            r = a.cmd("WAIT", "1", "20")
+            if r == 1:
+                break
+        check("WAIT counts the replica once its FULLRESYNC is applied", r == 1, repr(r))
+        # Read the replica at once: whatever WAIT counted must be readable now.
+        probe = [f"{{r}}big:{i}" for i in (0, N // 2, N - 2, N - 1)]
+        got = [b.cmd("GET", k) for k in probe]
+        want = [f"value-{i}".encode() for i in (0, N // 2, N - 2, N - 1)]
+        check("every key is on the replica the moment WAIT counts it", got == want,
+              f"{sum(g is None for g in got)} of {len(probe)} sampled keys missing")
     finally:
         replica.stop()
         primary.stop()

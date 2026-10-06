@@ -3,6 +3,13 @@ import socket
 import sys
 import time
 
+# `10.5 + 0.1` as Redis computes it: in long double, printed %.17Lf. On Apple
+# silicon long double is a double; on x86-64 and AArch64 Linux it is wider.
+import platform as _platform
+LD_TEN_POINT_SIX = ("10.59999999999999964"
+                    if _platform.system() == "Darwin" and _platform.machine() == "arm64"
+                    else "10.6")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from resp_strict import reader, parse_bytes, RespError  # noqa: E402
 
@@ -167,11 +174,13 @@ def test_pion_parity():
     send_cmd_bytes(sock, ["SET", "fkey", "10.5"])
     res = send_cmd_bytes(sock, ["INCRBYFLOAT", "fkey", "0.1"])
     # gh #232: this asserted "10.6", which is what Pion's Float32 arithmetic
-    # rounded to — not what Redis answers. Probed against a real redis-server
-    # 8.10, `SET fkey 10.5; INCRBYFLOAT fkey 0.1` returns exactly
-    # 10.59999999999999964, and Pion now matches it byte for byte. A parity
-    # test is only worth its name if its expectations come from the oracle.
-    assert_contains(res, "10.59999999999999964", "INCRBYFLOAT")
+    # rounded to — not what Redis answers. A parity test is only worth its
+    # name if its expectations come from the oracle, and the oracle's answer
+    # depends on the platform: Redis adds in long double and prints %.17Lf.
+    # Where long double is a double (Apple silicon) that is
+    # 10.59999999999999964; where it is wider (x86-64 and AArch64 Linux) the
+    # sum rounds to 10.6. Pion does the same arithmetic (pion_ld_incr).
+    assert_contains(res, LD_TEN_POINT_SIX, "INCRBYFLOAT")
 
     # ═══════════════════════════════════════════════════════════════════════
     # Section 3: Lists (list.mojo)
@@ -703,15 +712,15 @@ def test_pion_parity():
     res = send_cmd_bytes(sock, ["CLIENT", "NO-EVICT", "on"])
     assert_contains(res, "OK", "CLIENT NO-EVICT")
 
-    # BLPOP (should return null, not hang or error)
-    print("Testing BLPOP stub...")
-    res = send_cmd_bytes(sock, ["BLPOP", "nonexistent", "0"])
-    assert "$-1" in res or "*-1" in res, f"BLPOP should return null, got: {res!r}"
+    # BLPOP / BRPOP block (#38): on empty keys they wait out the timeout and
+    # answer a null array. (Waking on a push is tests/test_blocking.py.)
+    print("Testing BLPOP timeout...")
+    res = send_cmd_bytes(sock, ["BLPOP", "nonexistent", "0.05"])
+    assert "*-1" in res, f"BLPOP should time out with a null array, got: {res!r}"
 
-    # BRPOP (should return null, not hang or error)
-    print("Testing BRPOP stub...")
-    res = send_cmd_bytes(sock, ["BRPOP", "nonexistent", "0"])
-    assert "$-1" in res or "*-1" in res, f"BRPOP should return null, got: {res!r}"
+    print("Testing BRPOP timeout...")
+    res = send_cmd_bytes(sock, ["BRPOP", "nonexistent", "0.05"])
+    assert "*-1" in res, f"BRPOP should time out with a null array, got: {res!r}"
 
     # EVAL (now supported — Lua 5.1 engine)
     print("Testing EVAL basic...")
@@ -788,7 +797,9 @@ def test_pion_parity():
     sock.settimeout(3)
     res = send_cmd_bytes(sock, ["XREAD", "BLOCK", "200", "STREAMS", "nonexistent_block_stream", "0"])
     sock.settimeout(None)
-    assert "$-1" in res, f"XREAD BLOCK on empty stream should timeout with null, got: {res!r}"
+    # A nil ARRAY, as redis-server 8.10 answers: `$-1` (a nil bulk string)
+    # was the old reply's wrong type, pinned here from the implementation.
+    assert res.startswith("*-1"), f"XREAD BLOCK on empty stream should time out with a nil array, got: {res!r}"
 
     # XREAD BLOCK wake-up on XADD — tested manually with redis-cli (works)
     # Automated cross-connection test deferred (threading + socket timing issues in test harness)
@@ -809,41 +820,27 @@ def test_pion_parity():
     send_cmd_bytes(sock, ["DEL", "parity_stream"])
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Section 18b: Stream consumer-group commands must fail loudly (gh #81)
+    # Section 18b: Stream consumer groups (#40)
     # ═══════════════════════════════════════════════════════════════════════
-    # Pion does not implement consumer groups. Before gh #81 these handlers
-    # returned success-shaped fake responses (+OK / :0 / *0 / fake *3 cursor),
-    # so any client using XGROUP/XREADGROUP/XACK/XPENDING/XAUTOCLAIM/XCLAIM
-    # silently lost data. They now return -ERR; this section pins that.
-    print("\n=== Section 18b: Consumer-group rejection (gh #81) ===")
-
-    # Seed a real stream so any handler that ignored args and faked success
-    # would still look plausible — we want to see -ERR even with valid input.
-    send_cmd_bytes(sock, ["XADD", "cg_stream", "*", "k", "v"])
-
-    cg_cases = [
-        (["XGROUP", "CREATE", "cg_stream", "grp1", "$"], "XGROUP CREATE"),
-        (["XGROUP", "DESTROY", "cg_stream", "grp1"], "XGROUP DESTROY"),
-        (["XREADGROUP", "GROUP", "grp1", "c1", "COUNT", "10", "STREAMS", "cg_stream", ">"], "XREADGROUP"),
-        (["XACK", "cg_stream", "grp1", "0-0"], "XACK"),
-        (["XPENDING", "cg_stream", "grp1"], "XPENDING"),
-        (["XCLAIM", "cg_stream", "grp1", "c2", "0", "0-0"], "XCLAIM"),
-        (["XAUTOCLAIM", "cg_stream", "grp1", "c2", "0", "0"], "XAUTOCLAIM"),
-        (["XINFO", "GROUPS", "cg_stream"], "XINFO GROUPS"),
-        (["XINFO", "CONSUMERS", "cg_stream", "grp1"], "XINFO CONSUMERS"),
-    ]
-    for cmd_args, label in cg_cases:
-        print(f"Testing {label} rejection...")
-        res = send_cmd_bytes(sock, cmd_args)
-        assert res.startswith("-ERR"), f"{label} must return -ERR (gh #81), got: {res!r}"
-        assert "consumer groups not supported" in res, f"{label} error must mention consumer groups, got: {res!r}"
-
-    # XINFO STREAM must still work — only GROUPS/CONSUMERS subcommands error.
-    print("Testing XINFO STREAM still works...")
+    # gh #81 made these refuse (-ERR) instead of answering success-shaped fake
+    # replies that lost data; #40 implemented them. A smoke pass here; the
+    # whole surface, its durability and a differential against Redis are in
+    # tests/test_stream_groups.py.
+    print("\n=== Section 18b: Consumer groups (#40) ===")
+    send_cmd_bytes(sock, ["DEL", "cg_stream"])
+    res = send_cmd_bytes(sock, ["XGROUP", "CREATE", "cg_stream", "grp1", "$", "MKSTREAM"])
+    assert res == "+OK\r\n", f"XGROUP CREATE MKSTREAM, got: {res!r}"
+    send_cmd_bytes(sock, ["XADD", "cg_stream", "1-1", "k", "v"])
+    res = send_cmd_bytes(sock, ["XREADGROUP", "GROUP", "grp1", "c1", "COUNT", "10", "STREAMS", "cg_stream", ">"])
+    assert res == "*1\r\n*2\r\n$9\r\ncg_stream\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\nk\r\n$1\r\nv\r\n", \
+        f"XREADGROUP delivers the entry, got: {res!r}"
+    res = send_cmd_bytes(sock, ["XPENDING", "cg_stream", "grp1"])
+    assert res.startswith("*4\r\n:1\r\n$3\r\n1-1\r\n"), f"XPENDING counts it, got: {res!r}"
+    assert_int(send_cmd_bytes(sock, ["XACK", "cg_stream", "grp1", "1-1"]), 1, "XACK")
+    res = send_cmd_bytes(sock, ["XINFO", "GROUPS", "cg_stream"])
+    assert res.startswith("*1\r\n") and "grp1" in res, f"XINFO GROUPS lists the group, got: {res!r}"
     res = send_cmd_bytes(sock, ["XINFO", "STREAM", "cg_stream"])
-    assert res.startswith("*"), f"XINFO STREAM must keep working, got: {res!r}"
-    assert "length" in res, f"XINFO STREAM should include length field, got: {res!r}"
-
+    assert res.startswith("*") and "length" in res, f"XINFO STREAM, got: {res!r}"
     send_cmd_bytes(sock, ["DEL", "cg_stream"])
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -1208,7 +1205,7 @@ def test_pion_parity():
     send_cmd_bytes(sock, ["DEL", "hf"])
     send_cmd_bytes(sock, ["HSET", "hf", "val", "10.5"])
     res = send_cmd_bytes(sock, ["HINCRBYFLOAT", "hf", "val", "0.1"])
-    assert_contains(res, "10.6", "HINCRBYFLOAT")
+    assert_contains(res, LD_TEN_POINT_SIX, "HINCRBYFLOAT")   # as INCRBYFLOAT, above
 
     print("Testing HRANDFIELD...")
     send_cmd_bytes(sock, ["DEL", "hrf"])
@@ -1623,10 +1620,11 @@ def test_pion_parity():
     res = send_cmd_bytes(sock, ["EVAL", 'return cjson.decode(ARGV[1]).name', "0", '{"name":"test"}'])
     assert_contains(res, "test", "cjson.decode returns field")
 
-    # Safety: instruction limit
-    print("Testing EVAL instruction limit...")
+    # Safety: a script that never writes is stopped at --lua-time-limit
+    # (5000 ms by default): a worker cannot answer SCRIPT KILL mid-script (#36).
+    print("Testing EVAL time limit...")
     res = send_cmd_bytes(sock, ["EVAL", "while true do end", "0"])
-    assert_contains(res, "instruction limit", "Infinite loop caught")
+    assert_contains(res, "lua-time-limit", "Infinite loop stopped")
 
     # Safety: sandbox (no os)
     print("Testing EVAL sandbox...")

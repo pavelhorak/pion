@@ -265,6 +265,122 @@ def format_float_to_buf(buf: Pointer[UInt8, MutUntrackedOrigin], offset: Int, va
 
 
 @always_inline
+def score_prints_as_int(score: Float64) -> Bool:
+    """True when Redis prints a sorted-set score as a bare integer: its d2string
+    takes the integer path only for integral values within ±2^62 (double2ll's
+    LLONG_MAX/2 bound). Everything else goes through `format_score`.
+
+    #18: every score emitter used to test `Float64(Int64(score)) == score`.
+    Converting ±inf (or anything past Int64) to Int64 is undefined; LLVM folds
+    the round trip into a truncation test that ±inf passes, and x86's
+    cvttsd2si then yields INT64_MIN, so `ZADD k inf m` read back as
+    -9223372036854775808. The range test comes first and short-circuits, so
+    the conversion only ever sees values it can represent (NaN fails it too)."""
+    return score >= -4611686018427387904.0 and score <= 4611686018427387904.0 \
+        and Float64(Int64(score)) == score
+
+
+def format_score(score: Float64) -> String:
+    """Redis's d2string for a score `score_prints_as_int` rejects: `inf`,
+    `-inf`, `nan`, and otherwise the shortest round-trip digits laid out as its
+    fpconv_dtoa lays them out: plain digits up to 6 places past the last
+    significant one (`9223372036854776000`), plain decimals down to 1e-6
+    (`0.00001`), and `1e+20` / `1.5e-7` beyond those.
+
+    Known residual: fpconv is Grisu2, which for about 0.1% of full-precision
+    doubles emits a longer or differently-rounded digit string than the
+    shortest one (`-6016.9512179398635` for -6016.951217939863). Both parse
+    back to the same double; Pion emits the shortest, as Python's repr does."""
+    if score != score:
+        return "nan"
+    if score > 1.7976931348623157e308:
+        return "inf"
+    if score < -1.7976931348623157e308:
+        return "-inf"
+    if score == 0.0:
+        return "0"
+    # Shortest digits and the decimal exponent come from Mojo's own formatter
+    # ("1.5", "1e-05", "4.611686018427388e+18", "9007199254740992.0").
+    var s = String(score)
+    var p = s.unsafe_ptr()
+    var n = s.byte_length()
+    var i = 0
+    var neg = False
+    if n > 0 and p[0] == 45:   # '-'
+        neg = True
+        i = 1
+    var digits = String("")
+    var point = -1            # count of mantissa digits before the '.'
+    var nd_raw = 0
+    var exp10 = 0
+    while i < n:
+        var c = p[i]
+        if c == 46:           # '.'
+            point = nd_raw
+        elif c == 101 or c == 69:   # 'e' / 'E'
+            i += 1
+            var eneg = False
+            if i < n and (p[i] == 45 or p[i] == 43):
+                eneg = p[i] == 45
+                i += 1
+            while i < n:
+                exp10 = exp10 * 10 + Int(p[i] - 48)
+                i += 1
+            if eneg:
+                exp10 = -exp10
+            break
+        else:
+            digits += chr(Int(c))
+            nd_raw += 1
+        i += 1
+    if point < 0:
+        point = nd_raw
+    # value = digits * 10^K with digits stripped of leading and trailing zeros
+    var dp = digits.unsafe_ptr()
+    var lo = 0
+    while lo < nd_raw - 1 and dp[lo] == 48:
+        lo += 1
+    var hi = nd_raw
+    var K = point - nd_raw + exp10
+    while hi > lo + 1 and dp[hi - 1] == 48:
+        hi -= 1
+        K += 1
+    var nd = hi - lo
+    var out = String("-") if neg else String("")
+    var e = K + nd - 1
+    var ae = e if e >= 0 else -e
+    if K >= 0 and ae < nd + 7:
+        for j in range(lo, hi):
+            out += chr(Int(dp[j]))
+        for _ in range(K):
+            out += "0"
+        return out
+    if K < 0 and (K > -7 or ae < 4):
+        var offset = nd + K
+        if offset <= 0:
+            out += "0."
+            for _ in range(-offset):
+                out += "0"
+            for j in range(lo, hi):
+                out += chr(Int(dp[j]))
+        else:
+            for j in range(lo, lo + offset):
+                out += chr(Int(dp[j]))
+            out += "."
+            for j in range(lo + offset, hi):
+                out += chr(Int(dp[j]))
+        return out
+    out += chr(Int(dp[lo]))
+    if nd > 1:
+        out += "."
+        for j in range(lo + 1, hi):
+            out += chr(Int(dp[j]))
+    out += "e-" if e < 0 else "e+"
+    out += String(ae)
+    return out
+
+
+@always_inline
 def set_thread_qos_user_interactive():
     # Step 5: Pin this thread to P-cores (high-performance cores) on Apple Silicon.
     # pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE=0x21, relative_priority=0)
@@ -274,20 +390,32 @@ def set_thread_qos_user_interactive():
         _ = external_call["pthread_set_qos_class_self_np", Int32](UInt32(0x21), Int32(0))
 
 @always_inline
-def set_thread_affinity(cpu_id: Int):
-    # macOS THREAD_AFFINITY_POLICY = 4, THREAD_AFFINITY_POLICY_COUNT = 1
-    comptime if not CompilationTarget.is_linux():
+def set_thread_affinity(cpu_id: Int) -> String:
+    """Apply `--affinity` to the calling worker thread and say what was applied
+    ("" when nothing was). Linux pins the thread to one CPU; macOS has no hard
+    pinning and sets an affinity tag, a scheduling hint (#20: Linux used to do
+    nothing here while the caller logged "pinned to CPU i")."""
+    comptime if CompilationTarget.is_linux():
+        var c = Int(external_call["pion_pin_current_thread", Int32](Int32(cpu_id)))
+        if c < 0:
+            return ""
+        return "pinned to CPU " + String(c)
+    else:
+        # macOS THREAD_AFFINITY_POLICY = 4, THREAD_AFFINITY_POLICY_COUNT = 1
         var policy = cpu_id
         var thread = external_call["mach_thread_self", UInt32]()
         var policy_ptr = alloc[Int](1)
         policy_ptr[unsafe_offset=0] = policy
-        _ = external_call["thread_policy_set", Int32](
+        var kr = external_call["thread_policy_set", Int32](
             thread,
             4, # THREAD_AFFINITY_POLICY
             policy_ptr,
             1  # THREAD_AFFINITY_POLICY_COUNT
         )
         policy_ptr.unsafe_free()
+        if kr != 0:
+            return ""
+        return "affinity tag " + String(cpu_id) + " (a macOS scheduling hint)"
 
 comptime CMD_GET = 0x00746567
 comptime CMD_MGET = 0x7465676d
@@ -416,17 +544,19 @@ struct SetExpiry(Copyable, Movable, ImplicitlyCopyable):
 def set_expiry(v: Int64, unit_ms: Int64, relative: Bool, now_ns: Int64) -> SetExpiry:
     """The TTL argument of SET EX|PX|EXAT|PXAT, SETEX and PSETEX, resolved the
     way Redis's getExpireMillisecondsOrReply does (gh #393): non-positive, or
-    seconds that cannot scale to ms, is an error. A relative time whose sum
-    with now overflows ms is NOT an error there — the sum wraps negative and
-    the key is written already expired, so the reply is +OK and the key is
-    gone. A deadline already past ends the same way."""
+    seconds that cannot scale to ms, is an error, and so is a relative time
+    whose sum with now overflows ms (its "Overflow detected" check). That last
+    check reads a signed overflow, so a clang build of Redis (macOS) may drop
+    it and answer +OK with the key already expired; Linux builds answer the
+    error, which is what the check is for. A deadline already past is +OK and
+    the key is gone."""
     if v <= 0 or (unit_ms != 1 and v > I64_MAX // unit_ms):
         return SetExpiry(SETEXP_INVALID, 0)
     var ms = v * unit_ms
     var now_ms = now_ns // 1_000_000
     if relative:
         if ms > I64_MAX - now_ms:
-            return SetExpiry(SETEXP_EXPIRED, 0)
+            return SetExpiry(SETEXP_INVALID, 0)
         ms += now_ms
     if ms <= now_ms:
         return SetExpiry(SETEXP_EXPIRED, 0)

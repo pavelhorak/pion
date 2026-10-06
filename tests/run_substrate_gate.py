@@ -58,8 +58,6 @@ WIRE_TESTS = [
     "test_attend_fused_binary_parity.py",
     # KV.PREFIX.* — shared KV cache (wire-only subset)
     "test_kv_prefix_lru.py",
-    "test_kv_prefix_blocks.py",
-    "test_kv_prefix_cold_tier.py",
     # SSM.PREFIX.*
     "test_ssm_prefix_roundtrip.py",
     "test_ssm_prefix_large_blob.py",
@@ -72,7 +70,12 @@ WIRE_TESTS = [
 ]
 
 # Tests that spawn/kill their own pion-server (durability / multi-worker).
+# They run after the phase-1 server has stopped: a server on port P also holds
+# P+1 (the binary lane) and P+2 (worker 0's affinity port), so a test whose own
+# server wanted one of those could not start while it ran (#27).
 SELF_TESTS = [
+    "test_kv_prefix_blocks.py",
+    "test_kv_prefix_cold_tier.py",
     "test_vstore_wal.py",
     "test_ssm_prefix_durability.py",
     "test_kv_prefix_persistence.py",
@@ -254,12 +257,25 @@ def main() -> int:
                 if status == "CRASHED_SERVER":
                     break
         finally:
-            proc.kill()
-            proc.wait()
+            # SIGTERM first: a graceful stop cancels the workers' pending
+            # ACCEPTs, so the ports close with the process. A SIGKILLed server
+            # cannot, and on Linux its io_uring listeners outlive it for
+            # seconds (#22), which phase 2's servers would then fail to bind.
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
             shutil.rmtree(moe_dir, ignore_errors=True)
 
     # Phase 2 — self-managed durability tests (need the port free)
     if selfm and not args.skip_self:
+        # The gate server's ports: the RESP port, the binary lane (+1) and
+        # worker 0's affinity port (+2).
+        deadline = time.time() + 30
+        while time.time() < deadline and any(port_open(args.port + d) for d in (0, 1, 2)):
+            time.sleep(0.2)
         time.sleep(1)
         for t in selfm:
             clean_state()

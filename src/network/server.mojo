@@ -6,6 +6,22 @@ from std.memory import alloc
 from std.memory import unsafe_memset, unsafe_memcpy, stack_allocation
 
 
+@always_inline
+def _last_errno() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return external_call["__errno_location", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
+    else:
+        return external_call["__error", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
+
+
+@always_inline
+def _EADDRINUSE() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return 98
+    else:
+        return 48
+
+
 def create_listen_socket(port: Int) -> Int32:
     """Create a single shared listen socket. No SO_REUSEPORT — one socket, all workers compete to accept()."""
     var socket_fd = external_call["socket", Int32](Int32(2), Int32(1), Int32(0))  # AF_INET=2, SOCK_STREAM=1
@@ -46,6 +62,20 @@ def create_listen_socket(port: Int) -> Int32:
     addr[unsafe_offset=7] = UInt8((_ba >> 24) & 0xFF)
 
     var res = external_call["bind", Int32](socket_fd, addr, Int32(16))
+    # #22: a server that just stopped can still hold the port for a moment. On
+    # Linux the kernel tears an io_uring instance down AFTER the process exits,
+    # and a pending ACCEPT keeps the listening socket open until it has (a
+    # SIGKILLed server never gets to cancel its accepts). A restart used to
+    # lose that race and exit with "cannot bind port". Wait for the port, up
+    # to 3 s, before giving up.
+    var tries = 0
+    while res < 0 and tries < 30 and _last_errno() == _EADDRINUSE():
+        if tries == 0:
+            print("Port " + String(port) + " is still held (a server that just stopped "
+                  + "can keep it briefly); retrying for up to 3 s")
+        _ = external_call["usleep", Int32](Int32(100000))
+        res = external_call["bind", Int32](socket_fd, addr, Int32(16))
+        tries += 1
     if res < 0:
         print("Failed to bind shared listen socket to port " + String(port))
         addr.unsafe_free()

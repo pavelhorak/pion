@@ -1,6 +1,12 @@
 /*
- * Pion ↔ Lua 5.1 bridge header.
- * Coroutine-based execution: redis.call() yields to host for command dispatch.
+ * Pion ↔ Lua 5.1 bridge header. See lua_wrap.c: redis.call() runs
+ * synchronously through the host's `pion_script_dispatch` (an @export in
+ * src/main.mojo, resolved with dlsym), so a script runs the server's own
+ * commands.
+ *
+ * Every run and FUNCTION operation that answers the client builds its RESP
+ * reply in the state's output buffer: pion_lua_out() points at it, and the
+ * call returns its length (or -1 when no reply could be built).
  */
 
 #ifndef PION_LUA_WRAP_H
@@ -8,122 +14,59 @@
 
 #include <stdint.h>
 
-/* Opaque handle to a per-worker Lua state */
 typedef struct PionLuaState PionLuaState;
 
-/* Execution status codes */
-#define PION_LUA_OK           0   /* Script completed, result on stack */
-#define PION_LUA_NEEDS_CMD    1   /* redis.call() yielded, read cmd args */
-#define PION_LUA_ERROR       -1   /* Script error, error message available */
-
 /* --- Lifecycle --- */
-PionLuaState* pion_lua_new_state(int mem_limit, int insn_limit);
+/* mem_limit: bytes per Lua state, 0 = none. time_limit_ms: a script that runs
+ * longer without writing is stopped, 0 = never. */
+PionLuaState *pion_lua_new_state(int64_t mem_limit, int64_t time_limit_ms);
+/* Process-wide defaults for states created with negative limits. */
+void          pion_lua_set_defaults(int64_t mem_limit, int64_t time_limit_ms);
 void          pion_lua_close(PionLuaState *S);
+/* The context handed to pion_script_dispatch for the run that follows. */
+void          pion_lua_set_host(PionLuaState *S, void *host);
+int64_t       pion_lua_memory(PionLuaState *S);
+const char   *pion_lua_out(PionLuaState *S);
+int64_t       pion_lua_out_len(PionLuaState *S);
 
-/* --- Script cache --- */
-/* Load and compile a script. Writes 40-byte hex SHA1 to out_sha1.
-   Returns 0 on success, -1 on compile error (error msg via pion_lua_get_error). */
-int pion_lua_load_script(PionLuaState *S, const char *script, int script_len,
-                         char *out_sha1);
+/* --- Scripts (EVAL) --- */
+/* Compile and cache; writes the lower-case sha (41 bytes, NUL-terminated).
+ * 0 on success, -1 with an error reply in pion_lua_out. */
+int     pion_lua_load_script(PionLuaState *S, const char *code, int64_t len, char *out_sha);
+int     pion_lua_script_exists(PionLuaState *S, const char *sha);
+void    pion_lua_script_flush(PionLuaState *S);
+int64_t pion_lua_run_script(PionLuaState *S, const char *sha,
+                            const char **keys, const int64_t *key_lens, int64_t nkeys,
+                            const char **args, const int64_t *arg_lens, int64_t nargs,
+                            int64_t ro, int64_t client_resp);
 
-/* Check if a SHA1 hex string is cached. Returns 1 if found, 0 if not. */
-int pion_lua_script_exists(PionLuaState *S, const char *sha1_hex);
+/* --- Functions --- */
+/* 1 = loaded (the library name is the reply), 0 = an error reply. */
+int64_t     pion_lua_function_load(PionLuaState *S, const char *code, int64_t len, int64_t replace);
+int64_t     pion_lua_function_delete(PionLuaState *S, const char *name, int64_t nlen);
+void        pion_lua_function_flush(PionLuaState *S);
+int64_t     pion_lua_function_list(PionLuaState *S, const char *pat, int64_t plen, int64_t withcode, int64_t resp);
+int64_t     pion_lua_function_stats(PionLuaState *S, int64_t resp);
+int64_t     pion_lua_function_dump(PionLuaState *S);
+int64_t     pion_lua_dump_count(const char *p, int64_t n);
+const char *pion_lua_dump_entry(const char *p, int64_t n, int64_t k, int64_t *len);
+int64_t     pion_lua_library_name_of(const char *code, int64_t len, const char **name, int64_t *nlen);
+int64_t     pion_lua_library_exists(PionLuaState *S, const char *name, int64_t nlen);
+int64_t     pion_lua_library_count(PionLuaState *S);
+const char *pion_lua_library_name(PionLuaState *S, int64_t i);
+const char *pion_lua_library_code(PionLuaState *S, int64_t i, int64_t *len);
+int64_t     pion_lua_run_function(PionLuaState *S, const char *name, int64_t nlen,
+                                  const char **keys, const int64_t *key_lens, int64_t nkeys,
+                                  const char **args, const int64_t *arg_lens, int64_t nargs,
+                                  int64_t ro, int64_t client_resp);
 
-/* Flush all cached scripts. */
-void pion_lua_script_flush(PionLuaState *S);
+int64_t     pion_lua_function_exists(PionLuaState *S, const char *name, int64_t nlen);
 
-/* --- Execution (coroutine-based) --- */
-/* Set KEYS table before execution. */
-void pion_lua_set_keys(PionLuaState *S, const char **keys, const int *key_lens, int nkeys);
-
-/* Set ARGV table before execution. */
-void pion_lua_set_argv(PionLuaState *S, const char **argv, const int *argv_lens, int nargv);
-
-/* Begin executing a cached script by SHA1 hex.
-   Returns PION_LUA_OK, PION_LUA_NEEDS_CMD, or PION_LUA_ERROR. */
-int pion_lua_exec_sha1(PionLuaState *S, const char *sha1_hex);
-
-/* --- Command dispatch (when status == PION_LUA_NEEDS_CMD) --- */
-/* Get number of args (including command name) from the yielded redis.call(). */
-int pion_lua_get_call_nargs(PionLuaState *S);
-
-/* Get the i-th argument (0 = command name, 1+ = args).
-   Writes pointer and length. Pointer valid until next pion_lua call. */
-void pion_lua_get_call_arg(PionLuaState *S, int idx, const char **out_ptr, int *out_len);
-
-/* After dispatching a command, push the result and resume. */
-
-/* Push bulk string result, then resume. */
-int pion_lua_push_string_and_resume(PionLuaState *S, const char *s, int len);
-
-/* Push integer result, then resume. */
-int pion_lua_push_int_and_resume(PionLuaState *S, int64_t val);
-
-/* Push nil/false result (Redis nil → Lua false), then resume. */
-int pion_lua_push_nil_and_resume(PionLuaState *S);
-
-/* Push +OK status result, then resume. */
-int pion_lua_push_ok_and_resume(PionLuaState *S);
-
-/* Push error and resume (for redis.pcall — wraps in {err=...} table). */
-int pion_lua_push_error_and_resume(PionLuaState *S, const char *msg, int msg_len);
-
-/* Push array header (creates table), pushes N elements, then resume.
-   Elements must be pushed via pion_lua_array_push_* before calling _end. */
-void pion_lua_array_begin(PionLuaState *S);
-void pion_lua_array_push_string(PionLuaState *S, const char *s, int len);
-void pion_lua_array_push_int(PionLuaState *S, int64_t val);
-void pion_lua_array_push_nil(PionLuaState *S);
-int  pion_lua_array_end_and_resume(PionLuaState *S);
-
-/* --- Result reading (when status == PION_LUA_OK) --- */
-/* Write the Lua result as RESP bytes into out_buf.
-   Returns number of bytes written, or -1 if buffer too small. */
-int pion_lua_get_result(PionLuaState *S, char *out_buf, int buf_size);
-
-/* --- Error reading (when status == PION_LUA_ERROR) --- */
-const char* pion_lua_get_error(PionLuaState *S);
-
-/* --- pcall mode flag --- */
-/* Set to 1 before a pcall dispatch, 0 for call. Affects error handling. */
-void pion_lua_set_pcall_mode(PionLuaState *S, int pcall);
-int  pion_lua_get_pcall_mode(PionLuaState *S);
-
-/* --- Simple accessors (easier to call from Mojo FFI) --- */
-/* Return pointer to i-th call argument string (0=cmd name). Valid until next call. */
-const char* pion_lua_call_arg_ptr(PionLuaState *S, int idx);
-/* Return length of i-th call argument. */
-int pion_lua_call_arg_len(PionLuaState *S, int idx);
-
-/* --- Functions API (Redis 7+ compatible) --- */
-
-/* Load a library from code with #!lua name=<libname> shebang.
-   If replace != 0, overwrite existing library with same name.
-   Writes library name to out_name (max out_name_size bytes).
-   Returns 0 on success, -1 on error (msg via pion_lua_get_error). */
-int pion_lua_load_library(PionLuaState *S, const char *code, int code_len,
-                          int replace, char *out_name, int out_name_size);
-
-/* Delete a library by name. Returns 0 on success, -1 if not found. */
-int pion_lua_delete_library(PionLuaState *S, const char *name);
-
-/* Flush all libraries. */
-void pion_lua_flush_libraries(PionLuaState *S);
-
-/* Get number of loaded libraries. */
-int pion_lua_library_count(PionLuaState *S);
-
-/* Get library name by index. Returns pointer (valid until next call). */
-const char* pion_lua_library_name(PionLuaState *S, int idx);
-
-/* Get number of functions in library by index. */
-int pion_lua_library_func_count(PionLuaState *S, int lib_idx);
-
-/* Get function name in library. Returns pointer (valid until next call). */
-const char* pion_lua_library_func_name(PionLuaState *S, int lib_idx, int func_idx);
-
-/* Execute a named function (set KEYS/ARGV before calling).
-   Returns PION_LUA_OK, PION_LUA_NEEDS_CMD, or PION_LUA_ERROR. */
-int pion_lua_exec_function(PionLuaState *S, const char *func_name, int func_name_len);
+/* --- Persistence: this worker thread's state --- */
+/* WAL/snapshot/replication function records: 35 LOAD, 36 DELETE, 37 FLUSH. */
+int64_t     pion_lua_wal_apply(int64_t cmd_id, const char *key, int64_t kl, const char *val, int64_t vl);
+int64_t     pion_lua_tls_library_count(void);
+const char *pion_lua_tls_library_name(int64_t i);
+const char *pion_lua_tls_library_code(int64_t i, int64_t *len);
 
 #endif /* PION_LUA_WRAP_H */

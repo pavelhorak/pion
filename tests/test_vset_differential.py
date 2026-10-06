@@ -32,7 +32,9 @@ import struct
 import subprocess
 import sys
 import tempfile
-import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PION_PORT, REDIS_PORT = 6420, 6421
@@ -157,14 +159,14 @@ def script(dim=16, n=12):
 
 def start(cmd, port, cwd):
     p = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-    for _ in range(150):
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=1).close()
-            return p
-        except OSError:
-            time.sleep(0.1)
-    p.kill()
-    raise SystemExit(f"server on {port} did not start")
+    try:
+        # this process, not a lingering listener (#27); redis-server reports
+        # process_id in INFO too, so the oracle is held to the same check
+        wait_ready_pid(port, p, 15)
+    except RuntimeError:
+        p.kill()
+        raise SystemExit(f"server on {port} did not start")
+    return p
 
 
 def main():

@@ -10,7 +10,8 @@ and verifies the per-connection tenant binding:
   4. Cross-tenant forgery: tenant B reading "a:key" verbatim misses (it becomes
      "b:a:key" after rewrite — the prefix-free guarantee).
   5. Admin sees the raw prefixed keyspace; tenants never see raw keys.
-  6. Deny-by-default allowlist: FLUSHALL/EVAL/CONFIG/DBSIZE/SUBSCRIBE/FT.* → -NOPERM.
+  6. Deny-by-default allowlist: FLUSHALL/EVAL/CONFIG/DBSIZE/SUBSCRIBE/FT.* → -NOPERM
+     (Redis's "User <name> has no permissions to run the '<cmd>' command").
   7. KEYS/SCAN filter to the tenant's namespace and strip the prefix.
   8. MULTI/EXEC replay rewrites deterministically.
   9. Multi-key commands (MSET/MGET/DEL/RENAME) land entirely in-namespace.
@@ -145,9 +146,11 @@ def main() -> int:
         _wait_ready(PION_PORT)
 
         # 1. Forced binding. redis-py strips the NOAUTH/WRONGPASS code from
-        # the message, so match on the message text.
+        # the message, so match on the message text. redis-py >= 5 opens with
+        # HELLO, whose NOAUTH has its own text (Redis's, word for word).
         anon = conn()
-        err = expect_error(lambda: anon.get("k"), "authentication required")
+        err = expect_error(lambda: anon.get("k"), "authentication required",
+                           "HELLO must be called with the client already authenticated")
         check("anon GET → NOAUTH", err is not None and "unexpected" not in err, str(err))
 
         # 2. Wrong tenant password — and no fall-through to admin
@@ -158,6 +161,26 @@ def main() -> int:
         err = expect_error(lambda: bad2.get("k"), "invalid username-password", "authentication required")
         check("tenant name + admin password rejected (no escalation)",
               err is not None and "unexpected" not in err, str(err))
+
+        # 2b. HELLO's inline AUTH, on the wire (#24). redis-py >= 5 sends
+        # `HELLO 3 AUTH <user> <pass>` instead of AUTH, so these replies are what
+        # a RESP3 client sees: a bad password is WRONGPASS, as AUTH answers and
+        # as Redis answers; NOAUTH only when HELLO carried no credentials.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from resp_strict import Conn
+        h = Conn(PION_PORT)
+        r = h.raw("HELLO", "3", "AUTH", TENANT_A, "wrong")
+        check("HELLO 3 AUTH <tenant> <wrong> → -WRONGPASS", r.startswith(b"-WRONGPASS"), repr(r[:80]))
+        r = h.raw("HELLO", "3", "AUTH", "default", "wrong")
+        check("HELLO 3 AUTH default <wrong> → -WRONGPASS", r.startswith(b"-WRONGPASS"), repr(r[:80]))
+        r = h.raw("HELLO", "3")
+        check("HELLO 3 without credentials → -NOAUTH", r.startswith(b"-NOAUTH"), repr(r[:80]))
+        r = h.raw("HELLO", "3", "AUTH", TENANT_A, PW_A)
+        check("HELLO 3 AUTH <tenant> <right> → RESP3 map", r.startswith(b"%"), repr(r[:80]))
+        r = h.raw("HELLO", "3", "AUTH", TENANT_A, "wrong")
+        check("a failed HELLO AUTH on an authed connection still → -WRONGPASS",
+              r.startswith(b"-WRONGPASS"), repr(r[:80]))
+        h.close()
 
         ta = conn(username=TENANT_A, password=PW_A)
         tb = conn(username=TENANT_B, password=PW_B)
@@ -194,7 +217,8 @@ def main() -> int:
             (lambda: ta.execute_command("SORT", "mylist"), "SORT"),
             (lambda: ta.randomkey(), "RANDOMKEY"),
         ]:
-            err = expect_error(cmd, "not allowed for tenant")
+            # Redis's NOPERM text, which Pion's tenant users get since #47
+            err = expect_error(cmd, "has no permissions to run the")
             check(f"tenant {label} → NOPERM", err is not None and "unexpected" not in err, str(err))
 
         # 7. KEYS / SCAN filter + strip

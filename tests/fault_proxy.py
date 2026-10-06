@@ -85,7 +85,18 @@ class FaultProxy:
         self._threads.append(t)
 
     def stop(self):
+        """Release the port before returning (#27). Closing the listening
+        socket alone did not: on Linux an accept() blocked in another thread
+        keeps the socket alive until it returns, so the next FaultProxy on the
+        same port got EADDRINUSE. shutdown() wakes that accept; then join the
+        thread, then close."""
         self._stop.set()
+        try:
+            self._lsock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        for t in self._threads:
+            t.join(timeout=5)
         try:
             self._lsock.close()
         except OSError:

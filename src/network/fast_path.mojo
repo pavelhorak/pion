@@ -1,4 +1,6 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
+from src.network.vector_ingest import ingest_hash_vector
+from src.common.vec_tomb import VecTomb
 from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc, unsafe_memcpy, unsafe_memset, stack_allocation
 from std.collections import Array, Span
@@ -22,7 +24,7 @@ from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.io.wal import WAL, gv_bytes
 from src.io.blob_store import BlobStore, BLOB_TIER_OFF
 from src.commands.transaction import TransactionState
-from src.commands.command_table import PION_COMMAND_COUNT, command_arity, command_is_write
+from src.commands.command_table import command_arity, command_is_write
 from src.network.raft import RaftNode, RaftLogEntry
 from src.common.lock_free import LockFreeRingBuffer, AITask
 # gh #85: the KV_BUS import is gone with the last of the P2 fields — see
@@ -220,6 +222,21 @@ struct FastPathHandler(Movable):
     var blobs: UnsafePointer[BlobStore, MutUntrackedOrigin]
     var blob_threshold: Int          # BLOB_TIER_OFF disables the tier (--no-blob-tier)
     var field_sweep_cursor: Int      # gh #392: position in keyspace.field_ttl_index (last: hot struct)
+    # #46: the worker's vector-index tombstones (state.mojo sets it)
+    var vec_tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]
+
+    @no_inline
+    def _ingest_field(mut self, key_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], k_len: Int,
+                      field_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], f_len: Int,
+                      val_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], val_len: Int):
+        """#43/#46: after an HSET stored the field, send the index's vector
+        field to the index and link the hash to its slot (vector_ingest.mojo,
+        shared with the slow path). It used to run before the hash was even
+        looked up, so `SET k x; HSET k vec <v>` indexed a vector for a key
+        that answered WRONGTYPE. Out of line: the plain HSET row never takes it."""
+        _ = ingest_hash_vector(self.shared_hnsw, self.keyspace,
+                               self.wal if self.has_wal else null_ptr[WAL, MutUntrackedOrigin](),
+                               self.vec_tomb, key_ptr, k_len, field_ptr, f_len, val_ptr, val_len)
 
     @no_inline
     def _set_blob_value(mut self, key_val: GenericValue,
@@ -282,6 +299,7 @@ struct FastPathHandler(Movable):
         self.ttl_map = ttl_map
         self.ttl_sweep_cursor = 0
         self.field_sweep_cursor = 0
+        self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         self.has_cluster = is_not_null(cluster) and cluster[].enabled
         self.has_ttl = is_not_null(ttl_map)  # True if TTL map exists (lazy expiry checks enabled)
         self.has_wal = True  # default on; NetworkEngine sets False when --no-wal
@@ -311,8 +329,10 @@ struct FastPathHandler(Movable):
         plain key containing `::` into a phantom field deletion, leaving the
         key alive for good); they are in each hash, found via the keyspace's
         field_ttl_index."""
+        if not self.keyspace[].active_expire or self.keyspace[].expire_hides_only:
+            return     # DEBUG SET-ACTIVE-EXPIRE 0, or a replica: the primary expires (#45)
         self._sweep_field_ttls(max_scan)
-        if is_null(self.ttl_map):
+        if is_null(self.ttl_map) or self.ttl_map[].size == 0:
             return
         var cap = self.ttl_map[].capacity
         if cap == 0:
@@ -332,11 +352,18 @@ struct FastPathHandler(Movable):
                     # for every key over 23 bytes: the keyspace removal hashed
                     # tcmalloc's free-list word instead of the key, missed, and
                     # the expired key stayed readable forever with no TTL left.
-                    var key = self.ttl_map[].keys[cursor]
+                    # The keyspace's remove now drops the TTL entry
+                    # itself, so it gets an OWNED copy of the key.
+                    var key = self.ttl_map[].keys[cursor].clone()
                     # Remove from the keyspace, freeing an aggregate's container
-                    # (gh #369) rather than leaking it.
-                    _ = remove_and_free(self.keyspace, key)
-                    _ = self.ttl_map[].remove_generic(key)
+                    # (gh #369) rather than leaking it, and log the deletion
+                    # (#45): replay must not revive the key, or give a key
+                    # created again under its name the old deadline.
+                    var gone = self.keyspace[].expire_key(key, UInt64(key.__hash__()), False)
+                    if gone.type.value != ValueType.NONE:
+                        free_container(gone)
+                    _ = self.ttl_map[].remove_generic(key)   # a TTL whose key was already gone
+                    key.free_str_payload()
             cursor = (cursor + 1) & (cap - 1)
             scanned += 1
         self.ttl_sweep_cursor = cursor
@@ -1042,20 +1069,9 @@ struct FastPathHandler(Movable):
                         consumed = it_pos
                         continue
                     # gh #85b: P2 cross-worker routing removed (shared-nothing, gh #48).
+                    # #45: the lookup applies the key's TTL (the keyspace's
+                    # lazy expiry), as every other lookup does.
                     var val = self.keyspace[].get_with_ptr(buffer + it_pos, key_len)
-                    # TTL: lazy expiry check (skip when ttl_map is empty — no keys have TTL)
-                    if self.has_ttl and self.ttl_map[].size > 0 and not val.is_none():
-                        var key_val = GenericValue.borrow_buf(buffer + it_pos, key_len)
-                        var exp_v = self.ttl_map[].get(key_val)
-                        if not exp_v.is_none():
-                            var now_ns = _get_now_ns()
-                            if now_ns > exp_v.as_int():
-                                _ = self.keyspace[].remove_generic(key_val)
-                                _ = self.ttl_map[].remove_generic(key_val)
-                                writer.append_null_response()
-                                it_pos += key_len + 2
-                                consumed = it_pos
-                                continue
                     # A6: values >512B use writev (bypasses 4MB response buffer for LMCache blobs)
                     writer.append_large_value_response_writev(fd, val)
                     it_pos += key_len + 2
@@ -1175,12 +1191,9 @@ struct FastPathHandler(Movable):
                 elif b0_lower == 102 and cmd_len == 5: # 'f' - FCALL → slow path (Lua engine)
                     return consumed
                 elif b0_lower == 102 and cmd_len == 8: # 'f' - FUNCTION or FLUSHALL
-                    var b1_lower = buffer[cmd_start + 1] | 0x20
-                    if cmd_matches_8(buffer + cmd_start, 102, 108, 117, 115, 104, 97, 108, 108): # FLUSHALL (gh #225: it RESETS the keyspace)
-                        self.keyspace[].reset()
-                        writer.append_ok_response()
-                    else: # FUNCTION → slow path (Lua engine)
-                        return consumed
+                    # FLUSHALL and FUNCTION both go to the slow path: FLUSHALL is
+                    # logged there and parses its ASYNC|SYNC argument.
+                    return consumed
                 elif b0_lower == 120 and cmd_len == 4 and (buffer[cmd_start + 1] | 0x20) == 97 and (buffer[cmd_start + 2] | 0x20) == 100 and (buffer[cmd_start + 3] | 0x20) == 100: # 'x' 'a' 'd' 'd' - XADD
                     # Route to slow path for real stream storage
                     return consumed
@@ -1698,39 +1711,6 @@ struct FastPathHandler(Movable):
                         it_pos += 2
                         if val_len < 0 or it_pos + val_len + 2 > n:
                             return consumed
-                        # Route vector field to HNSW ingest buffer (single-field HSET)
-                        var _sh_ptr = self.shared_hnsw
-                        if is_not_null(_sh_ptr):
-                            if _sh_ptr[].pre_index_ready:
-                                if val_len == _sh_ptr[].pre_dim * 4:
-                                    if f_len == _sh_ptr[].pre_vector_field_len:
-                                        var _is_vf = True
-                                        var _vfn_ptr = _sh_ptr[].pre_vector_field_name.unsafe_ptr()
-                                        for _vbi in range(f_len):
-                                            if (field_ptr[_vbi] | 0x20) != _vfn_ptr[_vbi]:
-                                                _is_vf = False
-                                                break
-                                        if _is_vf:
-                                            var _slot = _sh_ptr[].add_ingest_vector(0, (buffer + it_pos).bitcast[Float32]())
-                                            if _slot >= 0:
-                                                # Store reverse mapping: slot ID → original hash key
-                                                var _hk_buf = stack_allocation[30, UInt8]()
-                                                _hk_buf[0]=95;_hk_buf[1]=95;_hk_buf[2]=104;_hk_buf[3]=107;_hk_buf[4]=95;_hk_buf[5]=95 # __hk__
-                                                var _hk_end = format_int_to_buf(_hk_buf, 6, Int64(_slot))
-                                                self.keyspace[].set(GenericValue.borrow(_hk_buf, _hk_end), GenericValue.borrow_buf(key_ptr, k_len))
-                                                # gh #211: effect-log the __hk__ SET (gh #170 rule —
-                                                # every keyspace mutation replays); it's the only
-                                                # durable slot→key source for keys >31B.
-                                                if self.has_wal:
-                                                    _ = self.wal[].append_kv(1, _hk_buf, _hk_end, key_ptr, k_len)
-                                                # Cross-worker shared mapping: byte 0 = len, bytes 1..31 = key.
-                                                # gh #211: >31B keys must stay len 0 (fall through to the
-                                                # __hk__ probe) — a truncated key stored as complete
-                                                # resolves to a wrong doc key.
-                                                if is_not_null(_sh_ptr[].hk_keys_buf) and _slot < _sh_ptr[].hk_max_elements and k_len <= 31:
-                                                    var _dst = _sh_ptr[].hk_keys_buf + _slot * 32
-                                                    _dst[0] = UInt8(k_len)
-                                                    unsafe_memcpy(dest=_dst + 1, src=key_ptr, count=k_len)
                         var key_val = GenericValue.borrow_buf(key_ptr, k_len)
                         var field_val = GenericValue.borrow_buf(field_ptr, f_len)
                         var val_val = GenericValue.borrow_buf(buffer + it_pos, val_len)
@@ -1755,6 +1735,8 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_field_kv(5, key_ptr, k_len,
                                                                field_ptr, f_len,
                                                                buffer + it_pos, val_len)
+                            if is_not_null(self.shared_hnsw) and self.shared_hnsw[].pre_index_ready:
+                                self._ingest_field(key_ptr, k_len, field_ptr, f_len, buffer + it_pos, val_len)
                             writer.append_int_response(Int64(1))
                         elif val.type.value == ValueType.HASH:
                             var hash_ptr = val.as_hash().bitcast[SlabHashMap]()
@@ -1772,6 +1754,8 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_field_kv(5, key_ptr, k_len,
                                                                field_ptr, f_len,
                                                                buffer + it_pos, val_len)
+                            if is_not_null(self.shared_hnsw) and self.shared_hnsw[].pre_index_ready:
+                                self._ingest_field(key_ptr, k_len, field_ptr, f_len, buffer + it_pos, val_len)
                             writer.append_int_response(Int64(1) if hash_ptr[].size > _hs_before else Int64(0))
                         else:
                             valid = False
@@ -1863,37 +1847,6 @@ struct FastPathHandler(Movable):
                             it_pos += 2
                             if v_len2 < 0 or it_pos + v_len2 + 2 > n:
                                 return consumed
-                            # Route to shared ingest buffer if this is the vector field
-                            # V3.1: use SharedHNSWView for cross-worker coordination
-                            var is_vec2 = False
-                            if is_not_null(self.shared_hnsw):
-                                if self.shared_hnsw[].pre_index_ready:
-                                    if v_len2 == self.shared_hnsw[].pre_dim * 4:
-                                        is_vec2 = True
-                            if is_vec2 and f_len2 == self.shared_hnsw[].pre_vector_field_len:
-                                var _vfn2 = self.shared_hnsw[].pre_vector_field_name.unsafe_ptr()
-                                for bi in range(f_len2):
-                                    if (f_ptr2[bi] | 0x20) != _vfn2[bi]:
-                                        is_vec2 = False
-                                        break
-                            elif is_vec2:
-                                is_vec2 = False
-                            if is_vec2:
-                                var _slot2 = self.shared_hnsw[].add_ingest_vector(0, (buffer + it_pos).bitcast[Float32]())
-                                if _slot2 >= 0:
-                                    var _hk2_buf = stack_allocation[30, UInt8]()
-                                    _hk2_buf[0]=95;_hk2_buf[1]=95;_hk2_buf[2]=104;_hk2_buf[3]=107;_hk2_buf[4]=95;_hk2_buf[5]=95
-                                    var _hk2_end = format_int_to_buf(_hk2_buf, 6, Int64(_slot2))
-                                    self.keyspace[].set(GenericValue.borrow(_hk2_buf, _hk2_end), GenericValue.borrow_buf(key_ptr2, k_len2))
-                                    # gh #211: effect-log the __hk__ SET (see single-field HSET above)
-                                    if self.has_wal:
-                                        _ = self.wal[].append_kv(1, _hk2_buf, _hk2_end, key_ptr2, k_len2)
-                                    # Cross-worker shared mapping (see single-field HSET above for
-                                    # rationale; gh #211: >31B keys stay len 0, never truncated)
-                                    if is_not_null(self.shared_hnsw[].hk_keys_buf) and _slot2 < self.shared_hnsw[].hk_max_elements and k_len2 <= 31:
-                                        var _dst2 = self.shared_hnsw[].hk_keys_buf + _slot2 * 32
-                                        _dst2[0] = UInt8(k_len2)
-                                        unsafe_memcpy(dest=_dst2 + 1, src=key_ptr2, count=k_len2)
                             # gh #360: the vector field is ALSO stored in the hash.
                             # It used to go to the HNSW ingest buffer only, so
                             # `HGET key <vector-field>` answered nil after a
@@ -1910,6 +1863,11 @@ struct FastPathHandler(Movable):
                                 _ = self.wal[].append_field_kv(5, key_ptr2, k_len2,
                                                                f_ptr2, f_len2,
                                                                buffer + it_pos, v_len2)
+                            # #43/#46: the index's vector field goes to the index
+                            # once it is stored, linked to this hash
+                            if is_not_null(self.shared_hnsw) and self.shared_hnsw[].pre_index_ready \
+                                    and v_len2 == self.shared_hnsw[].pre_dim * 4:
+                                self._ingest_field(key_ptr2, k_len2, f_ptr2, f_len2, buffer + it_pos, v_len2)
                             it_pos += v_len2 + 2
                         writer.append_int_response(Int64(hash_ptr2[].size - _hms_before))
                     else:
@@ -2260,12 +2218,10 @@ struct FastPathHandler(Movable):
                             # correct, so the two ends of the same command family
                             # disagreed. Integer-valued scores still emit bare
                             # digits (Redis prints "3", not "3.0").
-                            var _zpm_i = Int64(score)
-                            if Float64(_zpm_i) == score:
-                                writer.append_bulk_int_response(_zpm_i)
-                            else:
-                                var _zpm_s = String(score)
-                                writer.append_bulk_string_response(_zpm_s.unsafe_ptr(), _zpm_s.byte_length())
+                            # #18: and never through Int64(), which read ±inf
+                            # back as INT64_MIN on x86. RESP3: a double, as
+                            # Redis sends it (same bytes as before on RESP2).
+                            writer.append_score_response(score)
                             # gh #394: pop_min hands back the node's own payload; the
                             # reply above copied it, and nothing else holds it.
                             obj.free_str_payload()
@@ -2414,8 +2370,8 @@ struct FastPathHandler(Movable):
                         else:
                             # Count arg: return array of popped elements
                             var actual_count = min(spop_count, set_ptr[].size)
-                            var arr_hdr = String("*") + String(actual_count) + String("\r\n")
-                            writer.append_to_response(arr_hdr.unsafe_ptr(), arr_hdr.byte_length())
+                            # RESP3: a set, as Redis; and no String built on the fast path.
+                            writer.append_set_header(actual_count)
                             for _pi in range(actual_count):
                                 var popped = set_ptr[].pop_random(self.prng)
                                 if self.has_wal and not popped.is_none():  # gh #170
@@ -2440,7 +2396,7 @@ struct FastPathHandler(Movable):
                         if num_args == 2:
                             writer.append_null_response()
                         else:
-                            writer.append_empty_array_response()
+                            writer.append_set_header(0)   # RESP3 `~0`, RESP2 `*0`
                 elif b0_lower == 108 and cmd_len == 6 and cmd_matches_6(buffer + cmd_start, 108, 114, 97, 110, 103, 101): # LRANGE (gh #225: every byte)
                     if num_args != 4 or it_pos >= n or buffer[it_pos] != 36:
                         return consumed
@@ -2510,6 +2466,10 @@ struct FastPathHandler(Movable):
                             stop = size + stop
                             if stop < 0: stop = -1
                         if stop >= size: stop = size - 1
+                        # #47: a range this long can take milliseconds; the slow
+                        # path times it for SLOWLOG (gate rows ask for 100-600)
+                        if stop - start >= 4096:
+                            return consumed
                         if start > stop or start >= size:
                             writer.append_empty_array_response()
                         else:
@@ -2671,7 +2631,7 @@ struct FastPathHandler(Movable):
                         if bit_offset // 8 >= byte_len:
                             writer.append_int_response(0)
                         else:
-                            writer.append_int_response(Int64(getbit(bitmap_ptr, bit_offset)))
+                            writer.append_int_response(Int64(getbit(bitmap_ptr, byte_len, bit_offset)))
                     else:
                         writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                 elif b0_lower == 115 and cmd_len == 6 and cmd_matches_6(buffer + cmd_start, 115, 101, 116, 98, 105, 116): # SETBIT
@@ -2732,7 +2692,7 @@ struct FastPathHandler(Movable):
                             var byte_len = bit_offset // 8 + 1
                             var bitmap_ptr = alloc[UInt8](byte_len)
                             unsafe_memset(bitmap_ptr, 0, byte_len)
-                            var old_bit = getbit(bitmap_ptr, bit_offset)
+                            var old_bit = getbit(bitmap_ptr, byte_len, bit_offset)
                             var result = setbit(byte_len, bitmap_ptr, bit_offset, bit_value)
                             var new_val = GenericValue()
                             new_val.type = ValueType(ValueType.BITMAP)
@@ -2750,7 +2710,7 @@ struct FastPathHandler(Movable):
                         elif sb_val.type.value == ValueType.BITMAP:
                             var bitmap_ptr = sb_val.as_bitmap()
                             var byte_len = sb_val.bitmap_len()
-                            var old_bit = getbit(bitmap_ptr, bit_offset)
+                            var old_bit = getbit(bitmap_ptr, byte_len, bit_offset)
                             var result = setbit(byte_len, bitmap_ptr, bit_offset, bit_value)
                             sb_val._data0 = UInt64(Int(result.ptr))
                             sb_val._data1 = UInt64(result.len)
@@ -2780,7 +2740,7 @@ struct FastPathHandler(Movable):
                             var _sb_need = bit_offset // 8 + 1
                             var _sb_len = 0
                             var _sb_buf = sb_val.owned_bitmap_copy(_sb_need, _sb_len)
-                            var old_bit = getbit(_sb_buf, bit_offset)
+                            var old_bit = getbit(_sb_buf, _sb_len, bit_offset)
                             var result = setbit(_sb_len, _sb_buf, bit_offset, bit_value)
                             # NOTE: do NOT free the original here. `keyspace.set()`
                             # already calls `free_str_payload()` on the value it
@@ -2988,94 +2948,27 @@ struct FastPathHandler(Movable):
                     writer.append_to_response(type_resp.unsafe_ptr(), type_resp.byte_length())
                     it_pos += key_len + 2
                 elif b0_lower == 115 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 108 and (buffer[cmd_start + 3] | 0x20) == 101 and (buffer[cmd_start + 4] | 0x20) == 99 and (buffer[cmd_start + 5] | 0x20) == 116: # SELECT
-                    var _sel_end = _bulks_end(buffer, it_pos, n, num_args - 1)
-                    if _sel_end < 0:
-                        return consumed    # split frame: answer once it is whole
-                    it_pos = _sel_end
+                    # Only `SELECT 0` is answered here. Any other index, a
+                    # non-integer or a wrong arity goes to the slow path, which
+                    # refuses it (this answered +OK to everything).
+                    if num_args != 2 or it_pos + 7 > n or buffer[it_pos] != 36 \
+                            or buffer[it_pos + 1] != 49 or buffer[it_pos + 2] != 13 \
+                            or buffer[it_pos + 3] != 10 or buffer[it_pos + 4] != 48 \
+                            or buffer[it_pos + 5] != 13 or buffer[it_pos + 6] != 10:
+                        return consumed
+                    it_pos += 7
                     writer.append_ok_response()
                 elif b0_lower == 99 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 108 and (buffer[cmd_start + 2] | 0x20) == 105 and (buffer[cmd_start + 3] | 0x20) == 101 and (buffer[cmd_start + 4] | 0x20) == 110 and (buffer[cmd_start + 5] | 0x20) == 116: # CLIENT
-                    if _bulks_end(buffer, it_pos, n, num_args - 1) < 0:
-                        return consumed    # split frame: the sub-arms skip without bounds
-                    if num_args >= 2 and it_pos < n and buffer[it_pos] == 36:
-                        it_pos += 1
-                        var sub_len = 0
-                        while it_pos < n and buffer[it_pos] != 13:
-                            sub_len = sub_len * 10 + Int(buffer[it_pos] - 48)
-                            it_pos += 1
-                        it_pos += 2
-                        if sub_len < 0 or it_pos + sub_len + 2 > n:
-                            return consumed
-                        var sub0 = buffer[it_pos] | 0x20
-                        it_pos += sub_len + 2
-                        if sub0 == 105 and sub_len == 2:
-                            writer.append_int_response(Int64(fd))
-                        elif sub0 == 103 and sub_len == 7:
-                            writer.append_null_response()
-                        elif sub0 == 115 and sub_len == 7:
-                            for _ in range(num_args - 2):
-                                if it_pos >= n or buffer[it_pos] != 36: break
-                                it_pos += 1
-                                var al = 0
-                                while it_pos < n and buffer[it_pos] != 13:
-                                    al = al * 10 + Int(buffer[it_pos] - 48)
-                                    it_pos += 1
-                                it_pos += 2 + al + 2
-                            writer.append_ok_response()
-                        elif sub0 == 110:
-                            if num_args >= 3 and it_pos < n and buffer[it_pos] == 36:
-                                it_pos += 1
-                                var al = 0
-                                while it_pos < n and buffer[it_pos] != 13:
-                                    al = al * 10 + Int(buffer[it_pos] - 48)
-                                    it_pos += 1
-                                it_pos += 2 + al + 2
-                            writer.append_ok_response()
-                        else:
-                            fast_path_ok = False
-                            break
-                    else:
-                        fast_path_ok = False
-                        break
+                    # #47: CLIENT runs in the slow path, which keeps each connection's
+                    # ID (never reused, unlike the fd this arm answered), name, flags
+                    # and modes in its ClientRegistry. NO-EVICT / NO-TOUCH answered +OK
+                    # here and set nothing.
+                    return consumed
                 elif b0_lower == 99 and cmd_len == 7 and (buffer[cmd_start + 1] | 0x20) == 111 and (buffer[cmd_start + 2] | 0x20) == 109 and (buffer[cmd_start + 3] | 0x20) == 109 and (buffer[cmd_start + 4] | 0x20) == 97 and (buffer[cmd_start + 5] | 0x20) == 110 and (buffer[cmd_start + 6] | 0x20) == 100: # COMMAND
-                    # Whole frame first: with the subcommand still in flight,
-                    # `it_pos < n` failed and the arm answered `*0` for it.
-                    if _bulks_end(buffer, it_pos, n, num_args - 1) < 0:
-                        return consumed
-                    if num_args >= 2 and it_pos < n and buffer[it_pos] == 36:
-                        # gh #220: this replied :200 to EVERY subcommand — so
-                        # `COMMAND DOCS` answered an integer where Redis answers
-                        # an array, and the count itself was invented (the real
-                        # surface is PION_COMMAND_COUNT, derived from the
-                        # dispatch chains). Clients use COMMAND for routing, so
-                        # both the shape and the number matter. Peek at the
-                        # first subcommand byte instead of ignoring it.
-                        #
-                        # Note this arm is why the slow path's handle_command is
-                        # effectively unreachable for ordinary traffic: COMMAND
-                        # never falls through. Keep the two in step.
-                        var _cmd_sub0: UInt8 = 0
-                        var _cmd_first = True
-                        for _ in range(num_args - 1):
-                            if it_pos >= n or buffer[it_pos] != 36: break
-                            it_pos += 1
-                            var al = 0
-                            while it_pos < n and buffer[it_pos] != 13:
-                                al = al * 10 + Int(buffer[it_pos] - 48)
-                                it_pos += 1
-                            it_pos += 2
-                            if _cmd_first and al > 0 and it_pos < n:
-                                _cmd_sub0 = buffer[it_pos] | 0x20
-                                _cmd_first = False
-                            it_pos += al + 2
-                        if _cmd_sub0 == 99:  # COUNT
-                            writer.append_int_response(Int64(PION_COMMAND_COUNT))
-                        else:
-                            # DOCS / INFO / LIST / GETKEYS — array-shaped in
-                            # Redis; empty is incomplete but at least the right
-                            # type, which an integer was not.
-                            writer.append_empty_array_response()
-                    else:
-                        writer.append_empty_array_response()
+                    # #47: COMMAND runs in the slow path (src/commands/command_cmd.mojo),
+                    # which answers INFO, DOCS, LIST and GETKEYS from the command tables;
+                    # this arm answered every subcommand but COUNT with an empty array.
+                    return consumed
                 elif b0_lower == 100 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 98 and (buffer[cmd_start + 2] | 0x20) == 115 and (buffer[cmd_start + 3] | 0x20) == 105 and (buffer[cmd_start + 4] | 0x20) == 122 and (buffer[cmd_start + 5] | 0x20) == 101: # DBSIZE
                     # Step over any arguments before replying: this arm answers a
                     # no-argument command, and `consumed = it_pos` below must cover the
@@ -3108,6 +3001,11 @@ struct FastPathHandler(Movable):
                     it_pos = _fe
                     writer.append_ok_response()
                 elif b0_lower == 114 and cmd_len == 8 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 97 and (buffer[cmd_start + 3] | 0x20) == 100 and (buffer[cmd_start + 4] | 0x20) == 111 and (buffer[cmd_start + 5] | 0x20) == 110 and (buffer[cmd_start + 6] | 0x20) == 108 and (buffer[cmd_start + 7] | 0x20) == 121: # READONLY
+                    # #47: only in cluster mode, and only bare. Outside cluster mode
+                    # Redis refuses it ("This instance has cluster support disabled"),
+                    # and the slow path says so; this answered +OK.
+                    if not self.has_cluster or num_args != 1:
+                        return consumed
                     # Step over any arguments before replying: this arm answers a
                     # no-argument command, and `consumed = it_pos` below must cover the
                     # WHOLE frame, or the surplus bytes are re-parsed as a fresh command
@@ -3123,6 +3021,11 @@ struct FastPathHandler(Movable):
                         self.local_affinity[Int(fd)] = 3  # 3 = READONLY mode
                     writer.append_ok_response()
                 elif b0_lower == 114 and cmd_len == 9 and (buffer[cmd_start + 1] | 0x20) == 101 and (buffer[cmd_start + 2] | 0x20) == 97 and (buffer[cmd_start + 3] | 0x20) == 100 and (buffer[cmd_start + 4] | 0x20) == 119 and (buffer[cmd_start + 5] | 0x20) == 114 and (buffer[cmd_start + 6] | 0x20) == 105 and (buffer[cmd_start + 7] | 0x20) == 116 and (buffer[cmd_start + 8] | 0x20) == 101: # READWRITE
+                    # #47: only in cluster mode, and only bare. Outside cluster mode
+                    # Redis refuses it ("This instance has cluster support disabled"),
+                    # and the slow path says so; this answered +OK.
+                    if not self.has_cluster or num_args != 1:
+                        return consumed
                     # Step over any arguments before replying: this arm answers a
                     # no-argument command, and `consumed = it_pos` below must cover the
                     # WHOLE frame, or the surplus bytes are re-parsed as a fresh command
@@ -3138,6 +3041,11 @@ struct FastPathHandler(Movable):
                         self.local_affinity[Int(fd)] = 0
                     writer.append_ok_response()
                 elif b0_lower == 97 and cmd_len == 6 and (buffer[cmd_start + 1] | 0x20) == 115 and (buffer[cmd_start + 2] | 0x20) == 107 and (buffer[cmd_start + 3] | 0x20) == 105 and (buffer[cmd_start + 4] | 0x20) == 110 and (buffer[cmd_start + 5] | 0x20) == 103: # ASKING
+                    # #47: only in cluster mode, and only bare. Outside cluster mode
+                    # Redis refuses it ("This instance has cluster support disabled"),
+                    # and the slow path says so; this answered +OK.
+                    if not self.has_cluster or num_args != 1:
+                        return consumed
                     # Step over any arguments before replying: this arm answers a
                     # no-argument command, and `consumed = it_pos` below must cover the
                     # WHOLE frame, or the surplus bytes are re-parsed as a fresh command

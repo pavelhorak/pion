@@ -1,4 +1,5 @@
-from std.math import fma, sqrt
+from std.math import sqrt
+from src.vector.fma_mad import fma_mad
 from std.memory.unsafe_pointer import UnsafePointer
 from std.sys import simd_width_of
 from std.sys import CompilationTarget
@@ -122,7 +123,7 @@ def welford_calibrate(
         var d1 = val - mean_v
         mean_v += d1 / count_v
         var d2 = val - mean_v
-        m2_v = fma(d1, d2, m2_v)
+        m2_v = fma_mad[fp_width](d1, d2, m2_v)
         i += fp_width
 
     # Reduce SIMD lanes using Welford combine
@@ -440,19 +441,19 @@ def l2_distance_fp32_int8(v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: Un
     var sum_b = SIMD[DType.float32, width](0.0)
     var i = 0
     while i + width * 2 <= dim:
-        var d_a = v1.load[width=width](i) - fma(v2.load[width=width](i).cast[DType.float32](), scale_v, offset_v)
-        sum_a = fma(d_a, d_a, sum_a)
-        var d_b = v1.load[width=width](i + width) - fma(v2.load[width=width](i + width).cast[DType.float32](), scale_v, offset_v)
-        sum_b = fma(d_b, d_b, sum_b)
+        var d_a = v1.load[width=width](i) - fma_mad[width](v2.load[width=width](i).cast[DType.float32](), scale_v, offset_v)
+        sum_a = fma_mad[width](d_a, d_a, sum_a)
+        var d_b = v1.load[width=width](i + width) - fma_mad[width](v2.load[width=width](i + width).cast[DType.float32](), scale_v, offset_v)
+        sum_b = fma_mad[width](d_b, d_b, sum_b)
         i += width * 2
     while i + width <= dim:
-        var d = v1.load[width=width](i) - fma(v2.load[width=width](i).cast[DType.float32](), scale_v, offset_v)
-        sum_a = fma(d, d, sum_a)
+        var d = v1.load[width=width](i) - fma_mad[width](v2.load[width=width](i).cast[DType.float32](), scale_v, offset_v)
+        sum_a = fma_mad[width](d, d, sum_a)
         i += width
 
     var result = (sum_a + sum_b).reduce_add()
     for j in range(i, dim):
-        var f2 = fma(v2[j].cast[DType.float32](), scale, 127.0 * scale + min_val)
+        var f2 = fma_mad[1](v2[j].cast[DType.float32](), scale, 127.0 * scale + min_val)
         var d = v1[j] - f2
         result += d * d
 
@@ -570,12 +571,12 @@ def l2_distance_gpu(v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePo
     var sum = SIMD[DType.float32, width](0.0)
 
     for i in range(0, dim - width + 1, width):
-        var d = v1.load[width=width](i) - fma(v2.load[width=width](i).cast[DType.float32](), scale_v, offset_v)
-        sum = fma(d, d, sum)
+        var d = v1.load[width=width](i) - fma_mad[width](v2.load[width=width](i).cast[DType.float32](), scale_v, offset_v)
+        sum = fma_mad[width](d, d, sum)
 
     var result = sum.reduce_add()
     for i in range(dim - (dim % width), dim):
-        var f2 = fma(v2[i].cast[DType.float32](), scale, 127.0 * scale + min_val)
+        var f2 = fma_mad[1](v2[i].cast[DType.float32](), scale, 127.0 * scale + min_val)
         var d = v1[i] - f2
         result += d * d
 
@@ -617,12 +618,12 @@ def dot_product_simd[simd_width: Int](
     var i = 0
 
     while i + simd_width * 2 <= dim:
-        sum_a = fma(a.load[width=simd_width](i), b.load[width=simd_width](i), sum_a)
-        sum_b = fma(a.load[width=simd_width](i + simd_width), b.load[width=simd_width](i + simd_width), sum_b)
+        sum_a = fma_mad[simd_width](a.load[width=simd_width](i), b.load[width=simd_width](i), sum_a)
+        sum_b = fma_mad[simd_width](a.load[width=simd_width](i + simd_width), b.load[width=simd_width](i + simd_width), sum_b)
         i += simd_width * 2
 
     while i + simd_width <= dim:
-        sum_a = fma(a.load[width=simd_width](i), b.load[width=simd_width](i), sum_a)
+        sum_a = fma_mad[simd_width](a.load[width=simd_width](i), b.load[width=simd_width](i), sum_a)
         i += simd_width
 
     var total = (sum_a + sum_b).reduce_add()
@@ -780,9 +781,9 @@ def l2_distance_fp32_int8_fused_jit[dim: Int](v1: UnsafePointer[Float32, MutUntr
         var q2 = v2.load[width=width](i).cast[DType.float32]()
         
         # Dequantize and compute distance in two FMAs
-        var f2_scaled = fma(q2, scale_simd, offset_simd)
+        var f2_scaled = fma_mad[width](q2, scale_simd, offset_simd)
         var d = f1 - f2_scaled
-        sum = fma(d, d, sum) # sum += d * d
+        sum = fma_mad[width](d, d, sum) # sum += d * d
 
     var total_sum = sum.reduce_add()
 
@@ -790,7 +791,7 @@ def l2_distance_fp32_int8_fused_jit[dim: Int](v1: UnsafePointer[Float32, MutUntr
     for i in range(tail_start, dim):
         var f1 = v1[i]
         var q2 = v2[i].cast[DType.float32]()
-        var f2 = fma(q2, scale, 127.0 * scale + min_val)
+        var f2 = fma_mad[1](q2, scale, 127.0 * scale + min_val)
         var d = f1 - f2
         total_sum += d * d
 
@@ -806,11 +807,11 @@ def l2_distance_fp32_int8_sq8_jit[dim: Int](
     comptime width = simd_width_of[DType.float32]()
     var sum = SIMD[DType.float32, width](0.0)
     for i in range(0, dim - width + 1, width):
-        var dq = fma(v2.load[width=width](i).cast[DType.float32](),
+        var dq = fma_mad[width](v2.load[width=width](i).cast[DType.float32](),
                      sq8_scale.load[width=width](i),
                      sq8_offset.load[width=width](i))
         var d = v1.load[width=width](i) - dq
-        sum = fma(d, d, sum)
+        sum = fma_mad[width](d, d, sum)
     var total = sum.reduce_add()
     comptime tail_start = (dim // width) * width
     for i in range(tail_start, dim):
@@ -838,14 +839,14 @@ def l2_distance_fp32_int8_sq8_batch4_jit[dim: Int](
         var f1 = v1.load[width=width](i)
         var sc = sq8_scale.load[width=width](i)
         var of = sq8_offset.load[width=width](i)
-        var dq0 = fma(v2_0.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq1 = fma(v2_1.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq2 = fma(v2_2.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq3 = fma(v2_3.load[width=width](i).cast[DType.float32](), sc, of)
-        var d0 = f1 - dq0; sum0 = fma(d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma(d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma(d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma(d3, d3, sum3)
+        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), sc, of)
+        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
+        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
+        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
+        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
     var r0 = sum0.reduce_add(); var r1 = sum1.reduce_add()
     var r2 = sum2.reduce_add(); var r3 = sum3.reduce_add()
     comptime tail_start = (dim // width) * width
@@ -884,22 +885,22 @@ def l2_distance_fp32_int8_sq8_batch8_jit[dim: Int](
         var f1 = v1.load[width=width](i)
         var sc = sq8_scale.load[width=width](i)
         var of = sq8_offset.load[width=width](i)
-        var dq0 = fma(v2_0.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq1 = fma(v2_1.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq2 = fma(v2_2.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq3 = fma(v2_3.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq4 = fma(v2_4.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq5 = fma(v2_5.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq6 = fma(v2_6.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq7 = fma(v2_7.load[width=width](i).cast[DType.float32](), sc, of)
-        var d0 = f1 - dq0; sum0 = fma(d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma(d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma(d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma(d3, d3, sum3)
-        var d4 = f1 - dq4; sum4 = fma(d4, d4, sum4)
-        var d5 = f1 - dq5; sum5 = fma(d5, d5, sum5)
-        var d6 = f1 - dq6; sum6 = fma(d6, d6, sum6)
-        var d7 = f1 - dq7; sum7 = fma(d7, d7, sum7)
+        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq4 = fma_mad[width](v2_4.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq5 = fma_mad[width](v2_5.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq6 = fma_mad[width](v2_6.load[width=width](i).cast[DType.float32](), sc, of)
+        var dq7 = fma_mad[width](v2_7.load[width=width](i).cast[DType.float32](), sc, of)
+        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
+        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
+        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
+        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
+        var d4 = f1 - dq4; sum4 = fma_mad[width](d4, d4, sum4)
+        var d5 = f1 - dq5; sum5 = fma_mad[width](d5, d5, sum5)
+        var d6 = f1 - dq6; sum6 = fma_mad[width](d6, d6, sum6)
+        var d7 = f1 - dq7; sum7 = fma_mad[width](d7, d7, sum7)
     var r0 = sum0.reduce_add(); var r1 = sum1.reduce_add()
     var r2 = sum2.reduce_add(); var r3 = sum3.reduce_add()
     var r4 = sum4.reduce_add(); var r5 = sum5.reduce_add()
@@ -941,14 +942,14 @@ def l2_distance_fp32_int8_batch4_jit[dim: Int](
 
     for i in range(0, dim - width + 1, width):
         var f1 = v1.load[width=width](i)  # query chunk — loaded once, used 4×
-        var dq0 = fma(v2_0.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq1 = fma(v2_1.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq2 = fma(v2_2.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq3 = fma(v2_3.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var d0 = f1 - dq0; sum0 = fma(d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma(d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma(d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma(d3, d3, sum3)
+        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
+        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
+        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
+        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
 
     var r0 = sum0.reduce_add()
     var r1 = sum1.reduce_add()
@@ -1004,14 +1005,14 @@ def l2_distance_fp32_int8_pervec_batch4(
     var i = 0
     while i < n_simd:
         var f1 = v1.load[width=width](i)
-        var dq0 = fma(v2_0.load[width=width](i).cast[DType.float32](), sv0, ov0)
-        var dq1 = fma(v2_1.load[width=width](i).cast[DType.float32](), sv1, ov1)
-        var dq2 = fma(v2_2.load[width=width](i).cast[DType.float32](), sv2, ov2)
-        var dq3 = fma(v2_3.load[width=width](i).cast[DType.float32](), sv3, ov3)
-        var d0 = f1 - dq0; sum0 = fma(d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma(d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma(d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma(d3, d3, sum3)
+        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), sv0, ov0)
+        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), sv1, ov1)
+        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), sv2, ov2)
+        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), sv3, ov3)
+        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
+        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
+        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
+        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
         i += width
     var r0 = sum0.reduce_add()
     var r1 = sum1.reduce_add()
@@ -1059,22 +1060,22 @@ def l2_distance_fp32_int8_batch8_jit[dim: Int](
 
     for i in range(0, dim - width + 1, width):
         var f1 = v1.load[width=width](i)  # query chunk — loaded once, used 8×
-        var dq0 = fma(v2_0.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq1 = fma(v2_1.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq2 = fma(v2_2.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq3 = fma(v2_3.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq4 = fma(v2_4.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq5 = fma(v2_5.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq6 = fma(v2_6.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq7 = fma(v2_7.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var d0 = f1 - dq0; sum0 = fma(d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma(d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma(d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma(d3, d3, sum3)
-        var d4 = f1 - dq4; sum4 = fma(d4, d4, sum4)
-        var d5 = f1 - dq5; sum5 = fma(d5, d5, sum5)
-        var d6 = f1 - dq6; sum6 = fma(d6, d6, sum6)
-        var d7 = f1 - dq7; sum7 = fma(d7, d7, sum7)
+        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq4 = fma_mad[width](v2_4.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq5 = fma_mad[width](v2_5.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq6 = fma_mad[width](v2_6.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var dq7 = fma_mad[width](v2_7.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
+        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
+        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
+        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
+        var d4 = f1 - dq4; sum4 = fma_mad[width](d4, d4, sum4)
+        var d5 = f1 - dq5; sum5 = fma_mad[width](d5, d5, sum5)
+        var d6 = f1 - dq6; sum6 = fma_mad[width](d6, d6, sum6)
+        var d7 = f1 - dq7; sum7 = fma_mad[width](d7, d7, sum7)
 
     var r0 = sum0.reduce_add(); var r1 = sum1.reduce_add()
     var r2 = sum2.reduce_add(); var r3 = sum3.reduce_add()
@@ -1291,15 +1292,15 @@ def l2_distance_8query_fp32_int8_jit[dim: Int](
 
     for i in range(0, dim - width + 1, width):
         # Load neighbor chunk once, dequantize once → shared across all 8 queries
-        var dq = fma(neighbor.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var d0 = q0.load[width=width](i) - dq; sum0 = fma(d0, d0, sum0)
-        var d1 = q1.load[width=width](i) - dq; sum1 = fma(d1, d1, sum1)
-        var d2 = q2.load[width=width](i) - dq; sum2 = fma(d2, d2, sum2)
-        var d3 = q3.load[width=width](i) - dq; sum3 = fma(d3, d3, sum3)
-        var d4 = q4.load[width=width](i) - dq; sum4 = fma(d4, d4, sum4)
-        var d5 = q5.load[width=width](i) - dq; sum5 = fma(d5, d5, sum5)
-        var d6 = q6.load[width=width](i) - dq; sum6 = fma(d6, d6, sum6)
-        var d7 = q7.load[width=width](i) - dq; sum7 = fma(d7, d7, sum7)
+        var dq = fma_mad[width](neighbor.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
+        var d0 = q0.load[width=width](i) - dq; sum0 = fma_mad[width](d0, d0, sum0)
+        var d1 = q1.load[width=width](i) - dq; sum1 = fma_mad[width](d1, d1, sum1)
+        var d2 = q2.load[width=width](i) - dq; sum2 = fma_mad[width](d2, d2, sum2)
+        var d3 = q3.load[width=width](i) - dq; sum3 = fma_mad[width](d3, d3, sum3)
+        var d4 = q4.load[width=width](i) - dq; sum4 = fma_mad[width](d4, d4, sum4)
+        var d5 = q5.load[width=width](i) - dq; sum5 = fma_mad[width](d5, d5, sum5)
+        var d6 = q6.load[width=width](i) - dq; sum6 = fma_mad[width](d6, d6, sum6)
+        var d7 = q7.load[width=width](i) - dq; sum7 = fma_mad[width](d7, d7, sum7)
 
     var r0 = sum0.reduce_add(); var r1 = sum1.reduce_add()
     var r2 = sum2.reduce_add(); var r3 = sum3.reduce_add()

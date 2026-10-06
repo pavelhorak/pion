@@ -40,7 +40,7 @@ Usage: python3 tests/test_gh216.py [./pion-server-dev]
 """
 import os, socket, subprocess, sys, time, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from resp_strict import reader  # noqa: E402  (strict one-reply reads)
+from resp_strict import reader, wait_ready_pid  # noqa: E402  (strict one-reply reads)
 
 BINARY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server")
 PORT = 1979
@@ -81,7 +81,9 @@ def _await_ready(s, deadline_s=30.0):
     return s
 
 
-def connect():
+def connect(proc):
+    # Ready = THIS process answering, not a killed server's lingering listener (#27).
+    wait_ready_pid(PORT, proc, 60)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         s = socket.socket()
@@ -188,7 +190,7 @@ def run_mode(save_first):
     os.makedirs(WORKDIR, exist_ok=True)
 
     proc = start()
-    s = connect()
+    s = connect(proc)
     write_workload(s)
     if save_first:
         send(s, "SAVE")
@@ -196,7 +198,7 @@ def run_mode(save_first):
     kill(proc)
 
     proc = start()
-    s = connect()
+    s = connect(proc)
     failures = verify(s, mode)
     s.close()
     kill(proc)

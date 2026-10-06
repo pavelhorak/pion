@@ -775,6 +775,7 @@ tier = "gate"
 file = "tests/test_kv_prefix_cold_tier.py"
 server = "self"
 tier = "gate"
+requires = ["macos"]   # starts the server with --metal-attention
 
 [[test]]
 file = "tests/test_kv_prefix_commit.py"
@@ -970,6 +971,7 @@ timeout = 900
 file = "tests/test_pion_serve_sie_embed.py"
 server = "-w 1"
 tier = "gate"
+requires = ["py:flask"]   # pion-serve/serve.py imports it at the top
 
 [[test]]
 file = "tests/test_ppl_eval_methodology.py"
@@ -1005,6 +1007,15 @@ tier = "gate"
 file = "tests/test_redis_differential.py"
 server = "-w 1"
 args = "--start-redis --pion-port 1974 --redis-port 6399"
+tier = "gate"
+requires = ["bin:redis-server"]
+
+# The same probes with both connections on RESP3 (HELLO 3): reply TYPES as
+# well as values (#30).
+[[test]]
+file = "tests/test_redis_differential.py"
+server = "-w 1"
+args = "--start-redis --pion-port 1974 --redis-port 6398 --resp3"
 tier = "gate"
 requires = ["bin:redis-server"]
 
@@ -1245,6 +1256,13 @@ server = "none"
 tier = "gate"
 timeout = 120
 
+# gh #225: every dispatch arm pins its whole command name; canaried.
+[[test]]
+file = "tests/test_audit_loose_matchers.py"
+server = "none"
+tier = "gate"
+timeout = 60
+
 [[test]]
 file = "tests/test_split_frames.py"
 server = "self"
@@ -1294,6 +1312,123 @@ server = "self"
 tier = "gate"
 timeout = 300
 
+[[test]]
+file = "tests/test_client_buffer_overflow.py"
+server = "-w 1"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_conn_churn_isolation.py"
+server = "-w 1"
+tier = "gate"
+timeout = 180
+
+[[test]]
+file = "tests/test_connection_burst.py"
+server = "-w 1"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_iouring_unavailable.py"
+server = "self"
+tier = "gate"
+timeout = 180
+requires = ["linux"]
+
+[[test]]
+file = "tests/test_restart_rebind.py"
+server = "self"
+tier = "gate"
+timeout = 240
+
+[[test]]
+file = "tests/test_stream_entries.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_flush_durability.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_scripting.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_blocking.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_missing_commands.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_pubsub.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_vector_ingest_paths.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_dump_restore.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+# #45: a key past its deadline is gone for every command (against Redis, both
+# with active expiry off), expiry is logged, RANDOMKEY/KEYS/SCAN, DEBUG.
+[[test]]
+file = "tests/test_lazy_expiry.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+# #46: a document that leaves the keyspace (or whose vector leaves it) leaves
+# FT.SEARCH's results, across restarts, SAVE, the build, and workers.
+[[test]]
+file = "tests/test_vector_doc_lifecycle.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+# Every keyword argument of the differential's scripts, mangled: a parser that
+# matches a keyword by its first letters, or ignores an unknown one, shows up
+# as a divergence from Redis (#32).
+[[test]]
+file = "tests/test_redis_differential.py"
+server = "-w 1"
+args = "--start-redis --pion-port 1974 --redis-port 6397 --mutate"
+tier = "gate"
+requires = ["bin:redis-server"]
+
+[[test]]
+file = "tests/test_vector_isa_info.py"
+server = "self"
+tier = "gate"
+timeout = 240
+
+[[test]]
+file = "tests/test_embedding_store_owners.py"
+server = "self"
+tier = "gate"
+timeout = 600
+
 [not_tests]
 # benchmarks, profilers, one-off repros and helpers — run by hand, never gated
 files = [
@@ -1334,3 +1469,39 @@ files = [
   "tests/run_all.py",
   "tests/simd_kernel_bench.mojo",
 ]
+
+# #47: admin and introspection commands do what they answer, or refuse:
+# CLIENT (IDs, LIST, KILL, PAUSE, REPLY, UNBLOCK), SLOWLOG, ACL users and LOG,
+# COMMAND, LATENCY, MEMORY, standalone CLUSTER; byte-identical with Redis
+# where Pion does not differ on purpose (that part skips without redis-server)
+[[test]]
+file = "tests/test_admin_commands.py"
+server = "self"
+tier = "gate"
+timeout = 300
+
+# #40: stream consumer groups — a work queue end to end, blocking XREADGROUP,
+# a large pending list staying linear, every group surviving WAL replay /
+# SAVE / BGREWRITEAOF / DUMP / COPY and reaching a replica, and the same
+# replies as a live Redis (that part skips without redis-server)
+[[test]]
+file = "tests/test_stream_groups.py"
+server = "self"
+tier = "gate"
+timeout = 900
+
+# #40: a local buffer read through a pointer cast through Int (its origin
+# erased) must outlive the read; canaried with every shape that shipped
+[[test]]
+file = "tests/test_audit_erased_origin.py"
+server = "none"
+tier = "gate"
+timeout = 120
+
+# #25: no `fma(` in src/ outside fma_mad.mojo (each lane is a libm call on the
+# x86-64-v2 release build), and no vendored MANIFEST naming `fmaf`
+[[test]]
+file = "tests/test_audit_raw_fma.py"
+server = "none"
+tier = "gate"
+timeout = 60

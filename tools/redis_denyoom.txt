@@ -1,6 +1,8 @@
 append
 bitfield
 bitop
+blmove
+brpoplpush
 copy
 decr
 decrby
@@ -26,10 +28,12 @@ mset
 msetex
 msetnx
 pfadd
+pfdebug
 pfmerge
 psetex
 psubscribe
 restore
+restore-asking
 rpoplpush
 rpush
 rpushx
@@ -47,6 +51,7 @@ subscribe
 sunionstore
 vadd
 xadd
+xsetid
 zadd
 zdiffstore
 zincrby

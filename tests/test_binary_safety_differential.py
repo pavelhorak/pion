@@ -78,7 +78,8 @@ def main():
     if args.start_redis:
         rdir = tempfile.mkdtemp(prefix="bs-redis-")
         rproc = subprocess.Popen(["redis-server", "--port", str(args.redis_port), "--save", "",
-                                  "--appendonly", "no", "--dir", rdir],
+                                  "--appendonly", "no", "--dir", rdir,
+                                  "--databases", "1"],  # Pion has one database
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.time() + 15
@@ -99,6 +100,8 @@ def main():
         keymap = {"%K": "dfs:k", "%K2": "dfs:k2", "%K3": "dfs:k3"}
         n, diffs, desync = 0, [], []
         for name, script in trd.SEMANTIC_SCRIPTS:
+            if name.startswith("scripting:"):
+                continue        # their literals are Lua source, not data
             for cmd in script:
                 c = [rewrite(keymap.get(p, p), {v: v for v in keymap.values()}) for p in cmd]
                 n += 1

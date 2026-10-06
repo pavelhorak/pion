@@ -107,8 +107,10 @@ struct ReplicaReceiver(Movable):
         if is_not_null(self.handle):
             external_call["pion_repl_replica_stop", NoneType](self.handle)
 
-    def setup(mut self, primary_host: String, primary_repl_port: Int) -> Bool:
-        """Create + start the replica receiver thread."""
+    def setup(mut self, primary_host: String, primary_repl_port: Int, listening_port: Int = 0) -> Bool:
+        """Create + start the replica receiver thread. `listening_port` is the
+        port this server serves clients on: sent with PSYNC so the primary's
+        ROLE can list it (#39)."""
         var ph = primary_host
         var blk = external_call["pion_repl_replica_create",
                                  Pointer[NoneType, MutUntrackedOrigin]](
@@ -118,6 +120,7 @@ struct ReplicaReceiver(Movable):
         if is_null(blk):
             return False
         self.handle = blk
+        external_call["pion_repl_replica_set_listening_port", NoneType](blk, Int32(listening_port))
         var rc = external_call["pion_repl_replica_start", Int32](blk)
         return rc == 0
 
@@ -212,10 +215,13 @@ def apply_wal_entries(
             keyspace[].reset()           # aggregates go to the graveyard (gh #394)
             if is_not_null(ttl_map):
                 ttl_map[].reset()
+        elif cmd_id >= 35 and cmd_id <= 37:   # #36 FUNCTION LOAD / DELETE / FLUSH
+            _ = external_call["pion_lua_wal_apply", Int64](
+                Int64(cmd_id), key_ptr, Int64(key_len), buf.unsafe_offset(val_off), Int64(val_len))
         elif cmd_id == 25 or cmd_id == 26:   # gh #174 TTL records (EXPIREAT / PERSIST)
             _ = wal_apply_ttl(UInt8(cmd_id), key_ptr, key_len,
                               buf.unsafe_offset(val_off), val_len, ttl_map)
-        elif wal_is_aggregate(UInt8(cmd_id)):   # 5-24, 27-31 incl. 31 MSET
+        elif wal_is_aggregate(UInt8(cmd_id)):   # 5-24, 27-34 incl. 31 MSET, 34 XADD
             _ = wal_apply_aggregate(UInt8(cmd_id), key_ptr, key_len,
                                     buf.unsafe_offset(val_off), val_len, keyspace)
         elif cmd_id == 4:  # gh #163 blob pointer — meaningless on a replica

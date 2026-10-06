@@ -52,6 +52,8 @@ MAP_METHODS = {
     # gh #392 per-field TTL methods on SlabHashMap / StripedHashMap: map calls inside
     "field_deadline", "set_field_deadline", "clear_field_deadline", "expire_field",
     "note_field_ttl",
+    # #45: StripedHashMap's TTL reads (a ttl_map get; keep nothing)
+    "deadline", "is_expired",
 }
 # Read-only methods on the value itself.
 READ_METHODS = {
@@ -74,10 +76,12 @@ SAFE_FUNCS = {
     "member_score": {0},             # SlabSkipList.member_score: dict get
     "_lookup": {1},                  # vset.mojo: keyspace get + type check
     "hash_get_live": {1},            # container_free: keyspace get, purge, remove_and_free
+    "_lex_in": {2, 4},               # sorted_set.mojo: lex_lt comparisons only
     "index_field_ttls": {1},         # container_free: note_field_ttl (a map set)
     # wal.mojo replay lookups: keyspace get, and set on create
     "_replay_hash": {1}, "_replay_list": {1}, "_replay_set": {1}, "_replay_zset": {1},
     "_replay_stream": {1}, "_replay_vset": {1},
+    "hll_add": {1},                  # hll.mojo: hashes the element, keeps nothing
     "key_slot_from_hash": set(),     # only ever sees X.__hash__()
     "UInt64": {0},                   # UInt64(X.__hash__()) — never X itself
 }

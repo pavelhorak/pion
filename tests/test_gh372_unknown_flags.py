@@ -16,9 +16,11 @@ What is asserted:
   3. a value-taking flag with no value exits 1 and says it needs a value
      (it used to fall through as "unknown" or be silently ignored)
   4. an unparseable number (`-p abc`, `-w two`) exits 1
-  5. a correct command line still starts and serves (the refusal must not
+  5. invalid --tenant setups and cluster ports with no room for the replication
+     port (+10000) exit 1 (they exited 0, or started and replicated nothing)
+  6. a correct command line still starts and serves (the refusal must not
      reject what is valid — a guard needs a probe for the case it ALLOWS)
-  6. source check: _known_flags() / _value_flags() in src/main.mojo list exactly
+  7. source check: _known_flags() / _value_flags() in src/main.mojo list exactly
      the flags the parser matches (they drive the "did you mean" and
      "requires a value" messages, so drift makes the messages lie)
 
@@ -126,6 +128,19 @@ def main():
             ["--requirepass", "requires a value"])
     refused("unparseable port", ["-w", "1", "-p", "abc"], ["abc"])
     refused("unparseable worker count", ["-w", "two"], ["two"])
+    # Refusals that exited 0 (a bare `return` from main), so a supervisor or
+    # a CI step read them as a successful start
+    refused("--tenant without --requirepass", ["-p", str(PORT), "--tenant", "acme=pw"],
+            ["--tenant requires --requirepass"])
+    refused("invalid --tenant argument", ["-p", str(PORT), "--requirepass", "x", "--tenant", "nopassword"],
+            ["invalid --tenant argument"])
+    # A cluster node replicates on port + 10000: one above 55535 used to start
+    # and replicate nothing
+    refused("cluster port with no room for replication", ["-p", "60001", "--cluster"],
+            ["port + 10000", "60001"])
+    refused("replica of a primary with no room for replication",
+            ["-p", str(PORT), "--cluster", "--cluster-replica", "--cluster-primary-host", "127.0.0.1",
+             "--cluster-primary-port", "60001"], ["port + 10000", "60001"])
 
     # The valid case — several value-taking and boolean flags together.
     rc, up, out = run(["-p", str(PORT), "-w", "1", "--no-crash-log", "--wal-size", "64",

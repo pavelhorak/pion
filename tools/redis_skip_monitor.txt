@@ -1,0 +1,6 @@
+eval
+eval_ro
+evalsha
+evalsha_ro
+fcall
+fcall_ro

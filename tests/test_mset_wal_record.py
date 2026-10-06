@@ -24,14 +24,15 @@ What this proves, after a SIGKILL (so WAL replay is the only way back):
 import os
 import shutil
 import signal
-import socket
 import struct
 import subprocess
 import sys
 import tempfile
-import time
 
 import redis
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid, wait_port_free  # noqa: E402
 
 BINARY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server")
 PORT = 1987
@@ -50,15 +51,12 @@ def spawn(workdir):
     p = subprocess.Popen([os.path.abspath(BINARY), "-p", str(PORT), "-w", "1",
                           "--no-auto-detect", "--no-auto-embed", "--no-crash-log"],
                          cwd=workdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", PORT), timeout=0.5).close()
-            return p
-        except OSError:
-            time.sleep(0.1)
-    p.kill()
-    sys.exit("FAIL: server did not start")
+    try:
+        wait_ready_pid(PORT, p, 30)   # this process, not a lingering listener (#27)
+    except RuntimeError:
+        p.kill()
+        sys.exit("FAIL: server did not start")
+    return p
 
 
 def wal_records(path):
@@ -121,6 +119,7 @@ def main():
         print("SIGKILL + replay")
         proc.send_signal(signal.SIGKILL)
         proc.wait(timeout=10)
+        wait_port_free(PORT)
         proc = spawn(workdir)
         r = redis.Redis(port=PORT)
 

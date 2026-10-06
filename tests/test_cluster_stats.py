@@ -26,10 +26,12 @@ PION_BIN = os.environ.get("PION_BIN", "./pion-server")
 PION_PORT = int(os.environ.get("PION_PORT", "16974"))
 
 
-def _wait_ready(host: str, port: int, timeout: float = 20.0) -> None:
+def _wait_ready(host: str, port: int, timeout: float = 60.0, proc=None) -> None:
     deadline = time.time() + timeout
     last_err = None
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise RuntimeError(f"pion-server exited with {proc.returncode} before answering")
         try:
             r = redis.Redis(host=host, port=port, decode_responses=False, socket_timeout=1.0)
             if r.ping():
@@ -121,14 +123,27 @@ def main() -> int:
             try: os.remove(f)
             except OSError: pass
 
-    args = [PION_BIN, "--kvcache", "--metal-attention",
+    # #27: no --metal-attention (CLUSTER STATS reads the V-store, KV.PREFIX and
+    # ATTEND counters, none of which needs it, and it exists only on macOS) and
+    # no auto-detected sidecar (its startup outlasted the readiness wait on a
+    # Linux box). The server's output goes to a log that is printed on failure:
+    # it went to DEVNULL, so a server that never listened left no trace.
+    args = [PION_BIN, "--kvcache", "--no-auto-detect", "--no-auto-embed",
             "-p", str(PION_PORT), "-w", "1"]
     print(f"[boot] {' '.join(args)}")
-    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    import tempfile
+    log_path = os.path.join(tempfile.gettempdir(), f"cluster_stats_{PION_PORT}.log")
+    log = open(log_path, "w")
+    proc = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT)
 
     passed, failed = 0, 0
     try:
-        _wait_ready("127.0.0.1", PION_PORT)
+        try:
+            _wait_ready("127.0.0.1", PION_PORT, proc=proc)
+        except RuntimeError:
+            log.flush()
+            print(open(log_path).read()[-3000:])
+            raise
 
         # --- 1. Empty server: STATS should respond with sane zeros. -----
         info = _cluster_stats("127.0.0.1", PION_PORT)

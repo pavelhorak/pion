@@ -20,6 +20,8 @@ bug-by-bug audit of this file. Hence `--wal-size 1`.
 Usage: python3 tests/test_gh250_wal_rotation.py [./pion-server]
 """
 import os, socket, subprocess, sys, time, shutil, signal
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid  # noqa: E402
 
 BINARY = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server"))
 PORT = 1986
@@ -76,18 +78,30 @@ class Client:
 
 
 def spawn():
+    # The server's output and its crash log / status file stay in WORKDIR, and
+    # are printed if the run fails: a reset connection on Linux x86 left no
+    # evidence while they went to /dev/null and WORKDIR was deleted.
     return subprocess.Popen([BINARY, "-p", str(PORT), "-w", "1", "--no-auto-detect",
                              "--no-auto-embed", "--wal-size", "1"],
-                            cwd=WORKDIR, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
+                            cwd=WORKDIR, stdout=open(os.path.join(WORKDIR, "server.log"), "ab"),
+                            stderr=subprocess.STDOUT)
 
 
-def connect():
-    deadline = time.monotonic() + 40
-    while time.monotonic() < deadline:
-        try: return Client(PORT)
-        except OSError: time.sleep(0.25)
-    raise RuntimeError("server did not come up")
+def evidence():
+    for name in sorted(os.listdir(WORKDIR)) if os.path.isdir(WORKDIR) else []:
+        if name == "server.log" or name.endswith(".crash.log") or name.endswith(".status"):
+            with open(os.path.join(WORKDIR, name), "rb") as f:
+                tail = f.read()[-4000:].decode("utf-8", "replace")
+            print(f"--- {name} (tail) ---\n{tail}")
+
+
+def connect(proc):
+    # THIS process must answer, not the SIGKILLed one: on Linux its io_uring
+    # teardown keeps the old listening socket open for a moment after the
+    # kill, accepting into a backlog nobody will serve, and a client that took
+    # a bare TCP connect as "up" was reset there (#22, #27) — 1 of 3 runs.
+    wait_ready_pid(PORT, proc, 60)
+    return Client(PORT)
 
 
 def sealed_count(c):
@@ -102,7 +116,7 @@ def main():
     shutil.rmtree(WORKDIR, ignore_errors=True); os.makedirs(WORKDIR, exist_ok=True)
     proc = spawn()
     try:
-        c = connect()
+        c = connect(proc)
         expected = {}
         acked = 0
         for i in range(MSETS):
@@ -130,9 +144,14 @@ def main():
 
         proc.send_signal(signal.SIGKILL); proc.wait(timeout=15)
         proc = spawn()
-        c = connect()
+        c = connect(proc)
 
-        missing = [k for k, v in expected.items() if c("GET", k) != v.encode()]
+        try:
+            missing = [k for k, v in expected.items() if c("GET", k) != v.encode()]
+        except OSError:
+            print(f"restarted server: exit code {proc.poll()}")
+            evidence()
+            raise
         check("ZERO string keys lost across the rotation", not missing,
               f"{len(missing)} lost, e.g. {sorted(missing)[:6]}")
         h_missing = [i for i in range(200)
@@ -146,6 +165,8 @@ def main():
     finally:
         try: proc.kill(); proc.wait(timeout=5)
         except Exception: pass
+        if failures:
+            evidence()
         shutil.rmtree(WORKDIR, ignore_errors=True)
 
     print(f"\n{len(passes)} passed, {len(failures)} failed")

@@ -32,7 +32,7 @@ from src.common.hll import HLL_REGISTERS
 from src.io.blob_store import BlobStore
 from src.io.wal import wal_apply_aggregate, wal_apply_ttl, wal_is_aggregate, gv_bytes
 from src.common.vector_set import VectorSet
-from src.common.stream_data import StreamData
+from src.common.stream_data import StreamData, encode_meta_rec, encode_group_rec, encode_consumer_rec, encode_nack_rec
 
 
 comptime SNAP_MAGIC   = UInt64(0x31504E4150534E50)
@@ -103,6 +103,259 @@ def _snap_read_all(fd: Int32, ptr: Pointer[UInt8, MutUntrackedOrigin], n: Int) -
     return True
 
 
+struct RecordSink(Movable):
+    """Where serialized records go: a file (fd >= 0, the snapshot) or memory
+    (fd < 0, a DUMP payload, #41)."""
+    var fd: Int32
+    var buf: List[UInt8]
+
+    def __init__(out self, fd: Int32):
+        self.fd = fd
+        self.buf = List[UInt8]()
+
+    def __init__(out self, *, deinit take: Self):
+        self.fd = take.fd
+        self.buf = take.buf^
+
+    def write(mut self, p: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+        if n <= 0:
+            return
+        if self.fd >= 0:
+            _snap_write_all(self.fd, p, n)
+        else:
+            var at = len(self.buf)
+            self.buf.resize(at + n, 0)
+            unsafe_memcpy(dest=Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(self.buf.unsafe_ptr()) + at),
+                          src=p, count=n)
+
+    def take_buf(deinit self) -> List[UInt8]:
+        """The bytes written to a memory sink."""
+        return self.buf^
+
+
+def _sink_record(mut sink: RecordSink, ehdr: Pointer[UInt8, MutUntrackedOrigin], cmd_id: UInt8,
+                 kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
+                 vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int):
+    """One [4B elen][1B cmd][4B klen][key][4B vlen][val] record."""
+    _snap_write_u32(ehdr, 0, UInt32(13 + kl + vl))
+    ehdr[unsafe_offset=4] = cmd_id
+    _snap_write_u32(ehdr, 5, UInt32(kl))
+    sink.write(ehdr, 9)
+    sink.write(kp, kl)
+    _snap_write_u32(ehdr, 0, UInt32(vl))
+    sink.write(ehdr, 4)
+    sink.write(vp, vl)
+
+
+def _sink_list(mut sink: RecordSink, ehdr: Pointer[UInt8, MutUntrackedOrigin], cmd_id: UInt8,
+               kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int, payload: List[UInt8]):
+    """A record whose value is `payload` (#40's stream group records)."""
+    _sink_record(sink, ehdr, cmd_id, kp, kl,
+                 Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(payload.unsafe_ptr())), len(payload))
+
+
+def _sink_field_record(mut sink: RecordSink, ehdr: Pointer[UInt8, MutUntrackedOrigin], cmd_id: UInt8,
+                       kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
+                       fp: Pointer[UInt8, MutUntrackedOrigin], fl: Int,
+                       vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int):
+    """A record whose value is [4B fl][f][4B vl][v] (WAL append_field_kv)."""
+    _snap_write_u32(ehdr, 0, UInt32(13 + kl + 8 + fl + vl))
+    ehdr[unsafe_offset=4] = cmd_id
+    _snap_write_u32(ehdr, 5, UInt32(kl))
+    sink.write(ehdr, 9)
+    sink.write(kp, kl)
+    _snap_write_u32(ehdr, 0, UInt32(8 + fl + vl))
+    _snap_write_u32(ehdr, 4, UInt32(fl))
+    sink.write(ehdr, 8)
+    sink.write(fp, fl)
+    _snap_write_u32(ehdr, 0, UInt32(vl))
+    sink.write(ehdr, 4)
+    sink.write(vp, vl)
+
+
+def write_key_records(mut sink: RecordSink, kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
+                      val: GenericValue, blobs: Pointer[BlobStore, MutUntrackedOrigin], inline_blobs: Bool,
+                      ehdr: Pointer[UInt8, MutUntrackedOrigin], vbuf: Pointer[UInt8, MutUntrackedOrigin],
+                      fbuf: Pointer[UInt8, MutUntrackedOrigin], scored: Pointer[UInt8, MutUntrackedOrigin]):
+    """One key's value as WAL-format records (gh #170): the snapshot's body,
+    and a DUMP payload's (#41). `inline_blobs` writes a blob-backed string's
+    bytes instead of its arena pointer, which means nothing outside this
+    server. Scratch buffers: ehdr 16 bytes, vbuf and fbuf 64, scored 8."""
+    var t = Int(val.type.value)
+
+    if val.is_string():
+        var vl = val.string_len()
+
+        # gh #163: a blob-backed value is recorded as its arena pointer,
+        # not its bytes. Copying it here would defeat the tier — SAVE
+        # would write a second multi-GB copy and the reload would bring
+        # it back as anonymous heap.
+        var is_blob = val.is_blob_backed() and not inline_blobs
+        var bseg = 0
+        var boff = 0
+        if is_blob and is_not_null(blobs):
+            if not blobs[].locate(val.as_string(), vl, bseg, boff):
+                is_blob = False     # not resolvable — fall back to bytes
+
+        if is_blob:
+            var pr = alloc[UInt8](24)
+            var q = pr.unsafe_bitcast[UInt64]()
+            q[unsafe_offset=0] = UInt64(bseg); q[unsafe_offset=1] = UInt64(boff); q[unsafe_offset=2] = UInt64(vl)
+            _sink_record(sink, ehdr, 4, kp, kl, pr, 24)
+            pr.unsafe_free()
+        else:
+            _sink_record(sink, ehdr, 1, kp, kl, val.as_string_safe(vbuf), vl)
+
+    elif t == ValueType.INT or t == ValueType.FLOAT:
+        # gh #170: INCR'd keys hold INT values — v1 dropped them too.
+        # Restored as strings, matching how WAL replays an INCR's SET.
+        var vl = 0
+        var vp = gv_bytes(val, vbuf, vl)
+        _sink_record(sink, ehdr, 1, kp, kl, vp, vl)
+
+    elif t == ValueType.HASH:
+        var hp = val.as_hash().unsafe_bitcast[SlabHashMap]()
+        for j in range(hp[].capacity):
+            var hm = hp[].metadata[unsafe_offset=j]
+            if hm == SlabHashMap.EMPTY or hm == SlabHashMap.DELETED:
+                continue
+            var fl = 0
+            var fp = gv_bytes(hp[].keys[unsafe_offset=j], fbuf, fl)
+            var vl = 0
+            var vp = gv_bytes(hp[].values[unsafe_offset=j], vbuf, vl)
+            # record: [4B elen][cmd 5][klen][key][vlen][[4B fl][f][4B vl][v]]
+            _snap_write_u32(ehdr, 0, UInt32(13 + kl + 8 + fl + vl))
+            ehdr[unsafe_offset=4] = UInt8(5)
+            _snap_write_u32(ehdr, 5, UInt32(kl))
+            sink.write(ehdr, 9)
+            sink.write(kp, kl)
+            _snap_write_u32(ehdr, 0, UInt32(8 + fl + vl))
+            _snap_write_u32(ehdr, 4, UInt32(fl))
+            sink.write(ehdr, 8)
+            sink.write(fp, fl)
+            _snap_write_u32(ehdr, 0, UInt32(vl))
+            sink.write(ehdr, 4)
+            sink.write(vp, vl)
+        # gh #392: field TTLs, after the fields they belong to.
+        if Int(hp[].field_ttl) != 0:
+            var ft = hp[].field_ttl
+            for j in range(ft[].capacity):
+                var tm = ft[].metadata[unsafe_offset=j]
+                if tm == SlabHashMap.EMPTY or tm == SlabHashMap.DELETED:
+                    continue
+                var fl2 = 0
+                var fp2 = gv_bytes(ft[].keys[unsafe_offset=j], fbuf, fl2)
+                scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = UInt64(ft[].values[unsafe_offset=j].as_int())
+                _sink_field_record(sink, ehdr, 32, kp, kl, fp2, fl2, scored, 8)
+
+    elif t == ValueType.LIST:
+        var lp = val.as_list().unsafe_bitcast[SlabList]()
+        var elems = lp[].get_all()
+        for j in range(len(elems)):
+            var vl = 0
+            var vp = gv_bytes(elems[j], vbuf, vl)
+            _sink_record(sink, ehdr, 7, kp, kl, vp, vl)   # RPUSH in order
+
+    elif t == ValueType.SET:
+        var sp = val.as_set().unsafe_bitcast[SlabHashMap]()
+        for j in range(sp[].capacity):
+            var sm = sp[].metadata[unsafe_offset=j]
+            if sm == SlabHashMap.EMPTY or sm == SlabHashMap.DELETED:
+                continue
+            var vl = 0
+            var vp = gv_bytes(sp[].keys[unsafe_offset=j], vbuf, vl)
+            _sink_record(sink, ehdr, 8, kp, kl, vp, vl)
+
+    elif t == ValueType.ZSET or t == ValueType.GEO:
+        var zp = val.as_zset().unsafe_bitcast[SlabSkipList]()
+        var cid = UInt8(9) if t == ValueType.ZSET else UInt8(15)
+        var curr = zp[].head[].forward[0]
+        while is_not_null(curr):
+            var vl = 0
+            var vp = gv_bytes(curr[].obj, vbuf, vl)
+            _snap_write_u32(ehdr, 0, UInt32(13 + kl + 8 + vl))
+            ehdr[unsafe_offset=4] = cid
+            _snap_write_u32(ehdr, 5, UInt32(kl))
+            sink.write(ehdr, 9)
+            sink.write(kp, kl)
+            _snap_write_u32(ehdr, 0, UInt32(8 + vl))
+            sink.write(ehdr, 4)
+            scored.unsafe_bitcast[Float64]()[unsafe_offset=0] = curr[].score
+            sink.write(scored, 8)
+            sink.write(vp, vl)
+            curr = curr[].forward[0]
+
+    elif t == ValueType.BITMAP:
+        _sink_record(sink, ehdr, 16, kp, kl, val.as_bitmap(), val.bitmap_len())
+
+    elif t == ValueType.HLL:
+        _sink_record(sink, ehdr, 17, kp, kl, val.as_hll(), HLL_REGISTERS)
+
+    elif t == ValueType.STREAM:
+        # gh #174: one XADD record per *live* entry, in ID order:
+        # cmd 34, whose pairs carry u32 lengths.
+        # Tombstoned entries (XDEL, MAXLEN trim) are skipped rather
+        # than written-then-deleted, so a snapshot compacts the
+        # stream instead of carrying its garbage forward.
+        var sd = val.as_hash().unsafe_bitcast[StreamData]()
+        for ei in range(sd[].count):
+            if sd[].entries[unsafe_offset=ei].deleted:
+                continue
+            var e = sd[].entries[unsafe_offset=ei]
+            _snap_write_u32(ehdr, 0, UInt32(13 + kl + 16 + e.data_len))
+            ehdr[unsafe_offset=4] = UInt8(34)
+            _snap_write_u32(ehdr, 5, UInt32(kl))
+            sink.write(ehdr, 9)
+            sink.write(kp, kl)
+            _snap_write_u32(ehdr, 0, UInt32(16 + e.data_len))
+            sink.write(ehdr, 4)
+            scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = e.id_ms
+            sink.write(scored, 8)
+            scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = e.id_seq
+            sink.write(scored, 8)
+            if e.data_len > 0:
+                sink.write(e.data, e.data_len)
+        # #40: then the stream's metadata (record 45, which also keeps an
+        # empty stream: it had no record before and vanished on reload) and
+        # its consumer groups, consumers and pending entries (38, 41, 43).
+        _sink_list(sink, ehdr, 45, kp, kl, encode_meta_rec(sd))
+        for g in range(len(sd[].groups)):
+            ref grp = sd[].groups[g]
+            _sink_list(sink, ehdr, 38, kp, kl, encode_group_rec(grp))
+            for c in range(grp.ncons()):
+                _sink_list(sink, ehdr, 41, kp, kl, encode_consumer_rec(grp.name, grp.consumers[grp.by_name[c]]))
+            for k in range(len(grp.pel)):
+                var nk = grp.pel[k]
+                var oi = grp.consumer_by_id(nk.consumer)
+                if oi < 0:
+                    continue
+                _sink_list(sink, ehdr, 43, kp, kl, encode_nack_rec(grp.name, grp.consumers[oi].name, nk.ms, nk.seq,
+                                                                   nk.delivery_time, nk.delivery_count))
+
+    elif t == ValueType.VSET:
+        # gh #378: live elements in slot order (VSIM breaks score
+        # ties by slot), each as the WAL's VADD record, then its
+        # attribute. Tombstones are dropped, so a load compacts.
+        var vs = val.as_hash().unsafe_bitcast[VectorSet]()
+        var payload = alloc[UInt8](vs[].payload_len())
+        for s in range(vs[].n):
+            if vs[].alive[unsafe_offset=s] == 0:
+                continue
+            var pl = vs[].stored_payload(s, payload)
+            # The name and attribute bytes are read where the set keeps them
+            # (its lists are on the heap). A local String copy would put a
+            # short name's bytes on the stack, and a stack address may not
+            # reach an out-of-line call (gh #349).
+            var np = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(vs[].names[s].unsafe_ptr()))
+            var nl = vs[].names[s].byte_length()
+            _sink_field_record(sink, ehdr, 28, kp, kl, np, nl, payload, pl)
+            var al = vs[].attrs[s].byte_length()
+            if al > 0:
+                _sink_field_record(sink, ehdr, 30, kp, kl, np, nl,
+                    Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(vs[].attrs[s].unsafe_ptr())), al)
+        payload.unsafe_free()
+
+
 struct SnapshotEngine(Movable):
     var snapshot_path: String
 
@@ -145,7 +398,16 @@ struct SnapshotEngine(Movable):
         if t == ValueType.STREAM:
             # gh #174: one record per live entry — must match what the writer
             # emits below, or the header's kv_count lies about the file.
-            return val.as_hash().unsafe_bitcast[StreamData]()[].alive
+            # #40: plus the metadata record, and per group its record, its
+            # consumers' and its (owned) pending entries'.
+            var sd = val.as_hash().unsafe_bitcast[StreamData]()
+            var n = sd[].alive + 1
+            for g in range(len(sd[].groups)):
+                n += 1 + sd[].groups[g].ncons()
+                for k in range(len(sd[].groups[g].pel)):
+                    if sd[].groups[g].consumer_by_id(sd[].groups[g].pel[k].consumer) >= 0:
+                        n += 1
+            return n
         if t == ValueType.VSET:
             # gh #378: one VADD per live element, plus one VSETATTR for each
             # that carries an attribute — the writer's predicate, exactly.
@@ -158,41 +420,6 @@ struct SnapshotEngine(Movable):
                         n += 1
             return n
         return 0
-
-    def _write_record(self, fd: Int32, ehdr: Pointer[UInt8, MutUntrackedOrigin],
-                      cmd_id: UInt8,
-                      kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
-                      vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int):
-        """One [4B elen][1B cmd][4B klen][key][4B vlen][val] record."""
-        _snap_write_u32(ehdr, 0, UInt32(13 + kl + vl))
-        ehdr[unsafe_offset=4] = cmd_id
-        _snap_write_u32(ehdr, 5, UInt32(kl))
-        _snap_write_all(fd, ehdr, 9)
-        _snap_write_all(fd, kp, kl)
-        _snap_write_u32(ehdr, 0, UInt32(vl))
-        _snap_write_all(fd, ehdr, 4)
-        if vl > 0:
-            _snap_write_all(fd, vp, vl)
-
-    def _write_field_record(self, fd: Int32, ehdr: Pointer[UInt8, MutUntrackedOrigin],
-                            cmd_id: UInt8,
-                            kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
-                            fp: Pointer[UInt8, MutUntrackedOrigin], fl: Int,
-                            vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int):
-        """A record whose value is [4B fl][f][4B vl][v] (WAL append_field_kv)."""
-        _snap_write_u32(ehdr, 0, UInt32(13 + kl + 8 + fl + vl))
-        ehdr[unsafe_offset=4] = cmd_id
-        _snap_write_u32(ehdr, 5, UInt32(kl))
-        _snap_write_all(fd, ehdr, 9)
-        _snap_write_all(fd, kp, kl)
-        _snap_write_u32(ehdr, 0, UInt32(8 + fl + vl))
-        _snap_write_u32(ehdr, 4, UInt32(fl))
-        _snap_write_all(fd, ehdr, 8)
-        _snap_write_all(fd, fp, fl)
-        _snap_write_u32(ehdr, 0, UInt32(vl))
-        _snap_write_all(fd, ehdr, 4)
-        if vl > 0:
-            _snap_write_all(fd, vp, vl)
 
     def take_snapshot(mut self,
                      keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
@@ -236,6 +463,9 @@ struct SnapshotEngine(Movable):
                     continue
                 if not keyspace[].get(ttl_map[].keys[unsafe_offset=i]).is_none():
                     kv_count += 1
+        # #36: a FUNCTION FLUSH record, then one FUNCTION LOAD per library
+        var n_libs = Int(external_call["pion_lua_tls_library_count", Int64]())
+        kv_count += UInt64(1 + n_libs)
 
         var ts = external_call["pion_get_unix_time", Int64]()
 
@@ -264,6 +494,7 @@ struct SnapshotEngine(Movable):
 
         # --- Pass 2: write entries ---
         # entry header: [4B entry_len][1B cmd_id][4B key_len] = 9 bytes, then val_len 4 bytes
+        var sink = RecordSink(fd)
         var ehdr = alloc[UInt8](16)
         var sso_buf = alloc[UInt8](64)   # key scratch (SSO/int formatting)
         var vbuf = alloc[UInt8](64)      # element scratch
@@ -283,163 +514,7 @@ struct SnapshotEngine(Movable):
 
                 var kl = key.string_len()
                 var kp = key.as_string_safe(sso_buf)
-                var t = Int(val.type.value)
-
-                if val.is_string():
-                    var vl = val.string_len()
-
-                    # gh #163: a blob-backed value is recorded as its arena pointer,
-                    # not its bytes. Copying it here would defeat the tier — SAVE
-                    # would write a second multi-GB copy and the reload would bring
-                    # it back as anonymous heap.
-                    var is_blob = val.is_blob_backed()
-                    var bseg = 0
-                    var boff = 0
-                    if is_blob and is_not_null(blobs):
-                        if not blobs[].locate(val.as_string(), vl, bseg, boff):
-                            is_blob = False     # not resolvable — fall back to bytes
-
-                    if is_blob:
-                        var pr = alloc[UInt8](24)
-                        var q = pr.unsafe_bitcast[UInt64]()
-                        q[unsafe_offset=0] = UInt64(bseg); q[unsafe_offset=1] = UInt64(boff); q[unsafe_offset=2] = UInt64(vl)
-                        self._write_record(fd, ehdr, 4, kp, kl, pr, 24)
-                        pr.unsafe_free()
-                    else:
-                        self._write_record(fd, ehdr, 1, kp, kl, val.as_string_safe(vbuf), vl)
-
-                elif t == ValueType.INT or t == ValueType.FLOAT:
-                    # gh #170: INCR'd keys hold INT values — v1 dropped them too.
-                    # Restored as strings, matching how WAL replays an INCR's SET.
-                    var vl = 0
-                    var vp = gv_bytes(val, vbuf, vl)
-                    self._write_record(fd, ehdr, 1, kp, kl, vp, vl)
-
-                elif t == ValueType.HASH:
-                    var hp = val.as_hash().unsafe_bitcast[SlabHashMap]()
-                    for j in range(hp[].capacity):
-                        var hm = hp[].metadata[unsafe_offset=j]
-                        if hm == SlabHashMap.EMPTY or hm == SlabHashMap.DELETED:
-                            continue
-                        var fl = 0
-                        var fp = gv_bytes(hp[].keys[unsafe_offset=j], fbuf, fl)
-                        var vl = 0
-                        var vp = gv_bytes(hp[].values[unsafe_offset=j], vbuf, vl)
-                        # record: [4B elen][cmd 5][klen][key][vlen][[4B fl][f][4B vl][v]]
-                        _snap_write_u32(ehdr, 0, UInt32(13 + kl + 8 + fl + vl))
-                        ehdr[unsafe_offset=4] = UInt8(5)
-                        _snap_write_u32(ehdr, 5, UInt32(kl))
-                        _snap_write_all(fd, ehdr, 9)
-                        _snap_write_all(fd, kp, kl)
-                        _snap_write_u32(ehdr, 0, UInt32(8 + fl + vl))
-                        _snap_write_u32(ehdr, 4, UInt32(fl))
-                        _snap_write_all(fd, ehdr, 8)
-                        _snap_write_all(fd, fp, fl)
-                        _snap_write_u32(ehdr, 0, UInt32(vl))
-                        _snap_write_all(fd, ehdr, 4)
-                        _snap_write_all(fd, vp, vl)
-                    # gh #392: field TTLs, after the fields they belong to.
-                    if Int(hp[].field_ttl) != 0:
-                        var ft = hp[].field_ttl
-                        for j in range(ft[].capacity):
-                            var tm = ft[].metadata[unsafe_offset=j]
-                            if tm == SlabHashMap.EMPTY or tm == SlabHashMap.DELETED:
-                                continue
-                            var fl2 = 0
-                            var fp2 = gv_bytes(ft[].keys[unsafe_offset=j], fbuf, fl2)
-                            scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = UInt64(ft[].values[unsafe_offset=j].as_int())
-                            self._write_field_record(fd, ehdr, 32, kp, kl, fp2, fl2, scored, 8)
-
-                elif t == ValueType.LIST:
-                    var lp = val.as_list().unsafe_bitcast[SlabList]()
-                    var elems = lp[].get_all()
-                    for j in range(len(elems)):
-                        var vl = 0
-                        var vp = gv_bytes(elems[j], vbuf, vl)
-                        self._write_record(fd, ehdr, 7, kp, kl, vp, vl)   # RPUSH in order
-
-                elif t == ValueType.SET:
-                    var sp = val.as_set().unsafe_bitcast[SlabHashMap]()
-                    for j in range(sp[].capacity):
-                        var sm = sp[].metadata[unsafe_offset=j]
-                        if sm == SlabHashMap.EMPTY or sm == SlabHashMap.DELETED:
-                            continue
-                        var vl = 0
-                        var vp = gv_bytes(sp[].keys[unsafe_offset=j], vbuf, vl)
-                        self._write_record(fd, ehdr, 8, kp, kl, vp, vl)
-
-                elif t == ValueType.ZSET or t == ValueType.GEO:
-                    var zp = val.as_zset().unsafe_bitcast[SlabSkipList]()
-                    var cid = UInt8(9) if t == ValueType.ZSET else UInt8(15)
-                    var curr = zp[].head[].forward[0]
-                    while is_not_null(curr):
-                        var vl = 0
-                        var vp = gv_bytes(curr[].obj, vbuf, vl)
-                        _snap_write_u32(ehdr, 0, UInt32(13 + kl + 8 + vl))
-                        ehdr[unsafe_offset=4] = cid
-                        _snap_write_u32(ehdr, 5, UInt32(kl))
-                        _snap_write_all(fd, ehdr, 9)
-                        _snap_write_all(fd, kp, kl)
-                        _snap_write_u32(ehdr, 0, UInt32(8 + vl))
-                        _snap_write_all(fd, ehdr, 4)
-                        scored.unsafe_bitcast[Float64]()[unsafe_offset=0] = curr[].score
-                        _snap_write_all(fd, scored, 8)
-                        _snap_write_all(fd, vp, vl)
-                        curr = curr[].forward[0]
-
-                elif t == ValueType.BITMAP:
-                    self._write_record(fd, ehdr, 16, kp, kl, val.as_bitmap(), val.bitmap_len())
-
-                elif t == ValueType.HLL:
-                    self._write_record(fd, ehdr, 17, kp, kl, val.as_hll(), HLL_REGISTERS)
-
-                elif t == ValueType.STREAM:
-                    # gh #174: one cmd-23 record per *live* entry, in ID order.
-                    # Tombstoned entries (XDEL, MAXLEN trim) are skipped rather
-                    # than written-then-deleted, so a snapshot compacts the
-                    # stream instead of carrying its garbage forward.
-                    var sd = val.as_hash().unsafe_bitcast[StreamData]()
-                    for ei in range(sd[].count):
-                        if sd[].entries[unsafe_offset=ei].deleted:
-                            continue
-                        var e = sd[].entries[unsafe_offset=ei]
-                        _snap_write_u32(ehdr, 0, UInt32(13 + kl + 16 + e.data_len))
-                        ehdr[unsafe_offset=4] = UInt8(23)
-                        _snap_write_u32(ehdr, 5, UInt32(kl))
-                        _snap_write_all(fd, ehdr, 9)
-                        _snap_write_all(fd, kp, kl)
-                        _snap_write_u32(ehdr, 0, UInt32(16 + e.data_len))
-                        _snap_write_all(fd, ehdr, 4)
-                        scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = e.id_ms
-                        _snap_write_all(fd, scored, 8)
-                        scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = e.id_seq
-                        _snap_write_all(fd, scored, 8)
-                        if e.data_len > 0:
-                            _snap_write_all(fd, e.data, e.data_len)
-
-                elif t == ValueType.VSET:
-                    # gh #378: live elements in slot order (VSIM breaks score
-                    # ties by slot), each as the WAL's VADD record, then its
-                    # attribute. Tombstones are dropped, so a load compacts.
-                    var vs = val.as_hash().unsafe_bitcast[VectorSet]()
-                    var payload = alloc[UInt8](vs[].payload_len())
-                    for s in range(vs[].n):
-                        if vs[].alive[unsafe_offset=s] == 0:
-                            continue
-                        var pl = vs[].stored_payload(s, payload)
-                        var nm = vs[].names[s].copy()
-                        var np = nm.unsafe_ptr()
-                        self._write_field_record(fd, ehdr, 28, kp, kl,
-                            Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(np)),
-                            nm.byte_length(), payload, pl)
-                        var at = vs[].attrs[s].copy()
-                        if at.byte_length() > 0:
-                            self._write_field_record(fd, ehdr, 30, kp, kl,
-                                Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(np)),
-                                nm.byte_length(),
-                                Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(at.unsafe_ptr())),
-                                at.byte_length())
-                    payload.unsafe_free()
+                write_key_records(sink, kp, kl, val, blobs, False, ehdr, vbuf, fbuf, scored)
 
         # gh #174: TTLs, as cmd-25 absolute-deadline records. Emitted after the
         # keyspace so a load applies them to keys that already exist, and only
@@ -459,12 +534,27 @@ struct SnapshotEngine(Movable):
                 _snap_write_u32(ehdr, 0, UInt32(13 + kl2 + 8))
                 ehdr[unsafe_offset=4] = UInt8(25)
                 _snap_write_u32(ehdr, 5, UInt32(kl2))
-                _snap_write_all(fd, ehdr, 9)
-                _snap_write_all(fd, kp2, kl2)
+                sink.write(ehdr, 9)
+                sink.write(kp2, kl2)
                 _snap_write_u32(ehdr, 0, UInt32(8))
-                _snap_write_all(fd, ehdr, 4)
+                sink.write(ehdr, 4)
                 scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = deadline
-                _snap_write_all(fd, scored, 8)
+                sink.write(scored, 8)
+
+        # #36: the FUNCTION libraries. FLUSH first, so a replica loading this
+        # image (a FULLRESYNC) also drops libraries the primary has deleted.
+        _sink_record(sink, ehdr, UInt8(37), sso_buf, 0, sso_buf, 0)
+        var clen = alloc[Int64](1)
+        for li in range(n_libs):
+            clen[unsafe_offset=0] = 0
+            var code = external_call["pion_lua_tls_library_code", Pointer[UInt8, MutUntrackedOrigin]](
+                Int64(li), clen)
+            var lname = external_call["pion_lua_tls_library_name", Pointer[UInt8, MutUntrackedOrigin]](Int64(li))
+            var lnl = 0
+            while lname[unsafe_offset=lnl] != 0:
+                lnl += 1
+            _sink_record(sink, ehdr, UInt8(35), lname, lnl, code, Int(clen[unsafe_offset=0]))
+        clen.unsafe_free()
 
         ehdr.unsafe_free()
         sso_buf.unsafe_free()
@@ -568,6 +658,11 @@ struct SnapshotEngine(Movable):
                 if is_not_null(bp):
                     var key_gv = GenericValue.from_ptr(key_buf, kl)
                     keyspace[].set(key_gv, GenericValue.from_blob_ptr(bp, Int(q[unsafe_offset=2])))
+                    replayed += 1
+            elif cmd_id >= 35 and cmd_id <= 37:
+                # #36: the FUNCTION libraries (a 37 FLUSH, then one 35 per library)
+                if external_call["pion_lua_wal_apply", Int64](
+                        Int64(cmd_id), key_buf, Int64(kl), val_buf, Int64(vl)) == 1:
                     replayed += 1
             elif cmd_id == 25 or cmd_id == 26:
                 # gh #174: TTL record targets the ttl_map, not the keyspace.

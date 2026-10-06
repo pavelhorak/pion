@@ -30,8 +30,10 @@ import socket
 import struct
 import subprocess
 import sys
-import time
 import uuid
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resp_strict import wait_ready_pid  # noqa: E402
 
 import numpy as np
 
@@ -107,16 +109,13 @@ def _spawn_server() -> subprocess.Popen:
         [binary, "--kvcache", "--metal-attention", "-p", str(PORT), "-w", "1"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    # Wait for port.
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        try:
-            s = socket.create_connection((HOST, PORT), timeout=1); s.close()
-            return proc
-        except OSError:
-            time.sleep(0.2)
-    proc.kill()
-    raise RuntimeError("pion-server failed to start on port " + str(PORT))
+    # Wait for THIS process to answer, not just for the port (#27).
+    try:
+        wait_ready_pid(PORT, proc, 60)
+    except RuntimeError:
+        proc.kill()
+        raise
+    return proc
 
 
 def main() -> int:

@@ -17,8 +17,8 @@ from src.vector.hnsw import SharedHNSWView, HNSWGraph
 from src.network.server import create_listen_socket
 from src.common.lock_free import ShardQueryBus
 from src.network.cluster import ClusterState
+from src.network.slow_path import SlowPathHandler
 from src.network.v_store import VStoreDirectory
-from src.commands.pubsub import PubSubBroadcast
 from src.commands.tenant import tenant_arg_error
 from std.memory import unsafe_memset
 
@@ -219,6 +219,7 @@ def _known_flags() -> List[String]:
         "--iouring", "--epoll", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
         "--tenant", "--moe-cache", "--moe-cache-mib", "--dim", "--max-elements", "--crash-log",
         "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory",
+        "--lua-time-limit", "--lua-memory-limit", "--enable-debug-command",
         "--help", "-h", "--version", "-v",
     ]
 
@@ -233,7 +234,8 @@ def _value_flags() -> List[String]:
         "--wal-size", "--wal-max-segments", "--wal-full-policy", "--blob-threshold", "--ns-prefix",
         "--requirepass", "--requirepass-file", "--bind", "--tenant", "--moe-cache",
         "--moe-cache-mib", "--dim", "--max-elements", "--crash-log", "--status-file",
-        "--rss-warn-pct", "--maxmemory",
+        "--rss-warn-pct", "--maxmemory", "--lua-time-limit", "--lua-memory-limit",
+        "--enable-debug-command",
     ]
 
 
@@ -334,6 +336,10 @@ def _print_help():
     print("      --rss-warn-pct N      warn once when RSS crosses N% of physical RAM (default 70; >100 off)")
     print("      --maxmemory SIZE      refuse memory-growing writes (-OOM) above this RSS; bytes,")
     print("                            k/kb/m/mb/g/gb or N% of RAM (default 0 = off; no eviction)")
+    print("      --lua-time-limit MS   stop a script that runs longer without writing (default 5000;")
+    print("                            0 = never). A worker cannot answer SCRIPT KILL mid-script.")
+    print("      --lua-memory-limit SIZE  Lua heap cap per worker state (default 1gb; 0 = none)")
+    print("      --enable-debug-command no|yes|local  allow DEBUG (default no; local = loopback only)")
     print("      (supervised serving with auto-restart: scripts/pion-supervise.sh -- <server args>)")
     print("")
     print("I/O backend")
@@ -420,6 +426,8 @@ def main():
         external_call["exit", NoneType](Int32(1))
 
     var config = PionConfig()
+    var lua_time_limit_ms = 5000         # #36: --lua-time-limit
+    var lua_memory_limit = 1 << 30       # #36: --lua-memory-limit
 
     var auto_detect = True   # auto-probe Ollama unless --no-auto-detect is passed
     var auto_embed = True    # A3: auto-launch embedding sidecar when no external server available
@@ -717,7 +725,7 @@ def main():
             var terr = tenant_arg_error(args[i + 1])
             if terr.byte_length() > 0:
                 print("FATAL: invalid --tenant argument: " + terr)
-                return
+                external_call["exit", NoneType](Int32(1))   # a bare return exits 0
             if config.server.tenants.byte_length() > 0:
                 config.server.tenants += "\n"
             config.server.tenants += args[i + 1]
@@ -784,6 +792,44 @@ def main():
                 config.server.rss_warn_pct = atol(args[i + 1])
             except:
                 _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]))   # gh #372
+            i += 2
+        elif args[i] == "--enable-debug-command" and i + 1 < len(args):
+            # #45: Redis's option, and its default
+            var _edc = String(args[i + 1]).lower()
+            if _edc == "no":
+                config.server.enable_debug_command = 0
+            elif _edc == "yes":
+                config.server.enable_debug_command = 1
+            elif _edc == "local":
+                config.server.enable_debug_command = 2
+            else:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]) + " (no, yes or local):")
+            i += 2
+        elif args[i] == "--lua-time-limit" and i + 1 < len(args):
+            # #36: milliseconds; 0 = never stop a script
+            try:
+                var _ltl = atol(args[i + 1])
+                if _ltl < 0:
+                    raise Error("negative")
+                lua_time_limit_ms = _ltl
+            except:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]) + " (milliseconds, 0 = never):")
+            i += 2
+        elif args[i] == "--lua-memory-limit" and i + 1 < len(args):
+            # #36: Redis units, as --maxmemory; 0 = no cap. Parsed from a heap
+            # copy for the reason --maxmemory's comment gives (gh #349).
+            var _lm = String(args[i + 1])
+            var _lm_n = _lm.byte_length()
+            var _lm_h = alloc[UInt8](_lm_n + 1)
+            for _k in range(_lm_n):
+                _lm_h[unsafe_offset=_k] = _lm.as_bytes()[_k]
+            var _lm_v = parse_memory_value(_lm_h, _lm_n,
+                Int64(external_call["pion_physical_ram_bytes", UInt64]()))
+            _lm_h.unsafe_free()
+            if not _lm_v.ok:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i])
+                            + " (bytes, or with k/kb/m/mb/g/gb, or 1-100%):")
+            lua_memory_limit = Int(_lm_v.value)
             i += 2
         else:
             # gh #372: nothing matched. A known value flag here means its value
@@ -906,7 +952,18 @@ def main():
         print("FATAL: --tenant requires --requirepass (the admin credential).")
         print("  Tenant isolation is fail-closed: without --requirepass an")
         print("  unauthenticated connection could read prefixed keys verbatim.")
-        return
+        external_call["exit", NoneType](Int32(1))   # a bare return exits 0
+
+    # Replication runs on port + 10000. A cluster node on a port above 55535
+    # (or a replica of one) used to start anyway: its replication listener or
+    # connection failed, and it served on, replicating nothing.
+    if config.cluster.enabled:
+        var _rp = config.cluster.primary_port if config.cluster.is_replica else config.server.port
+        if config.server.port + 10000 > 65535 or (config.cluster.is_replica and _rp + 10000 > 65535):
+            print("FATAL: cluster replication uses port + 10000, which leaves no room above port "
+                  + String(_rp if config.cluster.is_replica and _rp + 10000 > 65535 else config.server.port)
+                  + ": use a port up to 55535.")
+            external_call["exit", NoneType](Int32(1))
 
     # Ignore SIGPIPE (signal 13) so writes to closed sockets return EPIPE instead of killing the process
     _ = external_call["signal", Int32](13, 1)
@@ -1137,18 +1194,21 @@ def main():
     # its BPF detach while the fatal signals (SEGV/BUS/ILL/FPE/ABRT) stay ours.
     # The heartbeat half (status file) is what survives an *uncatchable* jetsam
     # or OOM-killer SIGKILL: it holds RSS as of ~1s before death.
-    if config.server.crash_log.byte_length() > 0 or config.server.status_file.byte_length() > 0:
-        var _crash_log_p = config.server.crash_log + "\0"
-        var _status_p = config.server.status_file + "\0"
-        var _ver = PION_VERSION + "+" + PION_BUILD_SHA + "\0"
-        _ = external_call["pion_crash_init", Int32](
-            _crash_log_p.unsafe_ptr(),
-            _status_p.unsafe_ptr(),
-            _ver.unsafe_ptr(),
-            Int32(config.server.port),
-            Int32(n_workers),
-            Int32(config.server.rss_warn_pct),
-        )
+    #
+    # Installed even with --no-crash-log (it then opens no file): the same call
+    # installs the gh #259 SIGTERM/SIGINT latch, and skipping it made a server
+    # started with that flag die on the signal without its WAL flush.
+    var _crash_log_p = config.server.crash_log + "\0"
+    var _status_p = config.server.status_file + "\0"
+    var _ver = PION_VERSION + "+" + PION_BUILD_SHA + "\0"
+    _ = external_call["pion_crash_init", Int32](
+        _crash_log_p.unsafe_ptr(),
+        _status_p.unsafe_ptr(),
+        _ver.unsafe_ptr(),
+        Int32(config.server.port),
+        Int32(n_workers),
+        Int32(config.server.rss_warn_pct),
+    )
 
     # gh #261: the limit is process-wide and lives in C, where every worker's
     # housekeeping tick reads it. The C side logs each crossing (with the RSS it
@@ -1157,6 +1217,8 @@ def main():
         external_call["pion_set_maxmemory", NoneType](UInt64(config.server.maxmemory))
         print("Maxmemory: " + String(config.server.maxmemory >> 20)
               + " MB (noeviction: above it, memory-growing writes get -OOM)")
+    # #36: every worker's Lua states take these when they are created.
+    external_call["pion_lua_set_defaults", NoneType](Int64(lua_memory_limit), Int64(lua_time_limit_ms))
 
     # Sharding: DISABLED on all platforms (2026-04-27).
     #
@@ -1184,6 +1246,21 @@ def main():
     ready_atomic_buf[unsafe_offset=0] = 0
     shared_hnsw_ptr[].ready_atomic = ready_atomic_buf
 
+    # #19: count the persisted indexes the workers are about to load. Each is
+    # pion.hnsw.<worker that built it>, loaded by that worker alone; the others
+    # wait for it before serving (see Pion.__init__ phase 6).
+    # [0] = loaders still loading; [1 + w] = 1 when worker w is one. Decided
+    # here, once, so a worker never re-derives it from the filesystem.
+    var warm_pending_buf = alloc[UInt64](1 + n_workers)
+    warm_pending_buf[unsafe_offset=0] = 0
+    for _wl in range(n_workers):
+        var _wl_path = "pion.hnsw." + String(_wl) + "\0"
+        var _loads = external_call["access", Int32](_wl_path.unsafe_ptr(), Int32(4)) == 0   # R_OK
+        warm_pending_buf[unsafe_offset=1 + _wl] = 1 if _loads else 0
+        if _loads:
+            warm_pending_buf[unsafe_offset=0] += 1
+    shared_hnsw_ptr[].warm_load_pending = warm_pending_buf
+
     # gh #14: phase-2 epoch RCU state. `reclaim_epoch` is bumped by
     # FT.DROPINDEX; `worker_epoch` holds one 64-byte-strided slot per worker so
     # the per-batch relaxed store on the dispatch path never shares a cache
@@ -1207,6 +1284,16 @@ def main():
     unsafe_memset(hk_keys_buf, 0, hk_max * 32)
     shared_hnsw_ptr[].hk_keys_buf = hk_keys_buf
     shared_hnsw_ptr[].hk_max_elements = hk_max
+    # #46: tombstones, a byte per slot, and the build id they belong to
+    var vec_dead = alloc[UInt8](hk_max)
+    unsafe_memset(vec_dead, 0, hk_max)
+    shared_hnsw_ptr[].vec_dead = vec_dead
+    shared_hnsw_ptr[].vec_dead_count = alloc[UInt64](1)
+    shared_hnsw_ptr[].vec_dead_count[] = 0
+    shared_hnsw_ptr[].build_id = alloc[UInt64](1)
+    shared_hnsw_ptr[].build_id[] = 0
+    shared_hnsw_ptr[].vec_gen = alloc[UInt64](1)
+    shared_hnsw_ptr[].vec_gen[] = 1
 
     # 64-byte stride per worker: shard_ready[worker_id * 8] (UInt64 units × 8 bytes each = 64 bytes).
     # Each worker's ready flag occupies its own cache line — eliminates LDXR/STXR livelock on ARM64.
@@ -1317,6 +1404,17 @@ def main():
             sig_iface.as_c_string_slice(), UInt16(config.server.port)
         )
 
+    # Each connection is one fd, and every per-fd table holds 65536 entries. A
+    # stock Linux login allows 1024 open files, which capped the server at about
+    # a thousand clients; raise the soft limit as Redis does.
+    var _nofile_before = alloc[Int64](1)
+    _nofile_before[unsafe_offset=0] = 0
+    var _nofile = external_call["pion_raise_nofile", Int64](Int64(65536), _nofile_before)
+    if _nofile > _nofile_before[unsafe_offset=0] and _nofile_before[unsafe_offset=0] > 0:
+        print("Open-file limit raised from " + String(_nofile_before[unsafe_offset=0])
+              + " to " + String(_nofile))
+    _nofile_before.unsafe_free()
+
     # V3.1: single shared listen socket — all workers register with their own kqueue and race
     # to accept(). macOS delivers connections round-robin across workers → N× QPS scaling.
     var shared_listen_fd = create_listen_socket(config.server.port)
@@ -1377,9 +1475,8 @@ def main():
     xdp_shared_fds[unsafe_offset=0] = xdp_shared_xskmap_fd
     xdp_shared_fds[unsafe_offset=1] = xdp_shared_bpf_fd
 
-    # Pub/Sub broadcast ring — shared across all workers for cross-worker PUBLISH.
-    var pubsub_broadcast_ptr = alloc[PubSubBroadcast](1)
-    pubsub_broadcast_ptr.unsafe_write(PubSubBroadcast())
+    # #42: the workers' pub/sub inboxes, for PUBLISH across workers (no-op at -w 1).
+    external_call["pion_pubsub_init", NoneType](Int32(n_workers))
 
     # Mojo 1.0: spawn workers via pthreads (see pion_worker_entry above the
     # heap import below). Blocks forever — workers never exit in normal
@@ -1387,7 +1484,7 @@ def main():
     var _boot_ctx = alloc[Int64](8)
     _boot_ctx[unsafe_offset=0] = Int64(Int(shared_hnsw_ptr))
     _boot_ctx[unsafe_offset=1] = Int64(Int(cluster_ptr))
-    _boot_ctx[unsafe_offset=2] = Int64(Int(pubsub_broadcast_ptr))
+    _boot_ctx[unsafe_offset=2] = Int64(0)    # was the pub/sub ring (#42: per-worker inboxes in C)
     _boot_ctx[unsafe_offset=3] = Int64(Int(secondary_listen_fds))
     _boot_ctx[unsafe_offset=4] = Int64(Int(xdp_shared_fds))
     _boot_ctx[unsafe_offset=5] = Int64(Int(shared_listen_fd))
@@ -1398,6 +1495,23 @@ def main():
 
 
 
+# ── #36: redis.call() from a running script ──────────────────────────────────
+# lua_wrap.c resolves this with dlsym and calls it, synchronously, for each
+# redis.call() / redis.pcall(): the command runs through the worker's own slow
+# path (SlowPathHandler.script_dispatch), re-entrantly. `ctx` is the
+# SlowPathHandler the running EVAL/FCALL set as the Lua state's host. Lives in
+# main.mojo for the reason the next export gives (root-module exports only);
+# the -u link flags keep it. Must not raise at the ABI boundary.
+@export
+def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64,
+                         argv: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                         lens: Pointer[Int64, MutUntrackedOrigin], flags: Int64, resp: Int64,
+                         reply: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                         wrote: Pointer[Int64, MutUntrackedOrigin]) -> Int64:
+    var sp = Pointer[SlowPathHandler, MutUntrackedOrigin](unsafe_from_address=Int(ctx))
+    return Int64(sp[].script_dispatch(Int(argc), argv, lens, Int(flags), Int(resp), reply, wrote))
+
+
 # ── Mojo 1.0 migration: worker spawn ─────────────────────────────────────────
 # std.algorithm.parallelize moved to the `max` package, which the server build
 # must not depend on. Workers are raw pthreads (worker_spawn_wrap.c) calling
@@ -1406,7 +1520,7 @@ def main():
 # and the -u link flag makes a regression a loud link error.
 # ctx layout (Int64 slots, packed in main(), outlives workers — main() blocks
 # in pion_spawn_workers): [0]=SharedHNSWView* [1]=ClusterState*
-# [2]=PubSubBroadcast* [3]=secondary_listen_fds(Int32*) [4]=xdp_shared_fds
+# [2]=unused (was the pub/sub ring) [3]=secondary_listen_fds(Int32*) [4]=xdp_shared_fds
 # (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers.
 @export
 def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64):
@@ -1414,7 +1528,6 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
     # worker_task body, unchanged.
     var shared_hnsw_ptr = Pointer[SharedHNSWView, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=0]))
     var cluster_ptr = Pointer[ClusterState, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=1]))
-    var pubsub_broadcast_ptr = Pointer[PubSubBroadcast, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=2]))
     var secondary_listen_fds = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=3]))
     var xdp_shared_fds = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=4]))
     var shared_listen_fd = Int32(ctx[unsafe_offset=5])
@@ -1542,6 +1655,11 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                 worker_config.server.ns_prefix = args[j + 1]
             elif args[j] == "--requirepass" and j + 1 < len(args):
                 worker_config.server.requirepass = args[j + 1]  # gh #100 (C2)
+            elif args[j] == "--enable-debug-command" and j + 1 < len(args):
+                # #45: main() validated the value; this loop builds the
+                # worker's own config from argv, as for --requirepass
+                var _edc = String(args[j + 1]).lower()
+                worker_config.server.enable_debug_command = 1 if _edc == "yes" else (2 if _edc == "local" else 0)
             elif args[j] == "--requirepass-file" and j + 1 < len(args):
                 # gh #258: this parse loop is SEPARATE from main()'s and builds
                 # each worker's own config from argv. Handling the flag only in
@@ -1662,18 +1780,20 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
         if CompilationTarget.is_macos() and worker_config.server.use_huge_pages:
             print("Warning: Huge Pages are not supported on macOS. Falling back to standard pages.")
             worker_config.server.use_huge_pages = False
-        # On Linux (Docker/CI), hugepages are rarely configured; disable by default.
-        # SlabAllocator already has a per-call fallback, but disabling here avoids
-        # the unnecessary syscall overhead and MAP_HUGETLB failures on every alloc.
-        if CompilationTarget.is_linux() and worker_config.server.use_huge_pages:
-            worker_config.server.use_huge_pages = False
+        # Linux: the profiles leave huge pages off (a stock box reserves none),
+        # so this is on only when `--huge-pages` asked for it. It used to be
+        # forced off here, which made that flag a no-op the banner still
+        # reported as on. SlabAllocator falls back to normal pages per mmap.
 
         # Step 5: Pin to P-cores (always on macOS; QoS class must be set before affinity).
         if CompilationTarget.is_macos():
             set_thread_qos_user_interactive()
         if worker_config.server.strict_affinity:
-            set_thread_affinity(i)
-            print("Worker " + String(i) + " pinned to CPU " + String(i))
+            var _aff = set_thread_affinity(i)
+            if _aff.byte_length() > 0:
+                print("Worker " + String(i) + " " + _aff)
+            else:
+                print("Worker " + String(i) + ": --affinity requested but not applied")
 
         # gh #258: same env-var fallback as main()'s parse. This loop rebuilds
         # each worker's config from argv, so anything main() resolved from the
@@ -1699,9 +1819,6 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                       secondary_listen_fd=secondary_listen_fds[unsafe_offset=i],
                       binary_listen_fd=binary_listen_fd,
                       cluster=cluster_ptr)
-        # Wire cross-worker pub/sub broadcast ring
-        if n_workers > 1:
-            db.engine.slow_path.pubsub_broadcast = pubsub_broadcast_ptr
         db.run_server()
     except e:
         # stderr + explicit message: worker deaths were invisible when this

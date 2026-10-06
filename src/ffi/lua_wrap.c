@@ -1,13 +1,20 @@
 /*
- * Pion ↔ Lua 5.1 bridge.
+ * Pion ↔ Lua 5.1 bridge: EVAL, EVALSHA, their _RO forms, SCRIPT, FUNCTION and
+ * FCALL, with the scripting environment Redis 7+ gives a script.
  *
- * Coroutine-based execution model:
- *   1. Script runs inside a Lua coroutine (lua_newthread).
- *   2. redis.call("CMD", ...) yields the coroutine back to the host.
- *   3. Host (Mojo) reads the command args, dispatches, pushes result, resumes.
- *   4. Repeat until the script returns or errors.
+ * redis.call() runs SYNCHRONOUSLY: it calls back into the host (Mojo's
+ * `pion_script_dispatch`, an @export resolved with dlsym), which runs the
+ * command through the server's own slow-path dispatcher and hands back its RESP
+ * reply, converted here to Lua values. Every command, option, error and WAL
+ * record is the server's own. The bridge used to yield a coroutine to a
+ * separate 26-command dispatcher instead; Lua 5.1 cannot yield across pcall,
+ * so a script could not even catch a redis.call() error (#36).
  *
- * This avoids C→Mojo callbacks entirely.
+ * Errors use Lua's longjmp only between C and Lua frames: by the time a
+ * redis.call() error is raised, the host callback has returned.
+ *
+ * Two Lua states per worker, as in Redis: one for EVAL scripts, one for
+ * FUNCTION libraries.
  */
 
 #include "lua/lua.h"
@@ -15,14 +22,24 @@
 #include "lua/lualib.h"
 #include "lua_wrap.h"
 
+#include <dlfcn.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
+#include <strings.h>
+#include <time.h>
 
-/* lua-cjson: luaopen_cjson declared here (defined in lua_cjson.c) */
 extern int luaopen_cjson(lua_State *L);
+extern int luaopen_struct(lua_State *L);
+extern int luaopen_cmsgpack(lua_State *L);
+extern int luaopen_bit(lua_State *L);
 
-/* ── SHA1 (minimal implementation for script hashing) ── */
+/* The version Pion reports in INFO (`redis_version`), which clients gate on. */
+#define PION_REDIS_VERSION     "7.0.0"
+#define PION_REDIS_VERSION_NUM 0x00070000
+
+/* ── SHA1 (script hashing) ── */
 
 typedef struct {
     uint32_t state[5];
@@ -91,8 +108,12 @@ static void sha1_final(SHA1_CTX *ctx, uint8_t digest[20]) {
     }
 }
 
-static void sha1_hex(const uint8_t digest[20], char hex[41]) {
+static void sha1_hex_of(const char *s, size_t len, char hex[41]) {
     static const char hc[] = "0123456789abcdef";
+    SHA1_CTX ctx; uint8_t digest[20];
+    sha1_init(&ctx);
+    sha1_update(&ctx, (const uint8_t *)s, len);
+    sha1_final(&ctx, digest);
     for (int i = 0; i < 20; i++) {
         hex[i*2]   = hc[digest[i] >> 4];
         hex[i*2+1] = hc[digest[i] & 0xF];
@@ -100,43 +121,12 @@ static void sha1_hex(const uint8_t digest[20], char hex[41]) {
     hex[40] = '\0';
 }
 
-/* ── Script cache ── */
-
-#define MAX_CACHED_SCRIPTS 256
-
-typedef struct {
-    char sha1_hex[41];
-    int  ref;           /* Lua registry reference to compiled chunk */
-} CachedScript;
-
-/* ── Function library registry ── */
-
-#define MAX_LIBRARIES 64
-#define MAX_FUNCS_PER_LIB 32
-#define MAX_NAME_LEN 64
-
-typedef struct {
-    char name[MAX_NAME_LEN];
-    int  ref;           /* Lua registry reference to function closure */
-} RegisteredFunc;
-
-typedef struct {
-    char           name[MAX_NAME_LEN];
-    int            code_ref;  /* registry ref to library chunk (for reload) */
-    RegisteredFunc funcs[MAX_FUNCS_PER_LIB];
-    int            func_count;
-} Library;
-
 /* ── Memory-limited allocator ── */
 
-/*
- * The cap binds only while SCRIPT code runs (`enforce`, set around every
- * resume/pcall of user code). Host bookkeeping — copying KEYS/ARGV in,
- * creating the coroutine, registry refs, pushing redis.call() replies —
- * runs outside any protected call, where a failed allocation is not a Lua
- * error but a panic that ends the process. Script garbage left behind at the
- * cap used to make exactly that happen on the NEXT command (gh #410).
- */
+/* The cap binds only while script code runs (`enforce`, set around every
+ * protected call into user code). Host bookkeeping outside a protected call
+ * — creating the states, registry refs — must never see a failed allocation:
+ * there it is a panic, not a Lua error (gh #410). */
 typedef struct {
     size_t used;
     size_t limit;
@@ -150,7 +140,7 @@ static void *lua_mem_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
         ctx->used -= osize;
         return NULL;
     }
-    if (nsize > osize && ctx->enforce && ctx->used - osize + nsize > ctx->limit) {
+    if (nsize > osize && ctx->enforce && ctx->limit > 0 && ctx->used - osize + nsize > ctx->limit) {
         return NULL;  /* inside a script: Lua raises "not enough memory" */
     }
     void *p = realloc(ptr, nsize);
@@ -163,10 +153,8 @@ static void *lua_mem_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
     return p;
 }
 
-/* An error outside every protected call. The bridge keeps script code and the
- * memory cap inside protected calls, so reaching this is a bug: say so and
- * abort, so the crash log records a signal and a backtrace instead of the
- * silent exit(1) that Lua would otherwise take after a panic function returns. */
+/* An error outside every protected call is a bridge bug: say so and abort, so
+ * the crash log records a signal and a backtrace. */
 static int pion_lua_panic(lua_State *L) {
     const char *msg = lua_tostring(L, -1);
     fprintf(stderr, "[Lua] PANIC: unprotected error in the Lua bridge: %s\n",
@@ -176,895 +164,1803 @@ static int pion_lua_panic(lua_State *L) {
     return 0;
 }
 
-/* ── PionLuaState ── */
+/* ── State ── */
+
+typedef struct {
+    char sha[41];
+    int  ref;              /* registry ref to the compiled chunk */
+    int  flags;            /* shebang flags; FN_SHEBANG when it had one */
+} CachedScript;
+
+#define FN_NO_WRITES            (1 << 0)
+#define FN_ALLOW_OOM            (1 << 1)
+#define FN_ALLOW_STALE          (1 << 2)
+#define FN_NO_CLUSTER           (1 << 3)
+#define FN_ALLOW_CROSS_SLOT     (1 << 4)
+#define FN_SHEBANG              (1 << 8)
+
+typedef struct {
+    char *name;
+    char *desc;            /* NULL = none */
+    int   ref;             /* registry ref (functions state) to the callback */
+    int   flags;
+} RegFunc;
+
+typedef struct {
+    char    *name;
+    char    *code;
+    size_t   code_len;
+    RegFunc *fns;
+    int      nfns;
+} Library;
+
+/* The host's command dispatcher (Mojo `pion_script_dispatch`): runs argv as a
+ * command and returns its RESP reply (valid until the next call) in *out.
+ * flags: PION_LUA_DISPATCH_RO refuses writes; PION_LUA_DISPATCH_CHECK only
+ * answers whether the command exists (1/0). *wrote is set to 1 when a write
+ * command ran. Returns the reply length, or -1. */
+#define PION_LUA_DISPATCH_RO    1
+#define PION_LUA_DISPATCH_CHECK 2
+#define PION_LUA_DISPATCH_OOM   4   /* the function may run deny-oom commands */
+typedef int64_t (*pion_dispatch_fn)(void *ctx, int64_t argc, const char **argv,
+                                    const int64_t *lens, int64_t flags, int64_t resp,
+                                    const char **out, int64_t *wrote);
 
 struct PionLuaState {
-    lua_State   *L;             /* main Lua state */
-    lua_State   *co;            /* coroutine thread for current execution */
-    int          co_ref;        /* registry ref for coroutine (prevents GC) */
-    LuaMemCtx    mem_ctx;
-    int          insn_limit;
-    CachedScript cache[MAX_CACHED_SCRIPTS];
-    int          cache_count;
-    int          pcall_mode;    /* 1 = redis.pcall (errors as tables, not raises) */
-    char         error_buf[1024];
-    /* Array builder state */
-    int          array_count;   /* number of elements pushed via array_push_* */
-    /* Functions API (Redis 7+ libraries) */
-    Library      libs[MAX_LIBRARIES];
-    int          lib_count;
-    /* Temporary storage for register_function during library load */
-    Library     *loading_lib;   /* points to libs[lib_count] during load */
+    lua_State    *L;           /* EVAL scripts */
+    lua_State    *FL;          /* FUNCTION libraries */
+    int           fl_globals;  /* registry ref (FL): the real globals behind its proxy _G */
+    LuaMemCtx     mem;
+    LuaMemCtx     fmem;
+    int64_t       time_limit_ms;
+
+    CachedScript *scripts;
+    int           nscripts, cap_scripts;
+
+    Library      *libs;
+    int           nlibs, cap_libs;
+    Library      *loading;     /* the library being loaded (register_function) */
+
+    void             *host;
+    pion_dispatch_fn  dispatch;
+
+    /* the run in progress */
+    int           running;
+    int           resp;        /* redis.setresp: 2 or 3 */
+    int           ro;          /* writes refused */
+    int           allow_oom;
+    int           wrote;
+    int           killed;
+    struct timespec started;
+    char          run_name[128];   /* sha, or function name: the error suffix */
+    const char   *run_source;      /* "@user_script" / "@user_function" */
+
+    /* argv scratch for redis.call */
+    const char  **argv;
+    int64_t      *lens;
+    int           cap_argv;
+    char        **numbufs;         /* number arguments converted to strings */
+    int           cap_numbufs;
+
+    /* the reply being built */
+    char         *out;
+    size_t        out_len, out_cap;
+    int           out_oom;
 };
 
-/* ── Instruction limit hook ── */
+/* ── Output buffer ── */
 
-static void insn_hook(lua_State *L, lua_Debug *ar) {
-    (void)ar;
-    luaL_error(L, "script exceeded instruction limit");
-}
+static void out_reset(PionLuaState *S) { S->out_len = 0; S->out_oom = 0; }
 
-/* Run user code on the coroutine with the memory cap in force. */
-static int run_script(PionLuaState *S, int nargs) {
-    S->mem_ctx.enforce = 1;
-    int status = lua_resume(S->co, nargs);
-    S->mem_ctx.enforce = 0;
-    return status;
-}
-
-/* Drop the previous execution's coroutine. A script that ran into the cap
- * leaves its garbage behind, and Lua 5.1 has no emergency collection, so
- * without a full cycle here every later script would fail on memory that is
- * already unreachable. Below half the cap the incremental collector is left
- * to do its normal work. */
-static void release_coroutine(PionLuaState *S) {
-    if (S->co_ref != LUA_NOREF) {
-        luaL_unref(S->L, LUA_REGISTRYINDEX, S->co_ref);
-        S->co_ref = LUA_NOREF;
-        S->co = NULL;
+static void out_add(PionLuaState *S, const char *p, size_t n) {
+    if (S->out_oom) return;
+    if (S->out_len + n > S->out_cap) {
+        size_t nc = S->out_cap ? S->out_cap : 4096;
+        while (nc < S->out_len + n) nc *= 2;
+        char *q = (char *)realloc(S->out, nc);
+        if (!q) { S->out_oom = 1; return; }
+        S->out = q; S->out_cap = nc;
     }
-    if (S->mem_ctx.used > S->mem_ctx.limit / 2) {
-        lua_gc(S->L, LUA_GCCOLLECT, 0);
+    memcpy(S->out + S->out_len, p, n);
+    S->out_len += n;
+}
+
+static void out_str(PionLuaState *S, const char *s) { out_add(S, s, strlen(s)); }
+
+static void out_hdr(PionLuaState *S, char type, long long n) {
+    char b[32];
+    int l = snprintf(b, sizeof(b), "%c%lld\r\n", type, n);
+    out_add(S, b, (size_t)l);
+}
+
+static void out_bulk(PionLuaState *S, const char *p, size_t n) {
+    out_hdr(S, '$', (long long)n);
+    out_add(S, p, n);
+    out_add(S, "\r\n", 2);
+}
+
+/* A simple-string or error line: CR and LF become spaces, as Redis does. */
+static void out_line(PionLuaState *S, char type, const char *p, size_t n) {
+    out_add(S, &type, 1);
+    size_t start = S->out_len;
+    out_add(S, p, n);
+    if (!S->out_oom)
+        for (size_t i = start; i < S->out_len; i++)
+            if (S->out[i] == '\r' || S->out[i] == '\n') S->out[i] = ' ';
+    out_add(S, "\r\n", 2);
+}
+
+static void out_null(PionLuaState *S, int resp) { out_str(S, resp == 3 ? "_\r\n" : "$-1\r\n"); }
+
+/* An error reply of Pion's own (not a script's): "-<msg>\r\n". */
+static int64_t out_error(PionLuaState *S, const char *msg) {
+    out_reset(S);
+    out_line(S, '-', msg, strlen(msg));
+    return S->out_oom ? -1 : (int64_t)S->out_len;
+}
+
+const char *pion_lua_out(PionLuaState *S) { return S ? S->out : NULL; }
+
+/* ── Doubles ── */
+
+/* The shortest representation that reads back to the same double, as Redis's
+ * fpconv_dtoa prints a number passed to redis.call() and d2string a double
+ * reply: integral values print without an exponent, -0 as 0. */
+static int fmt_double(double v, char *buf, size_t cap) {
+    if (isnan(v)) return snprintf(buf, cap, "nan");
+    if (isinf(v)) return snprintf(buf, cap, v > 0 ? "inf" : "-inf");
+    if (v == 0) return snprintf(buf, cap, "0");
+    if (v == floor(v) && fabs(v) < 1e17) return snprintf(buf, cap, "%.0f", v);
+    for (int prec = 1; prec <= 17; prec++) {
+        int l = snprintf(buf, cap, "%.*g", prec, v);
+        if (strtod(buf, NULL) == v) return l;
     }
+    return snprintf(buf, cap, "%.17g", v);
 }
 
-/* Set a global without consulting a metatable a script may have put on _G:
- * the host writes KEYS/ARGV outside any protected call. */
-static void raw_setglobal(lua_State *L, const char *name) {
-    lua_pushstring(L, name);
-    lua_insert(L, -2);
-    lua_rawset(L, LUA_GLOBALSINDEX);
-}
+/* ── Lua helpers ── */
 
-static void raw_getglobal(lua_State *L, const char *name) {
-    lua_pushstring(L, name);
-    lua_rawget(L, LUA_GLOBALSINDEX);
-}
-
-/* ── redis.call / redis.pcall ── */
-
-/*
- * redis.call("CMD", arg1, arg2, ...) → yields all args to the host.
- * The host dispatches the command and pushes the result before resuming.
- */
-static int lua_redis_call(lua_State *L) {
-    /* Yield all arguments on the stack to the host */
-    return lua_yield(L, lua_gettop(L));
-}
-
-/*
- * redis.pcall — same as redis.call, but the host wraps errors in {err=...}
- * instead of raising. We signal pcall mode via a flag on the PionLuaState.
- * Since redis.pcall uses the same yield mechanism, we set a flag in the
- * registry before calling to differentiate.
- */
-static int lua_redis_pcall(lua_State *L) {
-    /* Set pcall flag in registry */
-    lua_pushboolean(L, 1);
-    lua_setfield(L, LUA_REGISTRYINDEX, "__pion_pcall");
-    return lua_yield(L, lua_gettop(L));
-}
-
-/* redis.log(level, msg) — simple print */
-static int lua_redis_log(lua_State *L) {
-    int nargs = lua_gettop(L);
-    if (nargs >= 2) {
-        const char *msg = lua_tostring(L, 2);
-        if (msg) fprintf(stderr, "[Lua] %s\n", msg);
-    }
-    return 0;
-}
-
-/* redis.error_reply(msg) → {err=msg} */
-static int lua_redis_error_reply(lua_State *L) {
-    lua_newtable(L);
-    lua_pushvalue(L, 1);
-    lua_setfield(L, -2, "err");
-    return 1;
-}
-
-/* redis.status_reply(msg) → {ok=msg} */
-static int lua_redis_status_reply(lua_State *L) {
-    lua_newtable(L);
-    lua_pushvalue(L, 1);
-    lua_setfield(L, -2, "ok");
-    return 1;
-}
-
-/*
- * redis.register_function(name, callback)
- * OR redis.register_function{function_name=name, callback=func}
- * Called during FUNCTION LOAD to register named functions.
- * Stores the callback ref in the loading library's func table.
- */
-static int lua_redis_register_function(lua_State *L) {
-    const char *fname = NULL;
-    int func_stack_idx = 0;
-
-    if (lua_type(L, 1) == LUA_TTABLE) {
-        /* Table form: {function_name="name", callback=func} */
-        lua_getfield(L, 1, "function_name");
-        fname = lua_tostring(L, -1);
-        lua_getfield(L, 1, "callback");
-        func_stack_idx = lua_gettop(L);
-    } else {
-        /* Simple form: register_function("name", func) */
-        fname = luaL_checkstring(L, 1);
-        luaL_checktype(L, 2, LUA_TFUNCTION);
-        func_stack_idx = 2;
-    }
-
-    if (!fname) return luaL_error(L, "register_function: missing function name");
-
-    /* Get PionLuaState from registry */
+static PionLuaState *state_of(lua_State *L) {
     lua_getfield(L, LUA_REGISTRYINDEX, "__pion_state");
     PionLuaState *S = (PionLuaState *)lua_touserdata(L, -1);
     lua_pop(L, 1);
+    return S;
+}
 
-    if (!S || !S->loading_lib) {
-        return luaL_error(L, "register_function: not inside FUNCTION LOAD");
+/* Push {err="<code> <msg>"} the way Redis's luaPushErrorBuff builds it: a
+ * message starting with '-' carries its own code ("-WRONGTYPE ..."), anything
+ * else gets "ERR". A trailing CR/LF is trimmed. */
+static void push_error_table(lua_State *L, const char *msg, size_t len) {
+    luaL_Buffer b;
+    while (len > 0 && (msg[len - 1] == '\r' || msg[len - 1] == '\n')) len--;
+    luaL_buffinit(L, &b);
+    if (len > 0 && msg[0] == '-') {
+        const char *sp = memchr(msg, ' ', len);
+        if (!sp) {
+            luaL_addstring(&b, "ERR ");
+            luaL_addlstring(&b, msg + 1, len - 1);
+        } else {
+            luaL_addlstring(&b, msg + 1, (size_t)(sp - msg - 1));
+            luaL_addlstring(&b, sp, len - (size_t)(sp - msg));
+        }
+    } else {
+        luaL_addstring(&b, "ERR ");
+        luaL_addlstring(&b, msg, len);
     }
-    if (S->loading_lib->func_count >= MAX_FUNCS_PER_LIB) {
-        return luaL_error(L, "register_function: too many functions in library");
+    lua_newtable(L);
+    lua_pushliteral(L, "err");
+    luaL_pushresult(&b);
+    lua_rawset(L, -3);
+}
+
+/* Raise (call) or return (pcall) an error table. */
+static int error_or_return(lua_State *L, int raise, const char *msg) {
+    push_error_table(L, msg, strlen(msg));
+    if (raise) return lua_error(L);
+    return 1;
+}
+
+/* Raise {err="ERR <msg>"}: how Redis's redis.* functions fail (no position
+ * prefix; the handler adds the script line). */
+static int raise_err(lua_State *L, const char *msg) {
+    push_error_table(L, msg, strlen(msg));
+    return lua_error(L);
+}
+
+/* Lua's own tostring for an error object of any type. */
+static void push_tostring(lua_State *L, int idx) {
+    switch (lua_type(L, idx)) {
+    case LUA_TNUMBER:
+    case LUA_TSTRING:  lua_pushvalue(L, idx); lua_tostring(L, -1); break;
+    case LUA_TBOOLEAN: lua_pushstring(L, lua_toboolean(L, idx) ? "true" : "false"); break;
+    case LUA_TNIL:     lua_pushliteral(L, "nil"); break;
+    default:
+        lua_pushfstring(L, "%s: %p", luaL_typename(L, idx), lua_topointer(L, idx));
     }
+}
 
-    /* Store function reference */
-    RegisteredFunc *rf = &S->loading_lib->funcs[S->loading_lib->func_count];
-    strncpy(rf->name, fname, MAX_NAME_LEN - 1);
-    rf->name[MAX_NAME_LEN - 1] = '\0';
+/* ── RESP → Lua (a command's reply, as Redis's redisProtocolToLuaType) ── */
 
-    lua_pushvalue(L, func_stack_idx);
-    rf->ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    S->loading_lib->func_count++;
-
+static int resp_line(const char *p, size_t n, size_t pos, size_t *end) {
+    for (size_t i = pos; i + 1 < n; i++)
+        if (p[i] == '\r' && p[i + 1] == '\n') { *end = i; return 1; }
     return 0;
 }
 
-/* redis.sha1hex(s) → SHA1 hex of string */
+static long long resp_int(const char *p, size_t a, size_t b) {
+    long long v = 0; int neg = 0; size_t i = a;
+    if (i < b && p[i] == '-') { neg = 1; i++; }
+    for (; i < b; i++) v = v * 10 + (p[i] - '0');
+    return neg ? -v : v;
+}
+
+/* Push the reply at *pos and advance past it. *is_err is set for a top-level
+ * error reply. Returns 0 on a malformed reply. */
+static int resp_to_lua(lua_State *L, const char *p, size_t n, size_t *pos, int *is_err, int depth) {
+    size_t end;
+    if (*pos >= n || !resp_line(p, n, *pos + 1, &end)) return 0;
+    if (depth > 1000 || !lua_checkstack(L, 4)) return 0;
+    char t = p[*pos];
+    size_t a = *pos + 1;
+    switch (t) {
+    case '+':
+        lua_newtable(L);
+        lua_pushliteral(L, "ok");
+        lua_pushlstring(L, p + a, end - a);
+        lua_rawset(L, -3);
+        *pos = end + 2;
+        return 1;
+    case '-':
+        push_error_table(L, p + *pos, end - *pos);   /* keeps its code */
+        if (is_err && depth == 0) *is_err = 1;
+        *pos = end + 2;
+        return 1;
+    case ':':
+        lua_pushnumber(L, (lua_Number)resp_int(p, a, end));
+        *pos = end + 2;
+        return 1;
+    case '$': {
+        long long len = resp_int(p, a, end);
+        *pos = end + 2;
+        if (len < 0) { lua_pushboolean(L, 0); return 1; }
+        if (*pos + (size_t)len + 2 > n) return 0;
+        lua_pushlstring(L, p + *pos, (size_t)len);
+        *pos += (size_t)len + 2;
+        return 1;
+    }
+    case '=': {   /* verbatim: {verbatim_string={format=, string=}} */
+        long long len = resp_int(p, a, end);
+        *pos = end + 2;
+        if (len < 4 || *pos + (size_t)len + 2 > n) return 0;
+        lua_newtable(L);
+        lua_pushliteral(L, "verbatim_string");
+        lua_newtable(L);
+        lua_pushliteral(L, "format");
+        lua_pushlstring(L, p + *pos, 3);
+        lua_rawset(L, -3);
+        lua_pushliteral(L, "string");
+        lua_pushlstring(L, p + *pos + 4, (size_t)len - 4);
+        lua_rawset(L, -3);
+        lua_rawset(L, -3);
+        *pos += (size_t)len + 2;
+        return 1;
+    }
+    case '*':
+    case '>': {
+        long long cnt = resp_int(p, a, end);
+        *pos = end + 2;
+        if (cnt < 0) { lua_pushboolean(L, 0); return 1; }
+        lua_newtable(L);
+        for (long long j = 1; j <= cnt; j++) {
+            if (!resp_to_lua(L, p, n, pos, NULL, depth + 1)) return 0;
+            lua_rawseti(L, -2, (int)j);
+        }
+        return 1;
+    }
+    case '%': {
+        long long cnt = resp_int(p, a, end);
+        *pos = end + 2;
+        lua_newtable(L);
+        lua_pushliteral(L, "map");
+        lua_newtable(L);
+        for (long long j = 0; j < cnt; j++) {
+            if (!resp_to_lua(L, p, n, pos, NULL, depth + 1)) return 0;
+            if (!resp_to_lua(L, p, n, pos, NULL, depth + 1)) return 0;
+            lua_rawset(L, -3);
+        }
+        lua_rawset(L, -3);
+        return 1;
+    }
+    case '~': {
+        long long cnt = resp_int(p, a, end);
+        *pos = end + 2;
+        lua_newtable(L);
+        lua_pushliteral(L, "set");
+        lua_newtable(L);
+        for (long long j = 0; j < cnt; j++) {
+            if (!resp_to_lua(L, p, n, pos, NULL, depth + 1)) return 0;
+            lua_pushboolean(L, 1);
+            lua_rawset(L, -3);
+        }
+        lua_rawset(L, -3);
+        return 1;
+    }
+    case '_':
+        lua_pushnil(L);
+        *pos = end + 2;
+        return 1;
+    case '#':
+        lua_pushboolean(L, end > a && p[a] == 't');
+        *pos = end + 2;
+        return 1;
+    case ',': {
+        char tmp[128];
+        size_t l = end - a < sizeof(tmp) - 1 ? end - a : sizeof(tmp) - 1;
+        memcpy(tmp, p + a, l); tmp[l] = 0;
+        lua_newtable(L);
+        lua_pushliteral(L, "double");
+        lua_pushnumber(L, strtod(tmp, NULL));
+        lua_rawset(L, -3);
+        *pos = end + 2;
+        return 1;
+    }
+    case '(':
+        lua_newtable(L);
+        lua_pushliteral(L, "big_number");
+        lua_pushlstring(L, p + a, end - a);
+        lua_rawset(L, -3);
+        *pos = end + 2;
+        return 1;
+    case '|': {   /* attributes are dropped; the value follows */
+        long long cnt = resp_int(p, a, end);
+        *pos = end + 2;
+        for (long long j = 0; j < 2 * cnt; j++) {
+            if (!resp_to_lua(L, p, n, pos, NULL, depth + 1)) return 0;
+            lua_pop(L, 1);
+        }
+        return resp_to_lua(L, p, n, pos, is_err, depth);
+    }
+    default:
+        return 0;
+    }
+}
+
+/* ── Lua → RESP (a script's return value, as Redis's luaReplyToRedisReply) ── */
+
+static void reply_value(PionLuaState *S, lua_State *L, int resp, int depth);
+
+/* The value on top of the stack, consumed. `resp` is the CLIENT's protocol;
+ * S->resp is the script's (redis.setresp), which decides how a boolean
+ * converts, as in Redis. */
+static void reply_value(PionLuaState *S, lua_State *L, int resp, int depth) {
+    int t = lua_type(L, -1);
+    if (depth > 1000 || !lua_checkstack(L, 4)) {
+        out_str(S, "-ERR reached lua stack limit\r\n");
+        lua_pop(L, 1);
+        return;
+    }
+    switch (t) {
+    case LUA_TSTRING: {
+        size_t l; const char *s = lua_tolstring(L, -1, &l);
+        out_bulk(S, s, l);
+        break;
+    }
+    case LUA_TBOOLEAN:
+        if (S->resp == 2) {
+            if (lua_toboolean(L, -1)) out_str(S, ":1\r\n"); else out_null(S, resp);
+        } else if (resp == 2) {
+            out_str(S, lua_toboolean(L, -1) ? ":1\r\n" : ":0\r\n");
+        } else {
+            out_str(S, lua_toboolean(L, -1) ? "#t\r\n" : "#f\r\n");
+        }
+        break;
+    case LUA_TNUMBER:
+        out_hdr(S, ':', (long long)lua_tonumber(L, -1));
+        break;
+    case LUA_TTABLE: {
+        int tbl = lua_gettop(L);
+        /* {err=string}: an error reply */
+        lua_pushliteral(L, "err"); lua_rawget(L, tbl);
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            size_t l; const char *s = lua_tolstring(L, -1, &l);
+            if (l > 0 && s[0] == '-') { s++; l--; }
+            out_line(S, '-', s, l);
+            lua_pop(L, 2);
+            return;
+        }
+        lua_pop(L, 1);
+        /* {ok=string}: a status reply */
+        lua_pushliteral(L, "ok"); lua_rawget(L, tbl);
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            size_t l; const char *s = lua_tolstring(L, -1, &l);
+            out_line(S, '+', s, l);
+            lua_pop(L, 2);
+            return;
+        }
+        lua_pop(L, 1);
+        /* {double=number} */
+        lua_pushliteral(L, "double"); lua_rawget(L, tbl);
+        if (lua_type(L, -1) == LUA_TNUMBER) {
+            char b[64]; int l = fmt_double(lua_tonumber(L, -1), b, sizeof(b));
+            if (resp == 3) { out_line(S, ',', b, (size_t)l); }
+            else out_bulk(S, b, (size_t)l);
+            lua_pop(L, 2);
+            return;
+        }
+        lua_pop(L, 1);
+        /* {big_number=string} */
+        lua_pushliteral(L, "big_number"); lua_rawget(L, tbl);
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            size_t l; const char *s = lua_tolstring(L, -1, &l);
+            if (resp == 3) out_line(S, '(', s, l); else out_bulk(S, s, l);
+            lua_pop(L, 2);
+            return;
+        }
+        lua_pop(L, 1);
+        /* {verbatim_string={format=, string=}} */
+        lua_pushliteral(L, "verbatim_string"); lua_rawget(L, tbl);
+        if (lua_type(L, -1) == LUA_TTABLE) {
+            int vt = lua_gettop(L);
+            lua_pushliteral(L, "format"); lua_rawget(L, vt);
+            lua_pushliteral(L, "string"); lua_rawget(L, vt);
+            if (lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING) {
+                size_t fl, sl;
+                const char *f = lua_tolstring(L, -2, &fl);
+                const char *s = lua_tolstring(L, -1, &sl);
+                if (resp == 3) {
+                    char fmt3[3] = {'t', 'x', 't'};
+                    for (size_t k = 0; k < 3 && k < fl; k++) fmt3[k] = f[k];
+                    out_hdr(S, '=', (long long)(sl + 4));
+                    out_add(S, fmt3, 3);
+                    out_add(S, ":", 1);
+                    out_add(S, s, sl);
+                    out_add(S, "\r\n", 2);
+                } else {
+                    out_bulk(S, s, sl);
+                }
+                lua_pop(L, 4);
+                return;
+            }
+            lua_pop(L, 2);
+        }
+        lua_pop(L, 1);
+        /* {map={...}} */
+        lua_pushliteral(L, "map"); lua_rawget(L, tbl);
+        if (lua_type(L, -1) == LUA_TTABLE) {
+            int mt = lua_gettop(L);
+            long long cnt = 0;
+            lua_pushnil(L);
+            while (lua_next(L, mt)) { cnt++; lua_pop(L, 1); }
+            out_hdr(S, resp == 3 ? '%' : '*', resp == 3 ? cnt : 2 * cnt);
+            lua_pushnil(L);
+            while (lua_next(L, mt)) {
+                lua_pushvalue(L, -2);
+                reply_value(S, L, resp, depth + 1);   /* key */
+                reply_value(S, L, resp, depth + 1);   /* value */
+            }
+            lua_pop(L, 2);
+            return;
+        }
+        lua_pop(L, 1);
+        /* {set={...}} */
+        lua_pushliteral(L, "set"); lua_rawget(L, tbl);
+        if (lua_type(L, -1) == LUA_TTABLE) {
+            int st = lua_gettop(L);
+            long long cnt = 0;
+            lua_pushnil(L);
+            while (lua_next(L, st)) { cnt++; lua_pop(L, 1); }
+            out_hdr(S, resp == 3 ? '~' : '*', cnt);
+            lua_pushnil(L);
+            while (lua_next(L, st)) {
+                lua_pop(L, 1);
+                lua_pushvalue(L, -1);
+                reply_value(S, L, resp, depth + 1);
+            }
+            lua_pop(L, 2);
+            return;
+        }
+        lua_pop(L, 1);
+        /* an array: elements 1.. up to the first nil */
+        long long cnt = 0;
+        for (;;) {
+            lua_rawgeti(L, tbl, (int)(cnt + 1));
+            int nil = lua_isnil(L, -1);
+            lua_pop(L, 1);
+            if (nil) break;
+            cnt++;
+        }
+        out_hdr(S, '*', cnt);
+        for (long long j = 1; j <= cnt; j++) {
+            lua_rawgeti(L, tbl, (int)j);
+            reply_value(S, L, resp, depth + 1);
+        }
+        break;
+    }
+    default:
+        out_null(S, resp);
+    }
+    lua_pop(L, 1);
+}
+
+/* ── The time limit ── */
+
+static int64_t elapsed_ms(PionLuaState *S) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)(now.tv_sec - S->started.tv_sec) * 1000 +
+           (now.tv_nsec - S->started.tv_nsec) / 1000000;
+}
+
+/* Every 100K instructions. A script that has run past lua-time-limit and has
+ * not written anything is stopped, as SCRIPT KILL would stop it in Redis: a
+ * worker runs one thing at a time, so it cannot answer SCRIPT KILL (or BUSY)
+ * while a script runs. One that has written keeps running, as Redis keeps an
+ * unkillable script running. */
+static void time_hook(lua_State *L, lua_Debug *ar) {
+    (void)ar;
+    PionLuaState *S = state_of(L);
+    if (!S || S->time_limit_ms <= 0 || S->wrote || S->killed) return;
+    if (elapsed_ms(S) < S->time_limit_ms) return;
+    S->killed = 1;
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "ERR Script killed: it ran longer than lua-time-limit (%lld ms) without writing",
+             (long long)S->time_limit_ms);
+    lua_newtable(L);
+    lua_pushliteral(L, "err");
+    lua_pushstring(L, msg);
+    lua_rawset(L, -3);
+    lua_error(L);
+}
+
+/* ── The error handler (Redis's __redis__err__handler) ── */
+
+/* Turns any error into {err=..., source=..., line=...}: a non-table becomes
+ * {err="ERR " .. tostring(e)}, and the position is the script line that
+ * raised it (the caller of a C function such as redis.call or error). */
+static int err_handler(lua_State *L) {
+    lua_Debug ar;
+    int have = 0;
+    if (lua_getstack(L, 1, &ar)) {
+        lua_getinfo(L, "Sl", &ar);
+        have = 1;
+        if (ar.what && strcmp(ar.what, "C") == 0) {
+            have = lua_getstack(L, 2, &ar) ? (lua_getinfo(L, "Sl", &ar), 1) : 0;
+        }
+    }
+    if (lua_type(L, 1) != LUA_TTABLE) {
+        push_tostring(L, 1);
+        lua_newtable(L);
+        lua_pushliteral(L, "err");
+        lua_pushliteral(L, "ERR ");
+        lua_pushvalue(L, -4);
+        lua_concat(L, 2);
+        lua_rawset(L, -3);
+        lua_replace(L, 1);
+        lua_settop(L, 1);
+    }
+    if (have && ar.currentline > 0 && ar.source && ar.source[0] == '@' && !lua_isreadonlytable(L, 1)) {
+        lua_pushliteral(L, "source");
+        lua_pushstring(L, ar.source);
+        lua_rawset(L, 1);
+        lua_pushliteral(L, "line");
+        lua_pushinteger(L, ar.currentline);
+        lua_rawset(L, 1);
+    }
+    return 1;
+}
+
+/* The reply for a failed run: "-<err> script: <name>, on <source>:<line>." */
+static int64_t reply_run_error(PionLuaState *S, lua_State *L) {
+    out_reset(S);
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    if (lua_type(L, -1) == LUA_TTABLE) {
+        int et = lua_gettop(L);
+        lua_pushliteral(L, "err"); lua_rawget(L, et);
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            size_t l; const char *s = lua_tolstring(L, -1, &l);
+            if (l > 0 && s[0] == '-') { s++; l--; }
+            luaL_addlstring(&b, s, l);
+        } else {
+            luaL_addstring(&b, "ERR unknown error");
+        }
+        lua_pop(L, 1);
+        lua_pushliteral(L, "source"); lua_rawget(L, et);
+        lua_pushliteral(L, "line"); lua_rawget(L, et);
+        if (lua_type(L, -2) == LUA_TSTRING && lua_isnumber(L, -1)) {
+            char suf[256];
+            snprintf(suf, sizeof(suf), " script: %s, on %s:%d.", S->run_name,
+                     lua_tostring(L, -2), (int)lua_tointeger(L, -1));
+            lua_pop(L, 2);
+            luaL_addstring(&b, suf);
+        } else {
+            lua_pop(L, 2);
+        }
+    } else {
+        /* not through the handler (a memory error while raising one) */
+        push_tostring(L, -1);
+        luaL_addstring(&b, "ERR ");
+        luaL_addvalue(&b);
+    }
+    luaL_pushresult(&b);
+    size_t l; const char *m = lua_tolstring(L, -1, &l);
+    out_line(S, '-', m, l);
+    lua_pop(L, 1);
+    return S->out_oom ? -1 : (int64_t)S->out_len;
+}
+
+/* ── redis.* ── */
+
+static int redis_call_generic(lua_State *L, int raise) {
+    PionLuaState *S = state_of(L);
+    int argc = lua_gettop(L);
+    if (argc == 0)
+        return error_or_return(L, raise, "Please specify at least one argument for this redis lib call");
+    if (argc > S->cap_argv) {
+        int nc = argc < 16 ? 16 : argc * 2;
+        const char **na = (const char **)realloc((void *)S->argv, sizeof(char *) * (size_t)nc);
+        if (na) S->argv = na;
+        int64_t *nl = (int64_t *)realloc(S->lens, sizeof(int64_t) * (size_t)nc);
+        if (nl) S->lens = nl;
+        if (!na || !nl) return luaL_error(L, "not enough memory");
+        S->cap_argv = nc;
+    }
+    for (int j = 1; j <= argc; j++) {
+        int t = lua_type(L, j);
+        if (t == LUA_TNUMBER) {
+            /* Redis's fpconv_dtoa: the shortest form that reads back */
+            char nb[64];
+            int l = fmt_double(lua_tonumber(L, j), nb, sizeof(nb));
+            lua_pushlstring(L, nb, (size_t)l);
+            lua_replace(L, j);
+        } else if (t != LUA_TSTRING) {
+            return error_or_return(L, raise, "Lua redis lib command arguments must be strings or integers");
+        }
+        size_t l;
+        S->argv[j - 1] = lua_tolstring(L, j, &l);
+        S->lens[j - 1] = (int64_t)l;
+    }
+    if (!S->dispatch)
+        return error_or_return(L, raise, "This Redis command is not allowed from script");
+    const char *rep = NULL;
+    int64_t wrote = 0;
+    int64_t flags = (S->ro ? PION_LUA_DISPATCH_RO : 0) | (S->allow_oom ? PION_LUA_DISPATCH_OOM : 0);
+    int64_t n = S->dispatch(S->host, argc, S->argv, S->lens, flags, S->resp, &rep, &wrote);
+    if (wrote) S->wrote = 1;
+    if (n < 0 || !rep)
+        return error_or_return(L, raise, "internal error: the command produced no reply");
+    size_t pos = 0;
+    int is_err = 0;
+    lua_settop(L, 0);
+    if (!resp_to_lua(L, rep, (size_t)n, &pos, &is_err, 0))
+        return error_or_return(L, raise, "internal error: the command's reply could not be read");
+    if (is_err && raise) return lua_error(L);
+    return 1;
+}
+
+static int lua_redis_call(lua_State *L)  { return redis_call_generic(L, 1); }
+static int lua_redis_pcall(lua_State *L) { return redis_call_generic(L, 0); }
+
+/* Redis's pcall: an error table raised by redis.call() comes back as its
+ * message string, as scripts written for Redis < 7 expect. */
+static int lua_redis_lua_pcall(lua_State *L) {
+    int argc = lua_gettop(L);
+    luaL_checkany(L, 1);
+    lua_pushboolean(L, 1);
+    lua_insert(L, 1);
+    if (lua_pcall(L, argc - 1, LUA_MULTRET, 0)) {
+        lua_remove(L, 1);
+        if (lua_istable(L, -1)) {
+            lua_pushliteral(L, "err");
+            lua_rawget(L, -2);
+            if (lua_isstring(L, -1)) lua_replace(L, -2);
+            else lua_pop(L, 1);
+        }
+        lua_pushboolean(L, 0);
+        lua_insert(L, 1);
+    }
+    return lua_gettop(L);
+}
+
+static int lua_redis_log(lua_State *L) {
+    int argc = lua_gettop(L);
+    if (argc < 2) return raise_err(L, "redis.log() requires two arguments or more.");
+    if (!lua_isnumber(L, 1)) return raise_err(L, "First argument must be a number (log level).");
+    int level = (int)lua_tonumber(L, 1);
+    if (level < 0 || level > 3) return raise_err(L, "Invalid log level.");
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    for (int j = 2; j <= argc; j++) {
+        size_t l; const char *s = lua_tolstring(L, j, &l);
+        if (s) {
+            if (j != 2) luaL_addchar(&b, ' ');
+            luaL_addlstring(&b, s, l);
+        }
+    }
+    luaL_pushresult(&b);
+    if (level >= 2) fprintf(stderr, "[Lua] %s\n", lua_tostring(L, -1));
+    return 0;
+}
+
+/* redis.error_reply / status_reply: a table the script returns. */
+static int lua_redis_error_reply(lua_State *L) {
+    if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
+        push_error_table(L, "wrong number or type of arguments", strlen("wrong number or type of arguments"));
+        return 1;
+    }
+    size_t l; const char *s = lua_tolstring(L, 1, &l);
+    if (l > 0 && s[0] == '-') {
+        push_error_table(L, s, l);
+    } else {
+        lua_pushliteral(L, "-");
+        lua_pushvalue(L, 1);
+        lua_concat(L, 2);
+        size_t l2; const char *s2 = lua_tolstring(L, -1, &l2);
+        push_error_table(L, s2, l2);
+    }
+    return 1;
+}
+
+static int lua_redis_status_reply(lua_State *L) {
+    if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
+        push_error_table(L, "wrong number or type of arguments", strlen("wrong number or type of arguments"));
+        return 1;
+    }
+    lua_newtable(L);
+    lua_pushliteral(L, "ok");
+    lua_pushvalue(L, 1);
+    lua_rawset(L, -3);
+    return 1;
+}
+
 static int lua_redis_sha1hex(lua_State *L) {
+    if (lua_gettop(L) != 1) return raise_err(L, "wrong number of arguments");
     size_t len;
-    const char *s = luaL_checklstring(L, 1, &len);
-    SHA1_CTX ctx; uint8_t digest[20]; char hex[41];
-    sha1_init(&ctx);
-    sha1_update(&ctx, (const uint8_t *)s, len);
-    sha1_final(&ctx, digest);
-    sha1_hex(digest, hex);
+    const char *s = lua_tolstring(L, 1, &len);
+    char hex[41];
+    sha1_hex_of(s ? s : "", s ? len : 0, hex);
     lua_pushlstring(L, hex, 40);
     return 1;
 }
 
-/* ── Register redis.* table ── */
+static int lua_redis_setresp(lua_State *L) {
+    PionLuaState *S = state_of(L);
+    if (lua_gettop(L) != 1) return raise_err(L, "redis.setresp() requires one argument.");
+    int v = (int)lua_tonumber(L, 1);
+    if (v != 2 && v != 3) return raise_err(L, "RESP version must be 2 or 3.");
+    S->resp = v;
+    return 0;
+}
 
-static void register_redis_table(lua_State *L) {
+static int lua_redis_set_repl(lua_State *L) {
+    if (lua_gettop(L) != 1) return raise_err(L, "redis.set_repl() requires one argument.");
+    int v = (int)lua_tonumber(L, 1);
+    if (v < 0 || v > 3)
+        return raise_err(L, "Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.");
+    return 0;
+}
+
+static int lua_redis_true(lua_State *L)  { lua_pushboolean(L, 1); return 1; }
+static int lua_redis_false(lua_State *L) { lua_pushboolean(L, 0); return 1; }
+static int lua_redis_nil(lua_State *L)   { (void)L; return 0; }
+
+static int lua_redis_acl_check_cmd(lua_State *L) {
+    PionLuaState *S = state_of(L);
+    int argc = lua_gettop(L);
+    if (argc == 0) return raise_err(L, "Please specify at least one argument for this redis lib call");
+    size_t l; const char *name = lua_tolstring(L, 1, &l);
+    int exists = 0;
+    if (name && S->dispatch) {
+        const char *argv[1] = {name};
+        int64_t lens[1] = {(int64_t)l};
+        const char *rep = NULL; int64_t wrote = 0;
+        exists = S->dispatch(S->host, 1, argv, lens, PION_LUA_DISPATCH_CHECK, 2, &rep, &wrote) == 1;
+    }
+    if (!exists) return raise_err(L, "Invalid command passed to redis.acl_check_cmd()");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_redis_register_function(lua_State *L);
+
+/* The `redis` table: the full API for scripts and functions, or (`load`) the
+ * part FUNCTION LOAD gives library code. */
+static void push_redis_table(lua_State *L, int load) {
     lua_newtable(L);
-
-    lua_pushcfunction(L, lua_redis_call);
-    lua_setfield(L, -2, "call");
-
-    lua_pushcfunction(L, lua_redis_pcall);
-    lua_setfield(L, -2, "pcall");
-
-    lua_pushcfunction(L, lua_redis_log);
-    lua_setfield(L, -2, "log");
-
-    lua_pushcfunction(L, lua_redis_error_reply);
-    lua_setfield(L, -2, "error_reply");
-
-    lua_pushcfunction(L, lua_redis_status_reply);
-    lua_setfield(L, -2, "status_reply");
-
-    lua_pushcfunction(L, lua_redis_sha1hex);
-    lua_setfield(L, -2, "sha1hex");
-
-    lua_pushcfunction(L, lua_redis_register_function);
-    lua_setfield(L, -2, "register_function");
-
-    /* Log levels (match Redis) */
+    if (!load) {
+        lua_pushcfunction(L, lua_redis_call);           lua_setfield(L, -2, "call");
+        lua_pushcfunction(L, lua_redis_pcall);          lua_setfield(L, -2, "pcall");
+        lua_pushcfunction(L, lua_redis_sha1hex);        lua_setfield(L, -2, "sha1hex");
+        lua_pushcfunction(L, lua_redis_error_reply);    lua_setfield(L, -2, "error_reply");
+        lua_pushcfunction(L, lua_redis_status_reply);   lua_setfield(L, -2, "status_reply");
+        lua_pushcfunction(L, lua_redis_set_repl);       lua_setfield(L, -2, "set_repl");
+        lua_pushcfunction(L, lua_redis_true);           lua_setfield(L, -2, "replicate_commands");
+        lua_pushcfunction(L, lua_redis_false);          lua_setfield(L, -2, "breakpoint");
+        lua_pushcfunction(L, lua_redis_nil);            lua_setfield(L, -2, "debug");
+        lua_pushcfunction(L, lua_redis_acl_check_cmd);  lua_setfield(L, -2, "acl_check_cmd");
+        lua_pushinteger(L, 3); lua_setfield(L, -2, "REPL_ALL");
+        lua_pushinteger(L, 1); lua_setfield(L, -2, "REPL_AOF");
+        lua_pushinteger(L, 2); lua_setfield(L, -2, "REPL_SLAVE");
+        lua_pushinteger(L, 2); lua_setfield(L, -2, "REPL_REPLICA");
+        lua_pushinteger(L, 0); lua_setfield(L, -2, "REPL_NONE");
+    } else {
+        lua_pushcfunction(L, lua_redis_register_function); lua_setfield(L, -2, "register_function");
+    }
+    lua_pushcfunction(L, lua_redis_log);     lua_setfield(L, -2, "log");
+    if (!load) { lua_pushcfunction(L, lua_redis_setresp); lua_setfield(L, -2, "setresp"); }
     lua_pushinteger(L, 0); lua_setfield(L, -2, "LOG_DEBUG");
     lua_pushinteger(L, 1); lua_setfield(L, -2, "LOG_VERBOSE");
     lua_pushinteger(L, 2); lua_setfield(L, -2, "LOG_NOTICE");
     lua_pushinteger(L, 3); lua_setfield(L, -2, "LOG_WARNING");
+    lua_pushstring(L, PION_REDIS_VERSION);   lua_setfield(L, -2, "REDIS_VERSION");
+    lua_pushinteger(L, PION_REDIS_VERSION_NUM); lua_setfield(L, -2, "REDIS_VERSION_NUM");
+}
 
+/* ── The sandbox ── */
+
+/* Redis's error for reading an undefined global. */
+static int protected_global_index(lua_State *L) {
+    if (lua_gettop(L) != 2) return luaL_error(L, "Wrong number of arguments to luaProtectedTableError");
+    if (!lua_isstring(L, -1) && !lua_isnumber(L, -1))
+        return luaL_error(L, "Second argument to luaProtectedTableError must be a string or number");
+    return luaL_error(L, "Script attempted to access nonexistent global variable '%s'", lua_tostring(L, -1));
+}
+
+static void set_error_metatable(lua_State *L, int idx) {
+    idx = idx < 0 ? lua_gettop(L) + idx + 1 : idx;
+    lua_newtable(L);
+    lua_pushcfunction(L, protected_global_index);
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, idx);
+}
+
+/* Make the table at idx, and every table reachable from it, readonly. */
+static void protect_recursively(lua_State *L, int idx) {
+    idx = idx < 0 ? lua_gettop(L) + idx + 1 : idx;
+    if (!lua_checkstack(L, 4) || lua_isreadonlytable(L, idx)) return;
+    lua_enablereadonlytable(L, idx, 1);
+    if (lua_getmetatable(L, idx)) {
+        protect_recursively(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_pushnil(L);
+    while (lua_next(L, idx)) {
+        if (lua_istable(L, -1)) protect_recursively(L, -1);
+        lua_pop(L, 1);
+    }
+}
+
+static void open_lib(lua_State *L, const char *name, lua_CFunction f) {
+    lua_pushcfunction(L, f);
+    lua_pushstring(L, name);
+    lua_call(L, 1, 0);
+}
+
+static void remove_global(lua_State *L, const char *name) {
+    lua_pushnil(L);
+    lua_setglobal(L, name);
+}
+
+/* The environment Redis 7+ gives a script (the same globals, as probed against
+ * redis-server 8.10): base minus print, dofile, loadfile, getfenv, setfenv
+ * and newproxy; table, string, math, coroutine; os with only clock; cjson,
+ * struct, cmsgpack and bit; the redis table; Redis's pcall; then everything
+ * readonly, and reading an undefined global an error. */
+static lua_State *new_sandbox(LuaMemCtx *mem, PionLuaState *S, int functions) {
+    lua_State *L = lua_newstate(lua_mem_alloc, mem);
+    if (!L) return NULL;
+    lua_atpanic(L, pion_lua_panic);
+
+    open_lib(L, "", luaopen_base);
+    open_lib(L, LUA_TABLIBNAME, luaopen_table);
+    open_lib(L, LUA_STRLIBNAME, luaopen_string);
+    open_lib(L, LUA_MATHLIBNAME, luaopen_math);
+    open_lib(L, LUA_OSLIBNAME, luaopen_os);
+    open_lib(L, "cjson", luaopen_cjson);
+    open_lib(L, "struct", luaopen_struct);
+    open_lib(L, "cmsgpack", luaopen_cmsgpack);
+    open_lib(L, "bit", luaopen_bit);
+    /* luaopen_cjson returns its table without setting a global */
+    lua_getglobal(L, "cjson");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_pushcfunction(L, luaopen_cjson);
+        lua_call(L, 0, 1);
+        lua_setglobal(L, "cjson");
+    } else {
+        lua_pop(L, 1);
+    }
+    lua_getglobal(L, "cmsgpack");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_pushcfunction(L, luaopen_cmsgpack);
+        lua_call(L, 0, 1);
+        lua_setglobal(L, "cmsgpack");
+    } else {
+        lua_pop(L, 1);
+    }
+
+    remove_global(L, "print");
+    remove_global(L, "dofile");
+    remove_global(L, "loadfile");
+    remove_global(L, "getfenv");
+    remove_global(L, "setfenv");
+    remove_global(L, "newproxy");
+    remove_global(L, "module");
+    remove_global(L, "require");
+    remove_global(L, "package");
+
+    /* os: clock only */
+    lua_getglobal(L, "os");
+    lua_getfield(L, -1, "clock");
+    lua_newtable(L);
+    lua_insert(L, -2);
+    lua_setfield(L, -2, "clock");
+    lua_setglobal(L, "os");
+    lua_pop(L, 1);
+
+    lua_pushcfunction(L, lua_redis_lua_pcall);
+    lua_setglobal(L, "pcall");
+
+    push_redis_table(L, 0);
     lua_setglobal(L, "redis");
+
+    /* the handler Redis exposes as a global; ours is C, this keeps _G's shape */
+    lua_pushcfunction(L, err_handler);
+    lua_setglobal(L, "__redis__err__handler");
+
+    if (!functions) {
+        lua_newtable(L); lua_setglobal(L, "KEYS");
+        lua_newtable(L); lua_setglobal(L, "ARGV");
+    }
+
+    lua_pushlightuserdata(L, S);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__pion_state");
+
+    /* readonly: _G and everything reachable from it, the string metatable too */
+    lua_pushvalue(L, LUA_GLOBALSINDEX);
+    set_error_metatable(L, -1);
+    protect_recursively(L, -1);
+    lua_pop(L, 1);
+    lua_pushliteral(L, "");
+    if (lua_getmetatable(L, -1)) {
+        protect_recursively(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    if (functions) {
+        /* Redis's functions engine: _G is an empty proxy whose __index is the
+         * real globals when a function runs, and only the library API while
+         * FUNCTION LOAD runs the library body (see pion_lua_function_load). */
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
+        S->fl_globals = luaL_ref(L, LUA_REGISTRYINDEX);
+        lua_newtable(L);
+        lua_newtable(L);
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
+        lua_setfield(L, -2, "__index");
+        lua_setmetatable(L, -2);
+        lua_enablereadonlytable(L, -1, 1);
+        lua_replace(L, LUA_GLOBALSINDEX);
+    }
+    return L;
 }
 
-/* ── RESP result serialization ── */
+/* ── Lifecycle ── */
 
-/*
- * Serialize a Lua value at stack index `idx` to RESP bytes.
- * Returns bytes written, or -1 on overflow.
- */
-static int lua_to_resp(lua_State *L, int idx, char *buf, int buf_size) {
-    int pos = 0;
-    int type = lua_type(L, idx);
+/* --lua-memory-limit / --lua-time-limit, set once by main before the workers
+ * start; a state created with a negative limit takes these. */
+static int64_t g_mem_limit = (int64_t)1 << 30;
+static int64_t g_time_limit_ms = 5000;
 
-    switch (type) {
-    case LUA_TSTRING: {
-        size_t slen;
-        const char *s = lua_tolstring(L, idx, &slen);
-        /* $<len>\r\n<data>\r\n */
-        int hdr = snprintf(buf + pos, buf_size - pos, "$%d\r\n", (int)slen);
-        if (hdr < 0 || pos + hdr + (int)slen + 2 > buf_size) return -1;
-        pos += hdr;
-        memcpy(buf + pos, s, slen); pos += (int)slen;
-        buf[pos++] = '\r'; buf[pos++] = '\n';
-        return pos;
-    }
-    case LUA_TNUMBER: {
-        lua_Number n = lua_tonumber(L, idx);
-        int64_t ival = (int64_t)n;
-        /* Check if it's an integer */
-        if ((lua_Number)ival == n) {
-            int w = snprintf(buf + pos, buf_size - pos, ":%lld\r\n", (long long)ival);
-            if (w < 0 || pos + w > buf_size) return -1;
-            return pos + w;
-        } else {
-            /* Float as bulk string */
-            char tmp[64];
-            int tl = snprintf(tmp, sizeof(tmp), "%.17g", (double)n);
-            int w = snprintf(buf + pos, buf_size - pos, "$%d\r\n%s\r\n", tl, tmp);
-            if (w < 0 || pos + w > buf_size) return -1;
-            return pos + w;
-        }
-    }
-    case LUA_TBOOLEAN: {
-        if (lua_toboolean(L, idx)) {
-            /* true → :1 */
-            if (pos + 5 > buf_size) return -1;
-            memcpy(buf + pos, ":1\r\n", 4); return pos + 4;
-        } else {
-            /* false → $-1 (nil in Redis) */
-            if (pos + 6 > buf_size) return -1;
-            memcpy(buf + pos, "$-1\r\n", 5); return pos + 5;
-        }
-    }
-    case LUA_TTABLE: {
-        /* Check for {err=...} or {ok=...}. Raw access, never lua_getfield:
-         * result serialization runs OUTSIDE any protected call, so a returned
-         * table with a metamethod that errors (e.g. __index) would panic the
-         * process rather than raise a Lua error (gh #410). idx is absolute. */
-        lua_pushliteral(L, "err"); lua_rawget(L, idx);
-        if (!lua_isnil(L, -1)) {
-            size_t elen;
-            const char *e = lua_tolstring(L, -1, &elen);
-            int w = snprintf(buf + pos, buf_size - pos, "-ERR %.*s\r\n",
-                             (int)elen, e ? e : "");
-            lua_pop(L, 1);
-            if (w < 0 || pos + w > buf_size) return -1;
-            return pos + w;
-        }
-        lua_pop(L, 1);
+/* This worker thread's state: WAL replay, the snapshot writer and replication
+ * apply function records through it (they run on the worker's own thread). */
+static __thread PionLuaState *tls_lua = NULL;
 
-        lua_pushliteral(L, "ok"); lua_rawget(L, idx);
-        if (!lua_isnil(L, -1)) {
-            size_t olen;
-            const char *o = lua_tolstring(L, -1, &olen);
-            int w = snprintf(buf + pos, buf_size - pos, "+%.*s\r\n",
-                             (int)olen, o ? o : "");
-            lua_pop(L, 1);
-            if (w < 0 || pos + w > buf_size) return -1;
-            return pos + w;
-        }
-        lua_pop(L, 1);
-
-        /* Array table: count elements via rawlen / iteration */
-        int len = 0;
-        /* Count sequential integer keys starting from 1 */
-        while (1) {
-            lua_rawgeti(L, idx, len + 1);
-            if (lua_isnil(L, -1)) { lua_pop(L, 1); break; }
-            lua_pop(L, 1);
-            len++;
-        }
-
-        int hdr = snprintf(buf + pos, buf_size - pos, "*%d\r\n", len);
-        if (hdr < 0 || pos + hdr > buf_size) return -1;
-        pos += hdr;
-
-        for (int i = 1; i <= len; i++) {
-            lua_rawgeti(L, idx, i);
-            int w = lua_to_resp(L, lua_gettop(L), buf + pos, buf_size - pos);
-            lua_pop(L, 1);
-            if (w < 0) return -1;
-            pos += w;
-        }
-        return pos;
-    }
-    case LUA_TNIL:
-    default:
-        /* nil → $-1 */
-        if (pos + 6 > buf_size) return -1;
-        memcpy(buf + pos, "$-1\r\n", 5);
-        return pos + 5;
-    }
+void pion_lua_set_defaults(int64_t mem_limit, int64_t time_limit_ms) {
+    g_mem_limit = mem_limit;
+    g_time_limit_ms = time_limit_ms;
 }
 
-/* ── Public API ── */
-
-PionLuaState* pion_lua_new_state(int mem_limit, int insn_limit) {
+PionLuaState *pion_lua_new_state(int64_t mem_limit, int64_t time_limit_ms) {
     PionLuaState *S = (PionLuaState *)calloc(1, sizeof(PionLuaState));
     if (!S) return NULL;
-
-    S->mem_ctx.used = 0;
-    S->mem_ctx.limit = mem_limit > 0 ? (size_t)mem_limit : (size_t)(1 << 20); /* default 1MB */
-    S->mem_ctx.enforce = 0;
-    S->insn_limit = insn_limit > 0 ? insn_limit : 1000000;     /* default 1M instructions */
-
-    S->L = lua_newstate(lua_mem_alloc, &S->mem_ctx);
-    if (!S->L) { free(S); return NULL; }
-    lua_atpanic(S->L, pion_lua_panic);
-
-    /* Open sandboxed libraries */
-    luaL_openlibs(S->L);
-
-    /* Register redis.* table */
-    register_redis_table(S->L);
-
-    /* Register cjson library as global */
-    lua_pushcfunction(S->L, luaopen_cjson);
-    lua_call(S->L, 0, 1);       /* returns module table on stack */
-    lua_setglobal(S->L, "cjson"); /* set as global */
-
-    /* Remove print (use redis.log instead) */
-    lua_pushnil(S->L); lua_setglobal(S->L, "print");
-
-    S->co = NULL;
-    S->co_ref = LUA_NOREF;
-    S->cache_count = 0;
-    S->pcall_mode = 0;
-    S->array_count = 0;
-    S->lib_count = 0;
-    S->loading_lib = NULL;
-
-    /* Store PionLuaState* in registry for redis.register_function access */
-    lua_pushlightuserdata(S->L, S);
-    lua_setfield(S->L, LUA_REGISTRYINDEX, "__pion_state");
-
+    if (mem_limit < 0) mem_limit = g_mem_limit;
+    if (time_limit_ms < 0) time_limit_ms = g_time_limit_ms;
+    S->mem.limit = mem_limit > 0 ? (size_t)mem_limit : 0;
+    S->fmem.limit = S->mem.limit;
+    S->time_limit_ms = time_limit_ms;
+    S->resp = 2;
+    S->L = new_sandbox(&S->mem, S, 0);
+    S->FL = new_sandbox(&S->fmem, S, 1);
+    if (!S->L || !S->FL) {
+        if (S->L) lua_close(S->L);
+        if (S->FL) lua_close(S->FL);
+        free(S);
+        return NULL;
+    }
+    S->dispatch = (pion_dispatch_fn)dlsym(RTLD_DEFAULT, "pion_script_dispatch");
+    tls_lua = S;
     return S;
+}
+
+void pion_lua_set_host(PionLuaState *S, void *host) {
+    if (S) S->host = host;
+}
+
+int64_t pion_lua_memory(PionLuaState *S) {
+    return S ? (int64_t)(S->mem.used + S->fmem.used) : 0;
+}
+
+static void free_library(PionLuaState *S, Library *lib) {
+    for (int f = 0; f < lib->nfns; f++) {
+        luaL_unref(S->FL, LUA_REGISTRYINDEX, lib->fns[f].ref);
+        free(lib->fns[f].name);
+        free(lib->fns[f].desc);
+    }
+    free(lib->fns);
+    free(lib->name);
+    free(lib->code);
+    memset(lib, 0, sizeof(*lib));
 }
 
 void pion_lua_close(PionLuaState *S) {
     if (!S) return;
+    if (tls_lua == S) tls_lua = NULL;
+    for (int i = 0; i < S->nlibs; i++) free_library(S, &S->libs[i]);
+    free(S->libs);
+    free(S->scripts);
     if (S->L) lua_close(S->L);
+    if (S->FL) lua_close(S->FL);
+    free((void *)S->argv);
+    free(S->lens);
+    free(S->out);
     free(S);
 }
 
-int pion_lua_load_script(PionLuaState *S, const char *script, int script_len,
-                         char *out_sha1) {
-    if (!S || !S->L) return -1;
+/* ── Running user code ── */
 
-    /* Compute SHA1 */
-    SHA1_CTX sha; uint8_t digest[20];
-    sha1_init(&sha);
-    sha1_update(&sha, (const uint8_t *)script, (size_t)script_len);
-    sha1_final(&sha, digest);
-    sha1_hex(digest, out_sha1);
-
-    /* Check if already cached */
-    for (int i = 0; i < S->cache_count; i++) {
-        if (memcmp(S->cache[i].sha1_hex, out_sha1, 40) == 0) {
-            return 0; /* already loaded */
-        }
+/* Set KEYS and ARGV (globals of the EVAL state, written past its readonly
+ * protection), or push them as the function's two arguments. */
+static void push_array(lua_State *L, const char **p, const int64_t *l, int64_t n) {
+    lua_createtable(L, (int)n, 0);
+    for (int64_t j = 0; j < n; j++) {
+        lua_pushlstring(L, p[j], (size_t)l[j]);
+        lua_rawseti(L, -2, (int)(j + 1));
     }
+}
 
-    /* Compile */
-    if (luaL_loadbuffer(S->L, script, (size_t)script_len, "user_script") != 0) {
-        snprintf(S->error_buf, sizeof(S->error_buf), "%s", lua_tostring(S->L, -1));
-        lua_pop(S->L, 1);
+typedef struct {
+    PionLuaState *S;
+    int ref;                      /* the function to run */
+    int as_function;              /* FCALL: (keys, args) as arguments */
+    const char **keys; const int64_t *key_lens; int64_t nkeys;
+    const char **args; const int64_t *arg_lens; int64_t nargs;
+} RunCtx;
+
+/* Inside a protected call, so a memory error building KEYS/ARGV is a script
+ * error, not a panic. */
+static int run_trampoline(lua_State *L) {
+    RunCtx *rc = (RunCtx *)lua_touserdata(L, 1);
+    lua_settop(L, 0);
+    lua_pushcfunction(L, err_handler);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, rc->ref);
+    if (rc->as_function) {
+        push_array(L, rc->keys, rc->key_lens, rc->nkeys);
+        push_array(L, rc->args, rc->arg_lens, rc->nargs);
+    } else {
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
+        lua_enablereadonlytable(L, -1, 0);
+        lua_pushliteral(L, "KEYS");
+        push_array(L, rc->keys, rc->key_lens, rc->nkeys);
+        lua_rawset(L, -3);
+        lua_pushliteral(L, "ARGV");
+        push_array(L, rc->args, rc->arg_lens, rc->nargs);
+        lua_rawset(L, -3);
+        lua_enablereadonlytable(L, -1, 1);
+        lua_pop(L, 1);
+    }
+    int status = lua_pcall(L, rc->as_function ? 2 : 0, 1, 1);
+    lua_pushboolean(L, status == 0);
+    return 2;   /* result or error object, then the success flag */
+}
+
+static int64_t run_user(PionLuaState *S, lua_State *L, LuaMemCtx *mem, RunCtx *rc, int64_t client_resp) {
+    out_reset(S);
+    S->running = 1;
+    S->resp = 2;
+    S->wrote = 0;
+    S->killed = 0;
+    clock_gettime(CLOCK_MONOTONIC, &S->started);
+    lua_sethook(L, time_hook, LUA_MASKCOUNT, 100000);
+    mem->enforce = 1;
+    int top = lua_gettop(L);
+    lua_pushcfunction(L, run_trampoline);
+    lua_pushlightuserdata(L, rc);
+    int status = lua_pcall(L, 1, 2, 0);
+    mem->enforce = 0;
+    lua_sethook(L, NULL, 0, 0);
+    int64_t n;
+    if (status != 0) {
+        /* the trampoline itself failed (memory while setting up) */
+        n = reply_run_error(S, L);
+    } else if (lua_toboolean(L, -1)) {
+        lua_pop(L, 1);
+        reply_value(S, L, (int)client_resp, 0);
+        n = S->out_oom ? -1 : (int64_t)S->out_len;
+    } else {
+        lua_pop(L, 1);
+        n = reply_run_error(S, L);
+    }
+    lua_settop(L, top);
+    S->running = 0;
+    S->resp = 2;
+    /* A script that ran into the cap leaves garbage; Lua 5.1 has no emergency
+     * collection, so collect fully past half the cap. */
+    if (mem->limit > 0 && mem->used > mem->limit / 2) lua_gc(L, LUA_GCCOLLECT, 0);
+    return n;
+}
+
+/* ── Scripts (EVAL) ── */
+
+static CachedScript *find_script(PionLuaState *S, const char *sha) {
+    for (int i = 0; i < S->nscripts; i++)
+        if (strncasecmp(S->scripts[i].sha, sha, 40) == 0) return &S->scripts[i];
+    return NULL;
+}
+
+/* Strip a `#!lua [flags=...]` line; returns the flags, or -1 (with an error
+ * reply in S->out) when the shebang names another engine or an unknown flag. */
+static int script_shebang(PionLuaState *S, const char *code, size_t len, size_t *body_off) {
+    *body_off = 0;
+    if (len < 2 || code[0] != '#' || code[1] != '!') return 0;
+    size_t eol = 0;
+    while (eol < len && code[eol] != '\n') eol++;
+    const char *p = code + 2, *e = code + eol;
+    if (e - p < 3 || strncmp(p, "lua", 3) != 0 || (e - p > 3 && p[3] != ' ' && p[3] != '\r')) {
+        char msg[200];
+        size_t nl = 0;
+        while (code + nl < e && code[nl] != ' ' && code[nl] != '\r') nl++;
+        snprintf(msg, sizeof(msg), "ERR Unexpected engine in script shebang: %.*s", (int)nl, code);
+        out_error(S, msg);
         return -1;
     }
-
-    /* Store in registry */
-    int ref = luaL_ref(S->L, LUA_REGISTRYINDEX);
-
-    if (S->cache_count < MAX_CACHED_SCRIPTS) {
-        memcpy(S->cache[S->cache_count].sha1_hex, out_sha1, 41);
-        S->cache[S->cache_count].ref = ref;
-        S->cache_count++;
+    p += 3;
+    int flags = 0;
+    while (p < e) {
+        while (p < e && (*p == ' ' || *p == '\r')) p++;
+        if (p >= e) break;
+        const char *w = p;
+        while (p < e && *p != ' ' && *p != '\r') p++;
+        size_t wl = (size_t)(p - w);
+        if (wl >= 6 && strncmp(w, "flags=", 6) == 0) {
+            const char *f = w + 6, *fe = w + wl;
+            while (f < fe) {
+                const char *c = f;
+                while (f < fe && *f != ',') f++;
+                size_t cl = (size_t)(f - c);
+                if (cl == 9 && strncmp(c, "no-writes", 9) == 0) flags |= FN_NO_WRITES;
+                else if (cl == 9 && strncmp(c, "allow-oom", 9) == 0) flags |= FN_ALLOW_OOM;
+                else if (cl == 11 && strncmp(c, "allow-stale", 11) == 0) flags |= FN_ALLOW_STALE;
+                else if (cl == 10 && strncmp(c, "no-cluster", 10) == 0) flags |= FN_NO_CLUSTER;
+                else if (cl == 21 && strncmp(c, "allow-cross-slot-keys", 21) == 0) flags |= FN_ALLOW_CROSS_SLOT;
+                else if (cl > 0) {
+                    char msg[200];
+                    snprintf(msg, sizeof(msg), "ERR Unexpected flag in script shebang: %.*s", (int)cl, c);
+                    out_error(S, msg);
+                    return -1;
+                }
+                if (f < fe) f++;
+            }
+        } else {
+            char msg[200];
+            snprintf(msg, sizeof(msg), "ERR Unknown lua shebang option: %.*s", (int)wl, w);
+            out_error(S, msg);
+            return -1;
+        }
     }
+    *body_off = eol;   /* keep the newline: line numbers stay the source's */
+    return flags | FN_SHEBANG;
+}
 
+/* SCRIPT LOAD / EVAL: compile and cache. 0 = cached (sha in out_sha), -1 = an
+ * error reply in S->out. */
+int pion_lua_load_script(PionLuaState *S, const char *code, int64_t len, char *out_sha) {
+    if (!S || !S->L) return -1;
+    sha1_hex_of(code, (size_t)len, out_sha);
+    if (find_script(S, out_sha)) return 0;
+    size_t off = 0;
+    int flags = script_shebang(S, code, (size_t)len, &off);
+    if (flags < 0) return -1;
+    S->mem.enforce = 1;
+    int st = luaL_loadbuffer(S->L, code + off, (size_t)len - off, "@user_script");
+    S->mem.enforce = 0;
+    if (st != 0) {
+        const char *m = lua_tostring(S->L, -1);
+        char msg[1200];
+        snprintf(msg, sizeof(msg), "ERR Error compiling script (new function): %s", m ? m : "?");
+        lua_pop(S->L, 1);
+        out_error(S, msg);
+        return -1;
+    }
+    if (S->nscripts == S->cap_scripts) {
+        int nc = S->cap_scripts ? S->cap_scripts * 2 : 64;
+        CachedScript *ns = (CachedScript *)realloc(S->scripts, sizeof(CachedScript) * (size_t)nc);
+        if (!ns) { lua_pop(S->L, 1); out_error(S, "ERR out of memory"); return -1; }
+        S->scripts = ns; S->cap_scripts = nc;
+    }
+    CachedScript *cs = &S->scripts[S->nscripts++];
+    memcpy(cs->sha, out_sha, 41);
+    cs->flags = flags;
+    cs->ref = luaL_ref(S->L, LUA_REGISTRYINDEX);
     return 0;
 }
 
-int pion_lua_script_exists(PionLuaState *S, const char *sha1_hex) {
-    if (!S) return 0;
-    for (int i = 0; i < S->cache_count; i++) {
-        if (memcmp(S->cache[i].sha1_hex, sha1_hex, 40) == 0) return 1;
-    }
-    return 0;
+int pion_lua_script_exists(PionLuaState *S, const char *sha) {
+    return (S && find_script(S, sha)) ? 1 : 0;
 }
 
 void pion_lua_script_flush(PionLuaState *S) {
     if (!S || !S->L) return;
-    for (int i = 0; i < S->cache_count; i++) {
-        luaL_unref(S->L, LUA_REGISTRYINDEX, S->cache[i].ref);
-    }
-    S->cache_count = 0;
+    for (int i = 0; i < S->nscripts; i++) luaL_unref(S->L, LUA_REGISTRYINDEX, S->scripts[i].ref);
+    S->nscripts = 0;
+    lua_gc(S->L, LUA_GCCOLLECT, 0);
 }
 
-void pion_lua_set_keys(PionLuaState *S, const char **keys, const int *key_lens, int nkeys) {
-    if (!S || !S->L) return;
-    lua_newtable(S->L);
-    for (int i = 0; i < nkeys; i++) {
-        lua_pushlstring(S->L, keys[i], (size_t)key_lens[i]);
-        lua_rawseti(S->L, -2, i + 1);
-    }
-    raw_setglobal(S->L, "KEYS");
-}
-
-void pion_lua_set_argv(PionLuaState *S, const char **argv, const int *argv_lens, int nargv) {
-    if (!S || !S->L) return;
-    lua_newtable(S->L);
-    for (int i = 0; i < nargv; i++) {
-        lua_pushlstring(S->L, argv[i], (size_t)argv_lens[i]);
-        lua_rawseti(S->L, -2, i + 1);
-    }
-    raw_setglobal(S->L, "ARGV");
-}
-
-int pion_lua_exec_sha1(PionLuaState *S, const char *sha1_hex) {
-    if (!S || !S->L) return PION_LUA_ERROR;
-
-    /* Find cached script */
-    int ref = LUA_NOREF;
-    for (int i = 0; i < S->cache_count; i++) {
-        if (memcmp(S->cache[i].sha1_hex, sha1_hex, 40) == 0) {
-            ref = S->cache[i].ref;
-            break;
-        }
-    }
-    if (ref == LUA_NOREF) {
-        snprintf(S->error_buf, sizeof(S->error_buf), "NOSCRIPT No matching script. Use EVAL to load.");
-        return PION_LUA_ERROR;
-    }
-
-    /* Clean up previous coroutine (frees its garbage, GCs past half the cap) */
-    release_coroutine(S);
-
-    /* Create new coroutine */
-    S->co = lua_newthread(S->L);
-    S->co_ref = luaL_ref(S->L, LUA_REGISTRYINDEX);  /* prevent GC */
-    S->pcall_mode = 0;
-
-    /* Set instruction limit hook on the coroutine */
-    lua_sethook(S->co, insn_hook, LUA_MASKCOUNT, S->insn_limit);
-
-    /* Reset memory counter for this execution */
-    /* (We don't reset S->mem_ctx.used because Lua state itself uses memory) */
-
-    /* Push the cached function onto the coroutine stack */
-    lua_rawgeti(S->L, LUA_REGISTRYINDEX, ref);
-    lua_xmove(S->L, S->co, 1);
-
-    /* Copy KEYS and ARGV globals to coroutine's environment */
-    /* (Globals are shared in Lua 5.1 — KEYS/ARGV set on main state are visible) */
-
-    /* Resume the coroutine (0 arguments) — memory cap in force for script code */
-    int status = run_script(S, 0);
-
-    if (status == 0) {
-        /* Script completed normally */
-        return PION_LUA_OK;
-    } else if (status == LUA_YIELD) {
-        /* redis.call/pcall yielded — check pcall flag */
-        lua_getfield(S->co, LUA_REGISTRYINDEX, "__pion_pcall");
-        S->pcall_mode = lua_toboolean(S->co, -1);
-        lua_pop(S->co, 1);
-        /* Clear the flag for next time */
-        lua_pushnil(S->co);
-        lua_setfield(S->co, LUA_REGISTRYINDEX, "__pion_pcall");
-        return PION_LUA_NEEDS_CMD;
-    } else {
-        /* Error */
-        const char *err = lua_tostring(S->co, -1);
-        snprintf(S->error_buf, sizeof(S->error_buf), "%s", err ? err : "unknown error");
-        return PION_LUA_ERROR;
-    }
-}
-
-int pion_lua_get_call_nargs(PionLuaState *S) {
-    if (!S || !S->co) return 0;
-    return lua_gettop(S->co);
-}
-
-void pion_lua_get_call_arg(PionLuaState *S, int idx, const char **out_ptr, int *out_len) {
-    if (!S || !S->co || idx < 0 || idx >= lua_gettop(S->co)) {
-        *out_ptr = NULL; *out_len = 0; return;
-    }
-    size_t len;
-    /* Lua stack is 1-indexed */
-    const char *s = lua_tolstring(S->co, idx + 1, &len);
-    *out_ptr = s;
-    *out_len = (int)len;
-}
-
-/* Resume the coroutine after pushing a result.
-   The result value should already be on top of co's stack (pushed by caller).
-   Returns PION_LUA_OK, PION_LUA_NEEDS_CMD, or PION_LUA_ERROR. */
-static int do_resume(PionLuaState *S) {
-    /* Clear all yielded args from stack, keep only the result value on top */
-    /* Actually, lua_resume handles this: narg=1 means "1 value pushed as result" */
-    int status = run_script(S, 1);
-
-    if (status == 0) {
-        return PION_LUA_OK;
-    } else if (status == LUA_YIELD) {
-        lua_getfield(S->co, LUA_REGISTRYINDEX, "__pion_pcall");
-        S->pcall_mode = lua_toboolean(S->co, -1);
-        lua_pop(S->co, 1);
-        lua_pushnil(S->co);
-        lua_setfield(S->co, LUA_REGISTRYINDEX, "__pion_pcall");
-        return PION_LUA_NEEDS_CMD;
-    } else {
-        const char *err = lua_tostring(S->co, -1);
-        snprintf(S->error_buf, sizeof(S->error_buf), "%s", err ? err : "unknown error");
-        return PION_LUA_ERROR;
-    }
-}
-
-int pion_lua_push_string_and_resume(PionLuaState *S, const char *s, int len) {
-    if (!S || !S->co) return PION_LUA_ERROR;
-    /* Clear yielded args */
-    lua_settop(S->co, 0);
-    lua_pushlstring(S->co, s, (size_t)len);
-    return do_resume(S);
-}
-
-int pion_lua_push_int_and_resume(PionLuaState *S, int64_t val) {
-    if (!S || !S->co) return PION_LUA_ERROR;
-    lua_settop(S->co, 0);
-    lua_pushinteger(S->co, (lua_Integer)val);
-    return do_resume(S);
-}
-
-int pion_lua_push_nil_and_resume(PionLuaState *S) {
-    if (!S || !S->co) return PION_LUA_ERROR;
-    lua_settop(S->co, 0);
-    /* Redis nil → Lua false (not nil, because nil terminates tables) */
-    lua_pushboolean(S->co, 0);
-    return do_resume(S);
-}
-
-int pion_lua_push_ok_and_resume(PionLuaState *S) {
-    if (!S || !S->co) return PION_LUA_ERROR;
-    lua_settop(S->co, 0);
-    lua_newtable(S->co);
-    lua_pushstring(S->co, "OK");
-    lua_setfield(S->co, -2, "ok");
-    return do_resume(S);
-}
-
-int pion_lua_push_error_and_resume(PionLuaState *S, const char *msg, int msg_len) {
-    if (!S || !S->co) return PION_LUA_ERROR;
-    lua_settop(S->co, 0);
-    if (S->pcall_mode) {
-        /* pcall: return {err=...} table */
-        lua_newtable(S->co);
-        lua_pushlstring(S->co, msg, (size_t)msg_len);
-        lua_setfield(S->co, -2, "err");
-    } else {
-        /* call: raise error. EVAL reports S->error_buf, so the message must
-         * land there too — it used to be pushed only onto the dead coroutine,
-         * and every redis.call() error (WRONGTYPE, arity, -OOM from gh #261)
-         * reached the client as "ERR unknown Lua error". */
-        lua_pushlstring(S->co, msg, (size_t)msg_len);
-        int n = msg_len < (int)sizeof(S->error_buf) - 1 ? msg_len : (int)sizeof(S->error_buf) - 1;
-        memcpy(S->error_buf, msg, (size_t)n);
-        S->error_buf[n] = '\0';
-        return PION_LUA_ERROR;
-    }
-    return do_resume(S);
-}
-
-void pion_lua_array_begin(PionLuaState *S) {
-    if (!S || !S->co) return;
-    lua_settop(S->co, 0);
-    lua_newtable(S->co);
-    S->array_count = 0;
-}
-
-void pion_lua_array_push_string(PionLuaState *S, const char *s, int len) {
-    if (!S || !S->co) return;
-    S->array_count++;
-    lua_pushlstring(S->co, s, (size_t)len);
-    lua_rawseti(S->co, -2, S->array_count);
-}
-
-void pion_lua_array_push_int(PionLuaState *S, int64_t val) {
-    if (!S || !S->co) return;
-    S->array_count++;
-    lua_pushinteger(S->co, (lua_Integer)val);
-    lua_rawseti(S->co, -2, S->array_count);
-}
-
-void pion_lua_array_push_nil(PionLuaState *S) {
-    if (!S || !S->co) return;
-    S->array_count++;
-    lua_pushboolean(S->co, 0);  /* Redis nil → Lua false */
-    lua_rawseti(S->co, -2, S->array_count);
-}
-
-int pion_lua_array_end_and_resume(PionLuaState *S) {
-    if (!S || !S->co) return PION_LUA_ERROR;
-    /* Table is already on top of stack */
-    return do_resume(S);
-}
-
-int pion_lua_get_result(PionLuaState *S, char *out_buf, int buf_size) {
-    if (!S || !S->co) return -1;
-    int top = lua_gettop(S->co);
-    if (top == 0) {
-        /* No return value → nil */
-        if (buf_size < 5) return -1;
-        memcpy(out_buf, "$-1\r\n", 5);
-        return 5;
-    }
-    return lua_to_resp(S->co, 1, out_buf, buf_size);
-}
-
-const char* pion_lua_get_error(PionLuaState *S) {
-    if (!S) return "null state";
-    return S->error_buf;
-}
-
-void pion_lua_set_pcall_mode(PionLuaState *S, int pcall) {
-    if (S) S->pcall_mode = pcall;
-}
-
-int pion_lua_get_pcall_mode(PionLuaState *S) {
-    return S ? S->pcall_mode : 0;
-}
-
-/* ── Functions API ── */
-
-int pion_lua_load_library(PionLuaState *S, const char *code, int code_len,
-                          int replace, char *out_name, int out_name_size) {
+/* EVAL / EVALSHA and their _RO forms: run a cached script. The reply (the
+ * script's result, or its error) is in pion_lua_out; returns its length, or
+ * -1 when no reply could be built. */
+int64_t pion_lua_run_script(PionLuaState *S, const char *sha,
+                            const char **keys, const int64_t *key_lens, int64_t nkeys,
+                            const char **args, const int64_t *arg_lens, int64_t nargs,
+                            int64_t ro, int64_t client_resp) {
     if (!S || !S->L) return -1;
+    CachedScript *cs = find_script(S, sha);
+    if (!cs) return out_error(S, "NOSCRIPT No matching script. Please use EVAL.");
+    if (ro && (cs->flags & FN_SHEBANG) && !(cs->flags & FN_NO_WRITES))
+        return out_error(S, "ERR Can not execute a script with write flag using *_ro command.");
+    memcpy(S->run_name, cs->sha, 41);
+    S->run_source = "@user_script";
+    S->ro = (ro || (cs->flags & FN_NO_WRITES)) ? 1 : 0;
+    S->allow_oom = (cs->flags & FN_ALLOW_OOM) ? 1 : 0;
+    RunCtx rc = {S, cs->ref, 0, keys, key_lens, nkeys, args, arg_lens, nargs};
+    return run_user(S, S->L, &S->mem, &rc, client_resp);
+}
 
-    /* Parse shebang: #!lua name=<libname> */
-    const char *name_start = NULL;
-    int name_len = 0;
-    if (code_len > 10 && code[0] == '#' && code[1] == '!') {
-        /* Find "name=" */
-        for (int i = 2; i < code_len - 5; i++) {
-            if (code[i] == 'n' && code[i+1] == 'a' && code[i+2] == 'm' &&
-                code[i+3] == 'e' && code[i+4] == '=') {
-                name_start = code + i + 5;
-                /* Find end of name (newline or space) */
-                for (int j = i + 5; j < code_len; j++) {
-                    if (code[j] == '\n' || code[j] == '\r' || code[j] == ' ') break;
-                    name_len++;
+/* ── Functions ── */
+
+static RegFunc *find_function(PionLuaState *S, const char *name, size_t nlen, Library **lib) {
+    for (int i = 0; i < S->nlibs; i++)
+        for (int f = 0; f < S->libs[i].nfns; f++) {
+            RegFunc *rf = &S->libs[i].fns[f];
+            if (strlen(rf->name) == nlen && memcmp(rf->name, name, nlen) == 0) {
+                if (lib) *lib = &S->libs[i];
+                return rf;
+            }
+        }
+    return NULL;
+}
+
+static int valid_name(const char *s, size_t n) {
+    if (n == 0) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    return 1;
+}
+
+/* redis.register_function(name, callback) or
+ * redis.register_function{function_name=, callback=, flags=, description=} */
+static int lua_redis_register_function(lua_State *L) {
+    PionLuaState *S = state_of(L);
+    if (!S || !S->loading)
+        return raise_err(L, "redis.register_function can only be called on FUNCTION LOAD command");
+    Library *lib = S->loading;
+    const char *name = NULL; size_t nlen = 0;
+    const char *desc = NULL; size_t dlen = 0;
+    int flags = 0;
+    int cb = 0;
+    int argc = lua_gettop(L);
+    if (argc == 1) {
+        if (!lua_istable(L, 1))
+            return raise_err(L, "calling redis.register_function with a single argument is only applicable to Lua table (representing named arguments).");
+        lua_pushnil(L);
+        while (lua_next(L, 1)) {
+            if (lua_type(L, -2) != LUA_TSTRING)
+                return raise_err(L, "named argument key given to redis.register_function is not a string");
+            const char *k = lua_tostring(L, -2);
+            if (strcasecmp(k, "function_name") == 0) {
+                if (lua_type(L, -1) != LUA_TSTRING)
+                    return raise_err(L, "function_name argument given to redis.register_function must be a string");
+                name = lua_tolstring(L, -1, &nlen);
+            } else if (strcasecmp(k, "description") == 0) {
+                if (lua_type(L, -1) != LUA_TSTRING)
+                    return raise_err(L, "description argument given to redis.register_function must be a string");
+                desc = lua_tolstring(L, -1, &dlen);
+            } else if (strcasecmp(k, "callback") == 0) {
+                if (!lua_isfunction(L, -1))
+                    return raise_err(L, "callback argument given to redis.register_function must be a function");
+            } else if (strcasecmp(k, "flags") == 0) {
+                if (!lua_istable(L, -1))
+                    return raise_err(L, "flags argument to redis.register_function must be a table representing function flags");
+                int ft = lua_gettop(L);
+                for (int j = 1;; j++) {
+                    lua_rawgeti(L, ft, j);
+                    if (lua_isnil(L, -1)) { lua_pop(L, 1); break; }
+                    const char *fs = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+                    if (fs && strcmp(fs, "no-writes") == 0) flags |= FN_NO_WRITES;
+                    else if (fs && strcmp(fs, "allow-oom") == 0) flags |= FN_ALLOW_OOM;
+                    else if (fs && strcmp(fs, "allow-stale") == 0) flags |= FN_ALLOW_STALE;
+                    else if (fs && strcmp(fs, "no-cluster") == 0) flags |= FN_NO_CLUSTER;
+                    else if (fs && strcmp(fs, "allow-cross-slot-keys") == 0) flags |= FN_ALLOW_CROSS_SLOT;
+                    else return raise_err(L, "unknown flag given");
+                    lua_pop(L, 1);
                 }
+            } else {
+                return raise_err(L, "unknown argument given to redis.register_function");
+            }
+            lua_pop(L, 1);
+        }
+        if (!name) return raise_err(L, "redis.register_function must get a function name argument");
+        lua_pushnil(L);
+        while (lua_next(L, 1)) {   /* the callback, by its case-insensitive key */
+            if (lua_type(L, -2) == LUA_TSTRING && strcasecmp(lua_tostring(L, -2), "callback") == 0) {
+                cb = lua_gettop(L);
+                lua_pushvalue(L, -2);
                 break;
             }
+            lua_pop(L, 1);
         }
+        if (!cb) return raise_err(L, "redis.register_function must get a callback argument");
+    } else if (argc == 2) {
+        if (lua_type(L, 1) != LUA_TSTRING)
+            return raise_err(L, "first argument to redis.register_function must be a string");
+        if (!lua_isfunction(L, 2))
+            return raise_err(L, "second argument to redis.register_function must be a function");
+        name = lua_tolstring(L, 1, &nlen);
+        cb = 2;
+    } else {
+        return raise_err(L, "wrong number of arguments to redis.register_function");
     }
-    if (!name_start || name_len == 0 || name_len >= MAX_NAME_LEN) {
-        snprintf(S->error_buf, sizeof(S->error_buf),
-                 "ERR Missing or invalid library name. Library must start with #!lua name=<name>");
-        return -1;
+    if (!valid_name(name, nlen))
+        return raise_err(L, "Library names can only contain letters, numbers, or underscores(_) and must be at least one character long");
+    for (int f = 0; f < lib->nfns; f++)
+        if (strlen(lib->fns[f].name) == nlen && memcmp(lib->fns[f].name, name, nlen) == 0)
+            return raise_err(L, "Function already exists in the library");
+    RegFunc *nf = (RegFunc *)realloc(lib->fns, sizeof(RegFunc) * (size_t)(lib->nfns + 1));
+    if (!nf) return luaL_error(L, "not enough memory");
+    lib->fns = nf;
+    RegFunc *rf = &lib->fns[lib->nfns];
+    memset(rf, 0, sizeof(*rf));
+    rf->name = (char *)malloc(nlen + 1);
+    if (!rf->name) return luaL_error(L, "not enough memory");
+    memcpy(rf->name, name, nlen); rf->name[nlen] = 0;
+    if (desc) {
+        rf->desc = (char *)malloc(dlen + 1);
+        if (rf->desc) { memcpy(rf->desc, desc, dlen); rf->desc[dlen] = 0; }
     }
-
-    /* Copy name to output */
-    int copy_len = name_len < out_name_size - 1 ? name_len : out_name_size - 1;
-    memcpy(out_name, name_start, copy_len);
-    out_name[copy_len] = '\0';
-
-    /* Check if library already exists */
-    for (int i = 0; i < S->lib_count; i++) {
-        if (strncmp(S->libs[i].name, name_start, name_len) == 0 &&
-            S->libs[i].name[name_len] == '\0') {
-            if (!replace) {
-                snprintf(S->error_buf, sizeof(S->error_buf),
-                         "ERR Library '%s' already exists", S->libs[i].name);
-                return -1;
-            }
-            /* Replace: unref old functions, reset */
-            for (int f = 0; f < S->libs[i].func_count; f++) {
-                luaL_unref(S->L, LUA_REGISTRYINDEX, S->libs[i].funcs[f].ref);
-            }
-            if (S->libs[i].code_ref != LUA_NOREF)
-                luaL_unref(S->L, LUA_REGISTRYINDEX, S->libs[i].code_ref);
-            S->libs[i].func_count = 0;
-            S->libs[i].code_ref = LUA_NOREF;
-            S->loading_lib = &S->libs[i];
-            goto do_load;
-        }
-    }
-
-    if (S->lib_count >= MAX_LIBRARIES) {
-        snprintf(S->error_buf, sizeof(S->error_buf), "ERR too many libraries loaded");
-        return -1;
-    }
-
-    /* New library slot */
-    S->loading_lib = &S->libs[S->lib_count];
-    memset(S->loading_lib, 0, sizeof(Library));
-    memcpy(S->loading_lib->name, name_start, name_len);
-    S->loading_lib->name[name_len] = '\0';
-    S->loading_lib->code_ref = LUA_NOREF;
-
-do_load:
-    ;
-    /* Skip shebang line before compiling */
-    const char *lua_code = code;
-    int lua_code_len = code_len;
-    if (code_len > 2 && code[0] == '#' && code[1] == '!') {
-        for (int i = 0; i < code_len; i++) {
-            if (code[i] == '\n') {
-                lua_code = code + i + 1;
-                lua_code_len = code_len - i - 1;
-                break;
-            }
-        }
-    }
-
-    /* Compile and execute the library code */
-    if (luaL_loadbuffer(S->L, lua_code, (size_t)lua_code_len, out_name) != 0) {
-        snprintf(S->error_buf, sizeof(S->error_buf), "%s", lua_tostring(S->L, -1));
-        lua_pop(S->L, 1);
-        S->loading_lib = NULL;
-        return -1;
-    }
-
-    /* Execute — this should call redis.register_function() */
-    if (lua_pcall(S->L, 0, 0, 0) != 0) {
-        snprintf(S->error_buf, sizeof(S->error_buf), "%s", lua_tostring(S->L, -1));
-        lua_pop(S->L, 1);
-        S->loading_lib = NULL;
-        return -1;
-    }
-
-    /* If this was a new library, bump count */
-    if (S->loading_lib == &S->libs[S->lib_count]) {
-        S->lib_count++;
-    }
-    S->loading_lib = NULL;
+    rf->flags = flags;
+    lua_pushvalue(L, cb);
+    rf->ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lib->nfns++;
     return 0;
 }
 
-int pion_lua_delete_library(PionLuaState *S, const char *name) {
-    if (!S) return -1;
-    for (int i = 0; i < S->lib_count; i++) {
-        if (strcmp(S->libs[i].name, name) == 0) {
-            /* Unref all functions */
-            for (int f = 0; f < S->libs[i].func_count; f++) {
-                luaL_unref(S->L, LUA_REGISTRYINDEX, S->libs[i].funcs[f].ref);
-            }
-            if (S->libs[i].code_ref != LUA_NOREF)
-                luaL_unref(S->L, LUA_REGISTRYINDEX, S->libs[i].code_ref);
-            /* Shift remaining libraries down */
-            for (int j = i; j < S->lib_count - 1; j++) {
-                S->libs[j] = S->libs[j + 1];
-            }
-            S->lib_count--;
-            return 0;
+/* Parse "#!<engine> name=<lib>" — returns 0, or -1 with an error reply. */
+static int library_shebang(PionLuaState *S, const char *code, size_t len, const char **name, size_t *nlen, size_t *body_off) {
+    if (len < 2 || code[0] != '#' || code[1] != '!') {
+        out_error(S, "ERR Missing library metadata");
+        return -1;
+    }
+    size_t eol = 0;
+    while (eol < len && code[eol] != '\n') eol++;
+    const char *p = code + 2, *e = code + eol;
+    const char *eng = p;
+    while (p < e && *p != ' ' && *p != '\r') p++;
+    size_t englen = (size_t)(p - eng);
+    if (englen != 3 || strncasecmp(eng, "lua", 3) != 0) {
+        char msg[200];
+        snprintf(msg, sizeof(msg), "ERR Engine '%.*s' not found", (int)englen, eng);
+        out_error(S, msg);
+        return -1;
+    }
+    *name = NULL; *nlen = 0;
+    while (p < e) {
+        while (p < e && (*p == ' ' || *p == '\r')) p++;
+        if (p >= e) break;
+        const char *w = p;
+        while (p < e && *p != ' ' && *p != '\r') p++;
+        size_t wl = (size_t)(p - w);
+        if (wl >= 5 && strncmp(w, "name=", 5) == 0) {
+            *name = w + 5; *nlen = wl - 5;
+        } else {
+            char msg[200];
+            snprintf(msg, sizeof(msg), "ERR Invalid metadata value given: %.*s", (int)wl, w);
+            out_error(S, msg);
+            return -1;
         }
     }
-    snprintf(S->error_buf, sizeof(S->error_buf), "ERR Library not found");
+    if (!*name) { out_error(S, "ERR Library name was not given"); return -1; }
+    if (!valid_name(*name, *nlen)) {
+        out_error(S, "ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long");
+        return -1;
+    }
+    *body_off = eol;
+    return 0;
+}
+
+static int find_library(PionLuaState *S, const char *name, size_t nlen) {
+    for (int i = 0; i < S->nlibs; i++)
+        if (strlen(S->libs[i].name) == nlen && memcmp(S->libs[i].name, name, nlen) == 0) return i;
     return -1;
 }
 
-void pion_lua_flush_libraries(PionLuaState *S) {
-    if (!S || !S->L) return;
-    for (int i = 0; i < S->lib_count; i++) {
-        for (int f = 0; f < S->libs[i].func_count; f++) {
-            luaL_unref(S->L, LUA_REGISTRYINDEX, S->libs[i].funcs[f].ref);
-        }
-        if (S->libs[i].code_ref != LUA_NOREF)
-            luaL_unref(S->L, LUA_REGISTRYINDEX, S->libs[i].code_ref);
+typedef struct { int ref; } LoadCtx;
+
+static int load_trampoline(lua_State *L) {
+    LoadCtx *lc = (LoadCtx *)lua_touserdata(L, 1);
+    lua_settop(L, 0);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, lc->ref);
+    lua_call(L, 0, 0);
+    return 0;
+}
+
+/* FUNCTION LOAD [REPLACE] code. Returns 1 when a library was (re)loaded, with
+ * the library name as the reply in S->out; 0 with an error reply. */
+int64_t pion_lua_function_load(PionLuaState *S, const char *code, int64_t len, int64_t replace) {
+    if (!S || !S->FL) return 0;
+    const char *name; size_t nlen, off;
+    if (library_shebang(S, code, (size_t)len, &name, &nlen, &off) < 0) return 0;
+    int existing = find_library(S, name, nlen);
+    if (existing >= 0 && !replace) {
+        char msg[200];
+        snprintf(msg, sizeof(msg), "ERR Library '%.*s' already exists", (int)nlen, name);
+        out_error(S, msg);
+        return 0;
     }
-    S->lib_count = 0;
-}
+    lua_State *L = S->FL;
+    S->fmem.enforce = 1;
+    int st = luaL_loadbuffer(L, code + off, (size_t)len - off, "@user_function");
+    S->fmem.enforce = 0;
+    if (st != 0) {
+        char msg[1200];
+        snprintf(msg, sizeof(msg), "ERR Error compiling function: %s", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        out_error(S, msg);
+        return 0;
+    }
+    int chunk_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    Library nl;
+    memset(&nl, 0, sizeof(nl));
+    nl.name = (char *)malloc(nlen + 1);
+    nl.code = (char *)malloc((size_t)len + 1);
+    if (!nl.name || !nl.code) {
+        free(nl.name); free(nl.code);
+        luaL_unref(L, LUA_REGISTRYINDEX, chunk_ref);
+        out_error(S, "ERR out of memory");
+        return 0;
+    }
+    memcpy(nl.name, name, nlen); nl.name[nlen] = 0;
+    memcpy(nl.code, code, (size_t)len); nl.code[len] = 0;
+    nl.code_len = (size_t)len;
 
-int pion_lua_library_count(PionLuaState *S) {
-    return S ? S->lib_count : 0;
-}
+    /* The library body sees only `redis`, with the library API: register_function,
+     * log, the LOG_* levels and the versions. Any other global, or any other
+     * field of redis, is "nonexistent", as in Redis. */
+    lua_pushvalue(L, LUA_GLOBALSINDEX);
+    lua_getmetatable(L, -1);
+    lua_newtable(L);
+    push_redis_table(L, 1);
+    set_error_metatable(L, -1);
+    lua_enablereadonlytable(L, -1, 1);
+    lua_setfield(L, -2, "redis");
+    set_error_metatable(L, -1);
+    lua_enablereadonlytable(L, -1, 1);
+    lua_setfield(L, -2, "__index");
+    lua_pop(L, 2);
 
-const char* pion_lua_library_name(PionLuaState *S, int idx) {
-    if (!S || idx < 0 || idx >= S->lib_count) return "";
-    return S->libs[idx].name;
-}
+    S->loading = &nl;
+    LoadCtx lc = {chunk_ref};
+    lua_sethook(L, time_hook, LUA_MASKCOUNT, 100000);
+    S->wrote = 0; S->killed = 0;
+    clock_gettime(CLOCK_MONOTONIC, &S->started);
+    S->fmem.enforce = 1;
+    lua_pushcfunction(L, load_trampoline);
+    lua_pushlightuserdata(L, &lc);
+    int rs = lua_pcall(L, 1, 0, 0);
+    S->fmem.enforce = 0;
+    lua_sethook(L, NULL, 0, 0);
+    S->loading = NULL;
 
-int pion_lua_library_func_count(PionLuaState *S, int lib_idx) {
-    if (!S || lib_idx < 0 || lib_idx >= S->lib_count) return 0;
-    return S->libs[lib_idx].func_count;
-}
+    lua_pushvalue(L, LUA_GLOBALSINDEX);
+    lua_getmetatable(L, -1);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, S->fl_globals);
+    lua_setfield(L, -2, "__index");
+    lua_pop(L, 2);
+    luaL_unref(L, LUA_REGISTRYINDEX, chunk_ref);
 
-const char* pion_lua_library_func_name(PionLuaState *S, int lib_idx, int func_idx) {
-    if (!S || lib_idx < 0 || lib_idx >= S->lib_count) return "";
-    if (func_idx < 0 || func_idx >= S->libs[lib_idx].func_count) return "";
-    return S->libs[lib_idx].funcs[func_idx].name;
-}
-
-int pion_lua_exec_function(PionLuaState *S, const char *func_name, int func_name_len) {
-    if (!S || !S->L) return PION_LUA_ERROR;
-
-    /* Find function across all libraries */
-    int ref = LUA_NOREF;
-    for (int i = 0; i < S->lib_count; i++) {
-        for (int f = 0; f < S->libs[i].func_count; f++) {
-            if (strncmp(S->libs[i].funcs[f].name, func_name, func_name_len) == 0 &&
-                S->libs[i].funcs[f].name[func_name_len] == '\0') {
-                ref = S->libs[i].funcs[f].ref;
-                goto found;
+    const char *fail = NULL;
+    char msg[1200];
+    if (rs != 0) {
+        const char *m = NULL;
+        if (lua_istable(L, -1)) {
+            lua_pushliteral(L, "err"); lua_rawget(L, -2);
+            m = lua_tostring(L, -1);
+            snprintf(msg, sizeof(msg), "ERR Error registering functions: %s", m ? m : "unknown error");
+            lua_pop(L, 1);
+        } else {
+            m = lua_tostring(L, -1);
+            snprintf(msg, sizeof(msg), "ERR Error registering functions: ERR %s", m ? m : "unknown error");
+        }
+        lua_pop(L, 1);
+        fail = msg;
+    } else if (nl.nfns == 0) {
+        fail = "ERR No functions registered";
+    } else {
+        for (int f = 0; f < nl.nfns && !fail; f++) {
+            Library *owner = NULL;
+            RegFunc *other = find_function(S, nl.fns[f].name, strlen(nl.fns[f].name), &owner);
+            if (other && (existing < 0 || owner != &S->libs[existing])) {
+                snprintf(msg, sizeof(msg), "ERR Function %s already exists", nl.fns[f].name);
+                fail = msg;
             }
         }
     }
-found:
-    if (ref == LUA_NOREF) {
-        snprintf(S->error_buf, sizeof(S->error_buf),
-                 "ERR Function not found");
-        return PION_LUA_ERROR;
+    if (fail) {
+        free_library(S, &nl);
+        out_error(S, fail);
+        return 0;
     }
-
-    /* Clean up previous coroutine (frees its garbage, GCs past half the cap) */
-    release_coroutine(S);
-
-    /* Create coroutine */
-    S->co = lua_newthread(S->L);
-    S->co_ref = luaL_ref(S->L, LUA_REGISTRYINDEX);
-    S->pcall_mode = 0;
-
-    lua_sethook(S->co, insn_hook, LUA_MASKCOUNT, S->insn_limit);
-
-    /* Push the function */
-    lua_rawgeti(S->L, LUA_REGISTRYINDEX, ref);
-    lua_xmove(S->L, S->co, 1);
-
-    /* Push KEYS and ARGV as arguments to the function (raw — a script may have
-     * put a metatable on _G) */
-    raw_getglobal(S->co, "KEYS");
-    raw_getglobal(S->co, "ARGV");
-
-    /* Resume with 2 arguments (keys, args) — memory cap in force */
-    int status = run_script(S, 2);
-
-    if (status == 0) {
-        return PION_LUA_OK;
-    } else if (status == LUA_YIELD) {
-        lua_getfield(S->co, LUA_REGISTRYINDEX, "__pion_pcall");
-        S->pcall_mode = lua_toboolean(S->co, -1);
-        lua_pop(S->co, 1);
-        lua_pushnil(S->co);
-        lua_setfield(S->co, LUA_REGISTRYINDEX, "__pion_pcall");
-        return PION_LUA_NEEDS_CMD;
+    if (existing >= 0) {
+        free_library(S, &S->libs[existing]);
+        S->libs[existing] = nl;
     } else {
-        const char *err = lua_tostring(S->co, -1);
-        snprintf(S->error_buf, sizeof(S->error_buf), "%s", err ? err : "unknown error");
-        return PION_LUA_ERROR;
+        if (S->nlibs == S->cap_libs) {
+            int nc = S->cap_libs ? S->cap_libs * 2 : 16;
+            Library *nlibs = (Library *)realloc(S->libs, sizeof(Library) * (size_t)nc);
+            if (!nlibs) { free_library(S, &nl); out_error(S, "ERR out of memory"); return 0; }
+            S->libs = nlibs; S->cap_libs = nc;
+        }
+        S->libs[S->nlibs++] = nl;
     }
+    out_reset(S);
+    out_bulk(S, name, nlen);
+    return 1;
 }
 
-const char* pion_lua_call_arg_ptr(PionLuaState *S, int idx) {
-    if (!S || !S->co || idx < 0 || idx >= lua_gettop(S->co)) return NULL;
-    size_t len;
-    return lua_tolstring(S->co, idx + 1, &len);
+/* FUNCTION DELETE name: 1 when deleted, 0 when there is no such library. */
+int64_t pion_lua_function_delete(PionLuaState *S, const char *name, int64_t nlen) {
+    if (!S) return 0;
+    int i = find_library(S, name, (size_t)nlen);
+    if (i < 0) return 0;
+    free_library(S, &S->libs[i]);
+    memmove(&S->libs[i], &S->libs[i + 1], sizeof(Library) * (size_t)(S->nlibs - i - 1));
+    S->nlibs--;
+    return 1;
 }
 
-int pion_lua_call_arg_len(PionLuaState *S, int idx) {
-    if (!S || !S->co || idx < 0 || idx >= lua_gettop(S->co)) return 0;
-    size_t len;
-    lua_tolstring(S->co, idx + 1, &len);
-    return (int)len;
+void pion_lua_function_flush(PionLuaState *S) {
+    if (!S) return;
+    for (int i = 0; i < S->nlibs; i++) free_library(S, &S->libs[i]);
+    S->nlibs = 0;
+    if (S->FL) lua_gc(S->FL, LUA_GCCOLLECT, 0);
 }
+
+int64_t pion_lua_library_count(PionLuaState *S) { return S ? S->nlibs : 0; }
+
+const char *pion_lua_library_name(PionLuaState *S, int64_t i) {
+    return (S && i >= 0 && i < S->nlibs) ? S->libs[i].name : "";
+}
+
+const char *pion_lua_library_code(PionLuaState *S, int64_t i, int64_t *len) {
+    if (!S || i < 0 || i >= S->nlibs) { *len = 0; return ""; }
+    *len = (int64_t)S->libs[i].code_len;
+    return S->libs[i].code;
+}
+
+/* FCALL / FCALL_RO. The reply is in pion_lua_out. */
+int64_t pion_lua_run_function(PionLuaState *S, const char *name, int64_t nlen,
+                              const char **keys, const int64_t *key_lens, int64_t nkeys,
+                              const char **args, const int64_t *arg_lens, int64_t nargs,
+                              int64_t ro, int64_t client_resp) {
+    if (!S || !S->FL) return -1;
+    RegFunc *rf = find_function(S, name, (size_t)nlen, NULL);
+    if (!rf) return out_error(S, "ERR Function not found");
+    if (ro && !(rf->flags & FN_NO_WRITES))
+        return out_error(S, "ERR Can not execute a script with write flag using *_ro command.");
+    snprintf(S->run_name, sizeof(S->run_name), "%s", rf->name);
+    S->run_source = "@user_function";
+    S->ro = (ro || (rf->flags & FN_NO_WRITES)) ? 1 : 0;
+    S->allow_oom = (rf->flags & FN_ALLOW_OOM) ? 1 : 0;
+    RunCtx rc = {S, rf->ref, 1, keys, key_lens, nkeys, args, arg_lens, nargs};
+    return run_user(S, S->FL, &S->fmem, &rc, client_resp);
+}
+
+/* Glob match for FUNCTION LIST LIBRARYNAME (Redis's stringmatchlen subset). */
+static int glob(const char *p, size_t pl, const char *s, size_t sl) {
+    while (pl > 0) {
+        if (*p == '*') {
+            while (pl > 1 && p[1] == '*') { p++; pl--; }
+            if (pl == 1) return 1;
+            for (size_t i = 0; i <= sl; i++)
+                if (glob(p + 1, pl - 1, s + i, sl - i)) return 1;
+            return 0;
+        }
+        if (sl == 0) return 0;
+        if (*p == '?') { p++; pl--; s++; sl--; continue; }
+        if (*p == '[') {
+            size_t j = 1; int neg = 0, hit = 0;
+            if (j < pl && p[j] == '^') { neg = 1; j++; }
+            for (; j < pl && p[j] != ']'; j++) {
+                if (p[j] == '\\' && j + 1 < pl) { j++; if (p[j] == *s) hit = 1; }
+                else if (j + 2 < pl && p[j + 1] == '-' && p[j + 2] != ']') {
+                    char lo = p[j], hi = p[j + 2];
+                    if (lo > hi) { char t = lo; lo = hi; hi = t; }
+                    if (*s >= lo && *s <= hi) hit = 1;
+                    j += 2;
+                } else if (p[j] == *s) hit = 1;
+            }
+            if (neg) hit = !hit;
+            if (!hit) return 0;
+            if (j < pl) j++;
+            p += j; pl -= j; s++; sl--;
+            continue;
+        }
+        if (*p == '\\' && pl > 1) { p++; pl--; }
+        if (*p != *s) return 0;
+        p++; pl--; s++; sl--;
+    }
+    return sl == 0;
+}
+
+static void out_flag_names(PionLuaState *S, int flags, int resp) {
+    const char *names[5]; int n = 0;
+    if (flags & FN_NO_WRITES) names[n++] = "no-writes";
+    if (flags & FN_ALLOW_OOM) names[n++] = "allow-oom";
+    if (flags & FN_ALLOW_STALE) names[n++] = "allow-stale";
+    if (flags & FN_NO_CLUSTER) names[n++] = "no-cluster";
+    if (flags & FN_ALLOW_CROSS_SLOT) names[n++] = "allow-cross-slot-keys";
+    out_hdr(S, resp == 3 ? '~' : '*', n);
+    for (int i = 0; i < n; i++) { out_add(S, "+", 1); out_str(S, names[i]); out_add(S, "\r\n", 2); }
+}
+
+/* FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE] */
+int64_t pion_lua_function_list(PionLuaState *S, const char *pat, int64_t plen, int64_t withcode, int64_t resp) {
+    out_reset(S);
+    int n = 0;
+    for (int i = 0; i < S->nlibs; i++)
+        if (!pat || glob(pat, (size_t)plen, S->libs[i].name, strlen(S->libs[i].name))) n++;
+    out_hdr(S, '*', n);
+    for (int i = 0; i < S->nlibs; i++) {
+        Library *lib = &S->libs[i];
+        if (pat && !glob(pat, (size_t)plen, lib->name, strlen(lib->name))) continue;
+        int fields = withcode ? 4 : 3;
+        out_hdr(S, resp == 3 ? '%' : '*', resp == 3 ? fields : 2 * fields);
+        out_bulk(S, "library_name", 12); out_bulk(S, lib->name, strlen(lib->name));
+        out_bulk(S, "engine", 6); out_bulk(S, "LUA", 3);
+        out_bulk(S, "functions", 9);
+        out_hdr(S, '*', lib->nfns);
+        for (int f = 0; f < lib->nfns; f++) {
+            RegFunc *rf = &lib->fns[f];
+            out_hdr(S, resp == 3 ? '%' : '*', resp == 3 ? 3 : 6);
+            out_bulk(S, "name", 4); out_bulk(S, rf->name, strlen(rf->name));
+            out_bulk(S, "description", 11);
+            if (rf->desc) out_bulk(S, rf->desc, strlen(rf->desc)); else out_null(S, (int)resp);
+            out_bulk(S, "flags", 5); out_flag_names(S, rf->flags, (int)resp);
+        }
+        if (withcode) { out_bulk(S, "library_code", 12); out_bulk(S, lib->code, lib->code_len); }
+    }
+    return S->out_oom ? -1 : (int64_t)S->out_len;
+}
+
+/* FUNCTION STATS */
+int64_t pion_lua_function_stats(PionLuaState *S, int64_t resp) {
+    out_reset(S);
+    int nf = 0;
+    for (int i = 0; i < S->nlibs; i++) nf += S->libs[i].nfns;
+    out_hdr(S, resp == 3 ? '%' : '*', resp == 3 ? 2 : 4);
+    out_bulk(S, "running_script", 14);
+    out_null(S, (int)resp);
+    out_bulk(S, "engines", 7);
+    out_hdr(S, resp == 3 ? '%' : '*', resp == 3 ? 1 : 2);
+    out_bulk(S, "LUA", 3);
+    out_hdr(S, resp == 3 ? '%' : '*', resp == 3 ? 2 : 4);
+    out_bulk(S, "libraries_count", 15); out_hdr(S, ':', S->nlibs);
+    out_bulk(S, "functions_count", 15); out_hdr(S, ':', nf);
+    return S->out_oom ? -1 : (int64_t)S->out_len;
+}
+
+/* FUNCTION DUMP: Pion's own payload (as DUMP's is), restorable by FUNCTION
+ * RESTORE here: "PIONFN1\n", then per library [u32 len][code]. */
+int64_t pion_lua_function_dump(PionLuaState *S) {
+    out_reset(S);
+    out_add(S, "PIONFN1\n", 8);
+    for (int i = 0; i < S->nlibs; i++) {
+        uint32_t l = (uint32_t)S->libs[i].code_len;
+        unsigned char b[4] = {(unsigned char)l, (unsigned char)(l >> 8), (unsigned char)(l >> 16), (unsigned char)(l >> 24)};
+        out_add(S, (const char *)b, 4);
+        out_add(S, S->libs[i].code, S->libs[i].code_len);
+    }
+    return S->out_oom ? -1 : (int64_t)S->out_len;
+}
+
+/* Validate a FUNCTION DUMP payload: the number of libraries, or -1. */
+int64_t pion_lua_dump_count(const char *p, int64_t n) {
+    if (n < 8 || memcmp(p, "PIONFN1\n", 8) != 0) return -1;
+    int64_t pos = 8, cnt = 0;
+    while (pos < n) {
+        if (pos + 4 > n) return -1;
+        uint32_t l = (uint32_t)(unsigned char)p[pos] | ((uint32_t)(unsigned char)p[pos + 1] << 8) |
+                     ((uint32_t)(unsigned char)p[pos + 2] << 16) | ((uint32_t)(unsigned char)p[pos + 3] << 24);
+        pos += 4;
+        if (pos + (int64_t)l > n) return -1;
+        pos += l;
+        cnt++;
+    }
+    return cnt;
+}
+
+/* The k-th library's code in a validated payload. */
+const char *pion_lua_dump_entry(const char *p, int64_t n, int64_t k, int64_t *len) {
+    int64_t pos = 8;
+    for (int64_t i = 0; pos + 4 <= n; i++) {
+        uint32_t l = (uint32_t)(unsigned char)p[pos] | ((uint32_t)(unsigned char)p[pos + 1] << 8) |
+                     ((uint32_t)(unsigned char)p[pos + 2] << 16) | ((uint32_t)(unsigned char)p[pos + 3] << 24);
+        if (i == k) { *len = l; return p + pos + 4; }
+        pos += 4 + l;
+    }
+    *len = 0;
+    return "";
+}
+
+/* The library name a library's code declares, for FUNCTION RESTORE's
+ * conflict check: 1 with name/nlen set, or 0. */
+int64_t pion_lua_library_name_of(const char *code, int64_t len, const char **name, int64_t *nlen) {
+    if (len < 2 || code[0] != '#' || code[1] != '!') return 0;
+    int64_t eol = 0;
+    while (eol < len && code[eol] != '\n') eol++;
+    for (int64_t i = 2; i + 5 <= eol; i++) {
+        if (memcmp(code + i, "name=", 5) == 0 && (code[i - 1] == ' ')) {
+            int64_t s = i + 5, e = s;
+            while (e < eol && code[e] != ' ' && code[e] != '\r') e++;
+            *name = code + s; *nlen = e - s;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int64_t pion_lua_library_exists(PionLuaState *S, const char *name, int64_t nlen) {
+    return (S && find_library(S, name, (size_t)nlen) >= 0) ? 1 : 0;
+}
+
+
+/* ── Persistence (this thread's state) ── */
+
+/* Apply a function record from the WAL, a snapshot or the replication stream:
+ * 35 FUNCTION LOAD (value = the library code; replaces a library of the same
+ * name), 36 FUNCTION DELETE (key = the library name), 37 FUNCTION FLUSH.
+ * 1 when applied. */
+int64_t pion_lua_wal_apply(int64_t cmd_id, const char *key, int64_t kl, const char *val, int64_t vl) {
+    PionLuaState *S = tls_lua;
+    if (!S) return 0;
+    if (cmd_id == 35) return pion_lua_function_load(S, val, vl, 1) == 1;
+    if (cmd_id == 36) return pion_lua_function_delete(S, key, kl);
+    if (cmd_id == 37) { pion_lua_function_flush(S); return 1; }
+    return 0;
+}
+
+int64_t pion_lua_tls_library_count(void) { return tls_lua ? tls_lua->nlibs : 0; }
+
+const char *pion_lua_tls_library_name(int64_t i) { return pion_lua_library_name(tls_lua, i); }
+
+const char *pion_lua_tls_library_code(int64_t i, int64_t *len) { return pion_lua_library_code(tls_lua, i, len); }
+
+int64_t pion_lua_function_exists(PionLuaState *S, const char *name, int64_t nlen) {
+    return (S && find_function(S, name, (size_t)nlen, NULL)) ? 1 : 0;
+}
+
+int64_t pion_lua_out_len(PionLuaState *S) { return S ? (int64_t)S->out_len : 0; }
