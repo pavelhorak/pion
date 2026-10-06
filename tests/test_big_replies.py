@@ -127,6 +127,31 @@ def main() -> int:
           and len(ex[0]) == n_list and ex[1] == blob and ex[2] == "PONG")
     c.assert_in_sync()
 
+    print("[5b] CLIENT REPLY OFF/SKIP drops a reply too big to buffer (#49)")
+    off = socket.create_connection(("127.0.0.1", port)); off.settimeout(10)
+    off.sendall(encode(("CLIENT", "REPLY", "OFF")) + encode(("LRANGE", "br:list", 0, -1)) + encode(("SET", "br:k", "v")))
+    time.sleep(0.4)
+    off.setblocking(False)
+    seen = b""
+    try:
+        while True:
+            d = off.recv(1 << 20)
+            if not d:
+                break
+            seen += d
+    except BlockingIOError:
+        pass
+    check("REPLY OFF + 6 MB LRANGE sends nothing", seen == b"", f"{len(seen)} bytes")
+    off.setblocking(True); off.settimeout(10)
+    off.sendall(encode(("CLIENT", "REPLY", "ON")))
+    check("REPLY ON acks", off.recv(64) == b"+OK\r\n")
+    off.sendall(encode(("CLIENT", "REPLY", "SKIP")) + encode(("LRANGE", "br:list", 0, -1)) + encode(("PING",)))
+    time.sleep(0.4)
+    check("REPLY SKIP drops the big reply, PING answers", off.recv(1 << 20) == b"+PONG\r\n")
+    off.close()
+    check("the SET under REPLY OFF still ran", c.cmd("GET", "br:k") == b"v")
+    c.cmd("DEL", "br:k")
+
     print("[6] a slow reader holds up nobody else")
     a = socket.create_connection(("127.0.0.1", port))
     a.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)

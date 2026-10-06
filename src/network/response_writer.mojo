@@ -130,6 +130,11 @@ struct ResponseWriter(Movable):
     var cap_buf: Pointer[UInt8, MutUntrackedOrigin]
     var cap_len: Int
     var cap_cap: Int
+    # #49: when >= 0, the current command's reply is being dropped (CLIENT
+    # REPLY OFF / SKIP), so a spill truncates the buffer back to this mark and
+    # sends nothing — the reply cannot be rolled back after it has left. -1
+    # otherwise. The slow path sets it per command; other writers never do.
+    var suppress_from: Int
 
     def __init__(out self):
         self.buffer = alloc[UInt8](RESP_BUF_SIZE)
@@ -152,6 +157,7 @@ struct ResponseWriter(Movable):
         self.cap_buf = null_ptr[UInt8, MutUntrackedOrigin]()
         self.cap_len = 0
         self.cap_cap = 0
+        self.suppress_from = -1
         for i in range(65536):
             self.pending_offsets[unsafe_offset=i] = 0
             self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
@@ -185,6 +191,7 @@ struct ResponseWriter(Movable):
         self.cap_buf = null_ptr[UInt8, MutUntrackedOrigin]()
         self.cap_len = 0
         self.cap_cap = 0
+        self.suppress_from = -1
 
     @always_inline
     def bind_ring(mut self, ring_ptr: Pointer[IOUring, MutUntrackedOrigin]):
@@ -211,6 +218,12 @@ struct ResponseWriter(Movable):
         Redis's goes on into its reply list. A capture writer keeps the bytes
         for the script. False where no connection can take them (cur_fd -1,
         the XDP lane)."""
+        if self.suppress_from >= 0:
+            # #49: this reply is being dropped (CLIENT REPLY OFF / SKIP). Throw
+            # away what overflowed, back to where the command began, and send
+            # nothing — a dropped reply must never reach the socket.
+            self.offset = self.suppress_from
+            return True
         if is_null(self.pending_offsets):
             if self.offset > 0:
                 self._cap_push(self.buffer, self.offset)
@@ -287,6 +300,18 @@ struct ResponseWriter(Movable):
             self._emit_overflow_error()     # the XDP lane, as before #49
             return
         _ = self._put_big(src, n)
+
+    @always_inline
+    def reserve(mut self, n: Int) -> Bool:
+        """#49: room for a direct write of at most `n` bytes into `buffer`
+        (n well under RESP_LIMIT), spilling first when it is full. Every
+        caller that writes the buffer itself, not through an appender, must
+        reserve: a fast-path LRANGE and PING once wrote past the buffer's end.
+        False on the XDP lane once the buffer is full; the caller must then
+        write nothing."""
+        if self.offset + n > RESP_LIMIT:
+            return self._fixed_cold()
+        return True
 
     @no_inline
     def _fixed_cold(mut self) -> Bool:

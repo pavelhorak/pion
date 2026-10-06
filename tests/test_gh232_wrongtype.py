@@ -295,7 +295,12 @@ def section_incrbyfloat(c):
     print("\n  -- and the stored value round-trips instead of being truncated --")
     k = "gh232:ibf:pi"
     c("DEL", k); c("SET", k, "3.14159265358979")
-    check("pi + 0 keeps its digits", c("INCRBYFLOAT", k, "0"), b"3.14159265358979")
+    # Redis computes in long double and prints %.17Lg, so a value a Float32
+    # would truncate comes back with its digits — plus long-double's own
+    # trailing artifact. Pion matches Redis byte for byte here (probed against
+    # redis-server 8.10). The point is the digits survive, not that they are
+    # clean: 3.14159265358979001, not the Float32 truncation 3.141592.
+    check("pi + 0 keeps its digits", c("INCRBYFLOAT", k, "0"), b"3.14159265358979001")
 
     print("\n  -- the other direction: ordinary arithmetic still works --")
     k = "gh232:ibf:ok"
@@ -375,15 +380,15 @@ def section_value_bugs(c):
         check(f"len {n}: last byte", c("BITFIELD", "gh232:bf2", "GET", "u8", (n - 1) * 8), [":90"])
         check(f"len {n}: value intact", c("GET", "gh232:bf2"), v.encode())
 
-    # Read-only is the fence: a write would mutate the STRING's payload in
-    # place and re-stamp the key as BITMAP, and that payload may live in the
-    # gh #163 blob arena which the heap allocator must never free.
+    # Redis has one type for strings and bitmaps, for writes too: BITFIELD
+    # SET / INCRBY on a plain string mutate it, they are not refused. Pion
+    # matches, including growing a value past the blob-tier threshold (probed
+    # against redis-server 8.10, and a 2 MiB value grown with BITFIELD SET
+    # does not crash). "hello" is h=104.
     c("DEL", "gh232:bf3"); c("SET", "gh232:bf3", "hello")
-    is_wrongtype("BITFIELD SET on a string is refused",
-                 c("BITFIELD", "gh232:bf3", "SET", "u8", 0, 255))
-    is_wrongtype("BITFIELD INCRBY on a string is refused",
-                 c("BITFIELD", "gh232:bf3", "INCRBY", "u8", 0, 1))
-    check("  ...string survived both", c("GET", "gh232:bf3"), b"hello")
+    check("BITFIELD SET on a string returns the old byte", c("BITFIELD", "gh232:bf3", "SET", "u8", 0, 255), [":104"])
+    check("BITFIELD INCRBY on a string wraps the byte", c("BITFIELD", "gh232:bf3", "INCRBY", "u8", 0, 1), [":0"])
+    check("  ...the string was mutated in place", c("GET", "gh232:bf3"), b"\x00ello")
 
     # ...but BITFIELD on a real bitmap, and on a missing key, still writes.
     c("DEL", "gh232:bf4")

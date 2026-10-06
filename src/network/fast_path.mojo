@@ -430,6 +430,8 @@ struct FastPathHandler(Movable):
         var peer_host_len = self.cluster[].peer_host_lens[pi]
         var peer_port = self.cluster[].peer_ports[pi]
         # Write: -ASK <slot> <host>:<port>\r\n
+        if not writer.reserve(48 + peer_host_len):     # #49: one per pipelined command
+            return True
         var rb = writer.buffer + writer.offset
         rb[0] = 45; rb[1] = 65; rb[2] = 83; rb[3] = 75  # -ASK
         rb[4] = 32  # space
@@ -468,6 +470,8 @@ struct FastPathHandler(Movable):
         var peer_host_len = self.cluster[].peer_host_lens[pi]
         var peer_port = self.cluster[].peer_ports[pi]
         # Write: -MOVED <slot> <host>:<port>\r\n
+        if not writer.reserve(48 + peer_host_len):     # #49: one per pipelined command
+            return True
         var rb = writer.buffer + writer.offset
         rb[0] = 45; rb[1] = 77; rb[2] = 79; rb[3] = 86; rb[4] = 69; rb[5] = 68  # -MOVED
         rb[6] = 32  # space
@@ -497,6 +501,8 @@ struct FastPathHandler(Movable):
         # Non-READONLY: redirect to primary with -MOVED
         var pi = self.cluster[].primary_peer_idx
         if pi >= 0 and pi < self.cluster[].peer_count:
+            if not writer.reserve(48 + self.cluster[].peer_host_lens[pi]):   # #49
+                return True
             var rb = writer.buffer + writer.offset
             rb[0] = 45; rb[1] = 77; rb[2] = 79; rb[3] = 86; rb[4] = 69; rb[5] = 68  # -MOVED
             rb[6] = 32
@@ -882,25 +888,26 @@ struct FastPathHandler(Movable):
                             or (buffer[ci + 3] | 0x20) != 103):
                         break
                     var after = ci + 4
-                    # End-of-buffer: accept this PING (mirrors original
-                    # lenient single-shot behaviour — CR/LF can arrive next read).
-                    if after >= n:
+                    # #53: only a complete, bare `PING` line. Anything else
+                    # stops the batch and is left to the slow path whole:
+                    # `PING hello` was answered PONG here and its `hello` then
+                    # ran as a command (two replies for one), `PINGX` the same,
+                    # and a `PING` whose line had not arrived yet was answered
+                    # before the rest of the line could say otherwise.
+                    if after < n and buffer[after] == 10:
                         count += 1
-                        ci = after
-                        break
-                    # Non-terminator after PING: stop and let the rest fall
-                    # through to slow-path. Don't consume bytes we can't safely batch.
-                    if buffer[after] != 13 and buffer[after] != 10:
+                        ci = after + 1
+                        continue
+                    if after + 1 < n and buffer[after] == 13 and buffer[after + 1] == 10:
                         count += 1
-                        ci = after
-                        break
-                    count += 1
-                    ci = after
-                    if ci < n and buffer[ci] == 13: ci += 1
-                    if ci < n and buffer[ci] == 10: ci += 1
-                writer.append_pong_bulk(count)
-                writer.flush_response(fd, server, kq)
-                return ci
+                        ci = after + 2
+                        continue
+                    break
+                if count > 0:
+                    writer.append_pong_bulk(count)
+                    writer.flush_response(fd, server, kq)
+                    return ci
+                return 0
 
         if not is_complex and num_cmds > 0:
             var it_pos = 0
@@ -1172,17 +1179,10 @@ struct FastPathHandler(Movable):
                         if msg_len < 0 or it_pos + msg_len + 2 > n:
                             return consumed
 
-                        writer.buffer[writer.offset] = 36 # '$'
-                        writer.offset += 1
-                        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(msg_len))
-                        writer.buffer[writer.offset] = 13 # '\r'
-                        writer.buffer[writer.offset + 1] = 10 # '\n'
-                        writer.offset += 2
-                        unsafe_memcpy(dest=writer.buffer + writer.offset, src=buffer + it_pos, count=msg_len)
-                        writer.offset += msg_len
-                        writer.buffer[writer.offset] = 13 # '\r'
-                        writer.buffer[writer.offset + 1] = 10 # '\n'
-                        writer.offset += 2
+                        # The message is the client's, any length: through the
+                        # appender, which bounds it. A copy straight into the
+                        # buffer here let `PING <5 MB>` write past its end.
+                        writer.append_bulk_string_response(buffer + it_pos, msg_len)
 
                         it_pos += msg_len + 2
                     else:
@@ -2490,6 +2490,12 @@ struct FastPathHandler(Movable):
                             writer.append_empty_array_response()
                         else:
                             var count = stop - start + 1
+                            # The ziplist branch writes the buffer itself: at most
+                            # `$64\r\n` + 64 + `\r\n` per element. Without this,
+                            # pipelined LRANGEs of small lists ran past the end of
+                            # the buffer (nothing checked between commands).
+                            if not writer.reserve(16 + count * 72):
+                                return consumed
                             writer.buffer[writer.offset] = 42 # '*'
                             writer.offset += 1
                             writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(count))
