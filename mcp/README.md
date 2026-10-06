@@ -168,21 +168,9 @@ return response
 
 ## Performance
 
-Pion at ef=150, 50K vectors, 1536 dimensions (VectorDBBench Performance1536D50K,
-head-to-head on same machine — Linux Colima 8-CPU, 2026-03-23):
-
-| Metric | Redis VSET (Redis 8.0) | **Pion V37** | Advantage |
-|---|---|---|---|
-| Peak QPS (c=10) | 5,441 | **10,283** | **+89%** |
-| P99 latency | 0.9ms | **0.9ms** | equal |
-| Recall@100 | 0.9197 | **0.9371** | **+1.7pp** |
-| Load time | 40.5s | **17.6s** | **2.3× faster** |
-
-macOS (M-series): 8,134 QPS mean (3-run stable), recall 0.9371, load ~16.5s vs Redis 50.4s.
-
-These figures are from an earlier build (spring 2026). The build as of
-2026-09-30 measures ~9.4K QPS at recall 0.960 on an M4 Mac mini, at the same
-gate configuration (50K × 1536-d, ef=150).
+pion-mcp adds a tool call and, for the search tools, an embedding request in front of
+Pion's vector search. For how that search compares with Redis on one machine, see the
+main README's vector table.
 
 ## License
 
