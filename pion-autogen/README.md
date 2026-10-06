@@ -36,7 +36,7 @@ Supports `embed_provider` = `"mock"` (deterministic, for tests), `"openai"`, or 
 
 - Main project: [`../README.md`](../README.md)
 - Vector engine internals: [`../doc/vector_engine.md`](../doc/vector_engine.md)
-- Substrate this backend uses: `AI.MEMORY.*` + `FT.SEARCH` (see [`../doc/codebase_search.md`](../doc/codebase_search.md))
+- Substrate this backend uses: `FT.CREATE` / `FT.SEARCH` over `HSET` documents (see [`../doc/vector_engine.md`](../doc/vector_engine.md))
 
 ## License
 

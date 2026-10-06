@@ -163,8 +163,6 @@ nav:
       - Python API:
           - pion-vllm-mlx: reference/python/pion-vllm-mlx.md
           - pion-lmcache: reference/python/pion-lmcache.md
-          - pion-mcp: reference/python/pion-mcp.md
-          - pion-context: reference/python/pion-context.md
           - pion-glide: reference/python/pion-glide.md
           - LangGraph · AutoGen · LlamaIndex · exo: reference/python/integrations.md
           - Client APIs: client_apis.md
@@ -174,7 +172,6 @@ nav:
       - Reproducers: guides/reproducers.md
       - Pion Serve: pion_serve.md
       - AI gateway: ai_gateway.md
-      - Codebase search (Claude Code hooks): codebase_search.md
   - Operations:
       - Running in production: operations.md
       - Docker and deployment: guides/docker.md

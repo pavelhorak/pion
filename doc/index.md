@@ -63,5 +63,4 @@ them. The vector engine exists so that recall needs no second database, and
 
 [AI gateway](ai_gateway.md) · [Embeddings](embeddings.md) ·
 [Pion Serve](pion_serve.md) · [Data types](data_types.md) ·
-[Benchmarking guide](benchmarking_guide.md) · [Development guide](development_guide.md) ·
-[Codebase search](codebase_search.md)
+[Benchmarking guide](benchmarking_guide.md) · [Development guide](development_guide.md)

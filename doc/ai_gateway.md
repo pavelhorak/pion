@@ -392,24 +392,13 @@ prompts; vLLM saves KV recomputation on exact-prefix continuations.
 
 **Hypura** (Ollama-compatible API): `FLARE_UPSTREAM_URL=http://hypura-host:11434`, no other changes.
 
-## MCP Agent Memory (pion-mcp, `mcp/`)
+## MCP server (pion-mcp, `mcp/`) — experimental
 
-Persistent cross-session semantic memory for any MCP-compatible agent. Five tools:
-
-| Tool | Description |
-|---|---|
-| `agent_remember(text, session_id)` | Embed and store a memory in Pion's HNSW |
-| `agent_recall(query, k)` | Retrieve top-k semantically similar memories |
-| `agent_forget(key)` | Delete a specific memory |
-| `agent_forget_session(session_id)` | Delete all memories from a session |
-| `agent_memory_stats()` | Show count and index status |
-
-```bash
-# Add to Claude Code
-claude mcp add pion -- uvx --from ./mcp pion-mcp
-```
-
-Memories survive restarts (WAL persistence + HNSW disk snapshot). See `mcp/README.md`.
+`mcp/` holds an MCP server whose `agent_remember` / `agent_recall` / `agent_forget` tools
+store memories in a Pion FT index. It is experimental. Pion serves one FT index at a time,
+so these memories, the MCP semantic cache and codebase search replace one another on a
+server; give each its own server. pion-mcp also does not accept the `ollama` embedding
+provider that pion-context defaults to. See `mcp/README.md`.
 
 ---
 
