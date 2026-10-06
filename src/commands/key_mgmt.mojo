@@ -5,6 +5,7 @@ from src.common.utils import strict_atol, _glob_match, _glob_all, arg_eq, parse_
 from src.common.ptr import is_not_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
+from std.sys import CompilationTarget
 from std.collections import Array, Span, List
 from std.ffi import external_call
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
@@ -218,10 +219,13 @@ def _member_fits(v: GenericValue, buf: Pointer[UInt8, MutUntrackedOrigin], mut a
     return n <= 64
 
 
-def object_encoding(val: GenericValue) -> String:
+def object_encoding(val: GenericValue, key_len: Int) -> String:
     """OBJECT ENCODING, by Redis's rules for the size the value has (#47; a
     small list said quicklist): an integer string is int, others embstr up to
-    44 bytes and raw beyond; a list is a listpack while its elements' bytes
+    44 bytes and raw beyond — and, as Redis 8 stores a value (kvobjSet), only
+    while the object, the key and the value share one cache line, which
+    Redis sizes at 128 bytes on Apple silicon and 64 elsewhere: a 44-byte
+    value under a 2-byte key is embstr on a Mac and raw on Linux; a list is a listpack while its elements' bytes
     fit in 8 KB (list-max-listpack-size -2), else a quicklist; a hash is a
     listpack up to 512 entries of at most 64 bytes (Redis 8's
     hash-max-listpack-entries), a sorted set up to 128, else a hashtable or
@@ -235,9 +239,12 @@ def object_encoding(val: GenericValue) -> String:
         out = "int"
     elif t == ValueType.STRING_SSO or t == ValueType.STRING:
         var n = val.string_len()
+        var line = 64                                   # Redis's CACHE_LINE_SIZE
+        comptime if CompilationTarget.is_macos() and CompilationTarget.has_neon():
+            line = 128
         if _is_redis_int(val.as_string_safe(buf), n):
             out = "int"
-        elif n <= 44:
+        elif n <= 44 and 16 + (key_len + 3) + (4 + n) <= line:
             out = "embstr"
     elif t == ValueType.FLOAT:
         out = "embstr"
@@ -311,7 +318,7 @@ def handle_object(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             writer.append_null_response()
         # ENCODING subcommand
         elif arg_eq(sub_p2, sub_l2, "encoding"):
-            var enc_str = object_encoding(val)
+            var enc_str = object_encoding(val, tokens[unsafe_offset=i+2].length)
             writer.append_bulk_string_response(enc_str.unsafe_ptr(), enc_str.byte_length())
         elif arg_eq(sub_p2, sub_l2, "refcount"):
             writer.append_int_response(Int64(1))

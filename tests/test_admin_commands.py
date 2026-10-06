@@ -477,6 +477,12 @@ def probes():
           ["RPUSH", "l3", "x" * 65], ["OBJECT", "ENCODING", "l3"],
           ["RPUSH", "l4", *[str(i) for i in range(2000)]], ["OBJECT", "ENCODING", "l4"],
           ["SET", "s1", "123"], ["OBJECT", "ENCODING", "s1"], ["SET", "s2", "x" * 44], ["OBJECT", "ENCODING", "s2"],
+          # Redis 8 keeps a value embstr only while key and value fit one cache
+          # line with the object (64 bytes on Linux, 128 on Apple silicon)
+          ["SET", "k3", "x" * 37], ["OBJECT", "ENCODING", "k3"], ["SET", "k4", "x" * 39], ["OBJECT", "ENCODING", "k4"],
+          ["SET", "k5", "x" * 40], ["OBJECT", "ENCODING", "k5"], ["SET", "a" * 40, "hello"],
+          ["OBJECT", "ENCODING", "a" * 40], ["SET", "b" * 61, "x" * 44], ["OBJECT", "ENCODING", "b" * 61],
+          ["SET", "b" * 62, "x" * 44], ["OBJECT", "ENCODING", "b" * 62],
           ["SET", "s3", "x" * 45], ["OBJECT", "ENCODING", "s3"], ["SET", "s4", "0123"], ["OBJECT", "ENCODING", "s4"],
           ["HSET", "h1", "f", "v"], ["OBJECT", "ENCODING", "h1"],
           ["HSET", "h2", *sum([[f"f{i}", "v"] for i in range(129)], [])], ["OBJECT", "ENCODING", "h2"],
