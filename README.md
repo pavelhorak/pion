@@ -206,14 +206,22 @@ caveats under each table as part of the number.
 
 **Vector search.**
 
-| | Redis VSET | **Pion** |
+| | Redis 8.6 VSET | **Pion** |
 |---|---:|---:|
-| **QPS** (50K, 1536D) | 5,445 | **6,803** (+25%) |
+| **QPS** (50K, 1536D, 10 clients) | **8,801** | 6,689 (−24%) |
 | **Recall@100** | 0.920 | **0.937** (+1.7pp) |
-| **P99 latency** | 8.9ms | **1.6ms** (5.6× lower) |
-| **Ingest** (50K) | 50.2s | **9.0s** (5.6× faster) |
+| **P99 latency** | 1.57ms | 1.6ms (tie) |
+| **Load until searchable** (50K) | 50.2s | **31.9s** (1.6× faster) |
 
-*Linux bare metal, AMD EPYC 7313P, measured 2026-04-06 with the tuned kernels then in the tree. Linux release tarballs link the tuned library from v0.9.3 on; earlier ones ran the open reference kernels ([licensing](doc/licensing.md)). The current build on an M4 Mac mini measures ~9.4K QPS at recall 0.960 (gate configuration, 2026-09-30). The harnesses to rerun both are in `benchmarks/`; raw run logs are not published.*
+*One run, both engines on the same machine: Linux bare metal, AMD EPYC 7313P,
+2026-04-05, VectorDBBench Performance1536D50K, Pion at ef=150 with the tuned kernels
+then in the tree. Redis is faster at search; Pion has higher recall and is searchable
+sooner. Pion's load is its insert (9.0 s) plus the index build (22.9 s); Redis builds
+while it inserts. Pion has changed since: the current build measures ~9.4K QPS at recall
+0.960 on an M4 Mac mini (gate configuration, 2026-09-30), but it has not been measured
+against Redis again since this run. Linux release tarballs link the tuned library from
+v0.9.3 on; earlier ones ran the open reference kernels ([licensing](doc/licensing.md)).
+The harnesses to rerun both are in `benchmarks/`; raw run logs are not published.*
 
 ### Expert paging — models beyond RAM (substrate validation)
 
@@ -790,7 +798,7 @@ doc/                              # technical reference
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |
 | Peak KV throughput | **14.0M ops/sec** (Linux w=32) |
-| Vector QPS | ~9.4K on an M4 Mac mini (6,803 on Linux EPYC, April 2026) |
+| Vector QPS | ~9.4K on an M4 Mac mini (6,689 on Linux EPYC 7313P, April 2026) |
 | Recall@100 | 0.960 at that QPS (INT8, ef=150) |
 | P99 latency | 0.7 ms (vector search, M4 Mac mini) |
 | Embeddings | Apple NLEmbedding 512-dim with `--nle-embed` on macOS (no Python); MiniLM-L6-v2 384-dim from a source build |
