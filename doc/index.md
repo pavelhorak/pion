@@ -39,7 +39,7 @@ only pays off when a long prefix is really reused.
 
 ## What works
 
-Three things, each covered by the gate tier that runs on every change:
+Three things, each covered by Pion's gate tier, the tests run before every merge:
 
 1. **A prompt cache for mlx-lm, and one endpoint for coding agents.**
    [Shared KV cache](shared_kv_cache.md) (namespaces, Stage 1 vs Stage 2, the

@@ -33,7 +33,7 @@ Details: [`doc/licensing.md`](doc/licensing.md).
 
 ## What works
 
-Three things, each covered by the gate tier that runs on every change. Every
+Three things, each covered by Pion's gate tier, the tests run before every merge. Every
 other feature in this repository is [experimental](#experimental): it is
 there, it may be tested at the wire level, and it is not something to rely on.
 
