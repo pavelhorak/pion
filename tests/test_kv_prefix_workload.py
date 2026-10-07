@@ -41,6 +41,7 @@ from mlx_lm.models.cache import make_prompt_cache
 
 # Reuse the MLX adapter and PionVStore client from the G1 harness
 sys.path.insert(0, "tests")
+from _prompt_ids import one_bos, piece  # type: ignore
 from test_kv_prefix_mlx import (  # type: ignore
     PionVStore, CacheLayout, layout_from,
     cache_to_arrays, arrays_to_cache,
@@ -88,6 +89,13 @@ def system_prompt(i: int, repeats: int) -> str:
     return (SYSTEM_PROMPTS[i % len(SYSTEM_PROMPTS)] + SYSTEM_PADDING) * repeats
 
 
+def request_ids(tok, sys_ids, query):
+    """A request: the system prompt (its own leading <bos>) and the query as
+    a piece. A plain tok.encode(query) prepends a second <bos> mid-prompt,
+    on Llama 3 as on Gemma 4 (tests/_prompt_ids.py)."""
+    return one_bos(tok, list(sys_ids) + piece(tok, query))
+
+
 def main(args) -> int:
     print(f"§15.4 workload  model={args.model}  prompts={args.prompts}  q_per_prompt={args.queries}  vquant={args.vquant}")
     print(f"  pion: 127.0.0.1:1974")
@@ -117,7 +125,7 @@ def main(args) -> int:
     print(f"  prompt sizes (tokens): {[len(t) for t in sys_tokens]}")
 
     # Warmup
-    full_w = mx.array([sys_tokens[0] + tok.encode(USER_QUERIES[0])])
+    full_w = mx.array([request_ids(tok, sys_tokens[0], USER_QUERIES[0])])
     for _ in range(args.warmup):
         forward_logits(model, full_w)
 
@@ -125,13 +133,16 @@ def main(args) -> int:
     print("\n[A] standalone mlx-lm — cold prefill every request")
     a_ttfts = []
     a_first_tokens_by_key = {}  # for correctness check vs Pion path
+    a_margin_by_key = {}        # vanilla's top-1 minus top-2 logit: how close a call it was
     a_t0 = time.perf_counter()
     for (pi, q) in workload:
-        full = mx.array([sys_tokens[pi] + tok.encode(q)])
+        full = mx.array([request_ids(tok, sys_tokens[pi], q)])
         ttft, last = forward_logits(model, full)
         a_ttfts.append(ttft)
         key = (pi, q)
         a_first_tokens_by_key[key] = int(mx.argmax(last).item())
+        top2 = mx.sort(mx.topk(last.reshape(-1).astype(mx.float32), 2))
+        a_margin_by_key[key] = float((top2[1] - top2[0]).item())
     a_wall = time.perf_counter() - a_t0
     a_throughput = len(workload) / a_wall
 
@@ -148,7 +159,7 @@ def main(args) -> int:
     bytes_dn_total = 0
     c_t0 = time.perf_counter()
     for (pi, q) in workload:
-        suffix_ids_list = tok.encode(q)
+        suffix_ids_list = piece(tok, q)
         suffix_ids = mx.array([suffix_ids_list])
         if pi not in prompt_cache_meta:
             # MISS: cold path, prefill prompt, push K/V to Pion
@@ -223,6 +234,13 @@ def main(args) -> int:
     print(f"    TTFT p99 speedup        {a_p99 / c_p99 if c_p99 else float('inf'):.2f}×")
     print(f"    throughput speedup      {c_throughput / a_throughput if a_throughput else float('inf'):.2f}×")
     print(f"    first-token agreement   {correctness*100:.1f}% ({matches}/{len(a_first_tokens_by_key)})")
+    for k, a_tok in a_first_tokens_by_key.items():
+        c_tok = c_first_tokens_by_key.get(k)
+        if c_tok != a_tok:
+            pi, q = k
+            print(f"      disagrees: prompt {pi}, query {q[:40]!r}: vanilla {tok.decode([a_tok])!r}, "
+                  f"pion {tok.decode([c_tok]) if c_tok is not None else None!r}, "
+                  f"vanilla's top-2 margin {a_margin_by_key[k]:.3f}")
 
     # Pass criteria from §15.4 win condition: Pion beats standalone on TTFT AND quality equivalent
     pass_ttft = c_mean < a_mean

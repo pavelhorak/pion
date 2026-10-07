@@ -1,0 +1,29 @@
+gh #62 (1.5b) RULER-subset gate  model=mlx-community/gemma-4-e2b-it-4bit
+  lengths=[32768, 65536]  trials/length=3
+  VT chain=4  MV M=3  sparse K_block=64 K_blocks=8 (budget=512)
+
+loading model...
+  layers: 35 total, 7 full, 28 sliding
+
+MV trials: 6
+
+━━━ Task: Multi-Value NIAH (M=3) ━━━
+
+[A vanilla mlx-lm (cold)]  MV
+   length=32768  acc=100.0% (3/3)  F1=1.000  TTFT p50=23307.1ms
+   length=65536  acc=100.0% (3/3)  F1=1.000  TTFT p50=58806.5ms
+
+[B Pion in-proc DENSE]  MV
+   length=32768  acc=100.0% (3/3)  F1=1.000  TTFT p50=  135.5ms
+   length=65536  acc=100.0% (3/3)  F1=1.000  TTFT p50=  598.4ms
+
+[C Pion in-proc SPARSE]  MV
+   length=32768  acc=100.0% (3/3)  F1=1.000  TTFT p50=  140.0ms
+   length=65536  acc=100.0% (3/3)  F1=1.000  TTFT p50=  681.4ms
+
+━━━ Gate (MV — F1-based; EM is too strict at 32-64 decode tokens) ━━━
+  MV  length=32768  sparse F1=1.000  vanilla F1=1.000  ratio = 100.0%  (gate ≥ 95%)  PASS
+  MV  length=65536  sparse F1=1.000  vanilla F1=1.000  ratio = 100.0%  (gate ≥ 95%)  PASS
+
+OVERALL: PASS
+rc=0

@@ -42,6 +42,7 @@ from pion_vllm_mlx.mlx_lm_patch import (
     install_pion_attention_patch, make_pion_prompt_cache,
 )
 from _gemma4_text_filter_load import load_text_only_from_cached
+from _prompt_ids import bos, one_bos, piece
 
 
 # Long-form filler. Tiled to reach the desired token length.
@@ -83,7 +84,8 @@ class Trial:
 
 def build_prompt(trial: Trial, tok) -> Tuple[List[int], int]:
     """Tile FILLER, splice in the needle at `depth`, append the question.
-    Return (token_ids, target_number)."""
+    Return (token_ids, target_number). One <bos>, at position 0: see
+    tests/_prompt_ids.py for what plain tok.encode() pieces did here."""
     needle_text = (
         f"\nThe magic number for the city of {trial.city} is {trial.number}.\n"
     )
@@ -92,21 +94,21 @@ def build_prompt(trial: Trial, tok) -> Tuple[List[int], int]:
         f"Answer with only the number.\nAnswer:"
     )
     # Build filler to roughly the target length minus needle/question.
-    needle_tokens = tok.encode(needle_text)
-    question_tokens = tok.encode(question)
+    needle_tokens = piece(tok, needle_text)
+    question_tokens = piece(tok, question)
     target_filler_tokens = max(
-        128, trial.length - len(needle_tokens) - len(question_tokens) - 16
+        128, trial.length - len(bos(tok)) - len(needle_tokens) - len(question_tokens) - 16
     )
 
-    base_filler = tok.encode(FILLER)
+    base_filler = piece(tok, FILLER)
     while len(base_filler) < target_filler_tokens:
         base_filler = base_filler + base_filler
     filler = base_filler[:target_filler_tokens]
 
     # Splice needle at depth.
     insert_at = max(1, int(len(filler) * trial.depth))
-    full_ids = filler[:insert_at] + needle_tokens + filler[insert_at:] + question_tokens
-    return full_ids, trial.number
+    full_ids = bos(tok) + filler[:insert_at] + needle_tokens + filler[insert_at:] + question_tokens
+    return one_bos(tok, full_ids), trial.number
 
 
 def greedy_decode(model, prompt_ids: List[int], n_steps: int, cache,
@@ -250,7 +252,7 @@ def main(args) -> int:
             f"\n\nQuestion: What is the magic number for the city of {t.city}? "
             f"Answer with only the number.\nAnswer:"
         )
-        question_ids = tok.encode(question)
+        question_ids = piece(tok, question)
         prefix_ids = prompt_ids[: len(prompt_ids) - len(question_ids)]
         # Cold prefill via PionPromptCache stashes _mlx_prefix_kv.
         pc.get_or_prefill(prefix_ids, ns)

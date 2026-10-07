@@ -48,6 +48,7 @@ from pion_vllm_mlx.mlx_lm_patch import (
     install_pion_attention_patch, make_pion_prompt_cache,
 )
 from _gemma4_text_filter_load import load_text_only_from_cached
+from _prompt_ids import bos, one_bos, piece
 
 
 FILLER = (
@@ -81,7 +82,8 @@ class Trial:
 
 def build_prompt(trial: Trial, tok) -> Tuple[List[int], int]:
     """Tile filler, splice in ALL needles at their depths, append the question
-    asking only about the target needle. Returns (token_ids, target_number)."""
+    asking only about the target needle. Returns (token_ids, target_number).
+    One <bos>, at position 0 (tests/_prompt_ids.py)."""
     needle_texts = [
         f"\nThe magic number for the city of {c} is {n}.\n"
         for (c, n) in trial.needles
@@ -91,14 +93,14 @@ def build_prompt(trial: Trial, tok) -> Tuple[List[int], int]:
         f"\n\nQuestion: What is the magic number for the city of {target_city}? "
         f"Answer with only the number.\nAnswer:"
     )
-    needle_token_lists = [tok.encode(nt) for nt in needle_texts]
-    question_tokens = tok.encode(question)
+    needle_token_lists = [piece(tok, nt) for nt in needle_texts]
+    question_tokens = piece(tok, question)
     needles_total = sum(len(nt) for nt in needle_token_lists)
     target_filler_tokens = max(
-        128, trial.length - needles_total - len(question_tokens) - 16
+        128, trial.length - len(bos(tok)) - needles_total - len(question_tokens) - 16
     )
 
-    base_filler = tok.encode(FILLER)
+    base_filler = piece(tok, FILLER)
     while len(base_filler) < target_filler_tokens:
         base_filler = base_filler + base_filler
     filler = base_filler[:target_filler_tokens]
@@ -106,7 +108,7 @@ def build_prompt(trial: Trial, tok) -> Tuple[List[int], int]:
     # Plant needles at requested depths, sorted ascending so insert positions
     # don't drift each other.
     plan = sorted(zip(trial.depths, needle_token_lists), key=lambda x: x[0])
-    out: List[int] = []
+    out: List[int] = bos(tok)
     last_filler_pos = 0
     for depth, ntoks in plan:
         insert_at = max(1, int(len(filler) * depth))
@@ -117,7 +119,7 @@ def build_prompt(trial: Trial, tok) -> Tuple[List[int], int]:
         last_filler_pos = insert_at
     out.extend(filler[last_filler_pos:])
     out.extend(question_tokens)
-    return out, trial.needles[trial.target_idx][1]
+    return one_bos(tok, out), trial.needles[trial.target_idx][1]
 
 
 def greedy_decode(model, prompt_ids: List[int], n_steps: int, cache,
@@ -246,7 +248,7 @@ def main(args) -> int:
             f"\n\nQuestion: What is the magic number for the city of {target_city}? "
             f"Answer with only the number.\nAnswer:"
         )
-        qtoks = tok.encode(question)
+        qtoks = piece(tok, question)
         prefix_ids = prompt_ids[: len(prompt_ids) - len(qtoks)]
         ns = f"multi_niah|{ti}|L{t.length}|needles{args.needles}|target{t.target_idx}|dense"
         pc.get_or_prefill(prefix_ids, ns)
@@ -269,7 +271,7 @@ def main(args) -> int:
             f"\n\nQuestion: What is the magic number for the city of {target_city}? "
             f"Answer with only the number.\nAnswer:"
         )
-        qtoks = tok.encode(question)
+        qtoks = piece(tok, question)
         prefix_ids = prompt_ids[: len(prompt_ids) - len(qtoks)]
         ns = f"multi_niah|{ti}|L{t.length}|needles{args.needles}|target{t.target_idx}|dense"
         pc.get_or_prefill(prefix_ids, ns)
@@ -304,7 +306,7 @@ def main(args) -> int:
             f"\n\nQuestion: What is the magic number for the city of {target_city}? "
             f"Answer with only the number.\nAnswer:"
         )
-        qtoks = tok.encode(question)
+        qtoks = piece(tok, question)
         prefix_ids = prompt_ids[: len(prompt_ids) - len(qtoks)]
         ns = f"multi_niah|{ti}|L{t.length}|needles{args.needles}|target{t.target_idx}|sparse"
         pc.get_or_prefill(prefix_ids, ns)

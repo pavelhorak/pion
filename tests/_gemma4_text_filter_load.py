@@ -43,6 +43,40 @@ def _resolve_snapshot(repo: str) -> Path:
     raise FileNotFoundError(f"No cached snapshot for {repo} in {[str(c) for c in candidates]}")
 
 
+def _force_bos(tok):
+    """gh #93: Gemma 4's `GemmaTokenizer` ships with `add_bos_token=False`, so
+    `tok.encode("…")` does NOT prepend `<bos>` (id=2). On Gemma-4-12B-it-4bit
+    this collapses the next-token distribution onto punctuation/control
+    tokens — the very-degenerate-vanilla-output bug. (E2B-it-4bit happened to
+    produce coherent output without BOS, masking the issue.) Force BOS
+    prepending on both the outer TokenizerWrapper and the underlying
+    `GemmaTokenizer` so every consumer of this helper gets a faithful vanilla
+    baseline.
+
+    Every `tok.encode()` now starts with `<bos>`, so a prompt built from
+    several pieces must encode them with tests/_prompt_ids.py, or it carries
+    a `<bos>` at each seam."""
+    try:
+        tok.add_bos_token = True
+    except Exception:
+        pass
+    underlying = getattr(tok, "_tokenizer", None)
+    if underlying is not None:
+        try:
+            underlying.add_bos_token = True
+        except Exception:
+            pass
+    return tok
+
+
+def load_tokenizer_only(repo: str = "mlx-community/gemma-4-e2b-it-4bit"):
+    """The tokenizer `load_text_only_from_cached` returns, without the model."""
+    snapshot = _resolve_snapshot(repo)
+    cfg_full = json.loads((snapshot / "config.json").read_text())
+    eos = dict(cfg_full.get("text_config") or {}).get("eos_token_id")
+    return _force_bos(load_tokenizer(snapshot, eos_token_ids=eos))
+
+
 def load_text_only_from_cached(repo: str = "mlx-community/gemma-4-e2b-it-4bit"):
     snapshot = _resolve_snapshot(repo)
     cfg_full = json.loads((snapshot / "config.json").read_text())
@@ -95,25 +129,7 @@ def load_text_only_from_cached(repo: str = "mlx-community/gemma-4-e2b-it-4bit"):
     model.load_weights(list(text_weights.items()), strict=False)
     mx.eval(model.parameters())
 
-    tok = load_tokenizer(snapshot, eos_token_ids=text_cfg.get("eos_token_id"))
-    # gh #93: Gemma 4's `GemmaTokenizer` ships with `add_bos_token=False`, so
-    # `tok.encode("…")` does NOT prepend `<bos>` (id=2). On Gemma-4-12B-it-4bit
-    # this collapses the next-token distribution onto punctuation/control
-    # tokens — the very-degenerate-vanilla-output bug. (E2B-it-4bit happened to
-    # produce coherent output without BOS, masking the issue.) Force BOS
-    # prepending on both the outer TokenizerWrapper and the underlying
-    # `GemmaTokenizer` so every consumer of this helper gets a faithful vanilla
-    # baseline.
-    try:
-        tok.add_bos_token = True
-    except Exception:
-        pass
-    underlying = getattr(tok, "_tokenizer", None)
-    if underlying is not None:
-        try:
-            underlying.add_bos_token = True
-        except Exception:
-            pass
+    tok = _force_bos(load_tokenizer(snapshot, eos_token_ids=text_cfg.get("eos_token_id")))
     return model, tok
 
 

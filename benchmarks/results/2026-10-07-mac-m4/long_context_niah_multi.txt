@@ -1,0 +1,27 @@
+gh #60 Phase 3 multi-needle NIAH  model=mlx-community/gemma-4-e2b-it-4bit
+  lengths=[32768, 65536]  needles=3  trials/length=3
+  decode-tokens=12
+
+loading model...
+  layers: 35 total, 7 full, 28 sliding (window=512)
+
+total trials: 6
+
+[A vanilla mlx-lm — cold every request]
+   length=32768  acc=100.0% (3/3)  TTFT p50=22692.0ms
+   length=65536  acc=100.0% (3/3)  TTFT p50=58713.1ms
+
+[B] Pion-patched mlx-lm DENSE (in-proc lane, stage2=True)
+   length=32768  acc=100.0% (3/3)  TTFT p50=  297.4ms
+   length=65536  acc=100.0% (3/3)  TTFT p50=  435.3ms
+
+[C] Pion-patched mlx-lm SPARSE  K_block=64 K_blocks=8 (512 tokens of prefix budget per full layer)
+   length=32768  acc=100.0% (3/3)  TTFT p50=  161.8ms
+   length=65536  acc=100.0% (3/3)  TTFT p50= 2238.4ms
+
+──────── multi-needle gate ────────
+  length=32768  pion-sparse/vanilla = 100.0%  (gate ≥ 95%)  PASS
+  length=65536  pion-sparse/vanilla = 100.0%  (gate ≥ 95%)  PASS
+
+OVERALL (3-needle): PASS
+rc=0

@@ -14,6 +14,17 @@ enumerated — there were roughly 1,100 of them.
   them, through the filler and before the needle and the question, and neither
   vanilla mlx-lm nor Pion found the needle. The prompt now has one `<bos>`, at
   position 0.
+- **Six more harnesses put a second `<bos>` mid-prompt, and now build prompts
+  with one.** `test_long_context_niah`, `test_long_context_niah_multi`,
+  `test_ruler_subset` and `test_hybrid_per_layer_agreement` (Gemma 4), and
+  `test_kv_prefix_workload` and `bench_w1_stage2` (Llama 3, whose tokenizer
+  prepends `<|begin_of_text|>` on every `encode()` too). They build prompts
+  through `tests/_prompt_ids.py`, which refuses a prompt with any `<bos>` but
+  the first, and `tests/test_prompt_bos.py` (gate) checks every builder
+  against the real tokenizers. Re-run on 2026-10-07: every long-context test
+  passes, and RULER's multi-value NIAH, which lost a value on every path with
+  the stray tokens (F1 0.80 at 4K), scores F1 1.000 at 4K, 32K and 64K. The
+  per-layer agreement test, which failed with them (5/16), agrees 16/16.
 
 ### Documentation
 
@@ -22,6 +33,16 @@ enumerated — there were roughly 1,100 of them.
   vanilla mlx-lm and Pion find the needle, and Pion's warm call takes 124.4 ms
   against vanilla's 54.4 s cold prefill (437×), attending 0.80% of the prefix
   on each full-attention layer. It replaces the 326× figure withdrawn in 0.9.6.
+- **The Stage 1 and Stage 2 workload figures are re-measured with the fixed
+  harnesses** (`benchmarks/results/2026-10-07-mac-m4/`). The TTFT figures move
+  within run-to-run variation: Stage 1 3.6× (was 3.8×), the in-process lane
+  4.7× (was 4.8×), and the RESP lane's p50 is now given as two runs, 110 and
+  128 ms. Stage 1's first-token agreement is 49 of 50, not 50 of 50: one
+  request is a near-tie in vanilla mlx-lm (its top two tokens are 0.016 logits
+  apart) and the fp16-stored cache picks the other token, so
+  `test_kv_prefix_workload`'s 99% correctness check fails.
+- RULER's variable-tracking task is solvable on Gemma-4-E2B-it-4bit at 4K
+  (3/3 vanilla, dense and sparse); the test's note said 0%.
 
 ## [0.9.6] — 2026-10-07
 
