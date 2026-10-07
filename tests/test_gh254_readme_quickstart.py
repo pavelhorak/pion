@@ -231,12 +231,17 @@ def main():
           re.search(r"class PionPrefixCache[\s\S]*?def state\(self\)", patch_src) is not None,
           "without it, generate(..., prompt_cache=make_pion_prompt_cache(...)) raises AttributeError")
 
-    top_blocks = re.findall(r"```python\n(.*?)```", text.split("## Why Pion")[0], re.S)
-    check("a Python snippet exists above ## Why Pion", bool(top_blocks))
-    feature = text.split("### Shared KV Cache")[1].split("\n### ")[0] if "### Shared KV Cache" in text else ""
+    # Until 2026-10-07 the README had a "## Why Pion" section after the four
+    # lines and a "### Shared KV Cache" feature entry repeating them; the
+    # README now opens with "## What works" and its first item is the cache.
+    top_blocks = re.findall(r"```python\n(.*?)```", text.split("## Quick Start")[0], re.S)
+    check("a Python snippet exists above ## Quick Start", bool(top_blocks))
+    feature = text.split("### 1. A prompt cache for mlx-lm")[1].split("\n### ")[0] \
+        if "### 1. A prompt cache for mlx-lm" in text else ""
+    check("the README's first supported item is the prompt cache", bool(feature))
     copies = {
         "README.md (top)": top_blocks[0] if top_blocks else "",
-        "README.md (Feature Set)": feature,
+        "README.md (What works, item 1)": feature,
         "pion-vllm-mlx/pion_vllm_mlx/__init__.py": _read("pion-vllm-mlx/pion_vllm_mlx/__init__.py"),
         "pion-vllm-mlx/README.md": _read("pion-vllm-mlx/README.md"),
     }

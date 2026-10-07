@@ -241,7 +241,7 @@ run at a higher EF, so the comparison at 0.960 recall is still open.
 
 ---
 
-## Install
+## Quick Start
 
 <!-- --8<-- [start:security] -->
 > **Security model, in one paragraph.** Pion listens on **127.0.0.1 by
@@ -332,7 +332,7 @@ pixi run build                        # produces ./pion-server
 ```
 <!-- --8<-- [end:build-from-source] -->
 
-## First five minutes
+### First five minutes
 
 <!-- --8<-- [start:first-five-minutes] -->
 **KV** — `redis-cli` talks to Pion unmodified:
