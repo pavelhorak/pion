@@ -6,6 +6,16 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-10-07
+
+A security fix: every earlier release could be made to write past the end of
+its reply buffer from the wire (see Security), so every deployment should
+upgrade. Replies of any size now arrive whole, SCAN and its relatives iterate
+with a cursor, AI.CHAT returns the model's reply again, commands with more than
+2,048 arguments run, and inline commands parse as Redis parses them. Every
+measured number in the docs now names its raw evidence, re-measured against
+Redis 8.10.2 where it compares with Redis.
+
 ### Documentation
 
 - **Every measured number in the docs names its evidence.**
@@ -36,6 +46,18 @@ enumerated — there were roughly 1,100 of them.
   command-matrix coverage summary now counts the matrix's own rows; the
   `--profile` memory column is measured idle RSS; `tests/test_mlx_lm_patch.py`
   states the threshold it asserts.
+
+### Removed
+
+- **The site no longer recommends Pion as an MCP server for Claude Code.** The
+  landing page's MCP chip, the pion-mcp and pion-context reference pages and the
+  codebase-search guide are gone, and both packages' READMEs are marked
+  experimental, with their known limitations. Several statements in them were
+  wrong: re-indexing an edited file (the PostToolUse hook, `index-file`) removes
+  it from search instead of refreshing it; directories named `models`, Django's
+  ORM among them, were never indexed; agent memory and codebase search replace
+  each other's index on one server; the hooks were not configured automatically;
+  and "70-86% of repeated queries hit cache" had no measurement behind it.
 
 ### Fixed
 
@@ -75,43 +97,39 @@ enumerated — there were roughly 1,100 of them.
 - A command that fails after part of its reply has already been sent is
   answered and the connection closed, rather than rolled back to bytes the
   client already holds.
-
-- **pion-context indexes what git tracks, and keeps a built index current.** It skipped
-  every directory named `models` (Django's ORM among them) and `dataset`; it now indexes
-  git's files (tracked, plus untracked not ignored). Re-indexing a file in a built index
-  (`index-file`, the PostToolUse hook) made the file unsearchable, because a vector written
-  after FT.OPTIMIZE never enters the graph; it now rebuilds the index from the stored
-  vectors. The hook's absolute paths replace a file's chunks instead of adding a second
-  copy, deleted and emptied files leave the index, and `install-hooks` writes the Claude
-  Code hooks. Ollama embeddings go 64 to a request: Django's 8,627 chunks index in 194 s on
-  an M4 Mac mini. A search that cannot run raises instead of returning nothing. Tested on
-  every push by `tests/test_pion_context_index.py`.
-- **pion-mcp accepts `PION_EMBED_PROVIDER=ollama`** (it raised) and embeds exactly as
-  pion-context does; `codebase_search` reports a replaced index instead of returning `[]`.
-  `tests/test_mcp_search.py` now runs in the gate without the `mcp` package, through a stub
-  FastMCP; it was skipped on every gate run.
-- **pion-serve's `--rag-index` retrieves from any index.** It queried `@vector` whatever
-  the index's vector field was called, Pion refused, and the error was swallowed, so RAG
-  injected nothing. The field is learned from the server or set with `--rag-field`, and a
-  failed lookup is logged and counted in `/v1/stats` as `rag_errors`.
+- **pion-context indexes what git tracks, and keeps a built index current.**
+  It skipped every directory named `models` (Django's ORM among them) and
+  `dataset`; it now indexes git's files (tracked, plus untracked not ignored).
+  Re-indexing a file in a built index (`index-file`, the PostToolUse hook)
+  made the file unsearchable, because a vector written after FT.OPTIMIZE never
+  enters the graph; it now rebuilds the index from the stored vectors. The
+  hook's absolute paths replace a file's chunks instead of adding a second
+  copy, deleted and emptied files leave the index, and `install-hooks` writes
+  the Claude Code hooks. Ollama embeddings go 64 to a request: Django's 8,627
+  chunks index in 194 s on an M4 Mac mini. A search that cannot run raises
+  instead of returning nothing. Tested on every push by
+  `tests/test_pion_context_index.py`.
+- **pion-mcp accepts `PION_EMBED_PROVIDER=ollama`** (it raised) and embeds
+  exactly as pion-context does; `codebase_search` reports a replaced index
+  instead of returning `[]`. `tests/test_mcp_search.py` now runs in the gate
+  without the `mcp` package, through a stub FastMCP; it was skipped on every
+  gate run.
+- **pion-serve's `--rag-index` retrieves from any index.** It queried
+  `@vector` whatever the index's vector field was called, Pion refused, and
+  the error was swallowed, so RAG injected nothing. The field is learned from
+  the server or set with `--rag-field`, and a failed lookup is logged and
+  counted in `/v1/stats` as `rag_errors`.
 
 ### Security
 
-- A fast-path reply could be written past the end of the 4 MB reply buffer:
-  PING with a large argument, a pipeline of LRANGEs of small lists, and
-  cluster redirects.
+Reachable from the wire in every release up to and including 0.9.5, and fixed
+in this one:
 
-### Removed
-
-- **The site no longer recommends Pion as an MCP server for Claude Code.** The
-  landing page's MCP chip, the pion-mcp and pion-context reference pages and the
-  codebase-search guide are gone, and both packages' READMEs are marked
-  experimental, with their known limitations. Several statements in them were
-  wrong: re-indexing an edited file (the PostToolUse hook, `index-file`) removes
-  it from search instead of refreshing it; directories named `models`, Django's
-  ORM among them, were never indexed; agent memory and codebase search replace
-  each other's index on one server; the hooks were not configured automatically;
-  and "70-86% of repeated queries hit cache" had no measurement behind it.
+- Three fast-path replies were copied into the 4 MB reply buffer without a
+  bound: PING with an argument, LRANGE on a small list, and the cluster-mode
+  redirects (-MOVED, -ASK, -READONLY). A large enough PING, or a long enough
+  pipeline of the others, overflowed the heap and could crash the server. A
+  server without `--requirepass`, the default, accepts these from any client.
 
 ## [0.9.5] — 2026-10-06
 
