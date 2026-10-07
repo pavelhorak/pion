@@ -5,9 +5,12 @@ Pion implements Redis Cluster protocol compatibility, enabling use with cluster-
 Two cluster modes are available: **single-node cluster** (one Pion instance owns all 16,384 hash slots)
 and **multi-node cluster** (multiple Pion instances with gossip health monitoring and WAL replication).
 
-> **Multi-node is a preview.** Slot migration, gossip, failover and replication exist and are
-> tested, but production multi-node deployment is not supported yet. Replication covers worker 0's
-> keyspace only, so run replicated servers with `-w 1`.
+> **Experimental.** Slot migration, gossip, failover and replication exist and are tested
+> (`tests/test_cluster_full.py`, `tests/test_cluster_stats.py` and `tests/test_replication_*.py` in
+> the gate tier; `tests/test_failover.py` and `tests/test_cluster_migration.py` in the full tier),
+> but production multi-node deployment is not supported. Replication covers worker 0's keyspace only,
+> so run replicated servers with `-w 1`, and the replication stream on `port+10000` is
+> unauthenticated. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
 
 ---
 

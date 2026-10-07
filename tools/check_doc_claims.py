@@ -33,6 +33,14 @@ Kinds:
 The check fails when a claim has no entry, when an entry's evidence file is
 missing or lacks an `expect` string, or when an entry matches nothing any more.
 
+One more rule, about the comparison rather than the number: a section that
+gives a time-to-first-token ratio against a cold or vanilla start must also
+name mlx-lm's own prompt-cache file (`save_prompt_cache` / `load_prompt_cache`).
+That file is free, built in, and faster than Pion on a single-prefix hit; a
+TTFT speedup quoted only against recomputing everything leaves out the
+alternative every reader already has. A section is the text between two
+headings (a whole file for HTML).
+
     python3 tools/check_doc_claims.py            # report; exit 1 on any problem
     python3 tools/check_doc_claims.py --list     # every claim, covered or not
 """
@@ -179,6 +187,43 @@ def blocks(f: Path):
     yield from flush()
 
 
+TTFT_WORD = re.compile(r"\b(?:TTFT|time to first token|first token)\b", re.I)
+COLD_WORD = re.compile(r"\b(?:cold|vanilla)\b", re.I)
+RATIO = re.compile(NUM + r"\s?[x×](?![\w])(?!\s?\d)")
+FILE_BASELINE = re.compile(r"load_prompt_cache|save_prompt_cache|prompt-cache file|prompt cache file", re.I)
+
+
+def sections(f: Path) -> list[tuple[int, int, str]]:
+    """(first line, last line, raw text) per section: the lines between two
+    headings outside fenced code. An HTML file is one section."""
+    lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+    if f.suffix == ".html":
+        return [(1, len(lines), "\n".join(lines))]
+    starts, in_code = [1], False
+    for i, raw in enumerate(lines, 1):
+        st = raw.strip()
+        if st.startswith("```") or st.startswith("~~~"):
+            in_code = not in_code
+        elif not in_code and re.match(r"#{1,6}\s", st) and i > 1:
+            starts.append(i)
+    ends = [s - 1 for s in starts[1:]] + [len(lines)]
+    return [(a, b, "\n".join(lines[a - 1:b])) for a, b in zip(starts, ends)]
+
+
+def ttft_without_file_baseline(f: Path) -> list[tuple[int, str]]:
+    """Blocks that quote a TTFT ratio against a cold or vanilla start in a
+    section that never names the file-cache baseline."""
+    secs = sections(f)
+    bad = []
+    for line_no, text, header in blocks(f):
+        if not (RATIO.search(text) and (COLD_WORD.search(text) or COLD_WORD.search(header))):
+            continue
+        a, b, raw = next(((a, b, r) for a, b, r in secs if a <= line_no <= b), (0, 0, ""))
+        if TTFT_WORD.search(raw) and not FILE_BASELINE.search(raw):
+            bad.append((line_no, text))
+    return bad
+
+
 def norm(tok: str) -> str:
     t = tok.strip().replace(",", "").replace("−", "-").replace(" ", "").replace(" ", "")
     t = t.lstrip("+~≈")
@@ -275,13 +320,19 @@ def check(list_all: bool = False) -> int:
             if missing:
                 unsourced += 1
                 problems.append(f"{rel}:{line_no}: no evidence for {', '.join(missing)}")
+        for line_no, text in ttft_without_file_baseline(f):
+            print(f"{'NO-FILE':9} {rel}:{line_no}: {text[:150]}")
+            problems.append(f"{rel}:{line_no}: a TTFT ratio against a cold start, and its section never names "
+                            f"mlx-lm's prompt-cache file (load_prompt_cache) as the baseline")
     for idx, e in enumerate(reg):
         if not used[idx]:
             problems.append(f"benchmarks/claims.toml: {e['file']} '{e['where']}' matches nothing (stale entry)")
+    no_file = sum("prompt-cache file" in p for p in problems)
     print(f"\n{n_claims} numbers in {len(files)} files; {len(reg)} register entries; "
-          f"{unsourced} paragraphs or rows unsourced; {len(problems) - unsourced} register problems")
+          f"{unsourced} paragraphs or rows unsourced; {no_file} TTFT-vs-cold blocks without the file baseline; "
+          f"{len(problems) - unsourced - no_file} register problems")
     for p in problems:
-        if "no evidence for" not in p:
+        if "no evidence for" not in p and "prompt-cache file" not in p:
             print("  " + p)
     return 1 if problems else 0
 

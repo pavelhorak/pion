@@ -1,5 +1,7 @@
 # pion-langgraph
 
+> **Experimental.** pion-langgraph is covered by one gate-tier test, `tests/test_framework_integrations.py`, which exercises its basic calls. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 LangGraph checkpoint saver backed by Pion — deterministic low-latency agent-state persistence.
 
 `PionSaver` implements LangGraph's `BaseCheckpointSaver` against a running Pion server. Uses only RESP2-stable commands (HSET / HGET / HGETALL, single-key ZADD / ZREVRANGE) — no RedisJSON, no Lua scripting, no Sentinel. Works against any Pion deployment, single-worker or sharded.

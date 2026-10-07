@@ -1,5 +1,7 @@
 # pion-exo
 
+> **Experimental.** The exo hook is finished on Pion's side, but exo exposes no attention-hook API upstream, so it cannot be dropped into a running exo cluster. `pion-exo/tests/` runs in the full tier. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 Pion attention hook for [exo](https://github.com/exo-explore/exo) distributed inference — V offloading and Stage-2 Metal SDPA on Apple Silicon clusters.
 
 Two operating modes:

@@ -50,6 +50,8 @@ Cross-instance verified: a fresh second client (separate socket, separate model 
 
 This row is this harness's own workload (150 requests, 5 prompts × 30 queries, at its `--prompt-repeats 8` prefix), so it does not line up with the README's two headline numbers: **17×** is one separate process hitting a 2,049-token prefix (`benchmarks/reproducers/cross_process_ttft.py`), and **26×** is the process that stored the prefix asking again, through Stage 2's in-process lane (`cross_process_ttft.py --same`; the table below times each lane on its own).
 
+Every ratio here is against a cold start. mlx-lm's own prompt-cache file (`save_prompt_cache` / `load_prompt_cache`) is the free alternative, and on one fixed 2,049-token prefix with a 16-token question it is faster than either Pion lane: 37.0 ms from a fresh process, against 46.2 ms in-process and 69.0 ms over the wire ([`file_cache_ttft.py`](../benchmarks/reproducers/file_cache_ttft.py), [raw output](../benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json)). What Pion adds is the management a file leaves to the caller: one store every process reads over the Redis wire, crash-consistent writes, and in [`pion-vllm-mlx serve`](coding_agents.md) a longest-prefix match across restarts and sessions.
+
 ---
 
 ## Quick Start
@@ -382,13 +384,21 @@ cache = make_pion_prompt_cache(model, ns, pc, len(prompt_ids))
 out = model(suffix_ids, cache=cache)                      # attention runs on sidecar
 ```
 
-#### Measured TTFT win (warm path, median of 10 runs; 2026-10-06, M4 Mac mini)
+#### Measured TTFT win (warm path, median of 10 runs; 2026-10-07, M4 Mac mini)
 
-| Model | Prompt | Vanilla cold | Stage 1 rebuild (B) | Stage 2, wire lane (C) | Stage 2, in-process (D) |
-|---|---:|---:|---:|---:|---:|
-| Llama-3.2-1B-4bit | 256  | 148.6 ms | 12.4 ms (12.0×) | 19.6 ms (7.6×) | 8.5 ms (17.6×) |
-| Llama-3.2-1B-4bit | 1024 | 570.1 ms | 22.7 ms (25.2×) | 20.6 ms (27.7×) | 9.3 ms (61.4×) |
-| Llama-3.2-1B-4bit | 2048 | 1,170.9 ms | 37.3 ms (31.4×) | 23.9 ms (48.9×) | **11.3 ms (104×)** |
+| Model | Prompt | Vanilla cold | Stage 1 rebuild (B) | Stage 2, wire lane (C) | Stage 2, in-process (D) | mlx-lm prompt-cache file (E) |
+|---|---:|---:|---:|---:|---:|---:|
+| Llama-3.2-1B-4bit | 256  | 150.0 ms | 13.7 ms (10.9×) | 22.1 ms (6.8×) | 9.3 ms (16.1×) | 13.9 ms (10.8×) |
+| Llama-3.2-1B-4bit | 1024 | 571.1 ms | 25.1 ms (22.8×) | 22.4 ms (25.5×) | 10.4 ms (55.1×) | 11.9 ms (48.1×) |
+| Llama-3.2-1B-4bit | 2048 | 1,176.9 ms | 40.5 ms (29.1×) | 24.3 ms (48.4×) | **11.2 ms (105×)** | 14.6 ms (80.9×) |
+
+Path E is mlx-lm's own `save_prompt_cache` / `load_prompt_cache`: the prefix
+saved once, then each run maps the file (8.4, 33.5 and 67.1 MB) and answers
+the first token. It is free and built in, and it is ahead of both wire paths at
+every length: it maps a file where B and C move the rows over TCP. Only the
+in-process lane, which moves nothing, is faster with a one-token suffix. With
+a 16-token question the order changes: the file answers in 37.0 ms against the
+in-process lane's 46.2 ms (`file_cache_ttft.py`, `cross_process_ttft.py --same`).
 
 Every warm path restores all prompt tokens but the last, then runs the last
 one, and every path reproduces vanilla's first token. A one-token suffix is
@@ -397,11 +407,11 @@ the best case for a cache. A real question adds its own prefill: with a
 (`cross_process_ttft.py --same`).
 
 At 1,024 tokens Stage 1 and Stage 2's wire lane are close; at 2,048 the wire
-lane is 1.56× faster. Below ~1K, the wire lane's per-layer round trips
+lane is 1.67× faster. Below ~1K, the wire lane's per-layer round trips
 cost more than the transfer, and Stage 1 wins. The in-process lane wins at every
 length because it moves nothing, but only the process that prefilled has it.
 
-`tests/bench_ttft.py --runs 11` reproduces the table ([raw output](../benchmarks/results/2026-10-06-mac-m4/), `ttft_r11_*.txt`). Earlier versions timed a vanilla side that computed logits at every prompt
+`tests/bench_ttft.py --runs 11` reproduces the table ([raw output](../benchmarks/results/2026-10-07-mac-m4/), `ttft_r11_file_*.txt`). Earlier versions timed a vanilla side that computed logits at every prompt
 position; the changelog has the correction.
 
 #### Wire-protocol details (for clients implementing their own consumer)
@@ -461,7 +471,10 @@ also `PION_PROMPT_CACHE_NO_BINARY=1` (RESP). They make 32 calls a request
 because mlx-lm runs the suffix in two passes (all but its last token, then the
 last) and each pass queries every layer. Speedups are mean against mean. Raw
 output: [`benchmarks/results/2026-10-07-mac-m4/`](../benchmarks/results/2026-10-07-mac-m4/)
-(`w1_stage2*.txt`). Earlier versions of this table timed a vanilla side that
+(`w1_stage2*.txt`). The speedups are against a cold start; mlx-lm's own
+prompt-cache file was not run on this workload, and on one fixed 2,049-token
+prefix with a 16-token question it answers in 37.0 ms, ahead of the in-process lane's 46.2 ms
+(`benchmarks/reproducers/file_cache_ttft.py`). Earlier versions of this table timed a vanilla side that
 evaluated logits at every prompt position, and read higher; the changelog has
 the correction. Until 2026-10-07 the harness also put a second `<bos>` before
 every question; removing it moved no figure beyond run-to-run variation
@@ -526,6 +539,12 @@ way mlx-lm's `generate_step` does. Each cell is the mean over three queries, and
 the speedup is the mean of the per-query ratios
 (`benchmarks/reproducers/sweep_qwen3_5_warm_ttft.py`, raw output in
 [`stage1_qwen3_5_prefix_sweep_2026_10_02.json`](../benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_02.json)).
+The speedups are against a cold start. mlx-lm's `save_prompt_cache` also
+serializes recurrent (`ArraysCache`) state, which is what Qwen3.5's
+GatedDeltaNet layers keep, so mlx-lm's own prompt-cache file is the like
+baseline for this table; it was not measured on this sweep
+(`benchmarks/reproducers/file_cache_ttft.py --workload ssm` checks the file
+round trip on a Mamba model).
 Warm TTFT grows with the bytes shipped: 118.6 MB at 2K and 320 MB at 8K, with a
 33.55 MB largest layer. Token agreement misses one token in 18 at 4K,
 greedy-argmax noise present on both paths. Earlier versions of this table timed
@@ -751,11 +770,12 @@ python3 pion-vllm-mlx/tests/test_prompt_cache_workload.py \
 ```bash
 ./pion-server --kvcache --metal-attention -w 1 &  # Metal handles both decode (M=1) and batched-Q (M>1) TTFT
 python3 tests/bench_ttft.py --prompt-tokens 2048 --runs 11   # with pion-vllm-mlx[mlx] installed
-# Measured 2026-10-06, Llama-3.2-1B/2K, M4 Mac mini (warm TTFT median, one-token suffix):
-#   Path A vanilla cold:                1171 ms
-#   Path B cache-rebuild (Stage 1):       37 ms  (31×)
-#   Path C Stage 2, wire lane:            24 ms  (49×)
-#   Path D Stage 2, in-process lane:      11 ms  (104×)
+# Measured 2026-10-07, Llama-3.2-1B/2K, M4 Mac mini (warm TTFT median, one-token suffix):
+#   Path A vanilla cold:                1177 ms
+#   Path B cache-rebuild (Stage 1):       41 ms  (29×)
+#   Path C Stage 2, wire lane:            24 ms  (48×)
+#   Path D Stage 2, in-process lane:      11 ms  (105×)
+#   Path E mlx-lm prompt-cache file:      15 ms  (81×)
 ```
 
 **Cross-worker (`-w 4`) without auto-cap:**

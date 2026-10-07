@@ -4,16 +4,16 @@
 
 [[claim]]
 file = "README.md"
-where = "The process that stored the prefix, asking again"
-numbers = ["1,193 ms", "46.2 ms", "26×"]
+where = "| Pion, the process that stored the prefix, asking again |"
+numbers = ["46.2 ms", "26×"]
 kind = "result"
 evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
 expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82"]
 
 [[claim]]
 file = "README.md"
-where = "A separate process, over the wire"
-numbers = ["1,193 ms", "69.0 ms", "17×"]
+where = "| Pion, a separate process, over the wire |"
+numbers = ["69.0 ms", "17×"]
 kind = "result"
 evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
 expect = ["\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3"]
@@ -29,115 +29,16 @@ note = "14 ms = 45.0 - 31.2 at 34 tokens"
 
 [[claim]]
 file = "README.md"
-where = "About 3 MB compressed"
-numbers = ["3 MB", "2.9 MB"]
-kind = "external"
-evidence = ["https://github.com/pavelhorak/pion/releases/tag/v0.9.5"]
-note = "pion-0.9.5-macos-arm64.tar.gz is 2,931,707 bytes"
-
-[[claim]]
-file = "README.md"
-where = "In-process fast lane (default same-process consumer)"
-numbers = ["34.4 ms", "42.2 ms", "4.7×", "46.2 ms", "1,193 ms", "26×"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/w1_stage2.txt", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
-expect = ["TTFT mean=   42.2 ms  p50=   34.4", "TTFT mean speedup       4.74×", "\"same_median_ms\": 46.2"]
-note = "4.74× rounds to 4.7×"
-
-[[claim]]
-file = "README.md"
-where = "Binary fast lane on"
-numbers = ["98.2 ms", "0.63 ms"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/w1_stage2_binary_lane.txt"]
-expect = ["TTFT mean=  100.3 ms  p50=   98.2", "0.63 ms/call"]
-
-[[claim]]
-file = "README.md"
-where = "RESP fallback** for older servers"
-numbers = ["110", "128 ms", "0.441 ms", "0.456 ms", "0.441", "0.456"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/w1_stage2_resp_lane.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_resp_lane_repeat.txt", "benchmarks/results/2026-10-06-mac-m4/metal_attention.txt"]
-expect = ["TTFT mean=  101.3 ms  p50=  110.3", "TTFT mean=  109.6 ms  p50=  128.1", "median=0.441 ms", "fast.scaled_dot_product_attention      median=0.456 ms"]
-note = "two runs: p50 110.3 and 128.1 ms"
-
-[[claim]]
-file = "README.md"
-where = "A mixed workload"
-numbers = ["3.6×", "90%", "4.7×", "0.016", "17×"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_workload_q10.txt", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_workload_q10_repeat.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_binary_lane.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_resp_lane.txt", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
-expect = ["TTFT mean speedup       3.61×", "TTFT mean speedup       3.56×", "cache hit rate     90.0%", "first-token agreement   98.0% (49/50)", "vanilla's top-2 margin 0.016", "TTFT mean speedup       4.74×", "first-token agreement   100.0% (50/50)", "\"ratio\": 17.3"]
-note = "Stage 1 3.61× and 3.56× over two runs, both 49/50 on the same near-tie request"
-
-[[claim]]
-file = "README.md"
-where = "on a 100-query SQuAD v2 run"
-numbers = ["3.5×", "96.1%", "3.2×"]
-kind = "result"
-evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json"]
-expect = ["\"ttft_p50_ms\": 113.81925013847649", "\"ttft_p50_ms\": 32.495331950485706", "\"ttft_p50_ms\": 35.754125099629164", "\"token_agreement_mean\": 0.961", "\"answer_found_rate\": 0.73", "\"answer_found_rate\": 0.72"]
-note = "113.8 / 32.5 = 3.50; 113.8 / 35.8 = 3.18"
-
-[[claim]]
-file = "README.md"
-where = "on a 100-query SQuAD v2 run"
-numbers = ["8 KB", "32 KB", "80 KB"]
-kind = "arithmetic"
-note = "layers x KV heads x head dim x 2 (K and V) x 0.5 byte: 16x8x64, 32x8x128, 80x8x128"
-
-[[claim]]
-file = "README.md"
-where = "MiniLM-L6-v2 (384-dim, ~90 MB download"
-numbers = ["90 MB"]
-kind = "external"
-evidence = ["https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/tree/main"]
-note = "model.safetensors is 90.9 MB"
-
-[[claim]]
-file = "README.md"
-where = "failover"
-numbers = ["350 ms"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/failover.txt"]
-expect = ["failover completed in 350ms"]
-
-[[claim]]
-file = "README.md"
-where = "4 MB response buffer per worker"
-numbers = ["4 MB"]
-kind = "code"
-evidence = ["src/network/response_writer.mojo"]
-expect = ["comptime RESP_BUF_SIZE = 4 * 1024 * 1024"]
-
-[[claim]]
-file = "README.md"
-where = "fill rehash"
-numbers = ["70 %"]
-kind = "code"
-evidence = ["src/common/hash_map.mojo"]
-expect = ["* 100 > self.capacity * 70"]
-
-[[claim]]
-file = "README.md"
 where = "| Headline |"
-numbers = ["1,193 ms", "46.2 ms", "26×", "69.0 ms", "17×", "1.000"]
+numbers = ["1,193 ms", "46.2 ms", "26×", "69.0 ms", "17×", "1.000", "37.0 ms"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt"]
-expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82", "\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3", "B BLEU vs ref (50 tokens)        1.0000"]
-
-[[claim]]
-file = "README.md"
-where = "| Cluster |"
-numbers = ["350 ms"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/failover.txt"]
-expect = ["failover completed in 350ms"]
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82", "\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3", "B BLEU vs ref (50 tokens)        1.0000", "\"hit_median_ms\": 37.0"]
 
 [[claim]]
 file = "website/landing/sections.md"
-where = "2,049-token prefix, **same process**"
-numbers = ["1,193 ms", "46.2 ms", "26×"]
+where = "| Pion, **same process** |"
+numbers = ["46.2 ms", "26×"]
 kind = "result"
 evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
 expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82"]
@@ -152,8 +53,8 @@ expect = ["\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 1
 
 [[claim]]
 file = "doc/index.md"
-where = "2,049-token prefix, **same process**"
-numbers = ["1,193 ms", "46.2 ms", "26×"]
+where = "| Pion, **same process** |"
+numbers = ["46.2 ms", "26×"]
 kind = "result"
 evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
 expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82"]
@@ -168,7 +69,7 @@ expect = ["\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 1
 
 [[claim]]
 file = "website/landing/sections.md"
-where = "Both rows answer the same 16-token question"
+where = "The Pion rows answer the same 16-token question"
 numbers = ["1.000"]
 kind = "result"
 evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt"]
@@ -186,19 +87,19 @@ note = "54,378.6 ms = 54.4 s"
 [[claim]]
 file = "README.md"
 where = "At 64K context a sparse mask still finds the needle"
-numbers = ["54.4 s", "124.4 ms", "437×", "0.80%"]
+numbers = ["54.4 s", "124.4 ms", "437×", "0.80%", "405 MB", "82.6 ms"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt"]
-expect = ["TTFT       54,378.6 ms", "steady-state         124.4 ms", "437.1×, headline", "0.80% of prefix", "vanilla=True  pion=True"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt", "benchmarks/reproducers/results/file_cache_ttft_gemma_64000_2026_10_07.json"]
+expect = ["TTFT       54,378.6 ms", "steady-state         124.4 ms", "437.1×, headline", "0.80% of prefix", "vanilla=True  pion=True", "\"hit_median_ms\": 82.6", "\"file_mb\": 405.1", "\"first_token_matches_cold\": true"]
 note = "54,378.6 ms = 54.4 s; 54,378.6 / 124.4 = 437.1"
 
 [[claim]]
 file = "website/landing/sections.md"
 where = "A third number: at 64K context"
-numbers = ["54.4 s", "124.4 ms", "437×", "0.80%"]
+numbers = ["54.4 s", "124.4 ms", "437×", "0.80%", "405 MB", "82.6 ms"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt"]
-expect = ["TTFT       54,378.6 ms", "steady-state         124.4 ms", "437.1×, headline", "0.80% of prefix", "vanilla=True  pion=True"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt", "benchmarks/reproducers/results/file_cache_ttft_gemma_64000_2026_10_07.json"]
+expect = ["TTFT       54,378.6 ms", "steady-state         124.4 ms", "437.1×, headline", "0.80% of prefix", "vanilla=True  pion=True", "\"hit_median_ms\": 82.6", "\"file_mb\": 405.1", "\"first_token_matches_cold\": true"]
 note = "54,378.6 ms = 54.4 s; 54,378.6 / 124.4 = 437.1"
 
 [[claim]]
@@ -940,10 +841,10 @@ expect = ["TTFT mean=   42.2 ms  p50=   34.4", "TTFT mean speedup       4.74×"]
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "~316-token prefixes, vanilla ~200 ms a"
-numbers = ["200 ms", "100%"]
+numbers = ["200 ms", "100%", "37.0 ms", "46.2 ms"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/w1_stage2.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_binary_lane.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_resp_lane.txt"]
-expect = ["TTFT mean=  199.9 ms", "TTFT mean=  200.3 ms", "TTFT mean=  200.9 ms", "first-token agreement   100.0% (50/50)"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/w1_stage2.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_binary_lane.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_resp_lane.txt", "benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["TTFT mean=  199.9 ms", "TTFT mean=  200.3 ms", "TTFT mean=  200.9 ms", "first-token agreement   100.0% (50/50)", "\"hit_median_ms\": 37.0", "\"same_median_ms\": 46.2"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
@@ -1498,34 +1399,34 @@ expect = ["(target ≥ 0.99)", "throughput ≥ 100q/s"]
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "| Llama-3.2-1B-4bit | 256  |"
-numbers = ["148.6 ms", "12.4 ms", "12.0×", "19.6 ms", "7.6×", "8.5 ms", "17.6×"]
+numbers = ["150.0 ms", "13.7 ms", "10.9×", "22.1 ms", "6.8×", "9.3 ms", "16.1×", "13.9 ms", "10.8×"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/ttft_r11_256.txt"]
-expect = ["Path A vanilla cold:          148.6 ms", "12.4 ms  (11.95× vs A)", "19.6 ms  (7.57× vs A)", "8.5 ms  (17.55× vs A)"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/ttft_r11_file_256.txt"]
+expect = ["Path A vanilla cold:          150.0 ms", "13.7 ms  (10.92× vs A)", "22.1 ms  (6.78× vs A)", "9.3 ms  (16.09× vs A)", "13.9 ms  (10.79× vs A)  [8.4 MB]"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "| Llama-3.2-1B-4bit | 1024 |"
-numbers = ["570.1 ms", "22.7 ms", "25.2×", "20.6 ms", "27.7×", "9.3 ms", "61.4×"]
+numbers = ["571.1 ms", "25.1 ms", "22.8×", "22.4 ms", "25.5×", "10.4 ms", "55.1×", "11.9 ms", "48.1×"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/ttft_r11_1024.txt"]
-expect = ["Path A vanilla cold:          570.1 ms", "22.7 ms  (25.16× vs A)", "20.6 ms  (27.69× vs A)", "9.3 ms  (61.37× vs A)"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/ttft_r11_file_1024.txt"]
+expect = ["Path A vanilla cold:          571.1 ms", "25.1 ms  (22.77× vs A)", "22.4 ms  (25.52× vs A)", "10.4 ms  (55.13× vs A)", "11.9 ms  (48.14× vs A)  [33.5 MB]"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "| Llama-3.2-1B-4bit | 2048 |"
-numbers = ["1,170.9 ms", "37.3 ms", "31.4×", "23.9 ms", "48.9×", "11.3 ms", "104×"]
+numbers = ["1,176.9 ms", "40.5 ms", "29.1×", "24.3 ms", "48.4×", "11.2 ms", "105×", "14.6 ms", "80.9×"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/ttft_r11_2048.txt"]
-expect = ["Path A vanilla cold:         1170.9 ms", "37.3 ms  (31.41× vs A)", "23.9 ms  (48.94× vs A)", "11.3 ms  (103.53× vs A)"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/ttft_r11_file_2048.txt"]
+expect = ["Path A vanilla cold:         1176.9 ms", "40.5 ms  (29.05× vs A)", "24.3 ms  (48.41× vs A)", "11.2 ms  (105.25× vs A)", "14.6 ms  (80.87× vs A)  [67.1 MB]"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "At 1,024 tokens Stage 1 and Stage 2's wire lane are close"
-numbers = ["1.56×", "1K"]
+numbers = ["1.67×", "1K"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/ttft_r11_2048.txt"]
-expect = ["Stage-2 wins: 1.56× faster than cache-rebuild."]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/ttft_r11_file_2048.txt"]
+expect = ["Stage-2 wins: 1.67× faster than cache-rebuild."]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
@@ -1668,3 +1569,286 @@ kind = "result"
 evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json", "benchmarks/results/2026-10-07-mac-m4/before_fix/stage1_hybrid_results.json"]
 expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825", "\"answer_found_rate\": 0.68", "\"ttft_p50_ms\": 113.55687491595745", "\"ttft_p50_ms\": 31.957167200744152", "\"ttft_p50_ms\": 35.02825018949807", "\"token_agreement_mean\": 0.9925"]
 note = "2026-10-02: 123.1/41.3 = 2.98, 123.1/45.6 = 2.70; same-day unfixed: 113.6/32.0 = 3.55, 113.6/35.0 = 3.24"
+
+[[claim]]
+file = "README.md"
+where = "| Cold prefill, vanilla mlx-lm |"
+numbers = ["1,193 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4"]
+note = "1,193.4 ms rounds to 1,193"
+
+[[claim]]
+file = "doc/index.md"
+where = "| Cold prefill, vanilla mlx-lm |"
+numbers = ["1,193 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4"]
+note = "1,193.4 ms rounds to 1,193"
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "| Cold prefill, vanilla mlx-lm |"
+numbers = ["1,193 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4"]
+note = "1,193.4 ms rounds to 1,193"
+
+[[claim]]
+file = "README.md"
+where = "mlx-lm's own prompt-cache file, read by a fresh process"
+numbers = ["67 MB", "37.0 ms", "32×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"file_mb\": 67.1", "\"first_token_matches_cold\": true", "\"cold_median_ms\": 1193.4"]
+note = "1,193.4 / 37.0 = 32.3"
+
+[[claim]]
+file = "README.md"
+where = "**A file is faster.**"
+numbers = ["67 MB"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json"]
+expect = ["\"file_mb\": 67.1"]
+
+[[claim]]
+file = "pion-vllm-mlx/README.md"
+where = "**mlx-lm's own prompt-cache file is faster.**"
+numbers = ["37.0 ms", "67 MB"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"file_mb\": 67.1"]
+
+[[claim]]
+file = "benchmarks/reproducers/README.md"
+where = "the **baseline** for every TTFT row above"
+numbers = ["37.0 ms", "82.6 ms", "64K"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/file_cache_ttft_gemma_64000_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"hit_median_ms\": 82.6", "\"prefix_tokens\": 63961"]
+note = "64K is the input context length"
+
+[[claim]]
+file = "doc/index.md"
+where = "mlx-lm's own prompt-cache file, read by a fresh process (67 MB)"
+numbers = ["67 MB", "37.0 ms", "32×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"file_mb\": 67.1", "\"cold_median_ms\": 1193.4"]
+note = "1,193.4 / 37.0 = 32.3"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Every ratio here is against a cold start. mlx-lm's own prompt-cache file"
+numbers = ["37.0 ms", "46.2 ms", "69.0 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"same_median_ms\": 46.2", "\"hit_median_ms\": 69.0"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Path E is mlx-lm's own"
+numbers = ["8.4", "33.5", "67.1 MB", "37.0 ms", "46.2 ms"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-07-mac-m4/ttft_r11_file_256.txt", "benchmarks/results/2026-10-07-mac-m4/ttft_r11_file_1024.txt", "benchmarks/results/2026-10-07-mac-m4/ttft_r11_file_2048.txt", "benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["[8.4 MB]", "[33.5 MB]", "[67.1 MB]", "\"hit_median_ms\": 37.0", "\"same_median_ms\": 46.2"]
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "| mlx-lm's own prompt-cache file, a fresh process |"
+numbers = ["37.0 ms", "67 MB", "32×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"file_mb\": 67.1", "\"cold_median_ms\": 1193.4"]
+note = "1,193.4 / 37.0 = 32.3"
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "| Pion, **from a separate process**, over the wire |"
+numbers = ["69.0 ms", "17×", "67 MB"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json", "benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 69.0", "\"ratio\": 17.3", "\"file_mb\": 67.1"]
+note = "the wire moves the same K/V rows the file holds: 2,049 tokens x 16 layers x 8 KV heads x 64 x 2 (K and V) x 2 bytes = 67.1 MB"
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "One program, one fixed prefix: use mlx-lm's own prompt-cache file."
+numbers = ["37.0 ms", "69.0 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"hit_median_ms\": 69.0"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| mlx-lm server, stock | 16,020 tokens, 15.24 s"
+numbers = ["15.24s", "98.9%", "0.49s", "16.21s", "19.2s", "15.36s", "17478", "16065"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| mlx-lm server, stock | 16,020 tokens, 15.24 s | 98.9%, 0.49 s | ", "17,478 of 17,478; 3.0 + 16.21 s = **19.2 s**", "45 of 16,065, 15.36 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Ollama | 13,971 tokens, 18.42 s"
+numbers = ["18.42s", "35.3%", "14.66s", "18.34s", "18.9s", "16.98s", "15376", "14016"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| Ollama | 13,971 tokens, 18.42 s | 35.3%, 14.66 s | ", "15,376 of 15,376; 0.6 + 18.34 s = **18.9 s**", "30 of 14,016, 16.98 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| LM Studio | 15,921 tokens, 15.01 s"
+numbers = ["15.01s", "98.6%", "1.33s", "18.25s", "21.6s", "15.80s", "18263", "15966"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| LM Studio | 15,921 tokens, 15.01 s | 98.6%, 1.33 s | ", "18,263 of 18,263; 3.4 + 18.25 s = **21.6 s**", "46 of 15,966, 15.80 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| oMLX | 16,009 tokens, 15.04 s"
+numbers = ["15.04s", "97.9%", "0.85s", "1.63s", "2.8s", "2.67s", "469", "18389", "13824", "16054"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| oMLX | 16,009 tokens, 15.04 s | 97.9%, 0.85 s | ", "469 of 18,389; 1.2 + 1.63 s = **2.8 s**", "13,824 of 16,054, 2.67 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Pion serve | 15,994 tokens, 14.07 s"
+numbers = ["14.07s", "98.9%", "0.42s", "0.66s", "4.2s", "2.33s", "17452", "14056", "16039"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| Pion serve | 15,994 tokens, 14.07 s | 98.9%, 0.42 s | ", "89 of 17,452; 3.5 + 0.66 s = **4.2 s**", "14,056 of 16,039, 2.33 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| mlx-lm server, stock | 14,426 tokens, 9.89 s"
+numbers = ["9.89s", "98.4%", "0.41s", "10.47s", "12.9s", "8.02s", "16129", "14486"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["| mlx-lm server, stock | 14,426 tokens, 9.89 s | 98.4%, 0.41 s | ", "16,129 of 16,129; 2.4 + 10.47 s = **12.9 s**", "0 of 14,486, 8.02 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| LM Studio | 14,422 tokens, 9.14 s"
+numbers = ["9.14s", "15.5%", "10.27s", "11.95s", "19.1s", "8.17s", "16121", "14482"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["| LM Studio | 14,422 tokens, 9.14 s | 15.5%, 10.27 s | ", "16,121 of 16,121; 7.1 + 11.95 s = **19.1 s**", "0 of 14,482, 8.17 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| oMLX | 14,397 tokens, 11.34 s"
+numbers = ["11.34s", "98.4%", "0.40s", "5.46s", "8.2s", "1.33s", "116", "16102", "12288", "14457"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["| oMLX | 14,397 tokens, 11.34 s | 98.4%, 0.40 s | ", "116 of 16,102; 2.7 + 5.46 s = **8.2 s**", "12,288 of 14,457, 1.33 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Pion serve | 14,391 tokens, 9.99 s"
+numbers = ["9.99s", "98.4%", "0.40s", "10.22s", "12.6s", "1.67s", "16094", "12087", "14451"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["| Pion serve | 14,391 tokens, 9.99 s | 98.4%, 0.40 s | ", "16,094 of 16,094; 2.4 + 10.22 s = **12.6 s**", "12,087 of 14,451, 1.67 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| mlx-lm server, stock | 7,121 tokens, 5.14 s"
+numbers = ["5.14s", "97.5%", "0.36s", "7.33s", "10.3s", "9560"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| mlx-lm server, stock | 7,121 tokens, 5.14 s | 97.5%, 0.36 s | ", "9,560 of 9,560; 3.0 + 7.33 s = **10.3 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Ollama | 7,540 tokens, 9.96 s"
+numbers = ["9.96s", "82.7%", "0.40s", "9.94s", "10.6s", "9872"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| Ollama | 7,540 tokens, 9.96 s | 82.7%, 0.40 s | ", "9,872 of 9,872; 0.7 + 9.94 s = **10.6 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| LM Studio (9 of 20 replies ended in a stream error) | 7,249 tokens, 5.37 s"
+numbers = ["5.37s", "97.0%", "0.54s", "8.22s", "11.5s"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| LM Studio (9 of 20 replies ended in a stream error) | 7,249 tokens, 5.37 s | 97.0%, 0.54 s | ", "not reported (stream error); 3.3 + 8.22 s = **11.5 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| oMLX | 9,703 tokens, 8.05 s"
+numbers = ["8.05s", "97.1%", "0.51s", "1.13s", "2.3s", "110", "12142"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| oMLX | 9,703 tokens, 8.05 s | 97.1%, 0.51 s | ", "110 of 12,142; 1.2 + 1.13 s = **2.3 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Pion serve | 7,121 tokens, 5.59 s"
+numbers = ["5.59s", "97.5%", "0.38s", "1.13s", "3.4s", "9560"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| Pion serve | 7,121 tokens, 5.59 s | 97.5%, 0.38 s | ", "77 of 9,560; 2.3 + 1.13 s = **3.4 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "Recorded coding-agent sessions, replayed against five local servers"
+numbers = ["16GB"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/environment.json"]
+expect = ["Apple M4, 16 GB"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "Claude Code's prompts run from 14K to 21K tokens"
+numbers = ["14K", "21K", "7K"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/llama_ollama.json", "benchmarks/reproducers/results/agent_session_ab_2026_10_07/llama_omlx.json", "benchmarks/reproducers/results/agent_session_ab_2026_10_07/codex_llama_pion.json", "benchmarks/reproducers/results/agent_session_ab_2026_10_07/codex_llama_omlx.json"]
+expect = ["\"prompt\": 13971", "\"prompt\": 21420", "\"prompt\": 7121", "\"prompt\": 14197"]
+note = "ranges rounded: 13,971-21,420 (Claude Code), 7,121-14,197 (Codex, Ollama's alternating counts aside)"
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "Within one session every server reuses almost the whole prompt, with two"
+numbers = ["82.7%"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| 82.7%, 0.40 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "After a restart only oMLX and serve skip the re-prefill."
+numbers = ["0.66s", "1.63s", "1.13s", "2.8s", "4.2s", "2.3s", "3.4s"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md", "benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["1.2 + 1.63 s = **2.8 s**", "3.5 + 0.66 s = **4.2 s**", "1.2 + 1.13 s = **2.3 s**", "2.3 + 1.13 s = **3.4 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "On the hybrid model oMLX is ahead of serve."
+numbers = ["12.6s", "8.2s"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["= **12.6 s**", "= **8.2 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "oMLX 0.7 does everything serve does here, and on hybrid models more."
+numbers = ["1s"]
+kind = "arithmetic"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["1.63 s", "0.66 s"]
+note = "1.63 - 0.66 = 0.97 s"
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "Method notes. Every server got the same request bodies"
+numbers = ["4K"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/codex_llama_ollama.json"]
+expect = ["\"prompt\": 4290", "\"prompt\": 11863"]
+note = "Ollama's Codex prompts alternate between 4,290-7,880 and 8,001-11,863 tokens"

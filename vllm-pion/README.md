@@ -1,5 +1,7 @@
 # vllm-pion
 
+> **Experimental.** vllm-pion's v1 KVConnector integration is not merged upstream into vLLM. The client has no test in the suite of its own. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 Python client for Pion's externalized-attention and KV-cache surface — the
 `ATTEND.*` and `KV.STORE`/`KV.FETCH` commands (`--kvcache`). It lets an
 inference runtime store and reuse per-layer K/V state in Pion instead of

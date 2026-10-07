@@ -1,0 +1,408 @@
+{
+ "server": "lmstudio",
+ "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+ "measured": "2026-10-08 00:26",
+ "n": 20,
+ "restart_after": 10,
+ "max_tokens": 64,
+ "api": "responses",
+ "fold_system_messages": true,
+ "versions": {
+  "mlx": "0.31.2",
+  "mlx_lm": "0.31.3",
+  "lmstudio": "Contribute: https://github.com/lmstudio-ai/lms"
+ },
+ "requests": [
+  {
+   "status": 200,
+   "prompt": 7249,
+   "cached": 0,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 5.374,
+   "total_s": 6.203,
+   "usage": {
+    "input_tokens": 7249,
+    "output_tokens": 63,
+    "total_tokens": 7312,
+    "input_tokens_details": {
+     "cached_tokens": 0
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "processed": 7249,
+   "i": 0,
+   "phase": "session",
+   "reply_sha256": "30de618eda44073ed4aa9e3fa493e67fb9546daeb5b4ebac7849c4e6b9880115",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 7636,
+   "cached": 7249,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.534,
+   "total_s": 1.393,
+   "usage": {
+    "input_tokens": 7636,
+    "output_tokens": 63,
+    "total_tokens": 7699,
+    "input_tokens_details": {
+     "cached_tokens": 7249
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "processed": 387,
+   "i": 1,
+   "phase": "session",
+   "reply_sha256": "48737669aecdcb57d2d3db59c31573ac10d3419ce70753a0ab3b179a67d665ed",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": null,
+   "total_s": 1.243,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Expected \"{\", but got \"i\" at index 14.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 2,
+   "phase": "session",
+   "reply_sha256": "e2cc65a6b800ed70350affb2a70ed5a9f88fe44174109221dc870d12ad3ad38c",
+   "empty_reply": true
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": 0.386,
+   "total_s": 1.708,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Unexpected end of content.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 3,
+   "phase": "session",
+   "reply_sha256": "990b44692bc9965cbad6548173fd707a791ffcd1f348cfb7d4269214c331a1ee",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 8669,
+   "cached": 8206,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.616,
+   "total_s": 1.517,
+   "usage": {
+    "input_tokens": 8669,
+    "output_tokens": 63,
+    "total_tokens": 8732,
+    "input_tokens_details": {
+     "cached_tokens": 8206
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "processed": 463,
+   "i": 4,
+   "phase": "session",
+   "reply_sha256": "764f9ac7907b72ccdb49953e54a928a9013ce25d37f1d99dfb82bb701a1e697f",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 8797,
+   "cached": 8669,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.241,
+   "total_s": 1.059,
+   "usage": {
+    "input_tokens": 8797,
+    "output_tokens": 63,
+    "total_tokens": 8860,
+    "input_tokens_details": {
+     "cached_tokens": 8669
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "processed": 128,
+   "i": 5,
+   "phase": "session",
+   "reply_sha256": "4a4098cdfd861c23f14f01edbbed6456ec3fbe68feb04b43e98b5f48d8fe021d",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 9263,
+   "cached": 8797,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.615,
+   "total_s": 1.457,
+   "usage": {
+    "input_tokens": 9263,
+    "output_tokens": 63,
+    "total_tokens": 9326,
+    "input_tokens_details": {
+     "cached_tokens": 8797
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "processed": 466,
+   "i": 6,
+   "phase": "session",
+   "reply_sha256": "227edcc7b8f90c92cf8b90ccb287e25d4c27ea2d4a13297cbd0b5e08ab31fb0a",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 9516,
+   "cached": 9263,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.394,
+   "total_s": 1.232,
+   "usage": {
+    "input_tokens": 9516,
+    "output_tokens": 63,
+    "total_tokens": 9579,
+    "input_tokens_details": {
+     "cached_tokens": 9263
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "processed": 253,
+   "i": 7,
+   "phase": "session",
+   "reply_sha256": "1c03d5ea08812236dd8e560a27e109c8b87c04b2ca748413e0bda528cbec63b4",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": 0.442,
+   "total_s": 1.187,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Unexpected end of content.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 8,
+   "phase": "session",
+   "reply_sha256": "477b78c6fa956a699bd2151565e06e7da7adc7bbaab3ea4dd5dfb8b1fb6a9872",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": 0.536,
+   "total_s": 1.294,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Unexpected end of content.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 9,
+   "phase": "session",
+   "reply_sha256": "596799dca4651dfe3a94421c947a76e0a35688a6a637c8b5676702a3d4ddddf2",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": 8.22,
+   "total_s": 8.992,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Unexpected end of content.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 10,
+   "phase": "restart",
+   "reply_sha256": "596799dca4651dfe3a94421c947a76e0a35688a6a637c8b5676702a3d4ddddf2",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 10903,
+   "cached": 10516,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.674,
+   "total_s": 1.455,
+   "usage": {
+    "input_tokens": 10903,
+    "output_tokens": 60,
+    "total_tokens": 10963,
+    "input_tokens_details": {
+     "cached_tokens": 10516
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 60
+    }
+   },
+   "processed": 387,
+   "i": 11,
+   "phase": "restart",
+   "reply_sha256": "0f42d4f48c99cfccae82f6af291ee3bd0eeb55bfe0cdbc8a8079728563b80f15",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": 0.846,
+   "total_s": 1.571,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Unexpected end of content.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 12,
+   "phase": "restart",
+   "reply_sha256": "758b1c5dc5fd80f7b4497dfd3a209b7ad2dec7fed4f296f18193fac9e36c00e8",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 11720,
+   "cached": 11448,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.51,
+   "total_s": 1.277,
+   "usage": {
+    "input_tokens": 11720,
+    "output_tokens": 60,
+    "total_tokens": 11780,
+    "input_tokens_details": {
+     "cached_tokens": 11448
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 60
+    }
+   },
+   "processed": 272,
+   "i": 13,
+   "phase": "restart",
+   "reply_sha256": "10f7b1d8e1164ea8726bb77c8834fa2dbe94c1a924d6b9f8357e9b66aa6a4338",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 12064,
+   "cached": 11720,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.684,
+   "total_s": 1.454,
+   "usage": {
+    "input_tokens": 12064,
+    "output_tokens": 60,
+    "total_tokens": 12124,
+    "input_tokens_details": {
+     "cached_tokens": 11720
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 60
+    }
+   },
+   "processed": 344,
+   "i": 14,
+   "phase": "restart",
+   "reply_sha256": "0781dcb472004feb63df03e9cf96971ea44951097060b9d6935766c34446fe10",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": 0.804,
+   "total_s": 1.57,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Unexpected end of content.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 15,
+   "phase": "restart",
+   "reply_sha256": "f5405af2b0a098dbb5182a9eac860cf56ec2535d0436023456f00d144c1db4e6",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": 0.386,
+   "total_s": 1.126,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Unexpected end of content.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 16,
+   "phase": "restart",
+   "reply_sha256": "38a87b166ae1c0189fd249fa25445a95e319dc8a17be4a21496964b4f37a5eb8",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 12950,
+   "cached": 12740,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.472,
+   "total_s": 1.23,
+   "usage": {
+    "input_tokens": 12950,
+    "output_tokens": 60,
+    "total_tokens": 13010,
+    "input_tokens_details": {
+     "cached_tokens": 12740
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 60
+    }
+   },
+   "processed": 210,
+   "i": 17,
+   "phase": "restart",
+   "reply_sha256": "46a3e1b959b9d12f3c96fbcd1ac2c39a3ca51660f6f264a0fefa8fc04d5e1ee3",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 13224,
+   "cached": 12950,
+   "cached_source": "usage.input_tokens_details.cached_tokens",
+   "ttft_s": 0.545,
+   "total_s": 1.317,
+   "usage": {
+    "input_tokens": 13224,
+    "output_tokens": 60,
+    "total_tokens": 13284,
+    "input_tokens_details": {
+     "cached_tokens": 12950
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 60
+    }
+   },
+   "processed": 274,
+   "i": 18,
+   "phase": "restart",
+   "reply_sha256": "3a3afa852b4c5b1e176c28facad3ce36cc9228a13d8e701ff1e8c4f48f80394a",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": null,
+   "cached": null,
+   "cached_source": "not reported",
+   "ttft_s": 0.698,
+   "total_s": 1.415,
+   "usage": {},
+   "stream_error": "{'message': 'Failed to parse tool call: Unexpected end of content.', 'type': 'internal_error', 'code': 'unknown', 'param': None}",
+   "i": 19,
+   "phase": "restart",
+   "reply_sha256": "38a87b166ae1c0189fd249fa25445a95e319dc8a17be4a21496964b4f37a5eb8",
+   "empty_reply": false
+  }
+ ],
+ "restart_s": 3.3
+}

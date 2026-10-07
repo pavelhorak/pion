@@ -3,8 +3,10 @@
 MCP server for [Pion](https://github.com/pavelhorak/pion) — the Redis-compatible vector database
 built in Mojo. Exposes Pion's semantic search and key-value store as MCP tools.
 
-**Status: experimental.** Read the [known limitations](#known-limitations) before relying on
-it. No benefit to coding agents has been measured.
+> **Experimental.** `tests/test_mcp_search.py` and `tests/test_pion_context_index.py` (gate tier) call the tools
+> directly; no test drives the MCP protocol, and no benefit to coding agents has been measured.
+> No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+> Read the [known limitations](#known-limitations) before relying on it.
 
 ## Quickstart
 

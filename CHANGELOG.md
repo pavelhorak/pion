@@ -8,6 +8,18 @@ enumerated — there were roughly 1,100 of them.
 
 ### Added
 
+- **`pion-vllm-mlx serve` measured against the alternatives.** One recorded
+  Claude Code session (21 requests, 14K-21K-token prompts) replayed against
+  stock mlx-lm, Ollama, LM Studio, oMLX 0.7 and serve, with a restart after
+  turn 10 and a second session's first request: tokens reused and time to
+  first token, on Llama-3.2-1B and on Gemma-4-E2B (a hybrid model). Only oMLX
+  and serve skip the re-prefill after a restart and share the system prompt
+  with a second session. oMLX also does both on the hybrid model, which serve
+  does not, and reached the first token sooner from the start command.
+  Harness with a recording proxy: `benchmarks/reproducers/agent_session_ab.py`;
+  tables in `doc/coding_agents.md`; raw results, without reply text, in
+  `benchmarks/reproducers/results/agent_session_ab_2026_10_07/`.
+
 - **`pion-vllm-mlx serve` is a command now.** The package declares a
   `pion-vllm-mlx` console script (`pion-vllm-mlx serve ...`, also `python -m
   pion_vllm_mlx serve ...`). The serve module's own docstring named that
@@ -19,7 +31,37 @@ enumerated — there were roughly 1,100 of them.
   next request from Pion with an identical greedy reply. Until now serve's
   tests ran only in the full tier.
 
+### Changed
+
+- **The README documents three things, and marks the rest experimental.**
+  The README described about thirty planes, many with no outside user and
+  several with no test of their own. It now leads with the three that the gate
+  tier covers on every change: the prompt cache for mlx-lm with
+  `pion-vllm-mlx serve`, the Redis-compatible KV store with its WAL, and vector
+  search with the semantic cache. Everything else moved to an Experimental
+  table that says what tests each part: the `pion-serve` proxy, the MCP server,
+  cluster mode and replication, tenant binding, `AI.COMPLETE` / `AI.CHAT` /
+  `AI.ROUTE.*` / `RAG.*` / FLARE, `AI.KNN_LM.*` and `NEURON.PKM.*`,
+  `MOE.EXPERT.*`, `pion-exo`, `vllm-pion`, the LangGraph, AutoGen and
+  LlamaIndex packages, the LMCache backend, `pion-glide`, and RedisVL and
+  LangChain through their Redis clients. Each part's own page now opens with
+  an **Experimental** banner, and `tests/test_experimental_banners.py` (gate)
+  keeps the table and the banners in step. Nothing was deleted; whether any
+  part should be is a separate decision. The install, Docker and architecture
+  detail the README carried is in `doc/operations.md` and `doc/architecture.md`.
+
 ### Fixed
+
+- **serve re-prefilled every request on hybrid models.** To journal answers
+  for resume, serve forces mlx-lm's single-request path, and that path skips
+  the cache snapshots mlx-lm's batched path takes at segment ends, which are
+  the only in-process reuse a sliding-window or recurrent cache gets. On
+  Gemma-4-E2B a Claude Code session reused 0% of its prompt through serve
+  against 98.4% on stock mlx-lm. Pion stores nothing for such a model, so
+  there is nothing to resume from: serve now keeps the batched path and skips
+  the Pion tier on hybrid models, and logs once that it does.
+  `tests/test_vllm_mlx_serve.py` checks the in-process reuse on Gemma-4-E2B
+  when the model is cached.
 
 - **`src/common/version.mojo` says 0.9.7.** The 0.9.7 release PR set
   `VERSION` without committing the stamped `version.mojo`, so the v0.9.7

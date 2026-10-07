@@ -1,0 +1,55 @@
+{
+  "workload": "llama",
+  "measured": "2026-10-07",
+  "environment": {
+    "chip": "Apple M4",
+    "memory_gb": 16,
+    "macos": "26.6.2",
+    "mlx": "0.31.2",
+    "mlx_lm": "0.31.3",
+    "python": "3.14.7"
+  },
+  "prefix_tokens": 2049,
+  "file_bytes": 67144673,
+  "file_mb": 67.1,
+  "cache_classes": [
+    "KVCache"
+  ],
+  "hit_median_ms": 37.0,
+  "first_token_matches_cold": true,
+  "store": {
+    "mode": "store",
+    "prefix_tokens": 2049,
+    "question_tokens": 16,
+    "prefill_ms": 1168.1,
+    "save_ms": 14.7,
+    "file_bytes": 67144673,
+    "first_token": 578,
+    "cache_classes": [
+      "KVCache"
+    ]
+  },
+  "hits": [
+    {
+      "mode": "hit",
+      "prefix_tokens": 2049,
+      "ms": 36.94,
+      "load_ms": 0.221,
+      "first_token": 578
+    },
+    {
+      "mode": "hit",
+      "prefix_tokens": 2049,
+      "ms": 37.02,
+      "load_ms": 0.233,
+      "first_token": 578
+    },
+    {
+      "mode": "hit",
+      "prefix_tokens": 2049,
+      "ms": 36.95,
+      "load_ms": 0.241,
+      "first_token": 578
+    }
+  ]
+}

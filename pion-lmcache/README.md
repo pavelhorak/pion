@@ -1,5 +1,7 @@
 # pion-lmcache
 
+> **Experimental.** The LMCache backend is tested by `pion-lmcache/tests/` and `tests/test_lmcache_compat.py` (full tier); the CUDA connector test needs a CUDA box. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 Pion as an LMCache remote backend — three integration paths depending on
 what you need.
 

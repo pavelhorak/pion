@@ -14,6 +14,17 @@ where the saving is about 14 ms. Harness:
 raw output of every run:
 [`cross_process_ttft_2026_10_07.json`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json).
 
+**mlx-lm's own prompt-cache file is faster.** `save_prompt_cache` /
+`load_prompt_cache` answer the same question in **37.0 ms** from a fresh
+process, mapping a 67 MB file
+([`file_cache_ttft.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/file_cache_ttft.py),
+[raw output](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json)).
+If one program reuses one fixed prefix, use the file. This package is for
+what a file does not do: a cache any process or model object reads over the
+Redis wire, an acked write that survives a crash, and, in `pion-vllm-mlx
+serve`, a longest-prefix match over every stored conversation that a
+restarted agent or a second session picks up without naming a file.
+
 Stage 2 runs on three lanes, auto-selected by `PionPromptCache`:
 
 | Lane | Where it runs | TTFT p50, ~316-token system-prompt prefixes (Llama-3.2-1B-4bit, 100 requests; vanilla ~200 ms) |
@@ -54,7 +65,9 @@ mlx-lm's server with its prompt cache in Pion, plus Anthropic `/v1/messages`
 session and a second serve process start from the stored prefix instead of a
 full prefill, with the same greedy reply. Within one live session it does
 what stock mlx-lm does, and hybrid models (sliding-window or SSM layers) are
-not stored yet. The console script arrived after 0.1.5; on 0.1.5 run
+not stored. Measured on one recorded Claude Code session against stock
+mlx-lm, Ollama, LM Studio and oMLX, only oMLX and serve skip the re-prefill
+after a restart; oMLX 0.7 also does it on hybrid models, which serve does not. The console script arrived after 0.1.5; on 0.1.5 run
 `python -m pion_vllm_mlx.serve` with the same flags. Guide:
 [`doc/coding_agents.md`](https://github.com/pavelhorak/pion/blob/main/doc/coding_agents.md).
 

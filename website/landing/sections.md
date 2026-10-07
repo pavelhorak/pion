@@ -2,14 +2,26 @@
 help" page. website/landing/build_landing.py and website/gen_pages.py read the
 two sections below by heading, so keep the headings exactly as written. -->
 
-## Two numbers, with their denominators
+## The numbers, with their denominators
 
-| | vanilla mlx-lm | Pion warm | |
+| Llama-3.2-1B-4bit, 2,049-token prefix | first token | what it reads | vs cold |
 |---|---:|---:|:---:|
-| Llama-3.2-1B-4bit, 2,049-token prefix, **same process** | 1,193 ms | **46.2 ms** | **26×** |
-| Same model and prefix, **from a separate process**, over the wire | 1,193 ms | 69.0 ms | **17×** |
+| Cold prefill, vanilla mlx-lm | 1,193 ms | nothing | |
+| mlx-lm's own prompt-cache file, a fresh process | **37.0 ms** | a 67 MB file (mmap) | 32× |
+| Pion, **same process** | 46.2 ms | its own MLX arrays | 26× |
+| Pion, **from a separate process**, over the wire | 69.0 ms | 67 MB over loopback TCP | 17× |
 
-Both rows answer the same 16-token question after the same prefix, and differ
+**A file is faster.** mlx-lm ships `save_prompt_cache` / `load_prompt_cache`,
+and mapping a file beats fetching the same rows over TCP: if one program
+reuses one fixed prefix, use the file
+([`file_cache_ttft.py`](../../benchmarks/reproducers/file_cache_ttft.py),
+[raw output](../../benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json)).
+Pion is for what a file does not do: one cache that any process, model object
+or tool reads over the Redis wire, an acked write that survives a crash, and
+in `pion-vllm-mlx serve` a longest-prefix match that a restarted agent or a
+second session finds without naming a file.
+
+The Pion rows answer the same 16-token question after the same prefix, and differ
 only in *where the cache comes from*. The first is the process that computed
 it, which an in-process prompt cache also gives you. The second pays a wire hop
 for a cache a separate process wrote, and produces **BLEU 1.000** on a 50-token
@@ -30,6 +42,9 @@ prefix on each full-attention layer, Gemma-4-E2B-it-4bit still finds a single
 needle, and the warm call takes 124.4 ms against vanilla's 54.4 s cold prefill
 (437×). It is one needle at one depth, warm against cold
 ([raw output](../../benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt)).
+mlx-lm's prompt-cache file of the same prefix (405 MB) answers in 82.6 ms with
+dense attention over all of it
+([raw output](../../benchmarks/reproducers/results/file_cache_ttft_gemma_64000_2026_10_07.json)).
 The example missed on 2026-10-06 because its prompt carried 397 `<bos>`
 tokens; it now carries one.
 
@@ -39,6 +54,10 @@ A 34-token prefix saves **1.4×** — about 14 ms. This section exists because
 the demo that ships with this project once printed a slowdown at a short prefix,
 slower than doing nothing, and we shipped it that way for a while.
 
+- **One program, one fixed prefix: use mlx-lm's own prompt-cache file.**
+  `save_prompt_cache` / `load_prompt_cache` ship with mlx-lm and answer faster
+  than a Pion fetch: 37.0 ms against 69.0 ms at a 2,049-token prefix. Pion
+  earns its place when several processes, tools or restarts share the cache.
 - **It caches prefill, not decode.** If your bottleneck is tokens-per-second
   once generation starts, this changes nothing.
 - **The reuse has to be real, and the prefix has to be long.** Time to first

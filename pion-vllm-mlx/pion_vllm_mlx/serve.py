@@ -60,6 +60,24 @@ def normalize_text(s: str) -> str:
 
 # ── Pion-backed prompt cache ───────────────────────────────────────────────
 
+_PLAIN: dict = {}
+
+
+def plain_attention(model) -> bool:
+    """True when every layer of the model's prompt cache is a plain KVCache:
+    the only kind Pion stores (prefix_store.layout_of). A hybrid model's
+    sliding-window or recurrent layers are not stored, so for it the Pion tier
+    and the resume journal have nothing to work with."""
+    k = id(model)
+    if k not in _PLAIN:
+        from mlx_lm.models.cache import make_prompt_cache
+        _PLAIN[k] = model is not None and all(type(c).__name__ == "KVCache" for c in make_prompt_cache(model))
+        if not _PLAIN[k]:
+            log.warning("pion: this model has sliding-window or recurrent cache layers; Pion stores "
+                        "only plain attention caches, so serve runs on mlx-lm's in-process cache alone "
+                        "(no restore after a restart, no resume)")
+    return _PLAIN[k]
+
 def make_cache_class():
     import hashlib
 
@@ -134,7 +152,8 @@ def make_cache_class():
             local = len(tokens) - len(rest)
             self._prompt = list(tokens)
             self.ctx = None
-            if self.store is None or self.model_provider.draft_model is not None:
+            if (self.store is None or self.model_provider.draft_model is not None
+                    or not plain_attention(self.model_provider.model)):
                 return cache, rest
             try:
                 jkey = self._jkey(model, tokens) if self.resume else None
@@ -198,7 +217,7 @@ def make_cache_class():
 
         def insert_cache(self, model, tokens, prompt_cache, *, cache_type="assistant"):
             super().insert_cache(model, tokens, prompt_cache, cache_type=cache_type)
-            if self.store is None:
+            if self.store is None or not plain_attention(self.model_provider.model):
                 return
             # Store the prompt, not the reply. An agent's next prompt re-renders
             # the assistant turn from its own copy (reasoning stripped, output
@@ -874,8 +893,21 @@ def main(argv=None):
         if store is not None and not ours.no_resume:
             # Resume needs the single-request path, where generation is one
             # stream_generate call per request (the batched path interleaves
-            # requests inside mlx-lm). One local user loses nothing by it.
-            S.ResponseGenerator._is_batchable = lambda self, args: False
+            # requests inside mlx-lm). One local user loses nothing by it,
+            # except on a hybrid model: there Pion stores nothing to resume
+            # from, and the single-request path also skips the cache snapshots
+            # mlx-lm's batched path takes at segment ends, which are the only
+            # reuse a sliding-window or recurrent cache gets. Forcing it there
+            # cost every request a full prefill (Gemma-4-E2B: 0% of a Claude
+            # Code session reused, against 98.4% on stock mlx-lm).
+            orig_batchable = S.ResponseGenerator._is_batchable
+
+            def _is_batchable(self, args):
+                if plain_attention(self.model_provider.model):
+                    return False
+                return orig_batchable(self, args)
+
+            S.ResponseGenerator._is_batchable = _is_batchable
             orig_single = S.ResponseGenerator._serve_single
 
             # mlx-lm 0.32 added a second argument (the generation stream);

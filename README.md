@@ -31,6 +31,14 @@ the Mac — and everything else — the KV engine, persistence, the prompt cache
 Details: [`doc/licensing.md`](doc/licensing.md).
 <!-- --8<-- [end:open-core] -->
 
+## What works
+
+Three things, each covered by Pion's gate tier, the tests run before every merge. Every
+other feature in this repository is [experimental](#experimental): it is
+there, it may be tested at the wire level, and it is not something to rely on.
+
+### 1. A prompt cache for mlx-lm, and one endpoint for coding agents
+
 On Apple Silicon it is four lines around `mlx_lm`:
 
 <!-- --8<-- [start:four-lines] -->
@@ -80,17 +88,33 @@ pion-vllm-mlx serve --model mlx-community/Qwen3-4B-4bit --port 8080
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080    # Claude Code; Codex and OpenAI clients: see the guide
 ```
 
-Setup for each client, what it does not do (hybrid models are not stored yet),
-and how it stores a conversation: [`doc/coding_agents.md`](doc/coding_agents.md).
+Measured on one recorded Claude Code session against stock mlx-lm, Ollama,
+LM Studio and oMLX: after a restart, and in a second session, only oMLX and
+serve skip the re-prefill. oMLX 0.7 also does it on hybrid models (Gemma 4),
+which serve does not, and from the start command to the first token it was
+the faster of the two. The tables, setup for each client, and what serve does
+not do: [`doc/coding_agents.md`](doc/coding_agents.md).
 <!-- --8<-- [end:serve] -->
 
 <!-- --8<-- [start:two-numbers] -->
-**Time to first token on Apple Silicon, warm cache against a vanilla cold start:**
+**Time to first token on Apple Silicon, against a cold start and against
+mlx-lm's own prompt-cache file:**
 
-| Llama-3.2-1B-4bit, 2,049-token prefix, 16-token question | vanilla mlx-lm | Pion warm | |
-|---|---:|---:|:---:|
-| The process that stored the prefix, asking again | 1,193 ms | **46.2 ms** | **26×** |
-| A separate process, over the wire | 1,193 ms | **69.0 ms** | **17×** |
+| Llama-3.2-1B-4bit, 2,049-token prefix, 16-token question | first token | vs cold |
+|---|---:|---:|
+| Cold prefill, vanilla mlx-lm | 1,193 ms | |
+| mlx-lm's own prompt-cache file, read by a fresh process (`load_prompt_cache`, a 67 MB file) | **37.0 ms** | 32× |
+| Pion, the process that stored the prefix, asking again | 46.2 ms | 26× |
+| Pion, a separate process, over the wire | 69.0 ms | 17× |
+
+**A file is faster.** `save_prompt_cache` and `load_prompt_cache` ship with
+mlx-lm, and mapping a 67 MB file beats fetching the same rows over loopback
+TCP. If one program reuses one fixed prefix, use the file. Pion is for what a
+file does not do: one server that any process, model object or tool reads
+over the Redis wire, with an acked write that survives a crash, and, through
+`pion-vllm-mlx serve`, a longest-prefix match over every conversation it has
+stored, kept under a byte budget, so a restarted agent or a second session
+has no file to find and name.
 
 A shorter prefix saves less: from a separate process the same measurement gives
 12× at 1,035 tokens, 4.6× at 268, and 1.4× at 34, where the saving is about
@@ -101,7 +125,10 @@ for both rows (`--prefix-tokens` for the shorter prefixes) with its
 [raw output](benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json),
 and `tests/test_kv_prefix_cross_instance.py` with
 [its output](benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt),
-both on an M4 Mac mini. The vanilla side times the first token the way mlx-lm's
+both on an M4 Mac mini; the file row is
+[`file_cache_ttft.py`](benchmarks/reproducers/file_cache_ttft.py) with
+[its raw output](benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json),
+timed the same way, model load outside the clock. The vanilla side times the first token the way mlx-lm's
 own `generate_step` produces it; until 2026-10-02 it also computed logits at
 every prompt position, which no generation does, and the ratios published then
 were too high. The [changelog](CHANGELOG.md) has the correction. The figures
@@ -115,104 +142,37 @@ Both answered with the needle's number, while each full-attention layer
 attended 512 of the prefix's tokens, 0.80%
 ([`examples/sparse_mask_64k_niah.py`](examples/sparse_mask_64k_niah.py),
 [raw output](benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt), M4
-Mac mini, mlx-lm 0.31.3). It is one needle at one depth, warm against cold. On
+Mac mini, mlx-lm 0.31.3). It is one needle at one depth, warm against cold.
+mlx-lm's own prompt-cache file of the same prefix (405 MB) answers in 82.6 ms
+([raw output](benchmarks/reproducers/results/file_cache_ttft_gemma_64000_2026_10_07.json)),
+faster again, and it attends the whole prefix where Pion's mask attends 0.80%. On
 2026-10-06 the example found the needle with neither vanilla nor Pion, because
 its prompt carried 397 `<bos>` tokens; it now carries one.
 <!-- --8<-- [end:two-numbers] -->
 
-Underneath sits a Redis-wire-compatible KV core and an HNSW vector engine. They
-are the on-ramp — every Redis client, LMCache config and RESP tool already speaks
-to Pion — and they are fast enough to be interesting on their own
-([the engine underneath](#the-engine-underneath)). They are not why you would
-install this.
+Design, wire protocol, the quantized tiers and the Stage 2 lanes:
+[`doc/shared_kv_cache.md`](doc/shared_kv_cache.md). Hybrid models (SSM and
+sliding-window layers) are stored by `PionPromptCache` and its `SSM.PREFIX.*`
+companion; `pion-vllm-mlx serve` does not store them yet.
 
-```bash
-pixi install && pixi run build
-./pion-server --kvcache               # AI memory mode: KV.PREFIX.* + ATTEND.PREFIX.*
-redis-cli -p 1974 SET hello world     # the Redis wire still works
-```
+### 2. A Redis-compatible KV store with a write-ahead log
 
----
+354 command names (the generated command table), every one exercised by a
+dispatch sweep in five argument shapes, and a differential suite that compares
+replies against a real `redis-server`: strings, hashes, lists, sets, sorted
+sets, bitmaps, HyperLogLog, geo, streams and consumer groups, pub/sub,
+`MULTI`/`EXEC`/`WATCH`, TTLs, Lua. Every write goes to a write-ahead log
+before it is acknowledged; an acked write is still there after `SIGKILL`.
+`redis-cli` and redis-py, which the test suite uses, talk to it unmodified over
+RESP2 or RESP3. Reference:
+[`doc/command_matrix.md`](doc/command_matrix.md),
+[`doc/persistence.md`](doc/persistence.md).
 
-## Why Pion
-
-### LLM Memory
-
-Every competitor here does something well, and most of them do more than a
-table can show. Cells are what each project **ships today** (checked
-2026-09-19); the footnotes carry the sources.
-
-| | LMCache (+vLLM) | SGLang HiCache | oMLX | mlx-lm `cache_prompt` | **Pion** |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Cache shared across **processes** | ✓ via remote store¹ | ✓ L3¹ | ✗ per-process² | manual file | **✓ wire-native** |
-| Survives restart | ✓ | ✓ | ✓ SSD tier | ✓ manual | **✓** |
-| **Crash-consistent** (acked = durable) | ✗ | ✗ | ✗ | ✗ | **✓ WAL**† |
-| KV quantization | FP8; 4-bit demo³ | FP8 | ✓ TurboQuant | ✗ | **fp16/int8/turbo4/INT3/INT2/mlx4g32** |
-| Hybrid (Mamba/GDN) prefix state | in-process⁴ | host + storage tiers⁴ | in-process + SSD | ✗ | **cross-process + persisted** |
-| Sparse long-context selector | ✗ | ✗ | ✗ | ✗ | **✓ block-mean, bit-identical decode** |
-| MoE expert paging | ✗ | ✗ | ✓ in-process (experimental) | ✗ | **✓ cross-process + histograms** |
-| Apple Silicon | ✗ (CUDA) | ✗ (CUDA) | ✓ | ✓ | **✓** (+ Linux CPU) |
-| Redis wire / any RESP client | ✗ | ✗ | ✗ | ✗ | **✓** |
-| Runs as | vLLM plugin + service | serving engine | menu-bar app / server | library | **one server binary** |
-
-**The two rows that are actually ours** are crash-consistency and the shape of
-the sharing. Everything else on this list is a matter of degree.
-
-*Crash-consistent* is not the same as *persistent*. LMCache's disk backend,
-SGLang's L3 and oMLX's SSD tier all persist, and all of them recompute on a
-miss — that is a perfectly good design. Pion's contract is narrower and
-stronger: an acked write is there after a `SIGKILL`.†
-
-*Shared across processes* is not the same as *distributed*. LMCache does
-cross-instance sharing through a remote store, and that is its entire pitch;
-oMLX clusters by routing a request to the node that already holds the prefix,
-which is a different and reasonable answer. Pion is one process on one port
-that a **different program, a different model object, or a different machine**
-reads directly — no connector, no serving stack, no CUDA.
-
-¹ LMCache ships `local_disk_backend.py`, `p2p_backend.py` and NIXL/remote connectors; SGLang HiCache L3 backs onto Mooncake/3FS/NIXL.
-² oMLX per-node caches are private to the process; its cluster scheduler scores nodes on prefix affinity and routes to the hot one. An export/import API was requested by a user on 2026-09-12 ([jundot/omlx#3612](https://github.com/jundot/omlx/issues/3612)) and is not shipped.
-³ LMCache demoed 4-bit KV with AMD on 2026-08-28.
-⁴ vLLM merged hybrid prefix caching 2026-07-12 ([vllm#46384](https://github.com/vllm-project/vllm/pull/46384)), vllm-metal 2026-08-10 ([#584](https://github.com/vllm-project/vllm-metal/pull/584)); both share that state **within** a process. SGLang's HiCache tiers hybrid GDN/Mamba state to host memory and its storage backends as of 2026-09-21 ([sglang#37507](https://github.com/sgl-project/sglang/pull/37507)), inside its own serving stack.
-
-† WAL durability is verified on macOS **and Linux**, V-store included: SIGKILL → restart replays the WAL and `V.FETCH` returns bit-equal data (max |Δ| = 0.0), validated on EPYC 8124P. `tests/test_vstore_wal.py` runs in Gate 2c on every gate.
-
-If you run one server and never restart it, vLLM's automatic prefix caching
-already does this and you do not need Pion.
-
-### On oMLX specifically
-
-[oMLX](https://github.com/jundot/omlx) is the best way to serve
-models locally on a Mac today, and if that is what you want, use it — a
-menu-bar app, continuous batching, a RAM+SSD tiered KV cache, TurboQuant KV,
-and cache-aware cluster routing across machines.
-
-Pion is not a serving app and does not compete with it. oMLX keeps each
-node's cache private to its own process and routes work to whichever node is
-warm; Pion is a cache *substrate* that a separate process reads over a wire
-protocol, holds hybrid/SSM state across processes rather than within one, and
-makes an acked write survive a crash. The two compose, and Pion as a shared or
-remote tier underneath oMLX is a thing we would like to build.
-
-That the problem is real is not just our claim: an oMLX user recently asked
-for durable, portable prefix-cache artifacts so an agent session would stop
-re-prefilling 60–120k tokens after a reload
-([#3612](https://github.com/jundot/omlx/issues/3612)). They proposed a
-different shape from ours — an agent-owned file with a manifest, exported
-through oMLX's own API, rather than a server — so read it as evidence for the
-*problem*, not as a vote for Pion. The constraints they arrived at are the
-four Pion had to solve: carry the recurrent/GDN state and not only KV, pin the
-quantization parameters in the manifest, key on the exact token sequence
-rather than the text, and fail closed on any mismatch.
-
-### The engine underneath
-
-A Redis-wire-compatible KV core and an HNSW vector engine carry the substrate.
-They are the on-ramp, not the pitch, and against Redis 8.10 they win some
-configurations and lose others. Everything in this section is one Linux server,
-both engines measured the same day with the same client settings: an AMD EPYC
-8124P (16 cores), Redis 8.10.2 built from source, Pion 0.9.5 built as the
-release builds it. Raw output, scripts and method:
+Against Redis 8.10.2, Pion wins some configurations and loses others. The KV
+and vector numbers below are one Linux server, both engines measured the same
+day with the same client settings: an AMD EPYC 8124P (16 cores), Redis 8.10.2
+built from source, Pion 0.9.5 built as the release builds it. Raw output,
+scripts and method:
 [`benchmarks/results/2026-10-06-linux-epyc-8124p/`](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
 
 **KV throughput** (memtier, 256-byte values, 1:10 SET:GET over 1M keys, 30 s a
@@ -251,6 +211,14 @@ with raw output — and the like-for-like comparison is above.
 > keyspace, what a Redis client expects) and refuses to start with `-w N > 1`
 > unless you pass the flag. See [Scaling past one worker](#scaling-past-one-worker).
 
+### 3. Vector search and the semantic cache
+
+HNSW with INT8 SIMD kernels behind the RediSearch `FT.*` API and Redis 8 vector
+sets (`VADD`/`VSIM`), BM25 and hybrid fusion (`FT.HYBRID`), and
+`AI.SEMANTIC_CACHE`, which embeds on the server (Apple's `NLEmbedding` on macOS,
+MiniLM from a source build). Reference: [`doc/vector_engine.md`](doc/vector_engine.md),
+[`doc/embeddings.md`](doc/embeddings.md).
+
 **Vector search** (VectorDBBench Performance1536D50K: 50K OpenAI embeddings,
 1536 dims; recall@100 against the dataset's ground truth; 1, 5 and 10 clients
 for 5 s each; median of 3):
@@ -274,19 +242,6 @@ smallest search effort for 100 results, since Pion raises a smaller ef to k —
 four runs measured a median **8,544 QPS at recall 0.939**, against Redis's 8,039
 at 0.920 (`benchmarks/results/2026-10-06-linux-epyc-8124p/iso/`). Redis was not
 run at a higher EF, so the comparison at 0.960 recall is still open.
-
-### Expert paging — models beyond RAM (substrate validation)
-
-`MOE.EXPERT.*` serves a mixture-of-experts model's expert weights from a tiered
-cache (per-worker RAM LRU → SSD → network), so that a model larger than the
-machine's memory can run on it. The wire protocol is covered by the
-`tests/test_moe_*.py` suites, and
-[`examples/moe_expert_substrate_demo.py`](examples/moe_expert_substrate_demo.py)
-runs a model through it. No measurement of model size against device memory,
-cache-hit latency or pruning savings is published with a harness yet, so this
-section makes no number claim, and decode speed is research-grade. Pruning by
-access histogram (`HIST`) costs quality that depends on the traffic: collect
-histograms on traffic like yours and check perplexity on it before pruning.
 
 ---
 
@@ -329,47 +284,6 @@ against it as installed. As a service, Pion keeps its WAL, snapshots and crash l
 `pion-server` is also on your PATH; run by hand, it writes its data to the
 directory you start it from.
 
-### Docker
-
-Each release publishes a multi-arch image (linux/amd64 and linux/arm64) to
-GitHub Container Registry:
-
-```bash
-docker run -p 1974:1974 -v pion-data:/data ghcr.io/pavelhorak/pion
-redis-cli -p 1974 PING     # +PONG
-```
-
-To build one yourself, hermetically from source or in seconds around a binary
-you already have:
-
-```bash
-docker build -t pion .                              # from source, ~20 min
-docker build --target runtime-prebuilt -t pion .    # wraps ./pion-server, seconds
-                                                    # (Linux host only — the image
-                                                    #  runs the binary in the context)
-```
-
-The published image is built by the release workflow from the tagged source.
-The from-source build was last verified end to end by hand on 2026-09-01
-(linux/arm64): the correctness and Redis-parity suites pass from
-outside the container, and the keyspace survives `docker restart` through the
-`/data` volume.
-
-Data (WAL, snapshots, blob arenas) lives in the `/data` volume, so it survives
-container restarts. Three things worth knowing:
-
-- The default command passes `--epoll`, because Docker's default seccomp profile
-  blocks the io_uring syscalls (Docker ≥ 25). For the faster io_uring path, run
-  with `--security-opt seccomp=unconfined` and drop `--epoll`.
-- The image ships no Python, so it runs with `--no-auto-embed`. Features that
-  need an embedding model (semantic cache, auto-embed) need a host install:
-  Homebrew, or the tarball with `--nle-embed`, on macOS; a source build elsewhere.
-- Use a **named volume** (`-v pion-data:/data`) as shown. The server runs as the
-  unprivileged `pion` user, and a named volume inherits `/data`'s ownership from
-  the image; a bind mount (`-v $(pwd)/data:/data`) keeps the host directory's
-  owner instead, so the WAL cannot be created. For a bind mount, `chown` the
-  host directory to the image's `pion` uid first.
-
 ### Prebuilt binary (no build)
 
 macOS 14 or later on Apple Silicon, without Homebrew:
@@ -381,25 +295,28 @@ cd pion-*-macos-arm64
 redis-cli -p 1974 PING           # +PONG
 ```
 
-About 3 MB compressed (2.9 MB for the v0.9.5 macOS tarball): the binary, the three Mojo runtime dylibs it actually links
-against, and the Metal shader library that `--metal-attention` needs. No
-toolchain, no Python, no model download. Verify the download against the
-release's `SHA256SUMS` if you care to (`shasum -a 256 -c SHA256SUMS --ignore-missing`;
-without the flag it reports every tarball you did not download as FAILED).
+Launch through `pion-server.sh`, not `bin/pion-server`: the wrapper points the
+binary at the runtime libraries the tarball bundles. Linux tarballs for x86_64
+and arm64 come from the same release (swap the file name for
+`pion-linux-x86_64.tar.gz` or `pion-linux-arm64.tar.gz`) and need glibc 2.38 or
+newer. Checksums, the Metal shader library and building a tarball yourself:
+[`doc/operations.md`](doc/operations.md) §5.
 
-Launch through `pion-server.sh`, not `bin/pion-server` directly — the binary's
-rpath points at the build machine's toolchain, and the wrapper is what points it
-at the bundled `lib/`. WAL, snapshots and blob arenas are written to the working
-directory you launch from.
+### Docker
 
-**Linux** tarballs come from the same release, for x86_64 and arm64: swap the
-file name in the `curl` above for `pion-linux-x86_64.tar.gz` or
-`pion-linux-arm64.tar.gz`. The x86_64 build is the portable one (x86-64-v2, no
-GPU code). From v0.9.3 the Linux tarballs link the same tuned vector library
-as the macOS one; earlier ones ran the open reference kernels. They need glibc
-2.38 or newer: Ubuntu 24.04, Debian 13, Fedora 39 or later. On an older system
-the binary stops with `GLIBC_2.38 not found`; use the Docker image above
-instead.
+Each release publishes a multi-arch image (linux/amd64 and linux/arm64) to
+GitHub Container Registry:
+
+```bash
+docker run -p 1974:1974 -v pion-data:/data ghcr.io/pavelhorak/pion
+redis-cli -p 1974 PING     # +PONG
+```
+
+Data (WAL, snapshots, blob arenas) lives in the `/data` volume. The image runs
+with `--epoll`, because Docker's default seccomp profile blocks io_uring, and
+ships no Python, so features that need an embedding model need a host install.
+Building the image yourself, bind mounts and io_uring:
+[`doc/operations.md`](doc/operations.md) §5.
 
 ### From source
 
@@ -418,6 +335,8 @@ pixi run build                        # produces ./pion-server
 ./pion-server                         # port 1974, one shared keyspace
 ```
 <!-- --8<-- [end:build-from-source] -->
+
+### First five minutes
 
 <!-- --8<-- [start:first-five-minutes] -->
 **KV** — `redis-cli` talks to Pion unmodified:
@@ -491,31 +410,16 @@ redis-cli -p 1974 AI.SEMANTIC_CACHE GET "What is the capital of France?"
 ```bash
 ./pion-server --profile kv            # KV-only: ~50MB/worker, no HNSW
 ./pion-server --profile vector        # KV + vector search
-./pion-server --profile ai --flare    # KV + vector + AI (semantic cache, RAG, FLARE)
+./pion-server --profile ai --flare    # KV + vector + AI (semantic cache; RAG and FLARE are experimental)
 ./pion-server --kvcache -w 1          # + externalized attention (ATTEND.*)
 ./pion-server --metal-attention -w 1  # + native Metal SDPA on Mac (no Python; fp32, more accurate)
 ./pion-server --metal-attention-fp16 -w 1  # fp16 kernel — matches vanilla mlx-lm precision
 ./pion-server --metal-attention --fa-window 2048 -w 1  # sliding-window SDPA: scans only the last N tokens. Safe on Mistral SWA / Longformer; lossy on dense models (Llama, Gemma, GPT).
 ```
 
-### Quantization
-
-```bash
-./pion-server --polarquant            # block-INT4: recall 0.965, 6.6K QPS (INT8: 0.960, 8.0K)
-./pion-server --turboquant            # block-INT3+QJL: recall 0.953, 4.9K QPS
-./pion-server --nanoquant             # block-INT2: EXPERIMENTAL, recall 0.46
-```
-
-Gate dataset (Performance1536D50K, ef=150, `-w 10`, Mac). Each variant also keeps an FP32 re-rank copy, so none of them lowers total memory today — they shrink the search beam's working set. Details: [`doc/vector_engine.md`](doc/vector_engine.md).
-
-### I/O Backend (Linux)
-
-```bash
-./pion-server --epoll                 # best for P=1 benchmarks
-./pion-server --iouring -w 16 --independent-workers   # highest throughput — read the
-                                      # scaling note below before using -w > 1
-./pion-server --xdp --xdp-iface eth0  # AF_XDP kernel bypass: io_uring's P=1 throughput, p99 −29%
-```
+Vector quantization (`--polarquant`, `--turboquant`, `--nanoquant`) is in
+[`doc/vector_engine.md`](doc/vector_engine.md); the Linux I/O backends
+(`--epoll`, `--iouring`, `--xdp`) are in [`doc/networking.md`](doc/networking.md).
 
 ### Scaling past one worker
 
@@ -562,290 +466,105 @@ N ports and shard client-side, the same way you would shard Redis.
 
 ---
 
-## Feature Set
+## How it compares
 
-### Coding agents — `pion-vllm-mlx serve`
-mlx-lm's server with its prompt cache in Pion, plus the Anthropic and OpenAI
-Responses endpoints that Claude Code and Codex speak. A restarted server, a
-second session and a second serve process start from the stored prefix.
-Requests drop Claude Code's per-session billing-header line, so two sessions
-share their system prompt and tools. Guide: [`doc/coding_agents.md`](doc/coding_agents.md);
-gate test: `tests/test_vllm_mlx_serve.py`.
+### LLM Memory
 
-### Shared KV Cache — `KV.PREFIX.*` + `ATTEND.PREFIX.*`
-The prompt's K/V tensors live in Pion. Future requests on the same prefix skip prefill — backend returns the first token in milliseconds instead of seconds.
+Every competitor here does something well, and most of them do more than a
+table can show. Cells are what each project **ships today** (checked
+2026-09-19; the mlx-lm column re-checked against mlx-lm 0.31.3 on 2026-10-07);
+the footnotes carry the sources.
 
-```bash
-./pion-server --kvcache --metal-attention -w 1   # AI memory mode (Apple Silicon, native Metal end-to-end)
-```
+| | LMCache (+vLLM) | SGLang HiCache | oMLX | mlx-lm `cache_prompt` | **Pion** |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Cache shared across **processes** | ✓ via remote store¹ | ✓ L3¹ | ✗ per-process² | manual file | **✓ wire-native** |
+| Survives restart | ✓ | ✓ | ✓ SSD tier | ✓ manual | **✓** |
+| **Crash-consistent** (acked = durable) | ✗ | ✗ | ✗ | ✗ | **✓ WAL**† |
+| KV quantization | FP8; 4-bit demo³ | FP8 | ✓ TurboQuant | ✓ `--kv-bits`⁵ | **fp16/int8/turbo4/INT3/INT2/mlx4g32** |
+| Hybrid (Mamba/GDN) prefix state | in-process⁴ | host + storage tiers⁴ | in-process + SSD | ✓ in the file⁵ | **cross-process + persisted** |
+| Sparse long-context selector | ✗ | ✗ | ✗ | ✗ | **✓ block-mean, bit-identical decode** |
+| MoE expert paging | ✗ | ✗ | ✓ in-process (experimental) | ✗ | cross-process + histograms (experimental) |
+| Apple Silicon | ✗ (CUDA) | ✗ (CUDA) | ✓ | ✓ | **✓** (+ Linux CPU) |
+| Redis wire / any RESP client | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Runs as | vLLM plugin + service | serving engine | menu-bar app / server | library | **one server binary** |
 
-```python
-from pion_vllm_mlx import PionPromptCache
-pc = PionPromptCache(model, host="127.0.0.1", port=1974)
-cache = pc.get_or_prefill(prefix_ids, namespace=ns)   # what make_prompt_cache(model) returns, prefix already in it
-text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)
-```
+**The two rows that are actually ours** are crash-consistency and the shape of
+the sharing. Everything else on this list is a matter of degree.
 
-- **Stage 1** — the four lines above (`KV.PREFIX.LOOKUP` + `V.FETCH ... RANGE` / `V.FETCH ... BATCH`): cross-instance, persistent, BLEU 1.0, and mlx-lm decodes at native speed because the cache it gets back is an ordinary MLX prompt cache.
-- **Stage 2** — `PionPromptCache(model, stage2=True)` + `install_pion_attention_patch()` + `make_pion_prompt_cache(...)`: Pion computes the attention over the prefix itself. Three lanes, picked automatically:
-  - **In-process fast lane (default same-process consumer).** Cold prefill stashes per-layer prefix K/V as MLX arrays; warm forwards run `mx.fast.scaled_dot_product_attention` over `concat([prefix | suffix])` with **zero wire roundtrips** and no `mx.eval` barrier per layer. **`bench_w1_stage2.py` Llama-3.2-1B-4bit 5×20: TTFT p50 = 34.4 ms, mean = 42.2 ms, 4.7× vs vanilla cold** (mean against mean) on that harness's ~316-token system-prompt prefixes; at a 2,049-token prefix the same lane answers a 16-token question in 46.2 ms against 1,193 ms (26×), the same-process row above.
-  - **Binary fast lane on `port+1`** (`0xCA5E` + `CMD_ATTEND_PREFIX_QUERY_FUSED`). Cross-process consumers: single sendmsg scatter-gather, no `.tobytes()` allocs. **TTFT p50 = 98.2 ms** on the same workload: 32 wire calls a request at 0.63 ms each, because mlx-lm runs the suffix in two passes (all but its last token, then the last) and each pass queries every layer.
-  - **RESP fallback** for older servers without the binary listener. **TTFT p50 = 110–128 ms** over two runs.
-  Raw output for the three lanes: [`benchmarks/results/2026-10-07-mac-m4/`](benchmarks/results/2026-10-07-mac-m4/) (M4 Mac mini, 2026-10-07).
-  Lanes 2/3: native Metal SDPA via `--metal-attention` (no Python sidecar; **0.441 ms** end-to-end at H=8/N=2048/d=128, against 0.456 ms for MLX's own `scaled_dot_product_attention`, `tests/bench_pion_metal_attention.py`). Both M=1 decoder and M>1 batched-Q paths; fp16 variant for vanilla mlx-lm precision parity. Same tokens as vanilla mlx-lm on `tests/test_mlx_lm_patch.py` (20/20). Optional `--fa-window N` clamps SDPA to the last `N` tokens for sliding-window models (Mistral SWA, hybrid Qwen3.5 with per-layer routing) — server-wide, lossy on plain dense transformers.
-  The in-process lane is the same-process 46.2 ms row. On the wire lanes every decode step pays one round trip per layer, so a consumer that only generates text from another process is faster end to end on Stage 1; Stage 2 is for consumers that want the attention itself to run in Pion — the sparse selectors, `pion-exo`, a custom CacheEngine.
-- **WAL-durable** (macOS and Linux): SIGKILL recovers bit-equal, V-store included — replay after SIGKILL is validated on EPYC 8124P and guarded by `tests/test_vstore_wal.py` in Gate 2c. `KV.PREFIX.SAVE` compacts.
-- **Authentication**: `--requirepass <password>` requires `AUTH <password>` on every connection before any command is served — on both the RESP port and the binary `port+1` fast lane. Prefer `--requirepass-file <path>` or the `PION_REQUIREPASS` environment variable: the flag spelling puts the password in the process command line, where `ps` and `/proc/<pid>/cmdline` expose it to every local user. See [`SECURITY.md`](SECURITY.md).
-- **Tenant isolation**: `--tenant NAME=PASSWORD` (repeatable, requires `--requirepass` as the admin credential) binds each authenticated connection to its tenant's namespace — every key is transparently prefixed, commands outside a fail-closed allowlist are rejected with `-NOPERM`, and `KEYS`/`SCAN` are filtered to the tenant's namespace (see [`doc/multi_tenant.md`](doc/multi_tenant.md)). For hard *resource* isolation (memory/CPU/WAL), run one `pion-server` per tenant. The older `--ns-prefix` flag remains a cooperative namespace guard for `KV.PREFIX.*`/`V.*` only — not an isolation boundary.
-- **A mixed workload**: mean TTFT over every request, each prompt's first and cold one included, on Llama-3.2-1B-Instruct-4bit with ~316-token prefixes. `tests/test_kv_prefix_workload.py` (5 prompts × 10 queries) measures Stage 1 at **3.6×** (a 90% hit rate); `tests/bench_w1_stage2.py` (5 × 20) measures Stage 2's in-process lane at **4.7×**. First tokens agree with vanilla mlx-lm on 50 of 50 requests in each Stage 2 lane and on 49 of 50 in Stage 1, whose one disagreement is a near-tie: vanilla's top two tokens are 0.016 logits apart, and the fp16-stored cache picks the other (2026-10-07, M4 Mac mini, [raw output](benchmarks/results/2026-10-07-mac-m4/)). It times differently from `cross_process_ttft.py`, the source of the 17× figure, so read the two side by side rather than as one curve.
-- **`V.FETCH BATCH`**: a multi-layer fetch that returns all active layers in one round-trip — replaces 32 sequential per-layer calls (16 layers × K + V).
+*Crash-consistent* is not the same as *persistent*. LMCache's disk backend,
+SGLang's L3 and oMLX's SSD tier all persist, and all of them recompute on a
+miss — that is a perfectly good design. Pion's contract is narrower and
+stronger: an acked write is there after a `SIGKILL`.†
 
-Full design + numbers: [`doc/shared_kv_cache.md`](doc/shared_kv_cache.md).
+*Shared across processes* is not the same as *distributed*. LMCache does
+cross-instance sharing through a remote store, and that is its entire pitch;
+oMLX clusters by routing a request to the node that already holds the prefix,
+which is a different and reasonable answer. Pion is one process on one port
+that a **different program, a different model object, or a different machine**
+reads directly — no connector, no serving stack, no CUDA.
 
-### Hybrid Retrieval — RAG K/V hydration
-RAG pipelines retrieve text chunks from an embedding index, then re-encode the same chunk text through the LLM to fill its K/V cache. `HybridRetrievalCache` caches the chunk's prefilled K/V keyed by chunk_id so the LLM skips that prefill on every subsequent retrieval — same chunks, no re-encoding.
+¹ LMCache ships `local_disk_backend.py`, `p2p_backend.py` and NIXL/remote connectors; SGLang HiCache L3 backs onto Mooncake/3FS/NIXL.
+² oMLX per-node caches are private to the process; its cluster scheduler scores nodes on prefix affinity and routes to the hot one. An export/import API was requested by one user on 2026-09-12 ([jundot/omlx#3612](https://github.com/jundot/omlx/issues/3612), converted to a discussion on 2026-10-05 with no votes); the same user's draft implementation ([jundot/omlx#3615](https://github.com/jundot/omlx/pull/3615)) is unmerged, and nothing has shipped.
+³ LMCache demoed 4-bit KV with AMD on 2026-08-28.
+⁴ vLLM merged hybrid prefix caching 2026-07-12 ([vllm#46384](https://github.com/vllm-project/vllm/pull/46384)), vllm-metal 2026-08-10 ([#584](https://github.com/vllm-project/vllm-metal/pull/584)); both share that state **within** a process. SGLang's HiCache tiers hybrid GDN/Mamba state to host memory and its storage backends as of 2026-09-21 ([sglang#37507](https://github.com/sgl-project/sglang/pull/37507)), inside its own serving stack.
 
-```python
-from pion_vllm_mlx import HybridRetrievalCache
-from mlx_lm import load
+⁵ `mlx_lm.cache_prompt` builds the cache with `make_prompt_cache` and writes it with `save_prompt_cache`, which serializes every cache class's state, the rotating sliding-window and recurrent (`ArraysCache`) layers included; `--kv-bits` quantizes the K/V. [`file_cache_ttft.py`](benchmarks/reproducers/file_cache_ttft.py) `--workload ssm` checks a Mamba model's recurrent state through the file, and `--workload gemma` a sliding-window model's, each against the cold path's first token ([raw output](benchmarks/reproducers/results/)).
 
-model, tok = load("mlx-community/Llama-3.2-1B-Instruct-4bit")
-hr = HybridRetrievalCache(model)             # default: in-process, bit-perfect
+† WAL durability is verified on macOS **and Linux**, V-store included: SIGKILL → restart replays the WAL and `V.FETCH` returns bit-equal data (max |Δ| = 0.0), validated on EPYC 8124P. `tests/test_vstore_wal.py` runs in Gate 2c on every gate.
 
-# one-time per chunk (typically at index time, not in the hot path)
-hr.ingest("eiffel_passage", tok.encode("The Eiffel Tower is..."))
+If you run one server and never restart it, vLLM's automatic prefix caching
+already does this and you do not need Pion.
 
-# hot path — your existing embedder returned `chunk_id`; we hydrate K/V
-cache, suffix = hr.prepare("eiffel_passage", tok.encode("How tall?\nAnswer:"))
-# pass `cache` directly to mlx-lm generate — chunk K/V already loaded
-```
+### On oMLX specifically
 
-- **Two backends.** `inproc` (default) keeps K/V as MLX arrays in a process-local dict — bit-perfect vs combined-encoding text-RAG, no Pion server needed. `pion` ships K/V via `KV.PREFIX.*` + `V.STOREBATCH/V.FETCH BATCH` for cross-process / cross-host — fp16 wire precision, requires `--kvcache --metal-attention -w 1`.
-- **Measured (Llama-3.2-1B-Instruct-4bit):** on a 100-query SQuAD v2 run ([`stage1_hybrid_recall_bench.py`](benchmarks/reproducers/stage1_hybrid_recall_bench.py), [raw results](benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json)) the inproc backend measured 3.5× p50 TTFT with 96.1% token agreement (the `pion` backend 3.2×), the cache hydration inside the clock, and both found the answer as often as text-RAG (73 and 72 of 100). Storage, from the model shapes: ~8 KB/token at INT4 (1B: 16 layers × 8 KV heads × 64), ~32 KB (7B-class: 32 × 8 × 128), ~80 KB (70B: 80 × 8 × 128).
-- **No new opcodes** — the wire backend layers entirely on the existing `PionPromptCache` substrate. Chunk_id namespaces are hashed (`chunk_<sha256[:24]>`) so they don't collide with prompt-prefix caches.
-- **Several chunks per query.** `set_shared_stub()` + `ingest_pack()` + `prepare_multi()` compose up to 8 chunk packs, each re-rotated exactly to its position ([`doc/shared_kv_cache.md`](doc/shared_kv_cache.md) §Multi-chunk). Keep the packs coarse: with many small ones, distractor chunks collide and quality drops well before 20.
+[oMLX](https://github.com/jundot/omlx) is the best way to serve
+models locally on a Mac today, and if that is what you want, use it — a
+menu-bar app, continuous batching, a RAM+SSD tiered KV cache, TurboQuant KV,
+and cache-aware cluster routing across machines.
 
-Test: [`pion-vllm-mlx/tests/test_hybrid_retrieval.py`](pion-vllm-mlx/tests/test_hybrid_retrieval.py). Spike harness: [`benchmarks/reproducers/stage0_hybrid_kv_injection.py`](benchmarks/reproducers/stage0_hybrid_kv_injection.py).
+Pion is not a serving app and does not compete with it. oMLX keeps each
+node's cache private to its own process and routes work to whichever node is
+warm; Pion is a cache *substrate* that a separate process reads over a wire
+protocol, holds hybrid/SSM state across processes rather than within one, and
+makes an acked write survive a crash. The two compose, and Pion as a shared or
+remote tier underneath oMLX is a thing we would like to build.
 
-### MoE Expert Paging — `MOE.EXPERT.*` (models beyond RAM)
-Expert weights for MoE models live in a tiered cache (per-worker RAM LRU → SSD → network) and are served over the wire, so that a model larger than physical memory can run.
-
-```bash
-./pion-server --moe-cache /path/to/experts --moe-cache-mib 8192 -w 1
-redis-cli -p 1974 MOE.EXPERT.LOAD <model> <path>      # idempotent by basename
-redis-cli -p 1974 MOE.EXPERT.FETCH <model> <layer> <expert> [NS <traffic-class>]
-redis-cli -p 1974 MOE.EXPERT.HIST <model> [NS <name>|NSLIST]  # access histograms
-redis-cli -p 1974 MOE.EXPERT.PRUNE <model> <keep-set>          # HIST-guided
-```
-
-- **HIST-guided pruning**: per-distribution access histograms (≤8 namespaces per model) drive the prune set. Quality depends on the traffic — collect histograms on traffic like yours and check perplexity on it before pruning.
-- **Multi-model**: 4 concurrent models per worker over a shared LRU; stacked bf16, per-expert INT4 and stacked INT4 expert layouts.
-
-### Auto-Embeddings
-Pion can embed text itself, so the semantic cache and text search need no Ollama, no OpenAI key and no glue code. Redis, Valkey and the dedicated vector stores expect you to bring vectors or run a separate embedding service; this is a convenience difference, not a capability one, and it matters most on a laptop where the extra service is the whole friction.
-
-```bash
-redis-cli -p 1974 AI.SEMANTIC_CACHE SET "capital of France?" "Paris"
-redis-cli -p 1974 AI.SEMANTIC_CACHE GET "What is the capital of France?"  # hit
-```
-
-Two paths, both zero-Ollama:
-
-- **macOS (genuinely zero-dependency):** pass `--nle-embed` for Apple's `NLEmbedding` (512-dim, no model download, no Python); the Homebrew service runs with it. This is the recommended macOS path. Covers `AI.EMBED`, `AI.SEMANTIC_CACHE`, `AI.MEMORY`, `FT.SEARCHTEXT`, `AI.FLARE.*`.
-- **All platforms, from a source build (PyTorch sidecar):** omit `--nle-embed`; Pion auto-spawns `src/inference/worker.py` with MiniLM-L6-v2 (384-dim, ~90 MB download on first run). Requires `torch` + `transformers` — install with `pixi run install-inference`. Falls through to Ollama (768-dim) if available; disable entirely with `--no-auto-embed`.
-
-### Pion Serve — Inference Proxy with L1 Cache
-OpenAI-compatible proxy on `:8321`. Drops in front of any backend (Ollama / vLLM / OpenAI / Gemini / Claude / llama.cpp), adds a semantic cache layer in front of it. How much traffic it catches depends on how repetitive the traffic is; no hit rate is published with a harness yet.
-
-```bash
-python pion-serve/serve.py --backend ollama --model gemma3:4b
-python pion-serve/serve.py --backend ollama --model gemma3:4b --distill   # +L3 concept store (FAQ workloads)
-python pion-serve/serve.py --backend ollama --rag-index my_docs           # +RAG injection
-```
-
-`/v1/stats` reports `cost_savings_pct` end-to-end. Full guide: [`doc/pion_serve.md`](doc/pion_serve.md).
-
-### KV (Redis-wire-compatible — the foundation)
-354 command names (the generated command table), every one exercised by a dispatch sweep in five argument shapes, and a differential suite that compares replies against a real `redis-server`. Strings, Hashes, Lists, Sets, Sorted Sets, Bitmaps, HyperLogLog, Geo, Streams (XADD / XREAD BLOCK), Pub/Sub, MULTI/EXEC + WATCH, TTL / EXPIRE, Lua (EVAL / FCALL), WAL persistence (SAVE / BGSAVE). A zero-alloc fast path for the hottest commands. SSO 23-byte inline strings, SIMD Swiss Table probing.
-
-### Vector Search
-HNSW with INT8 SIMD kernels, batch-8 prefix pruning, suffix early-exit. Redis 8 vector sets (VADD / VSIM / …), one set per key and searched exactly (details and limits in the [vector command reference](website/pages/reference/commands/vector.md)) — + full FT.* protocol. Hybrid BM25 + vector fusion (FT.HYBRID). Optional Metal GPU brute-force search on macOS (`--gpu`). Quantization: `--polarquant` (INT4), `--turboquant` (INT3+QJL), `--nanoquant` (INT2, experimental) — see [Quantization](#quantization).
-
-### AI Gateway (wire-native)
-
-`AI.SEMANTIC_CACHE` is the shipped, benchmarked one. The rest are real, wired and
-tested, but they are not launch claims — measured on narrower workloads than the
-numbers beside them suggest, so read each caveat as part of the entry.
-
-- **AI.SEMANTIC_CACHE** — cosine-similarity cache with auto-embedding.
-- **AI.COMPLETE** — cache + LLM in one command.
-- **AI.CHAT** — full RAG pipeline (retrieve + generate) in one command.
-- **AI.ROUTE** — semantic router over node embeddings (latency and accuracy not yet measured with a published harness).
-- **RAG.SPECULATE** — predict the next query via embedding momentum (hit rate not yet measured with a published harness).
-- **AI.KNN_LM.\*** — token-id-tagged kNN datastore substrate for client-side kNN-LM augmentation (CREATE / STORE / STOREBATCH / QUERY / INFO / DROP). Up to 16 named datastores per worker. Brute-force scan below 5K entries; **per-vector SQ8 + asymmetric INT8 SIMD HNSW** above (M=32, heap-based PQ + per-vec batch-4 distance kernel + lazy reciprocal pruning). Use cases: code completion, log generation, in-domain text infill.
-
-### MCP server (experimental)
-
-`mcp/` holds an MCP server whose tools wrap Pion: agent memory, vector search, KV, the
-semantic cache and codebase search. It is experimental. Pion serves one FT index at a
-time, so agent memory, the semantic cache and codebase search replace one another on a
-server, and no benefit to coding agents has been measured. Known limitations:
-[`mcp/README.md`](mcp/README.md).
-
-### Cluster
-
-> **Not launch-ready, and the gaps are the kind you must know before trying it.**
-> Replication runs from worker 0 only, a replica syncs by full resync rather than
-> incrementally, and **the replication stream on `port+10000` is unauthenticated**
-> — anyone who can reach it can read the WAL. Run it on a private network, treat
-> it as a preview, and see [`doc/distributed_systems.md`](doc/distributed_systems.md).
-
-SWIM gossip + Raft metadata consensus + WAL replication + failover (`CLUSTER FAILOVER FORCE` on a replica completed in 350 ms after the primary was killed, `tests/test_failover.py`; automatic promotion exists but no test covers it) + CLUSTER commands + CRC16 slot routing + MOVED/ASK redirects + slot migration + replica-reads. Valkey GLIDE / redis-py cluster / Lettuce / Jedis compatible.
+One oMLX user asked for durable, portable prefix-cache artifacts so an agent
+session would stop re-prefilling 60–120k tokens after a reload
+([#3612](https://github.com/jundot/omlx/issues/3612), no votes, since converted
+to a discussion). It is one request, not a demand signal. They proposed a
+different shape from ours — an agent-owned file with a manifest, exported
+through oMLX's own API, rather than a server — so read it as evidence for the
+*problem*, not as a vote for Pion. The constraints they arrived at are the
+four Pion had to solve: carry the recurrent/GDN state and not only KV, pin the
+quantization parameters in the manifest, key on the exact token sequence
+rather than the text, and fail closed on any mismatch.
 
 ---
 
-## Ecosystem
+## Experimental
 
-### Python Integrations
+These parts of the repository are outside the supported surface above. Each
+works as far as its tests go, and none has a published measurement of what it
+buys or a user outside this project. They stay in the tree, may change or be
+removed, and each carries an **Experimental** banner on its own page.
 
-```python
-# RedisVL -- works unmodified
-from redisvl.index import SearchIndex
-index = SearchIndex(schema, redis_url="redis://localhost:1974")
-
-# LangChain -- works unmodified
-from langchain_community.vectorstores.redis import Redis
-vs = Redis.from_texts(texts, embedding, redis_url="redis://localhost:1974")
-
-# LangGraph -- agent state persistence
-from pion_langgraph import PionSaver      # pip install -e pion-langgraph/
-
-# AutoGen -- semantic agent memory
-from pion_autogen import PionMemoryStore  # pip install -e pion-autogen/
-
-# LlamaIndex -- vector store for RAG
-from pion_llamaindex import PionVectorStore  # pip install -e pion-llamaindex/
-
-# LMCache -- wire-compatible, zero code changes
-# config: remote_url: "resp://localhost:1974"
-```
-
-### Mac Cluster Inference
-
-> Pion's side of both hooks is finished and tested; the other side is not.
-> **exo exposes no attention-hook API upstream**,
-> and the **vllm-pion v1 connector branch is unmerged** — so these are integration
-> substrate, not something you can drop into a running exo cluster today.
-
-```python
-# exo integration -- distributed inference with V offloading
-# gpu_attention routes through PionPromptCache(stage2=True),
-# which uses ATTEND.PREFIX.STORE/QUERY against Pion's native Metal SDPA.
-# Start Pion with: ./pion-server --kvcache --metal-attention -w 1
-from pion_exo import PionAttentionHook    # pip install -e pion-exo/
-hook = PionAttentionHook(pion_host="192.168.1.100", mode="gpu_attention")
-
-# mlx-lm prompt cache; with stage2=True Pion computes the attention (pion-vllm-mlx/README.md)
-from pion_vllm_mlx import PionPromptCache           # pip install 'pion-vllm-mlx[mlx]'
-```
-
----
-
-## Benchmarking
-
-```bash
-# KV (redis-benchmark, P=10)
-python3 benchmarks/valkey-benchmark/valkey-benchmark.py -c 50 -n 100000 -P 10 -w 1 --pion-only
-
-# KV (memtier_benchmark, mixed workload)
-python3 benchmarks/memtier-benchmark/memtier-benchmark.py --pion-only --profiles throughput,pipeline -w 16
-# (the harness passes --independent-workers for -w > 1 — see "Scaling past one worker")
-
-# Vector (VectorDBBench, 50K 1536D OpenAI)
-python3 benchmarks/VectorDBBench/vectordb-benchmark.py --pion-only --ef-runtime 150 --workers 10
-
-# Correctness + protocol parity
-python3 tests/test_raw.py && python3 tests/test_parity.py
-```
-
----
-
-## Architecture
-
-```
-       │ RESP2/3 wire (Redis-compatible)                   │ port+1: 0xCA5E binary frame
-       ▼                                                    ▼ (cross-process KV.PREFIX
-                                                              + ATTEND.PREFIX fast lane)
-┌──────────────────────────────────────────────────────────────────────────┐
-│  NetworkEngine — one OS thread per worker, kqueue / epoll / io_uring / XDP│
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │  TCP recv → client_buffers[fd] (partial frame accumulation)         │ │
-│  │              ↓                                                       │ │
-│  │   FastPathHandler — 28 zero-heap-alloc commands                     │ │
-│  │     GET / SET / MGET / MSET / INCR / DECR / HSET / HGET             │ │
-│  │     LPUSH / RPUSH / LPOP / RPOP / LRANGE / LLEN / DEL / EXISTS      │ │
-│  │     SADD / SPOP / ZADD / ZPOPMIN / PING / FCALL / FUNCTION LOAD    │ │
-│  │     GETBIT / SETBIT / BITCOUNT / PFADD / PFCOUNT                    │ │
-│  │              ↓ (fallback when not matched)                          │ │
-│  │   SlowPathHandler — RESP3 parse, AI gateway, vector, cluster,       │ │
-│  │     Lua 5.1, MULTI/EXEC/WATCH, FT.* + VSET, ATTEND.PREFIX.*,        │ │
-│  │     KV.PREFIX.*, V.STOREBATCH/V.FETCH, MOE.EXPERT.*                 │ │
-│  │              ↓                                                       │ │
-│  │   ResponseWriter (4 MB buffer; -ERR-frame on overflow)               │ │
-│  │              ↓                                                       │ │
-│  │   send() / writev() / io_uring SQE                                  │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-│                                                                           │
-│  Per-worker private state (shared-nothing):                              │
-│     StripedHashMap (grows on demand) · HNSWGraph · WAL · ObjectPools     │
-│     SemanticCache · MoEExpertTier · KvCacheStore · VStoreIndex           │
-│                                                                           │
-│  Shared (across workers): listen fd · SharedHNSWView · MOE.EXPERT LRU    │
-│     V-store cross-worker directory (KV.PREFIX.* visibility)             │
-└──────────────────────────────────────────────────────────────────────────┘
-                                  ↓ writev / mmap.msync(MS_ASYNC)
-                          ┌────────────────────────────────┐
-                          │   pion.wal.{N}    (256 MB segs) │
-                          │   pion.hnsw.{N}   (snapshot)    │
-                          │   pion.vstore.{N} (snapshot)    │
-                          └────────────────────────────────┘
-```
-
-- **Shared-nothing workers**: N OS threads, each owns private hash map, HNSW, WAL, allocators — so `-w N` is N independent keyspaces and is gated behind `--independent-workers`; the default is `-w 1`. See [Scaling past one worker](#scaling-past-one-worker).
-- **Zero-alloc hot path**: SSO 23B strings, SIMD Swiss Table, `format_int_to_buf` (no division), 4 MB response buffer per worker; a reply that outgrows it continues in the connection's output queue, so replies of any size arrive whole (#49).
-- **GenericValue**: 32-byte tagged union (STRING_SSO / STRING / INT / FLOAT / HASH / LIST / SET / ZSET / BITMAP / HLL / GEO).
-- **SlabHashMap**: Swiss Table with `h2` fingerprint SIMD probing, Wyhash, 70 % fill rehash.
-- **HNSWGraph**: INT8 batch-8 prefix pruning, suffix early-exit, `l0_compact`, 24-cache-line prefetch.
-- **Native Metal SDPA** (`--metal-attention` on macOS): hand-written MSL kernels for M=1 decoder, M>1 prefill, fused, sparse, fp32 + fp16 variants — the same tokens as vanilla mlx-lm on `tests/test_mlx_lm_patch.py` (20/20).
-
----
-
-## Repository Layout
-
-```
-src/main.mojo                     # entry: pion_spawn_workers() -> N pthreads
-src/engine/state.mojo             # Pion -- state container / DI root
-src/network/fast_path.mojo        # zero-alloc fast path
-src/network/slow_path.mojo        # RESP3 fallback + AI/cluster/vector
-src/commands/                     # command handlers by family
-src/common/value.mojo             # GenericValue 32B tagged union
-src/common/hash_map.mojo          # Swiss Table
-src/vector/hnsw.mojo              # HNSWGraph
-src/vector/kernels.mojo           # SIMD distance kernels
-src/io/wal.mojo                   # mmap WAL, rotating 256 MB segments
-src/ffi/uring_wrap.c              # C shims: gossip, raft, replication, io_uring, xdp
-
-pion-serve/                       # inference proxy (semantic cache + RAG)
-pion-exo/                         # exo attention hook (Mac cluster)
-pion-vllm-mlx/                    # vllm-mlx attention backend
-pion-{langgraph,autogen,llamaindex}/  # framework integrations
-vllm-pion/                        # Python attention client
-mcp/pion_mcp/                     # MCP server (experimental)
-flare_gateway/                    # FLARE OpenAI-compat proxy
-benchmarks/                       # KV + vector benchmark harnesses
-tests/                            # correctness + parity + AI gateway
-doc/                              # technical reference
-```
+| Part | Its page | What is tested |
+|---|---|---|
+| `pion-serve`, the semantic-cache proxy (not `pion-vllm-mlx serve`) | [`doc/pion_serve.md`](doc/pion_serve.md) | its embedding path in the gate tier; router and backends in the full tier |
+| MCP server (`mcp/`) | [`mcp/README.md`](mcp/README.md) | its tools, called directly, in the gate tier; no test drives the MCP protocol |
+| Cluster: slots, gossip, Raft, replication, failover | [`doc/distributed_systems.md`](doc/distributed_systems.md) | gate and full tier; replication covers worker 0 only and its stream is unauthenticated |
+| Tenant binding (`--tenant`) | [`doc/multi_tenant.md`](doc/multi_tenant.md) | gate tier; isolation reviewed only by this project |
+| `AI.COMPLETE`, `AI.CHAT`, `AI.ROUTE.*`, `RAG.*`, `AI.FLARE.*` | [`doc/ai_gateway.md`](doc/ai_gateway.md) | wire-tested in the gate tier (needs Ollama) |
+| FLARE gateway proxy (`flare_gateway/`) | [`flare_gateway/README.md`](flare_gateway/README.md) | no test of its own |
+| `AI.KNN_LM.*`, `NEURON.PKM.*` | [the command reference](https://pion.pavelhorak.com/docs/reference/commands/rag-knn-pkm/) | full tier |
+| `MOE.EXPERT.*` expert paging | [the command reference](https://pion.pavelhorak.com/docs/reference/commands/moe-expert/) | wire-tested in the gate tier and the full tier; decode is research-grade |
+| `pion-exo` (exo attention hook) | [`pion-exo/README.md`](pion-exo/README.md) | full tier; exo has no upstream hook API |
+| `vllm-pion` (vLLM connector client) | [`vllm-pion/README.md`](vllm-pion/README.md) | no test of its own; the connector is not merged upstream |
+| LangGraph, AutoGen and LlamaIndex packages | [`pion-langgraph/`](pion-langgraph/README.md), [`pion-autogen/`](pion-autogen/README.md), [`pion-llamaindex/`](pion-llamaindex/README.md) | one gate-tier test of their basic calls |
+| LMCache backend (`pion-lmcache/`) | [`pion-lmcache/README.md`](pion-lmcache/README.md) | full tier; the CUDA connector test needs a CUDA box |
+| `pion-glide` (GLIDE client) | [`pion_glide/README.md`](pion_glide/README.md) | no test |
+| RedisVL and LangChain through their Redis clients | — | no test in the suite |
 
 ---
 
@@ -854,8 +573,7 @@ doc/                              # technical reference
 | | Pion |
 |---|---|
 | Category | **Memory engine for AI inference** |
-| Headline | **Shared KV Cache** — 1,193 ms → 46.2 ms TTFT (26×) at a 2K prefix on Llama-3.2-1B-4bit in the same process, 69.0 ms (17×) from a separate one; BLEU 1.000 cross-instance |
-| Expert paging | **MOE.EXPERT.\*** — tiered expert cache for models beyond RAM. *Substrate validation; no published measurement yet; decode is research-grade* |
+| Headline | **Shared KV Cache** — at a 2K prefix on Llama-3.2-1B-4bit, first token in 69.0 ms from a separate process over the wire and 46.2 ms in the same process, against 1,193 ms cold and 37.0 ms from mlx-lm's own prompt-cache file; BLEU 1.000 cross-instance |
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |
 | Peak KV throughput | **15.9M ops/sec** across 32 keyspaces at P=50 with 64-byte values (32 Redis 8.10.2 processes: 14.8M; at 256 bytes Redis leads, 12.4M to 11.6M) · **1.71M** on one keyspace (Redis with I/O threads: 1.38M) — [same server](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md) |
@@ -863,14 +581,17 @@ doc/                              # technical reference
 | Recall@100 | 0.960 at that QPS (Redis vector sets: 0.920); INT8, ef=150 |
 | P99 latency | 1.4 ms on Linux, 0.6 ms on an M4 Mac mini (vector search, one client) |
 | Embeddings | Apple NLEmbedding 512-dim with `--nle-embed` on macOS (no Python); MiniLM-L6-v2 384-dim from a source build |
-| Inference proxy | Pion Serve — semantic cache in front of any OpenAI-compatible backend |
 | Networking | kqueue / epoll / io_uring / AF_XDP |
 | Persistence | mmap WAL + HNSW snapshot + V-store WAL |
-| Cluster | SWIM gossip, Raft consensus, WAL replication, failover (`CLUSTER FAILOVER FORCE`: 350 ms in `tests/test_failover.py`). *Not launch-ready: replication is worker-0-only and full-resync, and the replication port is unauthenticated* |
-| AI features | semantic cache + externalized attention (shipped); RAG, FLARE, speculative RAG, `AI.CHAT`/`AI.COMPLETE` are in the box but not launch claims |
-| Mac cluster | exo / vllm-mlx hooks, MLX GPU attention sidecar. *Pion side done; the exo hook has no upstream API yet and the vllm-pion v1 connector is unmerged* |
-| Integrations | LangGraph, AutoGen, LlamaIndex, RedisVL, LangChain, LMCache |
 | License | Apache-2.0 · tuned 1536-dim vector kernels a free closed library (`libpion_vector`) — [table](#license) |
+
+---
+
+## More
+
+[Architecture](doc/architecture.md) · [Benchmarking your box](doc/benchmarking_guide.md) ·
+[Reproducers](benchmarks/reproducers/README.md) · [Development guide](doc/development_guide.md) ·
+[Operations](doc/operations.md) · [Changelog](CHANGELOG.md)
 
 ---
 

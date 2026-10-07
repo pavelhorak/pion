@@ -329,6 +329,12 @@ tier = "full"
 timeout = 600
 
 [[test]]
+file = "tests/test_experimental_banners.py"
+server = "none"
+tier = "gate"
+# README's Experimental table and each part's own banner stay in step
+
+[[test]]
 file = "tests/test_failover.py"
 server = "--cluster --cluster-host 127.0.0.1 -w 1"
 tier = "full"

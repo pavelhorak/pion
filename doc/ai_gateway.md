@@ -1,5 +1,7 @@
 # AI Gateway
 
+> **What is supported here.** `AI.SEMANTIC_CACHE`, `AI.EMBED`, `FT.ADDTEXT` and `FT.SEARCHTEXT` are part of Pion's supported surface. Everything else on this page — `AI.COMPLETE`, `AI.CHAT`, the FLARE gateway, the clustered-inference integrations, the MCP server, the semantic router (`AI.ROUTE.*`) and speculative RAG (`RAG.*`) — is **experimental**: wire-tested by `tests/test_ai_gateway.py` (gate tier, needs Ollama), with no published measurement of what it buys and no user outside this project ([README](../README.md#experimental)).
+
 Pion implements a native AI pipeline directly in the database engine, eliminating the need for
 external orchestration layers. All AI commands are handled in `src/network/slow_path.mojo` via
 blocking HTTP/1.0 calls to OpenAI-compatible external services (embedding server + LLM server).
@@ -34,6 +36,8 @@ No Python runtime. No application server. One TCP connection.
 ## Implemented Commands
 
 ### AI.COMPLETE
+
+> **Experimental.** `AI.COMPLETE` is wire-tested by `tests/test_ai_gateway.py` and `tests/test_ai_chat_json.py` (gate tier). No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
 
 ```
 AI.COMPLETE <query> [TOKENS <n>] [THRESHOLD <t>]
@@ -98,6 +102,8 @@ redis-cli FT.SEARCHTEXT products "noise cancelling audio" K 3
 ```
 
 ### AI.CHAT
+
+> **Experimental.** `AI.CHAT` is wire-tested by `tests/test_ai_gateway.py` and `tests/test_ai_chat_json.py` (gate tier). No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
 
 ```
 AI.CHAT <prompt> [CONTEXT <index> <text> [K <k>]]
@@ -251,6 +257,8 @@ silent no-op there and the failures would all be about the missing backend.
 
 ## FLARE AI Gateway (Python, `flare_gateway/`)
 
+> **Experimental.** The FLARE gateway proxy has no test of its own; `tests/test_ai_gateway.py` exercises the `AI.FLARE.*` commands it calls. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
+
 A separate Python HTTP proxy that adds **mid-generation retrieval** to any LLM backend.
 Unlike the in-Mojo `AI.CHAT` command (which retrieves once before generating), FLARE monitors
 token logprobs *during* generation and retrieves only when the model becomes uncertain.
@@ -317,6 +325,8 @@ python3 examples/pion_vs_ollama_demo.py
 ---
 
 ## Clustered Inference Integration
+
+> **Experimental.** These integration notes describe designs, not tested deployments. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
 
 Distributed inference tools — **exo**, **llama.cpp server**, **vllm-mlx**, and **Hypura** — are
 stateless HTTP APIs. When you run more than one of them, you immediately need:
@@ -477,6 +487,8 @@ The `vllm-pion/` package provides drop-in integration:
 
 ## Semantic Router
 
+> **Experimental.** `AI.ROUTE.*` is wire-tested by `tests/test_ai_gateway.py` (gate tier); its accuracy and latency are not measured with a published harness. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
+
 Routes inference queries to the node whose cached KV state is semantically closest. Instead of round-robin or least-connections, Pion routes by meaning.
 
 ### Commands
@@ -513,6 +525,8 @@ No accuracy or latency result is published with a harness yet.
 ---
 
 ## Speculative RAG
+
+> **Experimental.** `RAG.*` is wire-tested by `tests/test_ai_gateway.py` (gate tier); its hit rate is not measured with a published harness. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
 
 Predicts upcoming RAG queries using embedding-space momentum and pre-executes HNSW search before the query arrives.
 

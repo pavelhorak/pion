@@ -102,7 +102,7 @@ def build(out_dir: Path) -> Path:
     four_explained = md(S.region(readme, "four-lines-explained"))
 
     # ── numbers ──
-    two = S.section(post, "## Two numbers, with their denominators")
+    two = S.section(post, "## The numbers, with their denominators")
     rows = table_rows(two)
     numbers_rows = ""
     for r in rows:

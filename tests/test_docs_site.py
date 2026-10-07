@@ -162,6 +162,9 @@ def main():
     # the earlier 50.6× / 24× computed logits at every prompt position. The
     # 2026-10-07 rerun (the harness's prefix gained its <bos>) reads 26× / 17×.
     check("both TTFT rows with factors", "26×" in landing and "17×" in landing and "69.0 ms" in landing)
+    # 2026-10-07: the cold-only table left out the free alternative every mlx-lm
+    # user already has, which is faster on a fixed prefix. It is a row now.
+    check("the mlx-lm prompt-cache file row", "37.0 ms" in landing and "load_prompt_cache" in landing)
     # The correction sentence names the retired factors, so check the retired cells.
     check("the retired TTFT cells are gone", all(c not in landing for c in ("1,530 ms", "64.7 ms", "61.9 ms", "73.9 ms")))
     # The 64K sparse-mask row (326×) was withdrawn on 2026-10-06: its reproducer
