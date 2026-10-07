@@ -54,6 +54,11 @@ dev = ["pytest"]
 # pion-vllm-mlx/tests/run_mlx_version_matrix.sh.
 mlx = ["mlx>=0.10.0", "mlx-lm>=0.20.1,<0.33"]
 
+[project.scripts]
+# `pion-vllm-mlx serve ...`: one local endpoint for Claude Code, Codex and any
+# OpenAI client, with the prompt cache in Pion (pion_vllm_mlx/serve.py).
+pion-vllm-mlx = "pion_vllm_mlx.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["pion_vllm_mlx"]
 

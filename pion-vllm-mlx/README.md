@@ -41,6 +41,23 @@ brew install pavelhorak/tap/pion && brew services start pion   # macOS; the serv
 ./pion-server --kvcache --metal-attention                       # or from a release tarball / source build
 ```
 
+### `pion-vllm-mlx serve`: one local endpoint for coding agents
+
+```bash
+pion-vllm-mlx serve --model mlx-community/Qwen3-4B-4bit --port 8080
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080      # Claude Code
+export OPENAI_BASE_URL=http://127.0.0.1:8080/v1      # Aider, Continue, Zed; Codex: wire_api = "responses"
+```
+
+mlx-lm's server with its prompt cache in Pion, plus Anthropic `/v1/messages`
+(Claude Code) and OpenAI `/v1/responses` (Codex). A restarted serve, a second
+session and a second serve process start from the stored prefix instead of a
+full prefill, with the same greedy reply. Within one live session it does
+what stock mlx-lm does, and hybrid models (sliding-window or SSM layers) are
+not stored yet. The console script arrived after 0.1.5; on 0.1.5 run
+`python -m pion_vllm_mlx.serve` with the same flags. Guide:
+[`doc/coding_agents.md`](https://github.com/pavelhorak/pion/blob/main/doc/coding_agents.md).
+
 The `mlx` extra pins **`mlx-lm>=0.20.1,<0.33`**. That ceiling is not decoration:
 `install_pion_attention_patch()` replaces a *private* mlx-lm function and rebinds
 the snapshot-bound name inside every imported `mlx_lm.models.*` module. The

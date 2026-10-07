@@ -134,6 +134,7 @@ nav:
   - Get started:
       - Install: getting-started/install.md
       - First five minutes: getting-started/first-five-minutes.md
+      - Coding agents (serve): coding_agents.md
       - Where Pion does not help: getting-started/where-it-does-not-help.md
       - Licensing: licensing.md
   - Concepts:
