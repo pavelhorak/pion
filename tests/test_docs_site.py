@@ -170,7 +170,7 @@ def main():
     check("the withdrawn 64K row stays withdrawn", "326×" not in landing)
     check("the 64K figure links its raw output",
           "437×" in landing and "2026-10-07-mac-m4/sparse_mask_64k_niah.txt" in landing)
-    check("the honesty figure: what a short prefix saves", "1.5×" in landing)
+    check("the honesty figure: what a short prefix saves", "1.4×" in landing)  # 1.5× until the 2026-10-07 rerun
     check("install: Homebrew first on macOS", "brew install pavelhorak/tap/pion" in landing)
     check("install: the tarball is one click away", 'href="/docs/getting-started/install/"' in landing)
     check("install: docker run", "docker run" in landing)
