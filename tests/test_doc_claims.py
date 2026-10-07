@@ -64,6 +64,22 @@ ign = C.ignored_by_git(["scratch-not-evidence.txt", "benchmarks/results/any/run.
 check("a .txt outside benchmarks/results/ is reported as gitignored", "scratch-not-evidence.txt" in ign, f"got {ign}")
 check("raw results under benchmarks/results/ are not", "benchmarks/results/any/run.txt" not in ign, f"got {ign}")
 
+print("[3b] a TTFT ratio against a cold start must name the file baseline (canary)")
+import tempfile
+with tempfile.TemporaryDirectory() as d:
+    bad = Path(d) / "bad.md"
+    bad.write_text("# Numbers\n\nTime to first token, warm against a vanilla cold start: **17×**.\n")
+    good = Path(d) / "good.md"
+    good.write_text("# Numbers\n\nTime to first token, warm against a vanilla cold start: **17×**.\n\n"
+                    "mlx-lm's own `load_prompt_cache` file answers faster.\n")
+    other = Path(d) / "other.md"
+    other.write_text("# Numbers\n\nTime to first token: **17×**.\n\n## Elsewhere\n\n"
+                     "mlx-lm's own `load_prompt_cache` file answers faster than a vanilla cold start.\n")
+    check("flags a cold-only TTFT ratio", len(C.ttft_without_file_baseline(bad)) == 1)
+    check("accepts one whose section names load_prompt_cache", not C.ttft_without_file_baseline(good))
+    check("a TTFT section without a cold or vanilla word is not a cold-start ratio",
+          not C.ttft_without_file_baseline(other))
+
 print("[4] the published docs")
 rc = C.check()
 check("every measured number in the published docs names its evidence", rc == 0,

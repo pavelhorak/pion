@@ -14,6 +14,17 @@ where the saving is about 14 ms. Harness:
 raw output of every run:
 [`cross_process_ttft_2026_10_07.json`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json).
 
+**mlx-lm's own prompt-cache file is faster.** `save_prompt_cache` /
+`load_prompt_cache` answer the same question in **37.0 ms** from a fresh
+process, mapping a 67 MB file
+([`file_cache_ttft.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/file_cache_ttft.py),
+[raw output](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json)).
+If one program reuses one fixed prefix, use the file. This package is for
+what a file does not do: a cache any process or model object reads over the
+Redis wire, an acked write that survives a crash, and, in `pion-vllm-mlx
+serve`, a longest-prefix match over every stored conversation that a
+restarted agent or a second session picks up without naming a file.
+
 Stage 2 runs on three lanes, auto-selected by `PionPromptCache`:
 
 | Lane | Where it runs | TTFT p50, ~316-token system-prompt prefixes (Llama-3.2-1B-4bit, 100 requests; vanilla ~200 ms) |

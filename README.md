@@ -85,12 +85,24 @@ and how it stores a conversation: [`doc/coding_agents.md`](doc/coding_agents.md)
 <!-- --8<-- [end:serve] -->
 
 <!-- --8<-- [start:two-numbers] -->
-**Time to first token on Apple Silicon, warm cache against a vanilla cold start:**
+**Time to first token on Apple Silicon, against a cold start and against
+mlx-lm's own prompt-cache file:**
 
-| Llama-3.2-1B-4bit, 2,049-token prefix, 16-token question | vanilla mlx-lm | Pion warm | |
-|---|---:|---:|:---:|
-| The process that stored the prefix, asking again | 1,193 ms | **46.2 ms** | **26×** |
-| A separate process, over the wire | 1,193 ms | **69.0 ms** | **17×** |
+| Llama-3.2-1B-4bit, 2,049-token prefix, 16-token question | first token | vs cold |
+|---|---:|---:|
+| Cold prefill, vanilla mlx-lm | 1,193 ms | |
+| mlx-lm's own prompt-cache file, read by a fresh process (`load_prompt_cache`, a 67 MB file) | **37.0 ms** | 32× |
+| Pion, the process that stored the prefix, asking again | 46.2 ms | 26× |
+| Pion, a separate process, over the wire | 69.0 ms | 17× |
+
+**A file is faster.** `save_prompt_cache` and `load_prompt_cache` ship with
+mlx-lm, and mapping a 67 MB file beats fetching the same rows over loopback
+TCP. If one program reuses one fixed prefix, use the file. Pion is for what a
+file does not do: one server that any process, model object or tool reads
+over the Redis wire, with an acked write that survives a crash, and, through
+`pion-vllm-mlx serve`, a longest-prefix match over every conversation it has
+stored, kept under a byte budget, so a restarted agent or a second session
+has no file to find and name.
 
 A shorter prefix saves less: from a separate process the same measurement gives
 12× at 1,035 tokens, 4.6× at 268, and 1.4× at 34, where the saving is about
@@ -101,7 +113,10 @@ for both rows (`--prefix-tokens` for the shorter prefixes) with its
 [raw output](benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json),
 and `tests/test_kv_prefix_cross_instance.py` with
 [its output](benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt),
-both on an M4 Mac mini. The vanilla side times the first token the way mlx-lm's
+both on an M4 Mac mini; the file row is
+[`file_cache_ttft.py`](benchmarks/reproducers/file_cache_ttft.py) with
+[its raw output](benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json),
+timed the same way, model load outside the clock. The vanilla side times the first token the way mlx-lm's
 own `generate_step` produces it; until 2026-10-02 it also computed logits at
 every prompt position, which no generation does, and the ratios published then
 were too high. The [changelog](CHANGELOG.md) has the correction. The figures
@@ -115,7 +130,10 @@ Both answered with the needle's number, while each full-attention layer
 attended 512 of the prefix's tokens, 0.80%
 ([`examples/sparse_mask_64k_niah.py`](examples/sparse_mask_64k_niah.py),
 [raw output](benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt), M4
-Mac mini, mlx-lm 0.31.3). It is one needle at one depth, warm against cold. On
+Mac mini, mlx-lm 0.31.3). It is one needle at one depth, warm against cold.
+mlx-lm's own prompt-cache file of the same prefix (405 MB) answers in 82.6 ms
+([raw output](benchmarks/reproducers/results/file_cache_ttft_gemma_64000_2026_10_07.json)),
+faster again, and it attends the whole prefix where Pion's mask attends 0.80%. On
 2026-10-06 the example found the needle with neither vanilla nor Pion, because
 its prompt carried 397 `<bos>` tokens; it now carries one.
 <!-- --8<-- [end:two-numbers] -->
@@ -140,15 +158,16 @@ redis-cli -p 1974 SET hello world     # the Redis wire still works
 
 Every competitor here does something well, and most of them do more than a
 table can show. Cells are what each project **ships today** (checked
-2026-09-19); the footnotes carry the sources.
+2026-09-19; the mlx-lm column re-checked against mlx-lm 0.31.3 on 2026-10-07);
+the footnotes carry the sources.
 
 | | LMCache (+vLLM) | SGLang HiCache | oMLX | mlx-lm `cache_prompt` | **Pion** |
 |---|:---:|:---:|:---:|:---:|:---:|
 | Cache shared across **processes** | ✓ via remote store¹ | ✓ L3¹ | ✗ per-process² | manual file | **✓ wire-native** |
 | Survives restart | ✓ | ✓ | ✓ SSD tier | ✓ manual | **✓** |
 | **Crash-consistent** (acked = durable) | ✗ | ✗ | ✗ | ✗ | **✓ WAL**† |
-| KV quantization | FP8; 4-bit demo³ | FP8 | ✓ TurboQuant | ✗ | **fp16/int8/turbo4/INT3/INT2/mlx4g32** |
-| Hybrid (Mamba/GDN) prefix state | in-process⁴ | host + storage tiers⁴ | in-process + SSD | ✗ | **cross-process + persisted** |
+| KV quantization | FP8; 4-bit demo³ | FP8 | ✓ TurboQuant | ✓ `--kv-bits`⁵ | **fp16/int8/turbo4/INT3/INT2/mlx4g32** |
+| Hybrid (Mamba/GDN) prefix state | in-process⁴ | host + storage tiers⁴ | in-process + SSD | ✓ in the file⁵ | **cross-process + persisted** |
 | Sparse long-context selector | ✗ | ✗ | ✗ | ✗ | **✓ block-mean, bit-identical decode** |
 | MoE expert paging | ✗ | ✗ | ✓ in-process (experimental) | ✗ | **✓ cross-process + histograms** |
 | Apple Silicon | ✗ (CUDA) | ✗ (CUDA) | ✓ | ✓ | **✓** (+ Linux CPU) |
@@ -171,9 +190,11 @@ that a **different program, a different model object, or a different machine**
 reads directly — no connector, no serving stack, no CUDA.
 
 ¹ LMCache ships `local_disk_backend.py`, `p2p_backend.py` and NIXL/remote connectors; SGLang HiCache L3 backs onto Mooncake/3FS/NIXL.
-² oMLX per-node caches are private to the process; its cluster scheduler scores nodes on prefix affinity and routes to the hot one. An export/import API was requested by a user on 2026-09-12 ([jundot/omlx#3612](https://github.com/jundot/omlx/issues/3612)) and is not shipped.
+² oMLX per-node caches are private to the process; its cluster scheduler scores nodes on prefix affinity and routes to the hot one. An export/import API was requested by one user on 2026-09-12 ([jundot/omlx#3612](https://github.com/jundot/omlx/issues/3612), converted to a discussion on 2026-10-05 with no votes); the same user's draft implementation ([jundot/omlx#3615](https://github.com/jundot/omlx/pull/3615)) is unmerged, and nothing has shipped.
 ³ LMCache demoed 4-bit KV with AMD on 2026-08-28.
 ⁴ vLLM merged hybrid prefix caching 2026-07-12 ([vllm#46384](https://github.com/vllm-project/vllm/pull/46384)), vllm-metal 2026-08-10 ([#584](https://github.com/vllm-project/vllm-metal/pull/584)); both share that state **within** a process. SGLang's HiCache tiers hybrid GDN/Mamba state to host memory and its storage backends as of 2026-09-21 ([sglang#37507](https://github.com/sgl-project/sglang/pull/37507)), inside its own serving stack.
+
+⁵ `mlx_lm.cache_prompt` builds the cache with `make_prompt_cache` and writes it with `save_prompt_cache`, which serializes every cache class's state, the rotating sliding-window and recurrent (`ArraysCache`) layers included; `--kv-bits` quantizes the K/V. [`file_cache_ttft.py`](benchmarks/reproducers/file_cache_ttft.py) `--workload ssm` checks a Mamba model's recurrent state through the file, and `--workload gemma` a sliding-window model's, each against the cold path's first token ([raw output](benchmarks/reproducers/results/)).
 
 † WAL durability is verified on macOS **and Linux**, V-store included: SIGKILL → restart replays the WAL and `V.FETCH` returns bit-equal data (max |Δ| = 0.0), validated on EPYC 8124P. `tests/test_vstore_wal.py` runs in Gate 2c on every gate.
 
@@ -194,10 +215,10 @@ protocol, holds hybrid/SSM state across processes rather than within one, and
 makes an acked write survive a crash. The two compose, and Pion as a shared or
 remote tier underneath oMLX is a thing we would like to build.
 
-That the problem is real is not just our claim: an oMLX user recently asked
-for durable, portable prefix-cache artifacts so an agent session would stop
-re-prefilling 60–120k tokens after a reload
-([#3612](https://github.com/jundot/omlx/issues/3612)). They proposed a
+One oMLX user asked for durable, portable prefix-cache artifacts so an agent
+session would stop re-prefilling 60–120k tokens after a reload
+([#3612](https://github.com/jundot/omlx/issues/3612), no votes, since converted
+to a discussion). It is one request, not a demand signal. They proposed a
 different shape from ours — an agent-owned file with a manifest, exported
 through oMLX's own API, rather than a server — so read it as evidence for the
 *problem*, not as a vote for Pion. The constraints they arrived at are the
@@ -600,6 +621,14 @@ text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)
 - **A mixed workload**: mean TTFT over every request, each prompt's first and cold one included, on Llama-3.2-1B-Instruct-4bit with ~316-token prefixes. `tests/test_kv_prefix_workload.py` (5 prompts × 10 queries) measures Stage 1 at **3.6×** (a 90% hit rate); `tests/bench_w1_stage2.py` (5 × 20) measures Stage 2's in-process lane at **4.7×**. First tokens agree with vanilla mlx-lm on 50 of 50 requests in each Stage 2 lane and on 49 of 50 in Stage 1, whose one disagreement is a near-tie: vanilla's top two tokens are 0.016 logits apart, and the fp16-stored cache picks the other (2026-10-07, M4 Mac mini, [raw output](benchmarks/results/2026-10-07-mac-m4/)). It times differently from `cross_process_ttft.py`, the source of the 17× figure, so read the two side by side rather than as one curve.
 - **`V.FETCH BATCH`**: a multi-layer fetch that returns all active layers in one round-trip — replaces 32 sequential per-layer calls (16 layers × K + V).
 
+Every ratio in this section is against a cold start. On one fixed 2,049-token
+prefix with a 16-token question, mlx-lm's own prompt-cache file
+(`load_prompt_cache`) is faster than either Pion lane: 37.0 ms against 46.2 ms
+in-process and 69.0 ms over the wire (the table at the top of this README).
+With a one-token suffix the in-process lane is ahead of the file, 11.2 ms
+against 14.6 ms (`tests/bench_ttft.py`, the table in
+[`doc/shared_kv_cache.md`](doc/shared_kv_cache.md)).
+
 Full design + numbers: [`doc/shared_kv_cache.md`](doc/shared_kv_cache.md).
 
 ### Hybrid Retrieval — RAG K/V hydration
@@ -854,7 +883,7 @@ doc/                              # technical reference
 | | Pion |
 |---|---|
 | Category | **Memory engine for AI inference** |
-| Headline | **Shared KV Cache** — 1,193 ms → 46.2 ms TTFT (26×) at a 2K prefix on Llama-3.2-1B-4bit in the same process, 69.0 ms (17×) from a separate one; BLEU 1.000 cross-instance |
+| Headline | **Shared KV Cache** — at a 2K prefix on Llama-3.2-1B-4bit, first token in 69.0 ms from a separate process over the wire and 46.2 ms in the same process, against 1,193 ms cold and 37.0 ms from mlx-lm's own prompt-cache file; BLEU 1.000 cross-instance |
 | Expert paging | **MOE.EXPERT.\*** — tiered expert cache for models beyond RAM. *Substrate validation; no published measurement yet; decode is research-grade* |
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |

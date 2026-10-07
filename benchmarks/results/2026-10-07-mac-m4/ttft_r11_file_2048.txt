@@ -1,0 +1,31 @@
+  Loading mlx-community/Llama-3.2-1B-Instruct-4bit...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 79891.50it/s]
+  Prompt: 2048 tokens, suffix start token = 1176
+
+  Path A: vanilla mlx-lm cold prefill
+    TTFT median:  1176.9 ms (min 1170.4, max 1232.7), first_token=393
+
+  Path B: PionPromptCache cache-rebuild (vquant=fp16)
+    Cold (prefill + register + store + first token):  1262.8 ms (min 1262.8, max 1262.8)
+    Warm (lookup + fetch + rebuild + first token):      40.5 ms (min   32.8, max   43.1)
+
+  Path C: Stage 2, wire lane (Pion computes the prefix attention)
+    Cold (prefill + register + store, both lanes):  1322.5 ms (min 1322.5, max 1322.5)
+    Warm (lookup + wire attention + first token):     24.3 ms (min   23.7, max   31.8)
+
+  Path D: Stage 2, in-process lane (the instance that prefilled)
+    Warm (lookup + local attention + first token):    11.2 ms (min   10.9, max   11.9)
+
+  Path E: mlx-lm prompt-cache file (save_prompt_cache / load_prompt_cache)
+    Warm (load_prompt_cache + first token), file 67.1 MB:    14.6 ms (min   14.0, max   16.9)
+
+  Headline TTFT (warm path, median of 10):
+    Path A vanilla cold:         1176.9 ms
+    Path B cache-rebuild:          40.5 ms  (29.05× vs A)
+    Path C Stage 2, wire lane:     24.3 ms  (48.41× vs A)
+    Path D Stage 2, in-process:    11.2 ms  (105.25× vs A)
+    Path E mlx-lm file:            14.6 ms  (80.87× vs A)  [67.1 MB]
+
+    Stage-2 wins: 1.67× faster than cache-rebuild.
+
+    (Path B/C cold path one-time cost: B=1262.8ms, C=1322.5ms)

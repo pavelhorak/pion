@@ -16,16 +16,24 @@ cache = pc.get_or_prefill(prefix_ids, namespace="app|v1|llama-1b|system_v1")  # 
 text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)             # decode as usual, at native speed
 ```
 
-| Time to first token, Apple Silicon | vanilla mlx-lm | Pion warm | |
-|---|---:|---:|:---:|
-| Llama-3.2-1B-4bit, 2,049-token prefix, **same process** | 1,193 ms | **46.2 ms** | **26×** |
-| Same model and prefix, **from a separate process**, over the wire | 1,193 ms | 69.0 ms | **17×** |
+| Time to first token, Apple Silicon: Llama-3.2-1B-4bit, 2,049-token prefix, 16-token question | first token | vs cold |
+|---|---:|---:|
+| Cold prefill, vanilla mlx-lm | 1,193 ms | |
+| mlx-lm's own prompt-cache file, read by a fresh process (67 MB) | **37.0 ms** | 32× |
+| Pion, **same process** | 46.2 ms | 26× |
+| Pion, **from a separate process**, over the wire | 69.0 ms | 17× |
 
-The two rows differ only by *where the cache comes from*: the first is the
+The two Pion rows differ only by *where the cache comes from*: the first is the
 process that computed it, the second fetches what a separate process wrote and
 reproduces the vanilla output at BLEU 1.000. Both come from
 [`cross_process_ttft.py`](../benchmarks/reproducers/cross_process_ttft.py)
-(`--same` adds the first).
+(`--same` adds the first); the file row from
+[`file_cache_ttft.py`](../benchmarks/reproducers/file_cache_ttft.py), timed the
+same way. **A file is faster:** if one program reuses one fixed prefix, use
+mlx-lm's `save_prompt_cache` / `load_prompt_cache`. Pion is for what a file
+does not do: a cache every process reads over one wire, crash-consistent, and
+through [`pion-vllm-mlx serve`](coding_agents.md) a longest-prefix match that a
+restarted agent or a second session finds by itself.
 Read the limits before installing: it caches prefill, not decode, and it
 only pays off when a long prefix is really reused.
 

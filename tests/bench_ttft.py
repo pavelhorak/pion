@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TTFT benchmark — three paths on the same prompt:
+"""TTFT benchmark — five paths on the same prompt:
 
   A. Vanilla mlx-lm cold prefill
   B. PionPromptCache cache-rebuild (shipped — fetches K/V from V-store,
@@ -9,6 +9,10 @@
      the wire per layer.
   D. Stage 2, in-process lane — the PionPromptCache that prefilled keeps
      the prefix K/V resident as MLX arrays; attention runs locally.
+  E. mlx-lm's own prompt-cache FILE — save_prompt_cache once, then each run
+     times load_prompt_cache(file) + the first token. Free, built into mlx-lm,
+     and the baseline every Pion number here has to be read against (the
+     file sits in the page cache, as Pion's rows sit in a RAM-resident server).
 
 Goal: quantify the headline question — does (C) beat (B), and by how
 much? Closes the §28.3 ⚠ feasibility-only row at the value level.
@@ -21,8 +25,8 @@ Reports per-path: ms-to-first-token (median of N=5 runs), token-1
 correctness vs (A), and a cost breakdown (prefill / fetch / store /
 attend_query) for paths B and C.
 
-All four paths produce the first token after the same prompt: A prefills it
-the way mlx_lm.generate_step does (see first_token_logits), B, C and D restore
+All five paths produce the first token after the same prompt: A prefills it
+the way mlx_lm.generate_step does (see first_token_logits), B, C, D and E restore
 every token but the last and run the last one, and each must produce A's token. Until 2026-10-02 path A
 evaluated the logits of one forward over the whole prompt — a vocabulary
 projection at every position, which no generation computes — and path B
@@ -158,6 +162,8 @@ def main() -> int:
         ttft_c_first = []     # Path C first call (prefill + ATTEND.PREFIX.STORE)
         ttft_c_warm = []      # Path C subsequent calls (wire lane: attention in Pion)
         ttft_d_warm = []      # Path D (in-process lane: prefix K/V resident as MLX arrays)
+        ttft_e_warm = []      # Path E (mlx-lm's own prompt-cache file: load_prompt_cache)
+        file_bytes = 0
         ref_first_token = None
 
         # ── Path A: vanilla mlx-lm prefill ─────────────────────────────────
@@ -246,16 +252,51 @@ def main() -> int:
         finally:
             uninstall_pion_attention_patch()
 
+        # ── Path E: mlx-lm's own prompt-cache file ─────────────────────────
+        # The free alternative a reader already has. Prefill every token but
+        # the last once and save it (untimed, like B's and C's first call);
+        # each run then maps the file back and answers the first token.
+        print(f"\n  Path E: mlx-lm prompt-cache file (save_prompt_cache / load_prompt_cache)")
+        import tempfile
+        from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
+        with tempfile.TemporaryDirectory(prefix="bench_ttft_file_") as d:
+            fpath = os.path.join(d, "prefix.safetensors")
+            cache_e = make_prompt_cache(model)
+            first_token_logits(model, prompt_ids[:-1] + prompt_ids[-1:], cache_e)  # warm the same shapes
+            cache_e = make_prompt_cache(model)
+            x = mx.array([prompt_ids[:-1]])
+            done, n = 0, x.shape[1]
+            while done < n:
+                step = min(PREFILL_STEP, n - done)
+                model(x[:, done:done + step], cache=cache_e)
+                mx.eval([c.state for c in cache_e])
+                done += step
+            save_prompt_cache(fpath, cache_e)
+            file_bytes = os.path.getsize(fpath)
+            for i in range(args.runs - 1):
+                t0 = time.perf_counter()
+                cache_f = load_prompt_cache(fpath)
+                tok_e = int(mx.argmax(first_token_logits(model, prompt_ids[-1:], cache_f)))
+                ttft_e_warm.append((time.perf_counter() - t0) * 1000)
+                if tok_e != ref_first_token:
+                    print(f"    !! E run {i}: first token {tok_e} != vanilla {ref_first_token}")
+                    rc = 1
+        print(f"    Warm (load_prompt_cache + first token), file {file_bytes / 1e6:.1f} MB: "
+              f"{median_pretty(ttft_e_warm)}")
+
         # ── Summary ────────────────────────────────────────────────────────
         median_a = statistics.median(ttft_a)
         median_b = statistics.median(ttft_b_warm) if ttft_b_warm else float("nan")
         median_c = statistics.median(ttft_c_warm) if ttft_c_warm else float("nan")
         median_d = statistics.median(ttft_d_warm) if ttft_d_warm else float("nan")
+        median_e = statistics.median(ttft_e_warm) if ttft_e_warm else float("nan")
         print(f"\n  Headline TTFT (warm path, median of {args.runs - 1}):")
         print(f"    Path A vanilla cold:        {median_a:7.1f} ms")
         print(f"    Path B cache-rebuild:       {median_b:7.1f} ms  ({median_a/median_b:.2f}× vs A)")
         print(f"    Path C Stage 2, wire lane:  {median_c:7.1f} ms  ({median_a/median_c:.2f}× vs A)")
         print(f"    Path D Stage 2, in-process: {median_d:7.1f} ms  ({median_a/median_d:.2f}× vs A)")
+        print(f"    Path E mlx-lm file:         {median_e:7.1f} ms  ({median_a/median_e:.2f}× vs A)"
+              f"  [{file_bytes / 1e6:.1f} MB]")
         if median_c < median_b:
             print(f"\n    Stage-2 wins: {median_b/median_c:.2f}× faster than cache-rebuild.")
         else:

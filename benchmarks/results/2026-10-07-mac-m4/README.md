@@ -121,6 +121,7 @@ written at ingest, outside every timed span.
 
 | File | Server flags | Command | Result |
 |---|---|---|---|
+| `ttft_r11_file_256.txt`, `ttft_r11_file_1024.txt`, `ttft_r11_file_2048.txt` | `--kvcache --metal-attention -w 1`, started by the harness with its WAL on (16 GB free, not the RAM disk above), late on 2026-10-07 | `PION_BIN=./pion-server python3 tests/bench_ttft.py --start --prompt-tokens N --runs 11` | five paths with a one-token suffix, path E being mlx-lm's own prompt-cache file; at 2,048 tokens: cold 1,176.9 ms, Stage 1 40.5 ms, wire lane 24.3 ms, in-process 11.2 ms, file 14.6 ms |
 | `cross_process_ttft.txt` ([JSON](../../reproducers/results/cross_process_ttft_2026_10_07.json)) | `--kvcache --metal-attention -w 1` | `python3 benchmarks/reproducers/cross_process_ttft.py --prefix-tokens 34 268 1035 2049 --pairs 5 --same` | 2,049 tokens: cold 1,193 ms, separate process 69.0 ms (17.3×), same process 46.2 ms (25.8×); 12.35× / 4.62× / 1.44× at 1,035 / 268 / 34 |
 | `stage1_hybrid.txt` ([JSON](../../reproducers/results/stage1_hybrid_results_2026_10_07.json)) | same | `python3 benchmarks/reproducers/stage1_hybrid_recall_bench.py --n 100 --with-pion` | p50 TTFT 113.8 / 32.5 / 35.8 ms (text-RAG / inproc / pion), 3.5× and 3.2×; answer found 0.72 / 0.73 / 0.73; token agreement 96.1% |
 | `prompt_cache_workload_q30_r8.txt` | `--kvcache -w 1` | `python3 pion-vllm-mlx/tests/test_prompt_cache_workload.py --vquant fp16 --prompts 5 --queries 30 --prompt-repeats 8` | 8.92× mean TTFT, 96.7% hits, 50/50 first tokens |
