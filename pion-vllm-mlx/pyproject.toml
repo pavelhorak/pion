@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pion-vllm-mlx"
-version = "0.1.4"
+version = "0.1.5"
 description = "Pion prompt cache for mlx-lm on Apple Silicon — reuse a prefix's K/V across processes and restarts"
 requires-python = ">=3.10"
 # Apache-2.0 since 2026-09-21: this is a client library people vendor into

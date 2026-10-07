@@ -6,6 +6,28 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-10-07
+
+Every harness, reproducer and example now builds its prompt with exactly one
+`<bos>`. A stray second one mid-prompt had broken the 64K sparse-mask NIAH
+reproducer and moved several published figures. The 64K result is back at
+437× with its raw output, and the figures the stray tokens inflated are
+corrected: quantized-tier BLEU, hybrid-retrieval agreement, and RULER.
+`pion-vllm-mlx` 0.1.5 carries the corrected figures and the one-`<bos>`
+guidance to its PyPI page. The server is unchanged from 0.9.6, and the two
+read each other's data.
+
+### Changed
+
+- **`pion-vllm-mlx` 0.1.5: documentation only.** 0.1.4's PyPI page showed the
+  pre-0.9.6 TTFT figures and a hybrid-retrieval result the stray `<bos>`
+  inflated (3.0×, 98.3% token agreement). It now shows the 2026-10-07
+  measurements, each linked to its harness and raw output: 26× in the same
+  process, 17× over the wire, and hybrid retrieval at 3.5× with 96.1%
+  agreement. The `HybridRetrievalCache` docstring now says to encode a query
+  or chunk that follows other tokens with `add_special_tokens=False`. The
+  code and its dependency bounds are unchanged from 0.1.4.
+
 ### Fixed
 
 - **`examples/sparse_mask_64k_niah.py` finds the needle again.** It built its
