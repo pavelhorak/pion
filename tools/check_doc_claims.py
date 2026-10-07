@@ -78,14 +78,32 @@ INPUT_NOUN = re.compile(
     r"Mac\b|Mac mini|MacBook|machine|RAM|of RAM|box|laptop|unified|GPU|VRAM|card|device|NIAH|sparse|★)", re.I)
 
 
+def git_files() -> set[str] | None:
+    """Every file git tracks or would add (untracked, not ignored); None outside a
+    git tree. A working checkout can hold gitignored notes, symlinked in, that no
+    clean checkout publishes. `git check-ignore` cannot sort those out: it aborts
+    on the first path that runs through a symlinked directory."""
+    try:
+        out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                             capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return set(out.stdout.decode("utf-8", errors="replace").split("\0")) - {""}
+
+
 def published_files() -> list[Path]:
     files = sorted(ROOT.glob("*.md")) + sorted(ROOT.glob("*/README.md")) + sorted(ROOT.glob("*/*/README.md"))
     files += sorted((ROOT / "doc").glob("**/*.md")) + sorted((ROOT / "website").glob("**/*.md"))
     files += sorted((ROOT / "website" / "landing").glob("*.html"))
+    known = git_files()
     out, seen = [], set()
     for f in files:
         rel = f.relative_to(ROOT).as_posix()
         if rel in seen or rel in EXEMPT_FILES or f.name in EXEMPT_FILES or rel.startswith(EXEMPT_DIRS) or not f.is_file():
+            continue
+        if known is not None and rel not in known:
             continue
         seen.add(rel)
         out.append(f)
