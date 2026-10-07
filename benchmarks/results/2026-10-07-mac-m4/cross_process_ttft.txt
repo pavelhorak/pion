@@ -1,0 +1,7 @@
+ prefix        cold   hit (fresh process)    ratio   same process    ratio
+     34      45.0ms                31.2ms    1.44x         30.6ms    1.47x
+    268     165.8ms                35.9ms    4.62x         31.9ms    5.20x
+   1035     589.0ms                47.7ms   12.35x         35.6ms   16.53x
+   2049    1193.4ms                69.0ms   17.30x         46.2ms   25.82x
+raw runs -> cross_process_ttft.json
+rc=0

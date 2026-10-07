@@ -159,10 +159,11 @@ def main():
     # different workload, shown beside a 2,048-token row it did not match. Both rows
     # now come from cross_process_ttft.py (--same adds the first), and since
     # 2026-10-02 their vanilla side prefills the way mlx-lm's generate_step does —
-    # the earlier 50.6× / 24× computed logits at every prompt position.
-    check("both TTFT rows with factors", "20×" in landing and "17×" in landing and "73.9 ms" in landing)
+    # the earlier 50.6× / 24× computed logits at every prompt position. The
+    # 2026-10-07 rerun (the harness's prefix gained its <bos>) reads 26× / 17×.
+    check("both TTFT rows with factors", "26×" in landing and "17×" in landing and "69.0 ms" in landing)
     # The correction sentence names the retired factors, so check the retired cells.
-    check("the retired TTFT cells are gone", "1,530 ms" not in landing and "64.7 ms" not in landing)
+    check("the retired TTFT cells are gone", all(c not in landing for c in ("1,530 ms", "64.7 ms", "61.9 ms", "73.9 ms")))
     # The 64K sparse-mask row (326×) was withdrawn on 2026-10-06: its reproducer
     # missed the needle, and its vanilla time was never recorded. The figure that
     # replaced it on 2026-10-07 comes from a published run, and links to it.

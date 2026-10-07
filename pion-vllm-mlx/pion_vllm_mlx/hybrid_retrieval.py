@@ -32,7 +32,10 @@ Usage:
     chunk_ids = tok.encode("The Eiffel Tower is...")
     hr.ingest("eiffel_passage", chunk_ids)
 
-    query_ids = tok.encode("Question: How tall is it?\\nAnswer:")
+    # The query follows the chunk, so encode it without special tokens: a plain
+    # tok.encode() prepends <bos> again (Llama 3 does by default), and a second
+    # <bos> mid-prompt changes what the model answers.
+    query_ids = tok.encode("Question: How tall is it?\\nAnswer:", add_special_tokens=False)
     cache, suffix_ids = hr.prepare("eiffel_passage", query_ids)
     # mlx-lm generate from this point — chunk K/V is already in `cache`.
 
@@ -327,6 +330,9 @@ class HybridRetrievalCache:
         The stub has to be present at encode time (the chunk attends it) and
         re-prepended at serve time (see set_shared_stub) — storing the chunk
         alone and hoping is exactly the failure mode this API exists to avoid.
+
+        The stub opens the prompt and carries the tokenizer's <bos>; encode the
+        chunk with `add_special_tokens=False`, or it adds a second one.
         """
         mx, _ = _require_mlx()
         if self._stub_kv is None:

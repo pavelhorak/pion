@@ -132,7 +132,8 @@ def main(args) -> int:
     warm_total_ms = 0.0
     first_match = 0
     for qi, q in enumerate(EVAL_QUERIES[:args.queries]):
-        suffix_ids = tok.encode(q)
+        # The question follows the prefix: no second <bos> (until 2026-10-07 it had one).
+        suffix_ids = tok.encode(q, add_special_tokens=False)
         # COLD: standalone, full forward + greedy decode
         t0 = time.perf_counter()
         cold_cache = make_prompt_cache(model)

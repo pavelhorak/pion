@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO / "pion-vllm-mlx"))
 sys.path.insert(0, str(REPO / "tests"))
 
 from _gemma4_text_filter_load import _resolve_snapshot, load_tokenizer_only  # noqa: E402
-from _prompt_ids import bos, bos_count, one_bos, piece  # noqa: E402
+from _prompt_ids import bos, bos_count, chat_prompt, one_bos, piece  # noqa: E402
 from mlx_lm.tokenizer_utils import load as load_tokenizer  # noqa: E402
 
 failures: list[str] = []
@@ -60,7 +60,7 @@ llama = load_tokenizer(_resolve_snapshot("mlx-community/Llama-3.2-1B-Instruct-4b
 
 print("[1] the tokenizers prepend <bos> on a plain encode (canary)")
 for name, tok in (("gemma-4 (loader)", gemma), ("llama-3.2", llama)):
-    naive = tok.encode("Some filler text.") + tok.encode("Question: what?")
+    naive = tok.encode("Some filler text.") + tok.encode("Question: what?")  # bos-audit: ok — the canary
     check(f"{name}: two plain pieces carry two <bos>", bos_count(tok, naive) == 2,
           f"got {bos_count(tok, naive)}")
     try:
@@ -110,6 +110,27 @@ for name, tok in (("llama-3.2", llama), ("gemma-4 (loader)", gemma)):
     q = w1.USER_QUERIES[0]
     ok, why = well_formed(tok, w1.request_ids(tok, sys_ids, q), piece(tok, q))
     check(f"test_kv_prefix_workload / bench_w1_stage2 request_ids ({name})", ok, why)
+
+xp = load_module("cross_process_ttft", REPO / "benchmarks" / "reproducers" / "cross_process_ttft.py")
+for n in (34, 2049):
+    prefix = xp.build_prefix_ids(llama, n)
+    q = piece(llama, xp.QUESTION)
+    ok, why = well_formed(llama, prefix + q, q)
+    check(f"cross_process_ttft.build_prefix_ids({n}) + question", ok and len(prefix) == n, why or f"{len(prefix)} tokens")
+
+hyb = load_module("stage1_hybrid", REPO / "benchmarks" / "reproducers" / "stage1_hybrid_recall_bench.py")
+chunk, suffix = hyb.prompt_pieces(llama, "The Eiffel Tower is 330 metres tall.", "How tall is it?")
+ok, why = well_formed(llama, chunk + suffix, suffix)
+check("stage1_hybrid_recall_bench.prompt_pieces", ok, why)
+
+# The chat turn the two agreement tests use (test_chunked_prefill_correctness,
+# test_hybrid_per_layer_agreement): one <bos>, an exact prefix length, and the
+# model's turn opened at the end of the suffix.
+prefix, suffix = chat_prompt(gemma, "The quick brown fox jumps over the lazy dog. " * 64, 2048,
+                             "\n\nContinue the text above in your own words.")
+ok, why = well_formed(gemma, prefix + suffix, suffix)
+check("_prompt_ids.chat_prompt (gemma-4)", ok and len(prefix) == 2048
+      and gemma.decode(suffix).endswith("model\n"), why or gemma.decode(suffix)[-20:])
 
 print()
 print("PASS — 0 failure(s)" if not failures else f"FAIL — {len(failures)} failure(s)")

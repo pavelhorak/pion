@@ -1,0 +1,12 @@
+loading mlx-community/gemma-4-e2b-it-4bit...
+
+[A] single-shot prefill (N=1024), decode 16 tokens...
+[B] chunked prefill (chunk=256, N=1024), decode 16 tokens...
+
+  ref:     [31770, 4799, 236761, 669, 3823, 8864, 37423, 38167, 1024, 506, 31770, 4799, 236761, 669, 3823, 8864]
+  chunked: [31770, 4799, 236761, 669, 3823, 8864, 37423, 38167, 1024, 506, 31770, 4799, 236761, 669, 3823, 8864]
+
+  agreement: 16/16
+
+PASS
+rc=0

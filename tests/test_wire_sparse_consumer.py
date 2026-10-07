@@ -105,15 +105,19 @@ def main(args) -> int:
         f"\n\nQuestion: What is the magic number for the city of {needle_city}? "
         f"Answer with only the number.\nAnswer:"
     )
-    needle_tokens = tok.encode(needle)
-    question_tokens = tok.encode(question)
-    base_filler = tok.encode(filler)
-    while len(base_filler) < args.length - len(needle_tokens) - len(question_tokens):
+    # One <bos>, at position 0: every piece is encoded without special tokens.
+    # Until 2026-10-07 each piece began with its own <|begin_of_text|>, and the
+    # doubled filler copied it along.
+    bos = [tok.bos_token_id] if tok.bos_token_id is not None else []
+    needle_tokens = tok.encode(needle, add_special_tokens=False)
+    question_tokens = tok.encode(question, add_special_tokens=False)
+    base_filler = tok.encode(filler, add_special_tokens=False)
+    target_filler = args.length - len(bos) - len(needle_tokens) - len(question_tokens)
+    while len(base_filler) < target_filler:
         base_filler = base_filler + base_filler
-    target_filler = args.length - len(needle_tokens) - len(question_tokens)
     filler_toks = base_filler[:target_filler]
     insert_at = len(filler_toks) // 2
-    prompt_ids = filler_toks[:insert_at] + needle_tokens + filler_toks[insert_at:] + question_tokens
+    prompt_ids = bos + filler_toks[:insert_at] + needle_tokens + filler_toks[insert_at:] + question_tokens
     expected = magic_number
     print(f"  prompt length: {len(prompt_ids)} tokens (target {args.length})")
 

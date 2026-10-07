@@ -48,7 +48,7 @@ does; the changelog has the correction. A 3B row is not measured, so none is sho
 
 Cross-instance verified: a fresh second client (separate socket, separate model object) sees `+HIT` before any local work, fetches K/V the first client stored, and produces a **bit-identical 50-token greedy completion (BLEU 1.0000)**.
 
-This row is this harness's own workload (150 requests, 5 prompts × 30 queries, at its `--prompt-repeats 8` prefix), so it does not line up with the README's two headline numbers: **17×** is one separate process hitting a 2,049-token prefix (`benchmarks/reproducers/cross_process_ttft.py`), and **20×** is the process that stored the prefix asking again, through Stage 2's in-process lane (`cross_process_ttft.py --same`; the table below times each lane on its own).
+This row is this harness's own workload (150 requests, 5 prompts × 30 queries, at its `--prompt-repeats 8` prefix), so it does not line up with the README's two headline numbers: **17×** is one separate process hitting a 2,049-token prefix (`benchmarks/reproducers/cross_process_ttft.py`), and **26×** is the process that stored the prefix asking again, through Stage 2's in-process lane (`cross_process_ttft.py --same`; the table below times each lane on its own).
 
 ---
 
@@ -110,7 +110,7 @@ Three production wrapper commands, plus the underlying V-store path (`V.STOREBAT
 
 Creates two V-store sessions, `<ns_key>_pk` (keys) and `<ns_key>_pv` (values), with the given quantization format. After `REGISTER`, standard `V.STOREBATCH` and `V.FETCH ... RANGE` work against the derived sids.
 
-`vquant` ∈ `{int8, turbo4, turbo3, turbo2, fp16, fp8, mlx4g32}` (mlx4g32 = int4 group-32 affine). fp16 is the production default (BLEU 1.0000 cross-instance, a mean of 0.969 over 20 questions against standalone).
+`vquant` ∈ `{int8, turbo4, turbo3, turbo2, fp16, fp8, mlx4g32}` (mlx4g32 = int4 group-32 affine). fp16 is the production default (BLEU 1.0000 cross-instance, a mean of 0.979 over 20 questions against standalone).
 
 ```
 > KV.PREFIX.REGISTER my_app|v1|llama|fp16|prompt_a 512 fp16
@@ -393,7 +393,7 @@ out = model(suffix_ids, cache=cache)                      # attention runs on si
 Every warm path restores all prompt tokens but the last, then runs the last
 one, and every path reproduces vanilla's first token. A one-token suffix is
 the best case for a cache. A real question adds its own prefill: with a
-16-token question the in-process lane takes 61.9 ms at 2,049 tokens
+16-token question the in-process lane takes 46.2 ms at 2,049 tokens
 (`cross_process_ttft.py --same`).
 
 At 1,024 tokens Stage 1 and Stage 2's wire lane are close; at 2,048 the wire
@@ -560,19 +560,23 @@ cache, suffix = hr.prepare("eiffel_passage", tok.encode("How tall?\nAnswer:"))
 | Backend | K/V live | Precision | Server | Best for |
 |---|---|---|---|---|
 | `inproc` (default) | MLX arrays in a process-local dict | bit-perfect (state-setter pickling) | not required | single-process RAG |
-| `pion` | `KV.PREFIX.REGISTER` + `V.STOREBATCH/V.FETCH BATCH` | fp16 (Stage 1's mean BLEU, 0.969 in the table below) | `--kvcache --metal-attention -w 1` | cross-process / cross-host |
+| `pion` | `KV.PREFIX.REGISTER` + `V.STOREBATCH/V.FETCH BATCH` | fp16 (Stage 1's mean BLEU, 0.979 in the table below) | `--kvcache --metal-attention -w 1` | cross-process / cross-host |
 
 #### Measured (Llama-3.2-1B-Instruct-4bit, 100 SQuAD v2 queries)
 
-| Backend | p50 TTFT | vs text-RAG (123.1 ms) | Token agreement | Answer found |
+| Backend | p50 TTFT | vs text-RAG (113.8 ms) | Token agreement | Answer found |
 |---|---:|:---:|:---:|:---:|
-| inproc | 41.3 ms | **3.0×** | 98.3% | 0.68 (text-RAG: 0.68) |
-| pion | 45.6 ms | 2.7× | 98.3% | 0.68 |
+| inproc | 32.5 ms | **3.5×** | 96.1% | 0.73 (text-RAG: 0.72) |
+| pion | 35.8 ms | 3.2× | 96.1% | 0.73 |
 
 `benchmarks/reproducers/stage1_hybrid_recall_bench.py`, cache hydration inside the
 clock; raw output in
-[`stage1_hybrid_results_2026_10_02.json`](../benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json)
-(M4 Mac mini, 2026-10-02).
+[`stage1_hybrid_results_2026_10_07.json`](../benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json)
+(M4 Mac mini, 2026-10-07). Until then every question began with a second `<bos>`: the
+2026-10-02 run read 3.0× / 2.7×, 98.3% agreement and 0.68 answers on every path. A
+same-day run without the fix gives the same speedups (3.55× / 3.24×,
+[`before_fix/`](../benchmarks/results/2026-10-07-mac-m4/before_fix/)), so the speed
+difference is the day; the stray token cost answers (0.68) and hid divergence (99.3%).
 
 Test: `pion-vllm-mlx/tests/test_hybrid_retrieval.py`.
 First experiment: `benchmarks/reproducers/stage0_hybrid_kv_injection.py`.
@@ -618,13 +622,17 @@ Measured on a 20-question / 50-token-greedy BLEU eval against the standalone ref
 
 | Format | Storage vs FP16 | Mean BLEU | First-token | Notes |
 |---|---:|---:|:---:|---|
-| **fp16** | 1.00× | **0.969** | 100% (20/20) | Bit-identical on 17/20, brief late drift on 3/20. **Production default.** |
-| int8 | ~2× | 0.677 | 95% (19/20) | First token right on 19 of 20, but greedy decode drifts within the 50 tokens. |
-| turbo4 | 3.51× | 0.538 | 90% (18/20) | Argmax preserved on most first tokens, but compounds badly over greedy decode. **Single-step / classification only.** |
+| **fp16** | 1.00× | **0.979** | 100% (20/20) | Bit-identical on 19/20, late drift on 1/20. **Production default.** |
+| int8 | ~2× | 0.499 | 95% (19/20) | First token right on 19 of 20, but greedy decode drifts within the 50 tokens. |
+| turbo4 | 3.51× | 0.378 | 90% (18/20) | Argmax preserved on most first tokens, but compounds badly over greedy decode. **Single-step / classification only.** |
 
-`tests/test_kv_prefix_bleu.py --vquant {fp16,int8,turbo4}` on an M4 Mac mini, 2026-10-06
-([raw output](../benchmarks/results/2026-10-06-mac-m4/), `kv_prefix_bleu*.txt`; the
-test's own gate is a mean BLEU of 0.95, which only fp16 passes). Storage is per
+`tests/test_kv_prefix_bleu.py --vquant {fp16,int8,turbo4}` on an M4 Mac mini, 2026-10-07
+([raw output](../benchmarks/results/2026-10-07-mac-m4/), `kv_prefix_bleu*.txt`; the
+test's own gate is a mean BLEU of 0.95, which only fp16 passes). Until 2026-10-07 each
+question began with a second `<bos>`, and the table read 0.969 / 0.677 / 0.538: the stray
+token drew attention away from the stored prefix and hid part of the quantization error
+([`before_fix/`](../benchmarks/results/2026-10-07-mac-m4/before_fix/) reproduces those
+figures exactly). Storage is per
 token at the 1B model's 512-wide K/V rows: int8 is one byte an element against
 fp16's two, and turbo4 packs 32 elements into 18 bytes plus a 4-byte row header.
 
@@ -727,8 +735,8 @@ KV-cache traffic — it's no longer required.
 
 To reproduce the headlines:
 
-**Stage 1 (cache-rebuild) through the public API — 8.77× mean TTFT at 1B**
-([raw output](../benchmarks/results/2026-10-06-mac-m4/prompt_cache_workload_q30_r8.txt)):
+**Stage 1 (cache-rebuild) through the public API — 8.92× mean TTFT at 1B**
+([raw output](../benchmarks/results/2026-10-07-mac-m4/prompt_cache_workload_q30_r8.txt)):
 
 ```bash
 ./pion-server --kvcache -w 1 &

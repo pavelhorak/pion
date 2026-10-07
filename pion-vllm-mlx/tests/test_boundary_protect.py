@@ -54,7 +54,7 @@ def _greedy_first_token(model, tok, prefix_str: str, suffix_str: str, pc: PionPr
     argmax token id of the next-token logits."""
     import mlx.core as mx
     prefix_ids = tok.encode(prefix_str)
-    suffix_ids = tok.encode(suffix_str)
+    suffix_ids = tok.encode(suffix_str, add_special_tokens=False)  # follows the prefix: no second <bos>
     cache = pc.get_or_prefill(prefix_ids, ns)
     out = model(mx.array([suffix_ids]), cache=cache)
     mx.eval(out)

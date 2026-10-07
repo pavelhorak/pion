@@ -1,0 +1,23 @@
+gh #63 wire-mode sparse consumer gate (Llama-3.2-1B)
+  PION_PROMPT_CACHE_NO_INPROC=0
+  decode-tokens=12
+
+loading model...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 28308.01it/s]
+  n_layers: 16
+  prompt length: 4096 tokens (target 4096)
+
+[A] vanilla mlx-lm (cold)
+  TTFT: 3233.9ms
+  decode: ' 73691.\n\n ability to learn fast. When you analyze'
+
+[B] Pion wire-mode + sparse (K_block=64 K_blocks=8 selector=quest)
+  TTFT: 585.6ms  (544 wire calls, 278.2ms total)
+  decode: ' 73691.\n\n ability to learn fast. When you analyze'
+
+━━━ gate ━━━
+  vanilla found 73691: True
+  pion-wire-sparse found 73691: True
+
+PASS — gh #63 wire-mode sparse consumer end-to-end
+rc=0

@@ -50,7 +50,7 @@ _PARA = (
 def _build_prefix_ids(tok, n_tokens: int) -> list[int]:
     ids = tok.encode(_PARA)
     while len(ids) < n_tokens:
-        ids = ids + tok.encode(_PARA)
+        ids = ids + tok.encode(_PARA, add_special_tokens=False)  # one <bos>, first
     return ids[:n_tokens]
 
 

@@ -187,7 +187,9 @@ def run_one_L(model, tok, r, L: int, session_id: str, n_gen: int):
     vanilla_ttfts = []
     vanilla_decodeds = []
     for s_idx, suf in enumerate(SUFFIXES):
-        suffix_ids = tok.encode(suf)
+        # The suffix follows the prefix: no special tokens. Qwen3.5's tokenizer
+        # adds none anyway, so this changes no id for the published run.
+        suffix_ids = tok.encode(suf, add_special_tokens=False)
         full_ids = prefix_ids + suffix_ids
         cache = make_prompt_cache(model)
         t0 = time.perf_counter()
@@ -218,7 +220,7 @@ def run_one_L(model, tok, r, L: int, session_id: str, n_gen: int):
     pion_ttfts = []
     pion_decodeds = []
     for s_idx, suf in enumerate(SUFFIXES):
-        suffix_ids = tok.encode(suf)
+        suffix_ids = tok.encode(suf, add_special_tokens=False)  # as on the vanilla side
         cache = make_prompt_cache(model)
         t0 = time.perf_counter()
         for i, c in enumerate(cache):

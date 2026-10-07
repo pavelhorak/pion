@@ -147,10 +147,8 @@ def main() -> int:
                      "key-value and vector database engine written in Mojo. ")
         words = (seed_text * (args.prompt_tokens // 4 + 4)).split()
         prompt = " ".join(words)
-        prompt_ids = tok.encode(prompt)
-        prompt_ids = prompt_ids[: args.prompt_tokens]
-        if prompt_ids[0] != tok.bos_token_id and tok.bos_token_id is not None:
-            prompt_ids = [tok.bos_token_id] + prompt_ids
+        bos = [tok.bos_token_id] if tok.bos_token_id is not None else []
+        prompt_ids = (bos + tok.encode(prompt, add_special_tokens=False))[: args.prompt_tokens]
         suffix_id = tok.encode(" The first")[-1]  # arbitrary user-query token
         print(f"  Prompt: {len(prompt_ids)} tokens, suffix start token = {suffix_id}")
 

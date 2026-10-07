@@ -1,0 +1,36 @@
+§15.2 G1 BLEU eval  model=mlx-community/Llama-3.2-1B-Instruct-4bit  vquant=int8  max_new=50
+loading model...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 52648.17it/s]
+  q00: BLEU 0.678  first_token cold=4815 warm=4815 warn
+  q01: BLEU 0.574  first_token cold=4815 warm=4815 warn
+  q02: BLEU 0.749  first_token cold=4815 warm=4815 warn
+  q03: BLEU 0.625  first_token cold=320 warm=320 warn
+  q04: BLEU 0.609  first_token cold=4815 warm=4815 warn
+  q05: BLEU 0.377  first_token cold=4815 warm=4815 warn
+  q06: BLEU 0.509  first_token cold=4815 warm=4815 warn
+  q07: BLEU 0.181  first_token cold=4815 warm=4815 warn
+  q08: BLEU 0.279  first_token cold=4815 warm=4815 warn
+  q09: BLEU 0.336  first_token cold=4815 warm=4815 warn
+  q10: BLEU 0.749  first_token cold=24492 warm=24492 warn
+  q11: BLEU 0.432  first_token cold=4815 warm=4815 warn
+  q12: BLEU 0.572  first_token cold=4815 warm=4815 warn
+  q13: BLEU 0.151  first_token cold=3277 warm=4815 warn
+  q14: BLEU 0.446  first_token cold=4815 warm=4815 warn
+  q15: BLEU 0.095  first_token cold=4815 warm=4815 warn
+  q16: BLEU 0.418  first_token cold=4815 warm=4815 warn
+  q17: BLEU 0.293  first_token cold=382 warm=382 warn
+  q18: BLEU 0.954  first_token cold=4815 warm=4815 OK
+  q19: BLEU 0.949  first_token cold=3639 warm=3639 warn
+
+──────── BLEU summary  (int8) ────────
+  queries          20
+  mean BLEU        0.4989  (target > 0.95)
+  median BLEU      0.4776
+  min   BLEU       0.0946
+  first-token match19/20
+  cold total time  463 ms/query
+  warm total time  420 ms/query
+  speedup (full decode loop) 1.10×
+
+  G1 BLEU criterion  FAIL
+rc=1
