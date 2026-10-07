@@ -1,8 +1,11 @@
 # `AI.*` — semantic cache, embeddings, routing
 
-`AI.SEMANTIC_CACHE` is the shipped, benchmarked one. The rest are real, wired
-and tested, but they are not launch claims — read each caveat as part of the
-entry.
+`AI.SEMANTIC_CACHE` and `AI.EMBED` are part of Pion's supported surface. The
+rest of the `AI.*` family (`AI.COMPLETE`, `AI.CHAT`, `AI.ROUTE.*`,
+`AI.FLARE.*`, `AI.KNN_LM.*`, `AI.MEMORY`) is **experimental**: wired and
+wire-tested, with no published measurement of what it buys and no user outside
+this project, so it may change or be removed
+([README](https://github.com/pavelhorak/pion#experimental)).
 
 <!-- include-section: doc/command_matrix.md | ## 16. Pion-Native AI Commands (no Redis / Valkey equivalent) -->
 

@@ -1,5 +1,7 @@
 # Pion Serve — Inference Intelligence Proxy
 
+> **Experimental.** Pion Serve is a separate program from [`pion-vllm-mlx serve`](coding_agents.md), the supported endpoint for coding agents. `tests/test_pion_serve_sie_embed.py` (gate tier) covers its embedding path and `pion-serve/tests/` (full tier) its router and backends; no hit rate is published with a harness. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 OpenAI-compatible HTTP proxy that sits between your client and any LLM
 backend (Ollama, vLLM, OpenAI, Gemini, Claude, llama.cpp, MAX). Adds three
 layers of cached intelligence on top of the backend so you serve

@@ -1,5 +1,7 @@
 # pion-glide
 
+> **Experimental.** pion-glide has no test in the suite. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 Async Python client for [Pion](https://github.com/pavelhorak/pion) built on [Valkey GLIDE](https://github.com/valkey-io/valkey-glide).
 
 Thin wrapper that adds typed `FT.*` (HNSW vector search) and `AI.*` (semantic cache / RAG gateway) helpers on top of GLIDE's standard Redis interface — with full cluster topology discovery, AZ-affinity routing, and OpenTelemetry tracing coming for free from GLIDE.

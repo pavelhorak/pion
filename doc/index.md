@@ -37,38 +37,52 @@ restarted agent or a second session finds by itself.
 Read the limits before installing: it caches prefill, not decode, and it
 only pays off when a long prefix is really reused.
 
-## What Pion is, and is not
+## What works
 
-Pion is a memory engine: the prompt's K/V, recurrent (SSM) state, MoE expert
-weights, vectors and embeddings, and agent memory — behind one wire protocol,
-with one durability story. Two properties are Pion's own: an acked write is
-still there after `SIGKILL`, and the cache is read directly by a *different
-program* over a protocol every language already has a client for.
+Three things, each covered by the gate tier that runs on every change:
 
-It is **not** an inference engine: it feeds forward passes, it does not run
-them. The vector engine exists so that recall needs no second database, and
-[Pion Serve](pion_serve.md) is an example proxy, not a requirement.
+1. **A prompt cache for mlx-lm, and one endpoint for coding agents.**
+   [Shared KV cache](shared_kv_cache.md) (namespaces, Stage 1 vs Stage 2, the
+   wire protocol, what is measured) and [Coding agents](coding_agents.md)
+   (`pion-vllm-mlx serve` behind Claude Code, Codex and OpenAI clients).
+2. **A Redis-compatible KV store with a write-ahead log.** [Command
+   matrix](command_matrix.md) for every Redis-compatible command and its known
+   divergences, [Persistence](persistence.md), [Data types](data_types.md).
+3. **Vector search and the semantic cache.** [Vector engine](vector_engine.md),
+   [Embeddings](embeddings.md), and `AI.SEMANTIC_CACHE` in the
+   [AI gateway](ai_gateway.md) page.
+
+Two properties are Pion's own: an acked write is still there after `SIGKILL`,
+and the cache is read directly by a *different program* over a protocol every
+language already has a client for. It is **not** an inference engine: it feeds
+forward passes, it does not run them.
+
+## Experimental
+
+Everything else is experimental: in the tree, tested as far as each page
+says, with no published measurement of what it buys and no user outside this
+project, so it may change or be removed. Each such page opens with an
+**Experimental** banner: [Pion Serve](pion_serve.md) (the semantic-cache
+proxy), the rest of the [AI gateway](ai_gateway.md) (`AI.COMPLETE`, `AI.CHAT`,
+`AI.ROUTE.*`, `RAG.*`, FLARE, the MCP server), [Distributed
+systems](distributed_systems.md), [Multi-tenant](multi_tenant.md), and the
+framework packages. The README's
+[Experimental table](https://github.com/pavelhorak/pion#experimental) lists
+each part and what tests it.
 
 ## Where to start
 
-- **Get started** — [Shared KV cache](shared_kv_cache.md): namespaces, Stage 1
-  vs Stage 2, the wire protocol, what is measured.
-- **Reference** — [Command matrix](command_matrix.md) for every Redis-compatible
-  command and its known divergences; [Configuration](configuration.md) for
-  profiles; [Networking](networking.md) for the event-loop tiers and the
-  binary lane on `port+1`; [Client APIs](client_apis.md).
-- **Operations** — [Running in production](operations.md): crash breadcrumbs,
-  the status file, supervised serving, durability of every type;
-  [Persistence](persistence.md); [Multi-tenant](multi_tenant.md);
-  [Distributed systems](distributed_systems.md) (a preview — read its caveats).
-- **Internals** — [Architecture](architecture.md), [Memory
+- **Reference**: [Configuration](configuration.md) for profiles;
+  [Networking](networking.md) for the event-loop tiers and the binary lane on
+  `port+1`; [Client APIs](client_apis.md).
+- **Operations**: [Running in production](operations.md) for crash
+  breadcrumbs, the status file, supervised serving and the durability of every
+  type.
+- **Internals**: [Architecture](architecture.md), [Memory
   management](memory_management.md), [Vector engine](vector_engine.md).
-- **Licensing** — [`licensing.md`](licensing.md): Pion is Apache-2.0,
-  with one free closed binary library (`libpion_vector`) for the tuned vector
-  kernels.
+- **Licensing**: [`licensing.md`](licensing.md). Pion is Apache-2.0, with one
+  free closed binary library (`libpion_vector`) for the tuned vector kernels.
 
 ## Also here
 
-[AI gateway](ai_gateway.md) · [Embeddings](embeddings.md) ·
-[Pion Serve](pion_serve.md) · [Data types](data_types.md) ·
 [Benchmarking guide](benchmarking_guide.md) · [Development guide](development_guide.md)

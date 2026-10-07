@@ -1,5 +1,7 @@
 # pion-serve
 
+> **Experimental.** pion-serve, the OpenAI-compatible proxy with a semantic cache in front of a backend, is a separate program from `pion-vllm-mlx serve`. `tests/test_pion_serve_sie_embed.py` (gate tier) covers its embedding path and `pion-serve/tests/` (full tier) its router and backends; no hit rate is published with a harness. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 OpenAI-compatible inference proxy with semantic cache, fragment-level distillation, RAG, and semantic intent routing.
 
 ```

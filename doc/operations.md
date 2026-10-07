@@ -359,6 +359,13 @@ tar -xzf pion-<version>-macos-arm64.tar.gz && cd pion-<version>-macos-arm64
 Run the wrapper, not `bin/pion-server`: the tarball bundles the Mojo runtime
 libraries the binary needs, and the wrapper points the loader at them.
 
+Linux tarballs (x86_64, arm64) need glibc 2.38 or newer: Ubuntu 24.04, Debian
+13, Fedora 39 or later. On an older system the binary stops with
+`GLIBC_2.38 not found`; use the Docker image instead. The x86_64 build is the
+portable one (x86-64-v2, no GPU code). Verify a download against the release's
+`SHA256SUMS` with `shasum -a 256 -c SHA256SUMS --ignore-missing` (without the
+flag it reports every tarball you did not download as FAILED).
+
 **Metal shader library (macOS).** `--metal-attention` loads
 `metal_compute.metallib`, searched relative to the **executable**: `<exe>/`,
 `<exe>/../lib`, `<exe>/../share/pion`, `<exe>/../src/ffi`, `<exe>/src/ffi` (a
@@ -403,6 +410,12 @@ docker run -p 1974:1974 -v pion-data:/data pion
   Python/torch for the embedding sidecar. For io_uring:
   `docker run --security-opt seccomp=unconfined pion --no-auto-embed`.
 - State (WAL, snapshots, blob arenas) lands in the `/data` volume.
+- The published image is `ghcr.io/pavelhorak/pion`, built by the release
+  workflow from the tagged source. It runs as the unprivileged `pion` user, so
+  use a **named volume** (`-v pion-data:/data`), which inherits `/data`'s
+  ownership from the image. A bind mount keeps the host directory's owner and
+  the WAL cannot be created; `chown` the host directory to the image's `pion`
+  uid first.
 - `docker build --target runtime-prebuilt -t pion:dev .` wraps an
   already-built host `./pion-server` and its runtime libraries in seconds, for
   local use. The default target builds from source (a cold build takes a long

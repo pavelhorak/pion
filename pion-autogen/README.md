@@ -1,5 +1,7 @@
 # pion-autogen
 
+> **Experimental.** pion-autogen is covered by one gate-tier test, `tests/test_framework_integrations.py`, which exercises its basic calls. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 AutoGen memory backend powered by Pion's HNSW vector index — semantic recall for multi-agent systems.
 
 `PionMemoryStore` implements AutoGen Core's `Memory` interface against a running Pion server, so any AutoGen agent can persist and recall facts with sub-millisecond cosine-similarity lookup. No RedisJSON dependency; uses the wire-compatible RESP2 path.

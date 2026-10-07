@@ -1,5 +1,7 @@
 # Multi-tenancy in Pion
 
+> **Experimental.** Per-connection tenant binding (`--tenant`) is tested by `tests/test_multitenant.py` and `tests/test_tenant_isolation.py` (gate tier); its isolation has been reviewed only by this project. For hard isolation, run one server per tenant. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed. Supported: the prompt cache and `pion-vllm-mlx serve`, the Redis-compatible KV with its WAL, and vector search with the semantic cache ([README](../README.md#experimental)).
+
 **Short version:** Pion offers two multi-tenant models.
 
 1. **One `pion-server` process per tenant** — the canonical deployment wherever *hard resource isolation* matters (memory, CPU, WAL, blast radius).

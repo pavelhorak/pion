@@ -19,6 +19,25 @@ enumerated — there were roughly 1,100 of them.
   next request from Pion with an identical greedy reply. Until now serve's
   tests ran only in the full tier.
 
+### Changed
+
+- **The README documents three things, and marks the rest experimental.**
+  The README described about thirty planes, many with no outside user and
+  several with no test of their own. It now leads with the three that the gate
+  tier covers on every change: the prompt cache for mlx-lm with
+  `pion-vllm-mlx serve`, the Redis-compatible KV store with its WAL, and vector
+  search with the semantic cache. Everything else moved to an Experimental
+  table that says what tests each part: the `pion-serve` proxy, the MCP server,
+  cluster mode and replication, tenant binding, `AI.COMPLETE` / `AI.CHAT` /
+  `AI.ROUTE.*` / `RAG.*` / FLARE, `AI.KNN_LM.*` and `NEURON.PKM.*`,
+  `MOE.EXPERT.*`, `pion-exo`, `vllm-pion`, the LangGraph, AutoGen and
+  LlamaIndex packages, the LMCache backend, `pion-glide`, and RedisVL and
+  LangChain through their Redis clients. Each part's own page now opens with
+  an **Experimental** banner, and `tests/test_experimental_banners.py` (gate)
+  keeps the table and the banners in step. Nothing was deleted; whether any
+  part should be is a separate decision. The install, Docker and architecture
+  detail the README carried is in `doc/operations.md` and `doc/architecture.md`.
+
 ### Fixed
 
 - **`src/common/version.mojo` says 0.9.7.** The 0.9.7 release PR set
