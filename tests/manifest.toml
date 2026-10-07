@@ -942,6 +942,13 @@ tier = "full"
 requires = ["py:mlx_lm"]
 
 [[test]]
+file = "tests/test_mojo_packages.py"
+server = "none"
+tier = "gate"
+timeout = 900
+# packages/build.py: pion_resp, pion_slab, pion_simd assembled from src/, precompiled, tested
+
+[[test]]
 file = "tests/test_mset_wal_record.py"
 server = "self"
 tier = "gate"

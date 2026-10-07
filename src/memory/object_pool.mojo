@@ -15,7 +15,7 @@ struct ObjectPool[T: AnyType](Movable):
         for i in range(capacity):
             self.free_list[unsafe_offset=i] = alloc[Self.T](1)
 
-    def __moveinit__(out self, deinit take: Self):
+    def __init__(out self, *, deinit take: Self):
         self.capacity = take.capacity
         self.head = take.head
         self.free_list = take.free_list
@@ -60,7 +60,7 @@ struct ObjectPool[T: AnyType](Movable):
         else:
             ptr.unsafe_free()
             
-    def deinit(owned self):
+    def free_all(var self):
         # Note: In a real move-ready struct, we'd check if free_list is null
         # but for this prototype we assume it is valid if capacity > 0
         if self.capacity > 0:

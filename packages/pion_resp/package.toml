@@ -1,0 +1,12 @@
+name = "pion_resp"
+version_from = "VERSION"
+summary = "A zero-copy RESP2/RESP3 request parser: pipelined commands, inline commands, partial frames and Redis's protocol errors, from Pion's server"
+sources = [
+  { from = "src/network/resp3.mojo", as = "resp3.mojo" },
+  { from = "src/common/ptr.mojo", as = "ptr.mojo" },
+]
+exports = [
+  "from .resp3 import RESP3Parser, RESP3Token, protocol_error_text",
+  "from .resp3 import MAX_CMD_TOKENS, MAX_CMD_ENDS, MAX_BULK_LEN, MAX_ARRAY_LEN, TOKENS_OVERFLOW, PROTOCOL_ERROR",
+  "from .resp3 import PE_UNBALANCED_QUOTES, PE_BIG_INLINE, PE_MULTIBULK_LEN, PE_BULK_LEN, PE_BIG_MBULK_COUNT, PE_BIG_BULK_COUNT, PE_EXPECTED_DOLLAR",
+]

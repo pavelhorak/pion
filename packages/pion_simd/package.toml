@@ -1,0 +1,12 @@
+name = "pion_simd"
+version_from = "VERSION"
+summary = "SIMD vector-distance kernels: FP32 dot and L2, INT8/INT4 L2, Hamming, INT8 quantization, with NEON SDOT and x86 VNNI paths, from Pion's open vector engine"
+sources = [
+  { from = "src/vector/kernels.mojo", as = "kernels.mojo" },
+  { from = "src/vector/fma_mad.mojo", as = "fma_mad.mojo" },
+]
+exports = [
+  "from .kernels import dot_product_simd, l2_distance_int8, l2_distance_int8_jit, l2_distance_int4",
+  "from .kernels import hamming_distance, manual_popcount, quantize_fp32_to_int8_simd, sdot_int8",
+  "from .fma_mad import fma_mad",
+]

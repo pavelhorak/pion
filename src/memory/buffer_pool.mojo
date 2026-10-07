@@ -151,7 +151,7 @@ struct BufferPool:
         except:
             pass
 
-    def deinit(owned self):
+    def free_all(var self):
         for entry in self.page_table.items():
             try:
                 if entry.value[].is_dirty:
