@@ -2,6 +2,7 @@
 
     pion-server --kvcache -w 1 &
     pion-vllm-mlx serve --model mlx-community/Qwen3-4B-4bit --port 8080
+    # same thing without the console script: python -m pion_vllm_mlx serve ...
     export ANTHROPIC_BASE_URL=http://localhost:8080      # Claude Code
     export OPENAI_BASE_URL=http://localhost:8080/v1      # Codex CLI, Aider, Continue, Zed
 
@@ -802,7 +803,11 @@ def make_handler_class():
 # ── entry point ────────────────────────────────────────────────────────────
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(add_help=False)
+    ap = argparse.ArgumentParser(
+        prog="pion-vllm-mlx serve", add_help=False,
+        description="mlx-lm's server with a Pion-backed prompt cache, plus Anthropic /v1/messages "
+                    "(Claude Code) and OpenAI /v1/responses (Codex). Every flag not listed here "
+                    "is mlx-lm's (--model, --port, --host, --max-tokens, --prompt-cache-size, ...).")
     ap.add_argument("--pion-host", default="127.0.0.1")
     ap.add_argument("--pion-port", type=int, default=1974)
     ap.add_argument("--pion-vquant", default="fp16",
@@ -826,6 +831,16 @@ def main(argv=None):
     ap.add_argument("--unload-after", type=float, default=None, metavar="SECONDS",
                     help="free the model's RAM after SECONDS idle; the next request reloads it "
                          "and restores its prompt cache from Pion")
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if any(a in ("-h", "--help") for a in raw_argv):
+        # mlx-lm's parser owns --help (it parses everything we do not), so
+        # print ours first and then let it print its own and exit.
+        print(ap.format_help())
+        print("mlx-lm server options (passed through unchanged):\n", flush=True)
+        import mlx_lm.server as S
+        sys.argv = ["pion-vllm-mlx serve", "--help"]
+        S.main()
+        return 0
     ours, rest = ap.parse_known_args(argv)
     global NORMALIZE
     NORMALIZE = not ours.no_normalize

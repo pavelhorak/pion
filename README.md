@@ -67,6 +67,23 @@ mlx-lm's cold prefill against five cached requests, each followed by a full
 answer, and prints every one. Install with `pip install 'pion-vllm-mlx[mlx]'`.
 <!-- --8<-- [end:pip-install] -->
 
+<!-- --8<-- [start:serve] -->
+**For coding agents:** `pion-vllm-mlx serve` puts one local MLX model behind
+Claude Code (Anthropic `/v1/messages`), Codex (OpenAI `/v1/responses`) and any
+OpenAI client, with the prompt cache in Pion. Within one live session it does
+what a stock local server does. After a restart, in a second session, or from
+a second tool, a prompt starts from the prefix Pion stored instead of a full
+prefill, and the restored prefix gives the same greedy reply.
+
+```bash
+pion-vllm-mlx serve --model mlx-community/Qwen3-4B-4bit --port 8080
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080    # Claude Code; Codex and OpenAI clients: see the guide
+```
+
+Setup for each client, what it does not do (hybrid models are not stored yet),
+and how it stores a conversation: [`doc/coding_agents.md`](doc/coding_agents.md).
+<!-- --8<-- [end:serve] -->
+
 <!-- --8<-- [start:two-numbers] -->
 **Time to first token on Apple Silicon, warm cache against a vanilla cold start:**
 
@@ -546,6 +563,14 @@ N ports and shard client-side, the same way you would shard Redis.
 ---
 
 ## Feature Set
+
+### Coding agents — `pion-vllm-mlx serve`
+mlx-lm's server with its prompt cache in Pion, plus the Anthropic and OpenAI
+Responses endpoints that Claude Code and Codex speak. A restarted server, a
+second session and a second serve process start from the stored prefix.
+Requests drop Claude Code's per-session billing-header line, so two sessions
+share their system prompt and tools. Guide: [`doc/coding_agents.md`](doc/coding_agents.md);
+gate test: `tests/test_vllm_mlx_serve.py`.
 
 ### Shared KV Cache — `KV.PREFIX.*` + `ATTEND.PREFIX.*`
 The prompt's K/V tensors live in Pion. Future requests on the same prefix skip prefill — backend returns the first token in milliseconds instead of seconds.
