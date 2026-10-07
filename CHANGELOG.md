@@ -6,6 +6,15 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`src/common/version.mojo` says 0.9.7.** The 0.9.7 release PR set
+  `VERSION` without committing the stamped `version.mojo`, so the v0.9.7
+  source still said 0.9.6. The release binaries report `0.9.7+720a55c`, and
+  `pixi run build` stamps the file from `VERSION`. A build that compiles
+  `src/main.mojo` without the stamp step reported 0.9.6, and the conda recipe
+  was one. CI now fails when the two disagree.
+
 ## [0.9.7] — 2026-10-07
 
 Every harness, reproducer and example now builds its prompt with exactly one
