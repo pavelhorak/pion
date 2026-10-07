@@ -1,0 +1,13 @@
+name = "pion_slab"
+version_from = "VERSION"
+summary = "An mmap-backed slab allocator and a fixed-capacity object pool: O(1) allocate and free, no per-object heap call, from Pion's server"
+sources = [
+  { from = "src/memory/slab_allocator.mojo", as = "slab_allocator.mojo" },
+  { from = "src/memory/object_pool.mojo", as = "object_pool.mojo" },
+  { from = "src/common/ptr.mojo", as = "ptr.mojo" },
+]
+exports = [
+  "from .slab_allocator import SlabAllocator",
+  "from .object_pool import ObjectPool",
+  "from .ptr import null_ptr, is_null, is_not_null",
+]

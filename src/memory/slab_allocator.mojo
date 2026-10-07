@@ -35,7 +35,7 @@ struct SlabAllocator[T: AnyType](Movable):
         self.slab_sizes.append(total_size)
         self.current_slab = initial_slab
 
-    def __moveinit__(out self, deinit take: Self):
+    def __init__(out self, *, deinit take: Self):
         self.item_size = take.item_size
         self.items_per_slab = take.items_per_slab
         self.slabs = take.slabs^
@@ -143,6 +143,6 @@ struct SlabAllocator[T: AnyType](Movable):
     def deallocate(mut self, ptr: Pointer[Self.T, MutUntrackedOrigin]):
         self.free_list.append(ptr.unsafe_bitcast[UInt8]())
 
-    def deinit(owned self):
+    def free_all(var self):
         for i in range(len(self.slabs)):
             self._mmap_free(self.slabs[i], self.slab_sizes[i])

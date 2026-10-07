@@ -1339,8 +1339,10 @@ def pq_distance_8way[nsub: Int, pq_k: Int](
     for m in range(nsub):
         var table_m = pq_table + m * pq_k
         var indices = SIMD[DType.int32, 8](
-            Int(codes0[m]), Int(codes1[m]), Int(codes2[m]), Int(codes3[m]),
-            Int(codes4[m]), Int(codes5[m]), Int(codes6[m]), Int(codes7[m])
+            codes0[m].cast[DType.int32](), codes1[m].cast[DType.int32](),
+            codes2[m].cast[DType.int32](), codes3[m].cast[DType.int32](),
+            codes4[m].cast[DType.int32](), codes5[m].cast[DType.int32](),
+            codes6[m].cast[DType.int32](), codes7[m].cast[DType.int32]()
         )
         dists += table_m.gather(indices)
     return dists

@@ -31,12 +31,21 @@ enumerated — there were roughly 1,100 of them.
   next request from Pion with an identical greedy reply. Until now serve's
   tests ran only in the full tier.
 
+- **Three Mojo packages built from Pion's own source.** `packages/` builds
+  `pion_resp` (the RESP2/RESP3 request parser), `pion_slab` (the slab
+  allocator and object pool) and `pion_simd` (the open vector-distance
+  kernels) from the files under `src/` the server compiles, with no second
+  copy. `packages/build.py` assembles each one, rewrites Pion's absolute
+  imports to package-relative ones, precompiles it, and runs its tests; the
+  gate tier runs it (`tests/test_mojo_packages.py`). Each package has a draft
+  recipe for the modular-community channel; none has been submitted.
+
 ### Changed
 
 - **The README documents three things, and marks the rest experimental.**
   The README described about thirty planes, many with no outside user and
-  several with no test of their own. It now leads with the three that the gate
-  tier covers on every change: the prompt cache for mlx-lm with
+  several with no test of their own. It now leads with the three that Pion's
+  gate tier covers: the prompt cache for mlx-lm with
   `pion-vllm-mlx serve`, the Redis-compatible KV store with its WAL, and vector
   search with the semantic cache. Everything else moved to an Experimental
   table that says what tests each part: the `pion-serve` proxy, the MCP server,
@@ -62,6 +71,14 @@ enumerated — there were roughly 1,100 of them.
   the Pion tier on hybrid models, and logs once that it does.
   `tests/test_vllm_mlx_serve.py` checks the in-process reuse on Gemma-4-E2B
   when the model is cached.
+
+- **Server code that only compiled because nothing elaborated it.** `mojo
+  precompile` type-checks every function, and it rejected four spots the
+  server build never reaches: `def deinit(owned self)` methods with no callers
+  in the slab allocator, object pool and buffer pool (`owned` is gone in
+  Mojo 1.1; renamed `free_all(var self)`), the legacy `__moveinit__` form in
+  the first two (now `__init__(out self, *, deinit take: Self)`), and an
+  `Int`-to-`Int32` SIMD construction in `pq_distance_8way`.
 
 - **`src/common/version.mojo` says 0.9.7.** The 0.9.7 release PR set
   `VERSION` without committing the stamped `version.mojo`, so the v0.9.7
