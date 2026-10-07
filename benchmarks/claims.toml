@@ -172,13 +172,31 @@ evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
 expect = ["B BLEU vs ref (50 tokens)        1.0000"]
 
 [[claim]]
-file = "website/landing/sections.md"
-where = "A third number used to sit here"
-numbers = ["1%"]
+file = "doc/shared_kv_cache.md"
+where = "**Sparse-mask path:**"
+numbers = ["124.4 ms", "54.4 s"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/sparse_mask_64k_niah.txt"]
-expect = ["0.80% of prefix", "MISSED"]
-note = "the withdrawn claim's budget, as the run printed it"
+evidence = ["benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt"]
+expect = ["TTFT       54,378.6 ms", "steady-state         124.4 ms", "vanilla=True  pion=True"]
+note = "54,378.6 ms = 54.4 s"
+
+[[claim]]
+file = "README.md"
+where = "At 64K context a sparse mask still finds the needle"
+numbers = ["54.4 s", "124.4 ms", "437×", "0.80%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt"]
+expect = ["TTFT       54,378.6 ms", "steady-state         124.4 ms", "437.1×, headline", "0.80% of prefix", "vanilla=True  pion=True"]
+note = "54,378.6 ms = 54.4 s; 54,378.6 / 124.4 = 437.1"
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "A third number: at 64K context"
+numbers = ["54.4 s", "124.4 ms", "437×", "0.80%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt"]
+expect = ["TTFT       54,378.6 ms", "steady-state         124.4 ms", "437.1×, headline", "0.80% of prefix", "vanilla=True  pion=True"]
+note = "54,378.6 ms = 54.4 s; 54,378.6 / 124.4 = 437.1"
 
 [[claim]]
 file = "website/landing/sections.md"

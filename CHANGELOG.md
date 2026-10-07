@@ -6,6 +6,23 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`examples/sparse_mask_64k_niah.py` finds the needle again.** It built its
+  prompt from separate `tok.encode()` calls, and the Gemma 4 loader turns on
+  `add_bos_token`, so each call began with `<bos>`: the 64K prompt held 397 of
+  them, through the filler and before the needle and the question, and neither
+  vanilla mlx-lm nor Pion found the needle. The prompt now has one `<bos>`, at
+  position 0.
+
+### Documentation
+
+- **The 64K sparse-mask result is back, with its raw output**
+  (`benchmarks/results/2026-10-07-mac-m4/`): on Gemma-4-E2B-it-4bit, both
+  vanilla mlx-lm and Pion find the needle, and Pion's warm call takes 124.4 ms
+  against vanilla's 54.4 s cold prefill (437×), attending 0.80% of the prefix
+  on each full-attention layer. It replaces the 326× figure withdrawn in 0.9.6.
+
 ## [0.9.6] — 2026-10-07
 
 A security fix: every earlier release could be made to write past the end of

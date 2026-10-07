@@ -19,17 +19,19 @@ different model object, same text
 `generate_step` does; the ratios this table showed until 2026-10-02 did not,
 and were too high (the changelog lists them).
 
-A third number used to sit here: 64K context with a sparse mask, needle found
-while attending under 1% of the prefix. It is withdrawn until its reproducer
-works again: on 2026-10-06, with mlx-lm 0.31.3, neither vanilla mlx-lm nor Pion
-found the needle
-([raw output](../../benchmarks/results/2026-10-06-mac-m4/sparse_mask_64k_niah_full.txt)).
-
 Both rows come from one script,
 [`cross_process_ttft.py`](../../benchmarks/reproducers/cross_process_ttft.py)
 (`--same` adds the first), and its raw output for every run is
 [published](../../benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json).
 The [reproducers](../../benchmarks/reproducers/README.md) list what each one needs.
+
+A third number: at 64K context, with a sparse mask that attends 0.80% of the
+prefix on each full-attention layer, Gemma-4-E2B-it-4bit still finds a single
+needle, and the warm call takes 124.4 ms against vanilla's 54.4 s cold prefill
+(437×). It is one needle at one depth, warm against cold
+([raw output](../../benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt)).
+The example missed on 2026-10-06 because its prompt carried 397 `<bos>`
+tokens; it now carries one.
 
 ## Where this does not help
 
