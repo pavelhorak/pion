@@ -89,12 +89,16 @@ own `generate_step` produces it; until 2026-10-02 it also computed logits at
 every prompt position, which no generation does, and the ratios published then
 were too high. The [changelog](CHANGELOG.md) has the correction.
 
-The 64K sparse-mask result this README used to lead with is withdrawn until its
-reproducer works again: on 2026-10-06, with mlx-lm 0.31.3,
-[`examples/sparse_mask_64k_niah.py`](examples/sparse_mask_64k_niah.py) found the
-needle with neither vanilla mlx-lm nor Pion
-([raw output](benchmarks/results/2026-10-06-mac-m4/sparse_mask_64k_niah_full.txt)),
-so the run checks nothing about recall.
+At 64K context a sparse mask still finds the needle. On Gemma-4-E2B-it-4bit,
+with a 63,961-token prefix and a 23-token question, vanilla mlx-lm's cold
+prefill took 54.4 s to the first token and Pion's warm cache 124.4 ms (437×).
+Both answered with the needle's number, while each full-attention layer
+attended 512 of the prefix's tokens, 0.80%
+([`examples/sparse_mask_64k_niah.py`](examples/sparse_mask_64k_niah.py),
+[raw output](benchmarks/results/2026-10-07-mac-m4/sparse_mask_64k_niah.txt), M4
+Mac mini, mlx-lm 0.31.3). It is one needle at one depth, warm against cold. On
+2026-10-06 the example found the needle with neither vanilla nor Pion, because
+its prompt carried 397 `<bos>` tokens; it now carries one.
 <!-- --8<-- [end:two-numbers] -->
 
 Underneath sits a Redis-wire-compatible KV core and an HNSW vector engine. They

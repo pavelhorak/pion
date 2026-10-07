@@ -1,0 +1,28 @@
+sparse_mask_64k_niah  model=mlx-community/gemma-4-e2b-it-4bit
+  context=64,000 tokens · depth=0.5 · needle: 'Bratislava' → 65125
+
+loading model (3.4 GB if first run)...
+  35 layers (7 full, 28 sliding, window=512)
+
+prompt built: 63,984 total tokens (63,961 prefix + 23 suffix)
+
+[A] vanilla mlx-lm — cold prefill of full prompt
+    TTFT       54,378.6 ms  (wall 63.9s)
+    needle    FOUND
+
+[B] Pion in-proc lane — sparse-mask on full-attention layers
+    config    K_block=64  K_blocks=8  (budget = 512 tokens per full layer = 0.80% of prefix)
+    prefix prefill (cold — NOT counted in TTFT)...
+    prefix cached in 54.8s (63,961 tokens, one-time per prefix)
+    first warm TTFT      243.4 ms  (incl. Metal PSO JIT compile)
+    steady-state         124.4 ms  (suffix-only, 23 tokens)
+    needle           FOUND
+
+────────────────────────────────────────────────────────
+  Vanilla cold TTFT:      54,378.6 ms   (63,984 tokens)
+  Pion first warm:           243.4 ms   (223.4×, incl. PSO JIT)
+  Pion steady-state:         124.4 ms   (437.1×, headline)
+  Needle found:          vanilla=True  pion=True
+
+  Acceptance gate:       steady-state ≥ 100× AND both needles found → PASS (gh #73 acceptance)
+rc=0

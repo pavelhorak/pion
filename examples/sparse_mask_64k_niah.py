@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-sparse_mask_64k_niah.py — public reproduction of Pion's 326× warm-TTFT
-sparse-mask result on Gemma-4-E2B-it-4bit at 64K context.
+sparse_mask_64k_niah.py — public reproduction of Pion's warm-TTFT
+sparse-mask result on Gemma-4-E2B-it-4bit at 64K context. The run behind
+the README's figure is benchmarks/results/2026-10-07-mac-m4/.
 
 What this does:
   1. Loads `mlx-community/gemma-4-e2b-it-4bit` from your local HF cache
@@ -94,21 +95,28 @@ FILLER = (
 
 def build_prompt(length: int, depth: float, city: str, number: int, tok) -> Tuple[List[int], List[int]]:
     """Return (full_token_ids, question_token_ids). The first is the entire
-    cold prefill; the second is the suffix Pion measures warm."""
+    cold prefill; the second is the suffix Pion measures warm.
+
+    The prompt has exactly one `<bos>`, at position 0. The loader forces
+    `add_bos_token` on (Gemma 4 needs it, gh #93), so a plain `tok.encode()`
+    prepends `<bos>` to every piece: the filler, doubled to 64K, carried one
+    every 162 tokens, and the needle and the question each began with one.
+    With 397 of them, neither vanilla mlx-lm nor Pion found the needle."""
     needle = f"\nThe magic number for the city of {city} is {number}.\n"
     question = (
         f"\n\nQuestion: What is the magic number for the city of {city}? "
         f"Answer with only the number.\nAnswer:"
     )
-    needle_ids = tok.encode(needle)
-    question_ids = tok.encode(question)
-    target_filler = max(128, length - len(needle_ids) - len(question_ids) - 16)
-    base = tok.encode(FILLER)
+    needle_ids = tok.encode(needle, add_special_tokens=False)
+    question_ids = tok.encode(question, add_special_tokens=False)
+    bos = [tok.bos_token_id] if tok.bos_token_id is not None else []
+    target_filler = max(128, length - len(bos) - len(needle_ids) - len(question_ids) - 16)
+    base = tok.encode(FILLER, add_special_tokens=False)
     while len(base) < target_filler:
         base = base + base
     filler = base[:target_filler]
     insert_at = max(1, int(len(filler) * depth))
-    full_ids = filler[:insert_at] + needle_ids + filler[insert_at:] + question_ids
+    full_ids = bos + filler[:insert_at] + needle_ids + filler[insert_at:] + question_ids
     return full_ids, question_ids
 
 

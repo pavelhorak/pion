@@ -164,8 +164,11 @@ def main():
     # The correction sentence names the retired factors, so check the retired cells.
     check("the retired TTFT cells are gone", "1,530 ms" not in landing and "64.7 ms" not in landing)
     # The 64K sparse-mask row (326×) was withdrawn on 2026-10-06: its reproducer
-    # missed the needle, and its vanilla time was never recorded.
+    # missed the needle, and its vanilla time was never recorded. The figure that
+    # replaced it on 2026-10-07 comes from a published run, and links to it.
     check("the withdrawn 64K row stays withdrawn", "326×" not in landing)
+    check("the 64K figure links its raw output",
+          "437×" in landing and "2026-10-07-mac-m4/sparse_mask_64k_niah.txt" in landing)
     check("the honesty figure: what a short prefix saves", "1.5×" in landing)
     check("install: Homebrew first on macOS", "brew install pavelhorak/tap/pion" in landing)
     check("install: the tarball is one click away", 'href="/docs/getting-started/install/"' in landing)
