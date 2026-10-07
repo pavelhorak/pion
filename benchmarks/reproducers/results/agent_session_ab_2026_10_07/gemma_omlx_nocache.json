@@ -1,0 +1,411 @@
+{
+ "server": "omlx",
+ "model": "mlx-community/gemma-4-e2b-it-4bit",
+ "measured": "2026-10-07 23:39",
+ "n": 20,
+ "restart_after": 10,
+ "max_tokens": 64,
+ "fold_system_messages": true,
+ "requests": [
+  {
+   "status": 200,
+   "prompt": 14397,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 11.762,
+   "total_s": 12.835,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 14397,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 14397,
+   "i": 0,
+   "phase": "session",
+   "reply_sha256": "12c8774ae1b3f361de7cf360ba04f0151ea011739a66563490a7a334cc0b47a4",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 14598,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 7.661,
+   "total_s": 8.015,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 20,
+    "cache_creation_input_tokens": 14598,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 14598,
+   "i": 1,
+   "phase": "session",
+   "reply_sha256": "878864327f5665ae0d942049bb052ef3a3d71438684d5a7b374d446b286353b7",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 14925,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 8.033,
+   "total_s": 9.128,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 14925,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 14925,
+   "i": 2,
+   "phase": "session",
+   "reply_sha256": "cca0bb866190f77eeffefa72ca0dde98a017916b049ac3e57e3fda4564d85c14",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15048,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 8.557,
+   "total_s": 8.558,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 18,
+    "cache_creation_input_tokens": 15048,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15048,
+   "i": 3,
+   "phase": "session",
+   "reply_sha256": "696970516c520e3a145e3b00b506154166d0f14d025a38a7effbe1b16dd3d10c",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15124,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 8.311,
+   "total_s": 8.425,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 6,
+    "cache_creation_input_tokens": 15124,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15124,
+   "i": 4,
+   "phase": "session",
+   "reply_sha256": "aaee1ef5eee6336f22d90ee35c42e19cb8e1cd3e5880f1457007505885cb898c",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15198,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 9.578,
+   "total_s": 9.578,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 15198,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15198,
+   "i": 5,
+   "phase": "session",
+   "reply_sha256": "2cd199015014f4e7f6162bc48a5525b1ea6a5417381a139e0d8b2c6d39dee811",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15424,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 8.631,
+   "total_s": 9.35,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 41,
+    "cache_creation_input_tokens": 15424,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15424,
+   "i": 6,
+   "phase": "session",
+   "reply_sha256": "763e56b9ae90b2c18b53c1f60614408c02dc0e7f66d4aa7ee797596807ca302e",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15444,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 8.681,
+   "total_s": 9.785,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 15444,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15444,
+   "i": 7,
+   "phase": "session",
+   "reply_sha256": "b3ae392b0eed8aec0e19fd84a5f9a0698a0aa4a75201aff5833501d86e5ebc4b",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15711,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 8.863,
+   "total_s": 9.968,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 15711,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15711,
+   "i": 8,
+   "phase": "session",
+   "reply_sha256": "f0191f7ca0ca93c7b8d1022038e9a62c6b2acaaaad21287822605e6b313dbc14",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15989,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 8.991,
+   "total_s": 10.027,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 59,
+    "cache_creation_input_tokens": 15989,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15989,
+   "i": 9,
+   "phase": "session",
+   "reply_sha256": "dd33f71c30930061c7eb106a3179e6faa0ec637a98d09a52852c844a9b3367cf",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 16102,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 14.262,
+   "total_s": 14.263,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 16102,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 16102,
+   "i": 10,
+   "phase": "restart",
+   "reply_sha256": "2a3aebf4d5eb2ade801aa31458853daef04fed8f95e248fbc0c52bfdc4f20eb2",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 16313,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 10.244,
+   "total_s": 10.245,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 16313,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 16313,
+   "i": 11,
+   "phase": "restart",
+   "reply_sha256": "f98cf2846d5da2f27177d00879af9831a65e3b6fbc8013937abd07574158ffde",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 16732,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 9.474,
+   "total_s": 10.592,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 16732,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 16732,
+   "i": 12,
+   "phase": "restart",
+   "reply_sha256": "0573142a9be0ea9753e7751c2e3cc314fc772a9012ecfe38921d7c91167d9062",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 16852,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 10.708,
+   "total_s": 10.708,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 16852,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 16852,
+   "i": 13,
+   "phase": "restart",
+   "reply_sha256": "b60663f0f1e0e61b89d5f4839636d2872109dfecd850bac74108a256c462437a",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 17479,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 11.18,
+   "total_s": 11.18,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 17479,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 17479,
+   "i": 14,
+   "phase": "restart",
+   "reply_sha256": "cbe04a47e33150f029a704d1eb39e96602cc87b5eabc763e6dbc34440a43730e",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 17776,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 10.252,
+   "total_s": 11.112,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 48,
+    "cache_creation_input_tokens": 17776,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 17776,
+   "i": 15,
+   "phase": "restart",
+   "reply_sha256": "849fa2e50690686b9d9946c4d8425b13bd5e32c560f9183b98aa7afc674175ba",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 18183,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 10.578,
+   "total_s": 11.342,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 42,
+    "cache_creation_input_tokens": 18183,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 18183,
+   "i": 16,
+   "phase": "restart",
+   "reply_sha256": "948ee00e1a5c3de542e058589f7905f55549f9037db6b57775d3230dee928851",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 18314,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 11.772,
+   "total_s": 11.772,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 18314,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 18314,
+   "i": 17,
+   "phase": "restart",
+   "reply_sha256": "b2f6e2d7f069730e461764141e154b1d93a421043ae1368cdbac1bc204594673",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 18602,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 10.809,
+   "total_s": 11.939,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 18602,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 18602,
+   "i": 18,
+   "phase": "restart",
+   "reply_sha256": "558df54336999491a9c956cbb0751d39019f9f908a52462c55d727bc9c8c1bbd",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 18924,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 11.054,
+   "total_s": 11.911,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 47,
+    "cache_creation_input_tokens": 18924,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 18924,
+   "i": 19,
+   "phase": "restart",
+   "reply_sha256": "ebbf937dbf48e9169b7c56d6d198815c68a904666a9dd3171a911174f1d96f9a",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 14457,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens (log: no restore cached=0)",
+   "ttft_s": 8.049,
+   "total_s": 9.064,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 57,
+    "cache_creation_input_tokens": 14457,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 14457,
+   "i": 20,
+   "phase": "second",
+   "reply_sha256": "a24efde18e9fd1fff0b650ab45a912828a7da63c48b384c6c608f572382413bb",
+   "empty_reply": false
+  }
+ ],
+ "restart_s": 2.7
+}

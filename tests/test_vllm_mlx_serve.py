@@ -23,6 +23,11 @@ runnable command and no gate test. This test pins both.
           from Pion (cache_read_input_tokens covers the prompt, /v1/pion/stats
           counts a restore) and the greedy reply is identical to the miss;
        d. Codex's /v1/responses answers over the same cache.
+  4. Live, a hybrid model (Gemma-4-E2B: sliding-window layers), when it is in
+     the Hugging Face cache: a request that extends the previous one reuses
+     the previous prompt in-process. Pion does not store hybrid caches, so
+     this is mlx-lm's own segment-boundary reuse, which serve's resume path
+     used to switch off (every Gemma request was a full prefill).
 
     python3 tests/test_vllm_mlx_serve.py [--pion-port 1974] [--offline]
 
@@ -48,6 +53,7 @@ PKG = os.path.join(ROOT, "pion-vllm-mlx")
 sys.path.insert(0, PKG)
 
 MODEL = "mlx-community/Llama-3.2-1B-Instruct-4bit"
+HYBRID = "mlx-community/gemma-4-e2b-it-4bit"
 fails = 0
 
 
@@ -165,10 +171,10 @@ def http_json(port, method, path, body=None, timeout=600) -> tuple[int, dict]:
 
 
 class Serve:
-    def __init__(self, port, pion_port, workdir, log_path):
+    def __init__(self, port, pion_port, workdir, log_path, model=MODEL):
         self.port = port
         self.log = open(log_path, "ab")
-        cmd = [sys.executable, "-m", "pion_vllm_mlx", "serve", "--model", MODEL, "--host", "127.0.0.1",
+        cmd = [sys.executable, "-m", "pion_vllm_mlx", "serve", "--model", model, "--host", "127.0.0.1",
                "--port", str(port), "--pion-port", str(pion_port), "--max-tokens", "64"]
         self.p = subprocess.Popen(cmd, cwd=workdir, env=dict(os.environ, PYTHONPATH=PKG),
                                   stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -299,6 +305,49 @@ def part_live(pion_port):
         s.kill()
 
 
+def hf_cached(repo: str) -> bool:
+    hub = os.path.expanduser(os.environ.get("HF_HUB_CACHE", "~/.cache/huggingface/hub"))
+    return os.path.isdir(os.path.join(hub, "models--" + repo.replace("/", "--"), "snapshots"))
+
+
+def part_hybrid(pion_port):
+    try:
+        import mlx_lm  # noqa: F401
+    except ImportError:
+        print("SKIP hybrid part: mlx_lm is not installed")
+        return
+    if not hf_cached(HYBRID):
+        print(f"SKIP hybrid part: {HYBRID} is not in the Hugging Face cache")
+        return
+    nonce = uuid.uuid4().hex[:12]
+    work = tempfile.mkdtemp(prefix="pion_serve_hybrid_")
+    log_path = os.path.join(work, "serve.log")
+    port = free_port()
+    s = Serve(port, pion_port, work, log_path, model=HYBRID)
+    try:
+        ready = s.wait_ready()
+        check("serve starts on a hybrid model", ready, log_path)
+        if not ready:
+            print(open(log_path, errors="replace").read()[-3000:])
+            return
+        first = messages_request(nonce, "aaaa1111")
+        first["model"] = "gemma"
+        st, r1 = http_json(port, "POST", "/v1/messages", first)
+        u1 = r1.get("usage", {})
+        p1 = u1.get("input_tokens", 0) + u1.get("cache_read_input_tokens", 0)
+        check("hybrid: first request answers", st == 200 and p1 > 1000, (st, u1))
+        second = dict(first)
+        second["messages"] = first["messages"] + [
+            {"role": "assistant", "content": "Rule 7."},
+            {"role": "user", "content": "And which rule mentions module m9?"}]
+        st, r2 = http_json(port, "POST", "/v1/messages", second)
+        u2 = r2.get("usage", {})
+        check("hybrid: the next turn reuses the previous prompt in-process",
+              st == 200 and u2.get("cache_read_input_tokens", 0) >= 0.9 * p1, (u2, p1))
+    finally:
+        s.kill()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pion-port", type=int, default=1974)
@@ -308,6 +357,7 @@ def main():
     part_translation()
     if not a.offline:
         part_live(a.pion_port)
+        part_hybrid(a.pion_port)
     print(f"\n{'ALL PASS' if fails == 0 else f'{fails} FAILED'}")
     sys.exit(1 if fails else 0)
 

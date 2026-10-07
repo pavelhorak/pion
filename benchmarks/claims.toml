@@ -1681,3 +1681,174 @@ numbers = ["37.0 ms", "69.0 ms"]
 kind = "result"
 evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
 expect = ["\"hit_median_ms\": 37.0", "\"hit_median_ms\": 69.0"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| mlx-lm server, stock | 16,020 tokens, 15.24 s"
+numbers = ["15.24s", "98.9%", "0.49s", "16.21s", "19.2s", "15.36s", "17478", "16065"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| mlx-lm server, stock | 16,020 tokens, 15.24 s | 98.9%, 0.49 s | ", "17,478 of 17,478; 3.0 + 16.21 s = **19.2 s**", "45 of 16,065, 15.36 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Ollama | 13,971 tokens, 18.42 s"
+numbers = ["18.42s", "35.3%", "14.66s", "18.34s", "18.9s", "16.98s", "15376", "14016"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| Ollama | 13,971 tokens, 18.42 s | 35.3%, 14.66 s | ", "15,376 of 15,376; 0.6 + 18.34 s = **18.9 s**", "30 of 14,016, 16.98 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| LM Studio | 15,921 tokens, 15.01 s"
+numbers = ["15.01s", "98.6%", "1.33s", "18.25s", "21.6s", "15.80s", "18263", "15966"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| LM Studio | 15,921 tokens, 15.01 s | 98.6%, 1.33 s | ", "18,263 of 18,263; 3.4 + 18.25 s = **21.6 s**", "46 of 15,966, 15.80 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| oMLX | 16,009 tokens, 15.04 s"
+numbers = ["15.04s", "97.9%", "0.85s", "1.63s", "2.8s", "2.67s", "469", "18389", "13824", "16054"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| oMLX | 16,009 tokens, 15.04 s | 97.9%, 0.85 s | ", "469 of 18,389; 1.2 + 1.63 s = **2.8 s**", "13,824 of 16,054, 2.67 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Pion serve | 15,994 tokens, 14.07 s"
+numbers = ["14.07s", "98.9%", "0.42s", "0.66s", "4.2s", "2.33s", "17452", "14056", "16039"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["| Pion serve | 15,994 tokens, 14.07 s | 98.9%, 0.42 s | ", "89 of 17,452; 3.5 + 0.66 s = **4.2 s**", "14,056 of 16,039, 2.33 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| mlx-lm server, stock | 14,426 tokens, 9.89 s"
+numbers = ["9.89s", "98.4%", "0.41s", "10.47s", "12.9s", "8.02s", "16129", "14486"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["| mlx-lm server, stock | 14,426 tokens, 9.89 s | 98.4%, 0.41 s | ", "16,129 of 16,129; 2.4 + 10.47 s = **12.9 s**", "0 of 14,486, 8.02 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| LM Studio | 14,422 tokens, 9.14 s"
+numbers = ["9.14s", "15.5%", "10.27s", "11.95s", "19.1s", "8.17s", "16121", "14482"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["| LM Studio | 14,422 tokens, 9.14 s | 15.5%, 10.27 s | ", "16,121 of 16,121; 7.1 + 11.95 s = **19.1 s**", "0 of 14,482, 8.17 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| oMLX | 14,397 tokens, 11.34 s"
+numbers = ["11.34s", "98.4%", "0.40s", "5.46s", "8.2s", "1.33s", "116", "16102", "12288", "14457"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["| oMLX | 14,397 tokens, 11.34 s | 98.4%, 0.40 s | ", "116 of 16,102; 2.7 + 5.46 s = **8.2 s**", "12,288 of 14,457, 1.33 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Pion serve | 14,391 tokens, 9.99 s"
+numbers = ["9.99s", "98.4%", "0.40s", "10.22s", "12.6s", "1.67s", "16094", "12087", "14451"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["| Pion serve | 14,391 tokens, 9.99 s | 98.4%, 0.40 s | ", "16,094 of 16,094; 2.4 + 10.22 s = **12.6 s**", "12,087 of 14,451, 1.67 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| mlx-lm server, stock | 7,121 tokens, 5.14 s"
+numbers = ["5.14s", "97.5%", "0.36s", "7.33s", "10.3s", "9560"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| mlx-lm server, stock | 7,121 tokens, 5.14 s | 97.5%, 0.36 s | ", "9,560 of 9,560; 3.0 + 7.33 s = **10.3 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Ollama | 7,540 tokens, 9.96 s"
+numbers = ["9.96s", "82.7%", "0.40s", "9.94s", "10.6s", "9872"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| Ollama | 7,540 tokens, 9.96 s | 82.7%, 0.40 s | ", "9,872 of 9,872; 0.7 + 9.94 s = **10.6 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| LM Studio (9 of 20 replies ended in a stream error) | 7,249 tokens, 5.37 s"
+numbers = ["5.37s", "97.0%", "0.54s", "8.22s", "11.5s"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| LM Studio (9 of 20 replies ended in a stream error) | 7,249 tokens, 5.37 s | 97.0%, 0.54 s | ", "not reported (stream error); 3.3 + 8.22 s = **11.5 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| oMLX | 9,703 tokens, 8.05 s"
+numbers = ["8.05s", "97.1%", "0.51s", "1.13s", "2.3s", "110", "12142"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| oMLX | 9,703 tokens, 8.05 s | 97.1%, 0.51 s | ", "110 of 12,142; 1.2 + 1.13 s = **2.3 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "| Pion serve | 7,121 tokens, 5.59 s"
+numbers = ["5.59s", "97.5%", "0.38s", "1.13s", "3.4s", "9560"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| Pion serve | 7,121 tokens, 5.59 s | 97.5%, 0.38 s | ", "77 of 9,560; 2.3 + 1.13 s = **3.4 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "Recorded coding-agent sessions, replayed against five local servers"
+numbers = ["16GB"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/environment.json"]
+expect = ["Apple M4, 16 GB"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "Claude Code's prompts run from 14K to 21K tokens"
+numbers = ["14K", "21K", "7K"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/llama_ollama.json", "benchmarks/reproducers/results/agent_session_ab_2026_10_07/llama_omlx.json", "benchmarks/reproducers/results/agent_session_ab_2026_10_07/codex_llama_pion.json", "benchmarks/reproducers/results/agent_session_ab_2026_10_07/codex_llama_omlx.json"]
+expect = ["\"prompt\": 13971", "\"prompt\": 21420", "\"prompt\": 7121", "\"prompt\": 14197"]
+note = "ranges rounded: 13,971-21,420 (Claude Code), 7,121-14,197 (Codex, Ollama's alternating counts aside)"
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "Within one session every server reuses almost the whole prompt, with two"
+numbers = ["82.7%"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["| 82.7%, 0.40 s |"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "After a restart only oMLX and serve skip the re-prefill."
+numbers = ["0.66s", "1.63s", "1.13s", "2.8s", "4.2s", "2.3s", "3.4s"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md", "benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_codex_llama.md"]
+expect = ["1.2 + 1.63 s = **2.8 s**", "3.5 + 0.66 s = **4.2 s**", "1.2 + 1.13 s = **2.3 s**", "2.3 + 1.13 s = **3.4 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "On the hybrid model oMLX is ahead of serve."
+numbers = ["12.6s", "8.2s"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_gemma.md"]
+expect = ["= **12.6 s**", "= **8.2 s**"]
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "oMLX 0.7 does everything serve does here, and on hybrid models more."
+numbers = ["1s"]
+kind = "arithmetic"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/summary_claude_code_llama.md"]
+expect = ["1.63 s", "0.66 s"]
+note = "1.63 - 0.66 = 0.97 s"
+
+[[claim]]
+file = "doc/coding_agents.md"
+where = "Method notes. Every server got the same request bodies"
+numbers = ["4K"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/codex_llama_ollama.json"]
+expect = ["\"prompt\": 4290", "\"prompt\": 11863"]
+note = "Ollama's Codex prompts alternate between 4,290-7,880 and 8,001-11,863 tokens"

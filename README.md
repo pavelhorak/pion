@@ -88,8 +88,12 @@ pion-vllm-mlx serve --model mlx-community/Qwen3-4B-4bit --port 8080
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080    # Claude Code; Codex and OpenAI clients: see the guide
 ```
 
-Setup for each client, what it does not do (hybrid models are not stored yet),
-and how it stores a conversation: [`doc/coding_agents.md`](doc/coding_agents.md).
+Measured on one recorded Claude Code session against stock mlx-lm, Ollama,
+LM Studio and oMLX: after a restart, and in a second session, only oMLX and
+serve skip the re-prefill. oMLX 0.7 also does it on hybrid models (Gemma 4),
+which serve does not, and from the start command to the first token it was
+the faster of the two. The tables, setup for each client, and what serve does
+not do: [`doc/coding_agents.md`](doc/coding_agents.md).
 <!-- --8<-- [end:serve] -->
 
 <!-- --8<-- [start:two-numbers] -->

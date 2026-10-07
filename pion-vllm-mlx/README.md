@@ -65,7 +65,9 @@ mlx-lm's server with its prompt cache in Pion, plus Anthropic `/v1/messages`
 session and a second serve process start from the stored prefix instead of a
 full prefill, with the same greedy reply. Within one live session it does
 what stock mlx-lm does, and hybrid models (sliding-window or SSM layers) are
-not stored yet. The console script arrived after 0.1.5; on 0.1.5 run
+not stored. Measured on one recorded Claude Code session against stock
+mlx-lm, Ollama, LM Studio and oMLX, only oMLX and serve skip the re-prefill
+after a restart; oMLX 0.7 also does it on hybrid models, which serve does not. The console script arrived after 0.1.5; on 0.1.5 run
 `python -m pion_vllm_mlx.serve` with the same flags. Guide:
 [`doc/coding_agents.md`](https://github.com/pavelhorak/pion/blob/main/doc/coding_agents.md).
 

@@ -1,0 +1,390 @@
+{
+ "server": "lmstudio",
+ "model": "mlx-community/gemma-4-e2b-it-4bit",
+ "measured": "2026-10-07 23:24",
+ "n": 20,
+ "restart_after": 10,
+ "max_tokens": 64,
+ "fold_system_messages": true,
+ "requests": [
+  {
+   "status": 200,
+   "prompt": 14422,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 9.144,
+   "total_s": 10.202,
+   "usage": {
+    "input_tokens": 14422,
+    "output_tokens": 63,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 14422,
+   "i": 0,
+   "phase": "session",
+   "reply_sha256": "74b654b2952d7ce13e69ee61aa95938194d8567badff67f7038fd88ec127dafa",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 14623,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 7.85,
+   "total_s": 8.174,
+   "usage": {
+    "input_tokens": 14623,
+    "output_tokens": 22,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 14623,
+   "i": 1,
+   "phase": "session",
+   "reply_sha256": "086994b56dee50303518680492427878389a318b0a818a19480674aaa63762e7",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 14950,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 8.18,
+   "total_s": 8.45,
+   "usage": {
+    "input_tokens": 14950,
+    "output_tokens": 19,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 14950,
+   "i": 2,
+   "phase": "session",
+   "reply_sha256": "b3da672cd149b9b48d334c9d6b2e665ee050d022c6fb6d47b08795a4ea8dc621",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15071,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 10.019,
+   "total_s": 10.037,
+   "usage": {
+    "input_tokens": 15071,
+    "output_tokens": 19,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15071,
+   "i": 3,
+   "phase": "session",
+   "reply_sha256": "19a3206ac11d221bfdfd6b7c306300e07eafb70f62377617ed638dc65772e747",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15147,
+   "cached": 15090,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 0.248,
+   "total_s": 0.302,
+   "usage": {
+    "input_tokens": 15147,
+    "output_tokens": 7,
+    "cache_read_input_tokens": 15090
+   },
+   "processed": 57,
+   "i": 4,
+   "phase": "session",
+   "reply_sha256": "aaee1ef5eee6336f22d90ee35c42e19cb8e1cd3e5880f1457007505885cb898c",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15219,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": null,
+   "total_s": 9.916,
+   "usage": {
+    "input_tokens": 15219,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15219,
+   "i": 5,
+   "phase": "session",
+   "reply_sha256": "e2cc65a6b800ed70350affb2a70ed5a9f88fe44174109221dc870d12ad3ad38c",
+   "empty_reply": true
+  },
+  {
+   "status": 200,
+   "prompt": 15445,
+   "cached": 15282,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 0.25,
+   "total_s": 0.903,
+   "usage": {
+    "input_tokens": 15445,
+    "output_tokens": 38,
+    "cache_read_input_tokens": 15282
+   },
+   "processed": 163,
+   "i": 6,
+   "phase": "session",
+   "reply_sha256": "8265bbacc888a25ecaa7734ef943932b0d5fbb9cc1acfce2b64998c2959dccce",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15464,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 8.713,
+   "total_s": 9.813,
+   "usage": {
+    "input_tokens": 15464,
+    "output_tokens": 63,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15464,
+   "i": 7,
+   "phase": "session",
+   "reply_sha256": "65c9cd068e657275243b89731d10456d2d523f8829a62b419dc3f3406275b734",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 15732,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": null,
+   "total_s": 10.541,
+   "usage": {
+    "input_tokens": 15732,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 15732,
+   "i": 8,
+   "phase": "session",
+   "reply_sha256": "e2cc65a6b800ed70350affb2a70ed5a9f88fe44174109221dc870d12ad3ad38c",
+   "empty_reply": true
+  },
+  {
+   "status": 200,
+   "prompt": 16010,
+   "cached": 15795,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 0.335,
+   "total_s": 1.144,
+   "usage": {
+    "input_tokens": 16010,
+    "output_tokens": 49,
+    "cache_read_input_tokens": 15795
+   },
+   "processed": 215,
+   "i": 9,
+   "phase": "session",
+   "reply_sha256": "33d08b90073c39ff051e00c774f5f9a5d85396f5f0b4ac3ae5be0db942f32168",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 16121,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": null,
+   "total_s": 11.952,
+   "usage": {
+    "input_tokens": 16121,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 16121,
+   "i": 10,
+   "phase": "restart",
+   "reply_sha256": "e2cc65a6b800ed70350affb2a70ed5a9f88fe44174109221dc870d12ad3ad38c",
+   "empty_reply": true
+  },
+  {
+   "status": 200,
+   "prompt": 16332,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": null,
+   "total_s": 10.914,
+   "usage": {
+    "input_tokens": 16332,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 16332,
+   "i": 11,
+   "phase": "restart",
+   "reply_sha256": "e2cc65a6b800ed70350affb2a70ed5a9f88fe44174109221dc870d12ad3ad38c",
+   "empty_reply": true
+  },
+  {
+   "status": 200,
+   "prompt": 16751,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 9.648,
+   "total_s": 10.746,
+   "usage": {
+    "input_tokens": 16751,
+    "output_tokens": 63,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 16751,
+   "i": 12,
+   "phase": "restart",
+   "reply_sha256": "033ec87ffb9ed3fcf4ed40340189bcf315ca581a14216b06f8d7adf25cc958b0",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 16869,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": null,
+   "total_s": 11.32,
+   "usage": {
+    "input_tokens": 16869,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 16869,
+   "i": 13,
+   "phase": "restart",
+   "reply_sha256": "e2cc65a6b800ed70350affb2a70ed5a9f88fe44174109221dc870d12ad3ad38c",
+   "empty_reply": true
+  },
+  {
+   "status": 200,
+   "prompt": 17497,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": null,
+   "total_s": 11.763,
+   "usage": {
+    "input_tokens": 17497,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 17497,
+   "i": 14,
+   "phase": "restart",
+   "reply_sha256": "e2cc65a6b800ed70350affb2a70ed5a9f88fe44174109221dc870d12ad3ad38c",
+   "empty_reply": true
+  },
+  {
+   "status": 200,
+   "prompt": 17794,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 10.512,
+   "total_s": 11.584,
+   "usage": {
+    "input_tokens": 17794,
+    "output_tokens": 62,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 17794,
+   "i": 15,
+   "phase": "restart",
+   "reply_sha256": "f643fa49c71cb7eb2c90422e46f0d6faa4c9ad2072843e38b546ff811bd1c1e9",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 18201,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 10.874,
+   "total_s": 11.629,
+   "usage": {
+    "input_tokens": 18201,
+    "output_tokens": 43,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 18201,
+   "i": 16,
+   "phase": "restart",
+   "reply_sha256": "581a9d67ee4ca56c93c69e781aff9b688c32906d96a0c727213664b8cc26d737",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 18330,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": null,
+   "total_s": 12.587,
+   "usage": {
+    "input_tokens": 18330,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 18330,
+   "i": 17,
+   "phase": "restart",
+   "reply_sha256": "e2cc65a6b800ed70350affb2a70ed5a9f88fe44174109221dc870d12ad3ad38c",
+   "empty_reply": true
+  },
+  {
+   "status": 200,
+   "prompt": 18618,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 11.02,
+   "total_s": 11.87,
+   "usage": {
+    "input_tokens": 18618,
+    "output_tokens": 49,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 18618,
+   "i": 18,
+   "phase": "restart",
+   "reply_sha256": "90bdad16fe1043e1e8eb95218f495aa796c750cb9ac7faabcdf6c2d1177cbaeb",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 18940,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 11.285,
+   "total_s": 12.124,
+   "usage": {
+    "input_tokens": 18940,
+    "output_tokens": 46,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 18940,
+   "i": 19,
+   "phase": "restart",
+   "reply_sha256": "4784696ca9a370fc6b5d2129d492434535b2b86cf519f79060abd818c3867861",
+   "empty_reply": false
+  },
+  {
+   "status": 200,
+   "prompt": 14482,
+   "cached": 0,
+   "cached_source": "usage.cache_read_input_tokens",
+   "ttft_s": 8.17,
+   "total_s": 9.141,
+   "usage": {
+    "input_tokens": 14482,
+    "output_tokens": 58,
+    "cache_read_input_tokens": 0
+   },
+   "processed": 14482,
+   "i": 20,
+   "phase": "second",
+   "reply_sha256": "dd140e223904fbf82006bdff9f6a6362bcd59c6f40c9e7e90d8c3a03f0b10eb4",
+   "empty_reply": false
+  }
+ ],
+ "restart_s": 7.1
+}
