@@ -41,3 +41,30 @@ def one_bos(tok, ids: Sequence[int]) -> List[int]:
     if got != want or (want and ids[0] != bos(tok)[0]):
         raise ValueError(f"prompt has {got} <bos> tokens (want {want}, at position 0)")
     return ids
+
+
+def chat_prompt(tok, filler: str, prefix_tokens: int, instruction: str):
+    """A one-turn chat request split into (prefix_ids, suffix_ids): the chat
+    template's head (with its one <bos>) and `filler` tiled to exactly
+    `prefix_tokens` tokens, then the instruction and the template's tail.
+
+    For agreement checks on an instruct model. Given bare filler, Gemma 4 ends
+    its turn at once, and comparing tokens after <eos> measures noise; a stray
+    mid-prompt <bos> used to hide that by making it continue the filler.
+    Thinking is off, so the answer starts with text."""
+    mark = "@@PION_PROMPT_CONTENT@@"
+    templ = tok.apply_chat_template([{"role": "user", "content": mark}],
+                                    add_generation_prompt=True, tokenize=False,
+                                    enable_thinking=False)
+    head, tail = templ.split(mark)
+    head_ids = list(tok.encode(head, add_special_tokens=False))
+    if bos(tok) and (not head_ids or head_ids[0] != bos(tok)[0]):
+        head_ids = bos(tok) + head_ids
+    body = piece(tok, filler)
+    need = prefix_tokens - len(head_ids)
+    while len(body) < need:
+        body = body + body
+    prefix = head_ids + body[:need]
+    suffix = piece(tok, instruction) + list(tok.encode(tail, add_special_tokens=False))
+    one_bos(tok, prefix + suffix)
+    return prefix, suffix

@@ -39,7 +39,7 @@ from pion_vllm_mlx.mlx_lm_patch import (
     install_pion_attention_patch, make_pion_prompt_cache,
 )
 from _gemma4_text_filter_load import load_text_only_from_cached
-from _prompt_ids import bos, one_bos, piece
+from _prompt_ids import chat_prompt
 
 
 def greedy_decode(model, prompt_ids, n_steps: int, cache):
@@ -69,16 +69,13 @@ def main(args) -> int:
     n_sliding = sum(1 for t in layer_types if t == "sliding_attention")
     print(f"  layers: {len(layer_types)} total, {n_full} full, {n_sliding} sliding (window={sliding_window})")
 
-    # Build a prefix that's long enough to expose the sliding-window bug.
-    # Tokenize a paragraph and tile until we reach prefix_tokens. One <bos>,
-    # at position 0 (tests/_prompt_ids.py): tiling a plain tok.encode() copied
-    # its <bos> into the prefix, and the suffix began with another.
-    base = piece(tok, "The quick brown fox jumps over the lazy dog. " * 64)
-    while len(base) < args.prefix_tokens:
-        base = base + base
-    prefix_ids = (bos(tok) + base)[: args.prefix_tokens]
-    suffix_ids = piece(tok, " Continue: ")
-    one_bos(tok, prefix_ids + suffix_ids)
+    # A prefix long enough to expose the sliding-window bug, inside a chat
+    # turn so the model answers with text (tests/_prompt_ids.py): with a bare
+    # filler Gemma 4 ends its turn at once, and agreement on what follows
+    # <eos> measures nothing. One <bos>, at position 0.
+    prefix_ids, suffix_ids = chat_prompt(
+        tok, "The quick brown fox jumps over the lazy dog. " * 64, args.prefix_tokens,
+        "\n\nContinue the text above in your own words.")
 
     full_ids = mx.array([prefix_ids + suffix_ids])
 

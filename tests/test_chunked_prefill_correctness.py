@@ -25,6 +25,7 @@ from mlx_lm.models.cache import make_prompt_cache
 
 sys.path.insert(0, "tests")
 from _gemma4_text_filter_load import load_text_only_from_cached
+from _prompt_ids import chat_prompt
 
 
 def chunked_prefill(model, prefix_ids, chunk_size):
@@ -57,10 +58,14 @@ def main() -> int:
     print(f"loading {model_id}...")
     model, tok = load_text_only_from_cached(model_id)
 
-    base = tok.encode("The quick brown fox jumps over the lazy dog. " * 32)
-    while len(base) < prefix_len:
-        base = base + base
-    prefix_ids = base[:prefix_len]
+    # A chat turn the model answers with text, one <bos> first
+    # (tests/_prompt_ids.py). Tiling a plain tok.encode() used to copy <bos>
+    # through the prompt; with it gone, a bare filler makes Gemma 4 end its
+    # turn at once, and agreement after <eos> measures nothing.
+    prefix, suffix = chat_prompt(
+        tok, "The quick brown fox jumps over the lazy dog. " * 32, prefix_len,
+        "\n\nContinue the text above in your own words.")
+    prefix_ids = prefix + suffix
 
     n_decode = 16
 

@@ -130,7 +130,8 @@ def run_backend(model, tok, backend: str) -> tuple[int, list[str]]:
     ttft_ratios: list[float] = []
     for chunk_id, chunk_text, query_text, answer_substr in CASES:
         chunk_ids = tok.encode(chunk_text)
-        query_ids = tok.encode(query_text)
+        # The query follows the chunk: no second <bos> (add_special_tokens=False).
+        query_ids = tok.encode(query_text, add_special_tokens=False)
         out_a, t_a = _run_method_a(model, tok, chunk_ids, query_ids)
         out_b, t_b = _run_method_b(model, tok, hr, chunk_id, chunk_ids, query_ids)
         agreement = sum(1 for a, b in zip(out_a, out_b) if a == b) / N_GEN

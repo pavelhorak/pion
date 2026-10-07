@@ -25,6 +25,22 @@ enumerated — there were roughly 1,100 of them.
   passes, and RULER's multi-value NIAH, which lost a value on every path with
   the stray tokens (F1 0.80 at 4K), scores F1 1.000 at 4K, 32K and 64K. The
   per-layer agreement test, which failed with them (5/16), agrees 16/16.
+- **The rest of the class: reproducers, BLEU, hybrid retrieval.**
+  `tools/audit_prompt_bos.py` reads every tracked .py and reports a plain
+  `encode()` piece placed after another piece; it found 47 sites in 21 files,
+  and CI and the gate now run it (`tests/test_audit_prompt_bos.py`, canaried).
+  The rest are fixed: the hybrid-retrieval reproducers, demo, tests and the
+  `HybridRetrievalCache` docstring; `test_kv_prefix_bleu`,
+  `test_kv_prefix_cross_instance`, `test_prompt_cache_workload`,
+  `test_wire_sparse_consumer`, `test_boundary_protect` and two benches. The
+  cross-process TTFT reproducer's prefix had no `<bos>` at all and now has one.
+  The Qwen tokenizers add none, so the Qwen3.5 sweep was never affected.
+- **Two agreement tests compared tokens after `<eos>`.** With one `<bos>`,
+  Gemma 4 answers bare filler by ending its turn, so
+  `test_chunked_prefill_correctness` (13/16, failing) and
+  `test_hybrid_per_layer_agreement` compared noise; the stray `<bos>` had made
+  the model continue the filler. Both now send a one-turn chat request
+  (`tests/_prompt_ids.py:chat_prompt`) and agree 16/16 on real text.
 
 ### Documentation
 
@@ -43,6 +59,19 @@ enumerated — there were roughly 1,100 of them.
   `test_kv_prefix_workload`'s 99% correctness check fails.
 - RULER's variable-tracking task is solvable on Gemma-4-E2B-it-4bit at 4K
   (3/3 vanilla, dense and sparse); the test's note said 0%.
+- **The quantized V-store tiers' BLEU was overstated by the stray `<bos>`:**
+  int8 0.499 and turbo4 0.378 against vanilla, where the docs said 0.677 and
+  0.538; fp16 is 0.979 (was 0.969). The unfixed harness reproduces the old
+  figures exactly, and the fixed one repeats the new ones exactly.
+- **The TTFT figures are re-measured with the fixed reproducer:** 1,193 ms
+  cold at a 2,049-token prefix, 69.0 ms from a separate process (17×) and
+  46.2 ms in the same process (26×; was 61.9 ms, 20×); 12× / 4.6× / 1.4× at
+  1,035 / 268 / 34 tokens. A same-day run of the unfixed reproducer gives the
+  same figures within run-to-run variation, so the change from 2026-10-02 is
+  the day, not the fix. Hybrid retrieval is 3.5× (inproc) and 3.2× (pion)
+  with 96.1% token agreement, and answers 0.73 against text-RAG's 0.72; the
+  stray `<bos>` had cost answers (0.68 on every path) and hidden divergence
+  (98.3–99.3% agreement).
 
 ## [0.9.6] — 2026-10-07
 

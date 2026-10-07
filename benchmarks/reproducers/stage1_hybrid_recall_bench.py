@@ -136,13 +136,21 @@ def token_agreement(a: List[int], b: List[int]) -> float:
     return sum(1 for i in range(n) if a[i] == b[i]) / n
 
 
+def prompt_pieces(tok, context: str, question: str) -> tuple:
+    """(chunk_ids, suffix_ids). The chunk opens the prompt and keeps the
+    tokenizer's <bos>; the question suffix is encoded without special tokens.
+    Until 2026-10-07 the suffix began with a second <bos> as well, on both the
+    baseline and the hybrid side."""
+    return (tok.encode(context),
+            tok.encode(PROMPT_TEMPLATE.format(q=question), add_special_tokens=False))
+
+
 def run_baseline(model, tok, context: str, question: str, n_gen: int) -> dict:
     """Cold prefill of (context_ids + suffix_ids). Tokenize the two halves
     SEPARATELY then concat — matches the hybrid path's tokenization exactly,
     so token-agreement comparisons are apples-to-apples. (Joining the strings
     first then tokenizing can produce different BPE boundaries at the join.)"""
-    chunk_ids = tok.encode(context)
-    suffix_ids = tok.encode(PROMPT_TEMPLATE.format(q=question))
+    chunk_ids, suffix_ids = prompt_pieces(tok, context, question)
     prompt_ids = chunk_ids + suffix_ids
     cache = make_prompt_cache(model)
     decoded, ttft = greedy_decode(model, prompt_ids, n_gen, cache)
@@ -158,10 +166,9 @@ def run_hybrid(model, tok, hr: HybridRetrievalCache, chunk_id: str,
                 context: str, question: str, n_gen: int) -> dict:
     """Hybrid: ingest context (not timed if already in cache), warm-forward
     suffix. Returns dict with ttft (warm portion only) + decoded + tokens."""
-    chunk_ids = tok.encode(context)
+    chunk_ids, suffix_ids = prompt_pieces(tok, context, question)
     if not hr.has(chunk_id):
         hr.ingest(chunk_id, chunk_ids)
-    suffix_ids = tok.encode(PROMPT_TEMPLATE.format(q=question))
     decoded, ttft = warm_decode_via_hybrid(model, hr, chunk_id, suffix_ids, n_gen)
     text = tok.decode(decoded)
     return {"ttft_ms": ttft, "decoded": text, "decoded_tokens": decoded,

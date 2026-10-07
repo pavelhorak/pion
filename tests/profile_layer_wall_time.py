@@ -51,10 +51,13 @@ def main(args) -> int:
     print(f"  layers: {len(layer_types)} total, {n_full} full, {n_sliding} sliding")
 
     # Build a long prefix.
-    base = tok.encode("The quick brown fox jumps over the lazy dog. " * 64)
+    # One <bos>, first: tiling a plain tok.encode() copied its <bos> through
+    # the prefix (the Gemma loader forces add_bos_token).
+    bos = [tok.bos_token_id] if tok.bos_token_id is not None else []
+    base = tok.encode("The quick brown fox jumps over the lazy dog. " * 64, add_special_tokens=False)
     while len(base) < args.prefix_tokens:
         base = base + base
-    prefix_ids = base[: args.prefix_tokens]
+    prefix_ids = (bos + base)[: args.prefix_tokens]
 
     install_pion_attention_patch()
     pc = PionPromptCache(

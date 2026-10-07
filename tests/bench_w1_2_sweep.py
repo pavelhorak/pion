@@ -73,7 +73,7 @@ def run_workload_for_repeats(model, tok, layout, args, prompt_repeats: int,
     a_ttfts = []
     a_t0 = time.perf_counter()
     for (pi, q) in workload:
-        full = mx.array([sys_tokens[pi] + tok.encode(q)])
+        full = mx.array([sys_tokens[pi] + tok.encode(q, add_special_tokens=False)])
         ttft, _ = forward_logits(model, full)
         a_ttfts.append(ttft)
     a_wall = time.perf_counter() - a_t0
@@ -87,7 +87,7 @@ def run_workload_for_repeats(model, tok, layout, args, prompt_repeats: int,
     c_ttfts = []
     c_t0 = time.perf_counter()
     for (pi, q) in workload:
-        suffix_ids_list = tok.encode(q)
+        suffix_ids_list = tok.encode(q, add_special_tokens=False)
         suffix_ids = mx.array([suffix_ids_list])
         if pi not in prompt_cache_meta:
             prefix_ids_list = sys_tokens[pi]
@@ -131,7 +131,7 @@ def run_workload_for_repeats(model, tok, layout, args, prompt_repeats: int,
         d_t0 = time.perf_counter()
         for (pi, q) in workload:
             if pi not in prompt_meta:
-                full_ids = mx.array([sys_tokens[pi] + tok.encode(q)])
+                full_ids = mx.array([sys_tokens[pi] + tok.encode(q, add_special_tokens=False)])
                 ttft, _ = forward_logits(model, full_ids)
                 ns = f"w1_2_{run_id}_r{prompt_repeats}_p{pi}"
                 prefix_ids_list = sys_tokens[pi][:-1]
@@ -142,7 +142,7 @@ def run_workload_for_repeats(model, tok, layout, args, prompt_repeats: int,
                 ns, prefix_len = prompt_meta[pi]
                 cache = make_pion_prompt_cache(model, namespace=ns,
                                                 prompt_cache=pc, prefix_len=prefix_len)
-                suffix_ids = mx.array([[sys_tokens[pi][-1]] + tok.encode(q)])
+                suffix_ids = mx.array([[sys_tokens[pi][-1]] + tok.encode(q, add_special_tokens=False)])
                 ttft, _ = forward_logits(model, suffix_ids, cache=cache)
             d_ttfts.append(ttft)
         d_wall = time.perf_counter() - d_t0

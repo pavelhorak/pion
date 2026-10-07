@@ -18,8 +18,8 @@ text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)             #
 
 | Time to first token, Apple Silicon | vanilla mlx-lm | Pion warm | |
 |---|---:|---:|:---:|
-| Llama-3.2-1B-4bit, 2,049-token prefix, **same process** | 1,242 ms | **61.9 ms** | **20×** |
-| Same model and prefix, **from a separate process**, over the wire | 1,242 ms | 73.9 ms | **17×** |
+| Llama-3.2-1B-4bit, 2,049-token prefix, **same process** | 1,193 ms | **46.2 ms** | **26×** |
+| Same model and prefix, **from a separate process**, over the wire | 1,193 ms | 69.0 ms | **17×** |
 
 The two rows differ only by *where the cache comes from*: the first is the
 process that computed it, the second fetches what a separate process wrote and

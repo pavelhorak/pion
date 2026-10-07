@@ -40,8 +40,11 @@ from mlx_lm import load as mlx_load
 from mlx_lm.models.cache import make_prompt_cache
 
 
-def encode(tokenizer, text: str) -> mx.array:
-    ids = tokenizer.encode(text)
+def encode(tokenizer, text: str, special: bool = True) -> mx.array:
+    """`special=False` for any piece after the first: a plain encode() adds
+    <|begin_of_text|>, and a second one mid-prompt is not what any real prompt
+    holds (until 2026-10-07 the query carried one)."""
+    ids = tokenizer.encode(text, add_special_tokens=special)
     return mx.array([ids])
 
 
@@ -111,7 +114,7 @@ def run_one(args, model, tokenizer, chunk_text: str, query_text: str,
 
     # Method A: text-only RAG baseline (encode chunk+query together).
     chunk_ids = encode(tokenizer, chunk_text)
-    query_ids = encode(tokenizer, query_text)
+    query_ids = encode(tokenizer, query_text, special=False)
     full_ids = mx.concatenate([chunk_ids, query_ids], axis=1)
     chunk_len = chunk_ids.shape[1]
 

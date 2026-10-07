@@ -108,7 +108,9 @@ def main(args) -> int:
     random.Random(0).shuffle(workload)
 
     # Warmup
-    full_w = mx.array([sys_tokens[0] + tok.encode(USER_QUERIES[0])])
+    # Queries follow the system prompt, so they carry no <bos> of their own
+    # (until 2026-10-07 each had a second one).
+    full_w = mx.array([sys_tokens[0] + tok.encode(USER_QUERIES[0], add_special_tokens=False)])
     for _ in range(args.warmup):
         first_token_logits(model, full_w, make_prompt_cache(model))
 
@@ -118,7 +120,7 @@ def main(args) -> int:
     a_first_by_key = {}
     a_t0 = time.perf_counter()
     for (pi, q) in workload:
-        full = mx.array([sys_tokens[pi] + tok.encode(q)])
+        full = mx.array([sys_tokens[pi] + tok.encode(q, add_special_tokens=False)])
         cache = make_prompt_cache(model)
         t0 = time.perf_counter()
         last = first_token_logits(model, full, cache)
@@ -141,7 +143,7 @@ def main(args) -> int:
     c_t0 = time.perf_counter()
     for (pi, q) in workload:
         ns = PionPromptCache.make_namespace(args.model, "tok-v1", args.vquant, f"prompt{pi}")
-        suffix = mx.array([tok.encode(q)])
+        suffix = mx.array([tok.encode(q, add_special_tokens=False)])
         is_cold = pi not in seen_prompts
         t0 = time.perf_counter()
         cache = pc.get_or_prefill(sys_tokens[pi], ns)

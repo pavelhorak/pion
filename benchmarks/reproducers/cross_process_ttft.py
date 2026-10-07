@@ -2,11 +2,11 @@
 """Cross-process time to first token: a cold prefill vs a hit from a FRESH process.
 
 Backs the "across processes" row of the README / docs Overview / one-pager
-(2026-10-02, M4 Mac mini, Pion 0.9.1, mlx 0.32.3 / mlx-lm 0.31.3:
-1,241.9 ms -> 73.9 ms, 16.8x at a 2,049-token prefix, Llama-3.2-1B-Instruct-4bit;
-raw runs in results/cross_process_ttft_2026_10_02.json), its "same process" row
-with --same (61.9 ms, 20.1x), and the prefix-length regime in "Where this does
-not help": 1.50x at 34 tokens, 4.51x at 268, 11.24x at 1,035.
+(2026-10-07, M4 Mac mini, Pion 0.9.6, mlx 0.31.2 / mlx-lm 0.31.3:
+1,193.4 ms -> 69.0 ms, 17.3x at a 2,049-token prefix, Llama-3.2-1B-Instruct-4bit;
+raw runs in results/cross_process_ttft_2026_10_07.json), its "same process" row
+with --same (46.2 ms, 25.8x), and the prefix-length regime in "Where this does
+not help": 1.44x at 34 tokens, 4.62x at 268, 12.35x at 1,035.
 
 What each side measures, so the ratio means what it says:
 
@@ -39,7 +39,7 @@ flattering wrong number.
 Needs: Apple Silicon, mlx-lm, mlx-community/Llama-3.2-1B-Instruct-4bit, and a
 running server:
 
-    ./pion-server --kvcache -w 1                      # port 1974
+    ./pion-server --kvcache --metal-attention -w 1    # port 1974; --same needs the attention engine
     python3 benchmarks/reproducers/cross_process_ttft.py
     python3 benchmarks/reproducers/cross_process_ttft.py --prefix-tokens 34 268 1035 2049 --pairs 5 \
         --same --out cross_process_ttft.json
@@ -71,9 +71,13 @@ FILLER = (
 
 
 def build_prefix_ids(tok, n_tokens: int) -> list[int]:
-    """Exactly `n_tokens` token ids of a document-style system prompt."""
+    """Exactly `n_tokens` token ids of a document-style system prompt, the
+    first of them the tokenizer's <bos>. Until 2026-10-07 the prefix had none:
+    every piece was encoded without special tokens, so Llama ran without the
+    <|begin_of_text|> it is always prompted with (both sides alike)."""
     text = "You are a careful assistant. Answer using only the document below.\n\nDocument: "
-    ids = tok.encode(text, add_special_tokens=False)
+    bos = [tok.bos_token_id] if tok.bos_token_id is not None else []
+    ids = bos + tok.encode(text, add_special_tokens=False)
     filler = tok.encode(FILLER, add_special_tokens=False)
     while len(ids) < n_tokens:
         ids += filler

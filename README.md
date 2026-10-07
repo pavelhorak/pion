@@ -72,22 +72,24 @@ answer, and prints every one. Install with `pip install 'pion-vllm-mlx[mlx]'`.
 
 | Llama-3.2-1B-4bit, 2,049-token prefix, 16-token question | vanilla mlx-lm | Pion warm | |
 |---|---:|---:|:---:|
-| The process that stored the prefix, asking again | 1,242 ms | **61.9 ms** | **20×** |
-| A separate process, over the wire | 1,242 ms | **73.9 ms** | **17×** |
+| The process that stored the prefix, asking again | 1,193 ms | **46.2 ms** | **26×** |
+| A separate process, over the wire | 1,193 ms | **69.0 ms** | **17×** |
 
 A shorter prefix saves less: from a separate process the same measurement gives
-11× at 1,035 tokens, 4.5× at 268, and 1.5× at 34, where the saving is about
-16 ms. A second client (a separate socket and a separate model object) produces
+12× at 1,035 tokens, 4.6× at 268, and 1.4× at 34, where the saving is about
+14 ms. A second client (a separate socket and a separate model object) produces
 the same text: BLEU 1.000 on a 50-token greedy completion. Sources:
 [`cross_process_ttft.py`](benchmarks/reproducers/cross_process_ttft.py) `--same`
 for both rows (`--prefix-tokens` for the shorter prefixes) with its
-[raw output](benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json),
+[raw output](benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json),
 and `tests/test_kv_prefix_cross_instance.py` with
-[its output](benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt),
+[its output](benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt),
 both on an M4 Mac mini. The vanilla side times the first token the way mlx-lm's
 own `generate_step` produces it; until 2026-10-02 it also computed logits at
 every prompt position, which no generation does, and the ratios published then
-were too high. The [changelog](CHANGELOG.md) has the correction.
+were too high. The [changelog](CHANGELOG.md) has the correction. The figures
+above are from 2026-10-07, after the harness gained the `<bos>` its prefix lacked;
+a same-day run without that fix lands within run-to-run variation of them.
 
 At 64K context a sparse mask still finds the needle. On Gemma-4-E2B-it-4bit,
 with a 63,961-token prefix and a 23-token question, vanilla mlx-lm's cold
@@ -561,12 +563,12 @@ text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)
 
 - **Stage 1** — the four lines above (`KV.PREFIX.LOOKUP` + `V.FETCH ... RANGE` / `V.FETCH ... BATCH`): cross-instance, persistent, BLEU 1.0, and mlx-lm decodes at native speed because the cache it gets back is an ordinary MLX prompt cache.
 - **Stage 2** — `PionPromptCache(model, stage2=True)` + `install_pion_attention_patch()` + `make_pion_prompt_cache(...)`: Pion computes the attention over the prefix itself. Three lanes, picked automatically:
-  - **In-process fast lane (default same-process consumer).** Cold prefill stashes per-layer prefix K/V as MLX arrays; warm forwards run `mx.fast.scaled_dot_product_attention` over `concat([prefix | suffix])` with **zero wire roundtrips** and no `mx.eval` barrier per layer. **`bench_w1_stage2.py` Llama-3.2-1B-4bit 5×20: TTFT p50 = 34.4 ms, mean = 42.2 ms, 4.7× vs vanilla cold** (mean against mean) on that harness's ~316-token system-prompt prefixes; at a 2,049-token prefix the same lane answers a 16-token question in 61.9 ms against 1,242 ms (20×), the same-process row above.
+  - **In-process fast lane (default same-process consumer).** Cold prefill stashes per-layer prefix K/V as MLX arrays; warm forwards run `mx.fast.scaled_dot_product_attention` over `concat([prefix | suffix])` with **zero wire roundtrips** and no `mx.eval` barrier per layer. **`bench_w1_stage2.py` Llama-3.2-1B-4bit 5×20: TTFT p50 = 34.4 ms, mean = 42.2 ms, 4.7× vs vanilla cold** (mean against mean) on that harness's ~316-token system-prompt prefixes; at a 2,049-token prefix the same lane answers a 16-token question in 46.2 ms against 1,193 ms (26×), the same-process row above.
   - **Binary fast lane on `port+1`** (`0xCA5E` + `CMD_ATTEND_PREFIX_QUERY_FUSED`). Cross-process consumers: single sendmsg scatter-gather, no `.tobytes()` allocs. **TTFT p50 = 98.2 ms** on the same workload: 32 wire calls a request at 0.63 ms each, because mlx-lm runs the suffix in two passes (all but its last token, then the last) and each pass queries every layer.
   - **RESP fallback** for older servers without the binary listener. **TTFT p50 = 110–128 ms** over two runs.
   Raw output for the three lanes: [`benchmarks/results/2026-10-07-mac-m4/`](benchmarks/results/2026-10-07-mac-m4/) (M4 Mac mini, 2026-10-07).
   Lanes 2/3: native Metal SDPA via `--metal-attention` (no Python sidecar; **0.441 ms** end-to-end at H=8/N=2048/d=128, against 0.456 ms for MLX's own `scaled_dot_product_attention`, `tests/bench_pion_metal_attention.py`). Both M=1 decoder and M>1 batched-Q paths; fp16 variant for vanilla mlx-lm precision parity. Same tokens as vanilla mlx-lm on `tests/test_mlx_lm_patch.py` (20/20). Optional `--fa-window N` clamps SDPA to the last `N` tokens for sliding-window models (Mistral SWA, hybrid Qwen3.5 with per-layer routing) — server-wide, lossy on plain dense transformers.
-  The in-process lane is the same-process 61.9 ms row. On the wire lanes every decode step pays one round trip per layer, so a consumer that only generates text from another process is faster end to end on Stage 1; Stage 2 is for consumers that want the attention itself to run in Pion — the sparse selectors, `pion-exo`, a custom CacheEngine.
+  The in-process lane is the same-process 46.2 ms row. On the wire lanes every decode step pays one round trip per layer, so a consumer that only generates text from another process is faster end to end on Stage 1; Stage 2 is for consumers that want the attention itself to run in Pion — the sparse selectors, `pion-exo`, a custom CacheEngine.
 - **WAL-durable** (macOS and Linux): SIGKILL recovers bit-equal, V-store included — replay after SIGKILL is validated on EPYC 8124P and guarded by `tests/test_vstore_wal.py` in Gate 2c. `KV.PREFIX.SAVE` compacts.
 - **Authentication**: `--requirepass <password>` requires `AUTH <password>` on every connection before any command is served — on both the RESP port and the binary `port+1` fast lane. Prefer `--requirepass-file <path>` or the `PION_REQUIREPASS` environment variable: the flag spelling puts the password in the process command line, where `ps` and `/proc/<pid>/cmdline` expose it to every local user. See [`SECURITY.md`](SECURITY.md).
 - **Tenant isolation**: `--tenant NAME=PASSWORD` (repeatable, requires `--requirepass` as the admin credential) binds each authenticated connection to its tenant's namespace — every key is transparently prefixed, commands outside a fail-closed allowlist are rejected with `-NOPERM`, and `KEYS`/`SCAN` are filtered to the tenant's namespace (see [`doc/multi_tenant.md`](doc/multi_tenant.md)). For hard *resource* isolation (memory/CPU/WAL), run one `pion-server` per tenant. The older `--ns-prefix` flag remains a cooperative namespace guard for `KV.PREFIX.*`/`V.*` only — not an isolation boundary.
@@ -594,7 +596,7 @@ cache, suffix = hr.prepare("eiffel_passage", tok.encode("How tall?\nAnswer:"))
 ```
 
 - **Two backends.** `inproc` (default) keeps K/V as MLX arrays in a process-local dict — bit-perfect vs combined-encoding text-RAG, no Pion server needed. `pion` ships K/V via `KV.PREFIX.*` + `V.STOREBATCH/V.FETCH BATCH` for cross-process / cross-host — fp16 wire precision, requires `--kvcache --metal-attention -w 1`.
-- **Measured (Llama-3.2-1B-Instruct-4bit):** on a 100-query SQuAD v2 run ([`stage1_hybrid_recall_bench.py`](benchmarks/reproducers/stage1_hybrid_recall_bench.py), [raw results](benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json)) the inproc backend measured 3.0× p50 TTFT with 98.3% token agreement (the `pion` backend 2.7×), the cache hydration inside the clock. Storage, from the model shapes: ~8 KB/token at INT4 (1B: 16 layers × 8 KV heads × 64), ~32 KB (7B-class: 32 × 8 × 128), ~80 KB (70B: 80 × 8 × 128).
+- **Measured (Llama-3.2-1B-Instruct-4bit):** on a 100-query SQuAD v2 run ([`stage1_hybrid_recall_bench.py`](benchmarks/reproducers/stage1_hybrid_recall_bench.py), [raw results](benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json)) the inproc backend measured 3.5× p50 TTFT with 96.1% token agreement (the `pion` backend 3.2×), the cache hydration inside the clock, and both found the answer as often as text-RAG (73 and 72 of 100). Storage, from the model shapes: ~8 KB/token at INT4 (1B: 16 layers × 8 KV heads × 64), ~32 KB (7B-class: 32 × 8 × 128), ~80 KB (70B: 80 × 8 × 128).
 - **No new opcodes** — the wire backend layers entirely on the existing `PionPromptCache` substrate. Chunk_id namespaces are hashed (`chunk_<sha256[:24]>`) so they don't collide with prompt-prefix caches.
 - **Several chunks per query.** `set_shared_stub()` + `ingest_pack()` + `prepare_multi()` compose up to 8 chunk packs, each re-rotated exactly to its position ([`doc/shared_kv_cache.md`](doc/shared_kv_cache.md) §Multi-chunk). Keep the packs coarse: with many small ones, distractor chunks collide and quality drops well before 20.
 
@@ -827,7 +829,7 @@ doc/                              # technical reference
 | | Pion |
 |---|---|
 | Category | **Memory engine for AI inference** |
-| Headline | **Shared KV Cache** — 1,242 ms → 61.9 ms TTFT (20×) at a 2K prefix on Llama-3.2-1B-4bit in the same process, 73.9 ms (17×) from a separate one; BLEU 1.000 cross-instance |
+| Headline | **Shared KV Cache** — 1,193 ms → 46.2 ms TTFT (26×) at a 2K prefix on Llama-3.2-1B-4bit in the same process, 69.0 ms (17×) from a separate one; BLEU 1.000 cross-instance |
 | Expert paging | **MOE.EXPERT.\*** — tiered expert cache for models beyond RAM. *Substrate validation; no published measurement yet; decode is research-grade* |
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |

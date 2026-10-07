@@ -52,6 +52,12 @@ jobs:
         # kind of bug that reaches a user before it reaches a test.
         run: python3 tools/gen_command_table.py --check
 
+      - name: No prompt carries a <bos> after its first piece
+        # A plain tok.encode() piece placed after another one puts <bos> in
+        # the middle of a prompt; 21 harnesses did, and at 64K it hid the
+        # needle from vanilla mlx-lm and Pion alike. Canaried; must stay at 0.
+        run: python3 tests/test_audit_prompt_bos.py
+
       - name: Every dispatch arm pins its whole command name
         # Must stay at 0. Prefix matching once made PINX execute as PING and
         # DBFOO! as DBSIZE; FLUSHALL's arm matched on two bytes and a length.

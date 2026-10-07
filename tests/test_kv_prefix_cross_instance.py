@@ -100,7 +100,8 @@ def main() -> int:
     assert model_a is not model_b, "models must be distinct objects"
 
     prefix_ids = tok_a.encode(SYSTEM)
-    suffix_ids_list = tok_a.encode(QUERY)
+    # The query follows the prefix: no second <bos> (until 2026-10-07 it had one).
+    suffix_ids_list = tok_a.encode(QUERY, add_special_tokens=False)
     suffix_ids = mx.array([suffix_ids_list])
     full_ids = mx.array([prefix_ids + suffix_ids_list])
 

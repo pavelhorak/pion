@@ -87,8 +87,11 @@ def main(args) -> int:
     print("loading model...")
     model, tok = mlx_load(args.model)
 
+    # The chunk opens the prompt and keeps the tokenizer's <bos>; the query
+    # follows it, so it is encoded without special tokens (a plain encode()
+    # would put a second <bos> in the middle of the prompt).
     chunk_ids = tok.encode(CHUNK)
-    suffix_ids = tok.encode(QUERY)
+    suffix_ids = tok.encode(QUERY, add_special_tokens=False)
     print(f"  chunk={len(chunk_ids)} tokens · suffix={len(suffix_ids)} tokens")
     print()
 

@@ -6,13 +6,13 @@ different process, a different model object, or a restarted server can reuse
 that prefix itself (Stage 2).
 
 Time to first token on Llama-3.2-1B-4bit with a 2,049-token prefix and a
-16-token question: 1,242 ms cold in vanilla mlx-lm, **61.9 ms** warm in the same
-process (20×), and **73.9 ms** from a separate process over the wire (17×). A
-shorter prefix saves less: 11× at 1,035 tokens, 4.5× at 268, and 1.5× at 34,
-where the saving is about 16 ms. Harness:
+16-token question: 1,193 ms cold in vanilla mlx-lm, **46.2 ms** warm in the same
+process (26×), and **69.0 ms** from a separate process over the wire (17×). A
+shorter prefix saves less: 12× at 1,035 tokens, 4.6× at 268, and 1.4× at 34,
+where the saving is about 14 ms. Harness:
 [`cross_process_ttft.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/cross_process_ttft.py);
 raw output of every run:
-[`cross_process_ttft_2026_10_02.json`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json).
+[`cross_process_ttft_2026_10_07.json`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json).
 
 Stage 2 runs on three lanes, auto-selected by `PionPromptCache`:
 
@@ -26,7 +26,7 @@ Measured with [`tests/bench_w1_stage2.py`](https://github.com/pavelhorak/pion/bl
 on an M4 Mac mini, 2026-10-07; raw output in
 [`benchmarks/results/2026-10-07-mac-m4/`](https://github.com/pavelhorak/pion/tree/main/benchmarks/results/2026-10-07-mac-m4).
 
-Plus `HybridRetrievalCache` for RAG: chunk-id-keyed K/V hydration (3.0× p50 TTFT and 98.3% token agreement on a 100-query SQuAD v2 run, [`stage1_hybrid_recall_bench.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/stage1_hybrid_recall_bench.py), [raw results](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json)).
+Plus `HybridRetrievalCache` for RAG: chunk-id-keyed K/V hydration (3.5× p50 TTFT and 96.1% token agreement on a 100-query SQuAD v2 run, [`stage1_hybrid_recall_bench.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/stage1_hybrid_recall_bench.py), [raw results](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json)).
 
 ## Install
 
@@ -105,7 +105,7 @@ text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)
 ```
 
 When the cold prefill ran in this same process the prefix stays resident as MLX
-arrays (lane 1, zero wire round trips — the 61.9 ms / 20× same-process row in
+arrays (lane 1, zero wire round trips — the 46.2 ms / 26× same-process row in
 the main README). From any other process the patch uses lane 2 or 3, and then **every
 decode step pays one round trip per layer**. So for a consumer that only generates text from
 another process, the four Stage-1 lines above are the faster end-to-end path;

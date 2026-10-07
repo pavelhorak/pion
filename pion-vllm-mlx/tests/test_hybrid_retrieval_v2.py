@@ -79,8 +79,12 @@ def main():
     check("shared stub encodes", hr._stub_len == len(stub_ids),
           f"{hr._stub_len} tokens")
 
-    doc_a = tok.encode("Document A: the Pion server listens on port 1974 by default.\n")
-    doc_b = tok.encode("Document B: the reference recall floor for the vector gate is 0.940.\n")
+    # Packs and the question follow the stub, so they carry no special tokens;
+    # the stub opens the prompt and keeps the tokenizer's <bos>, if it has one.
+    doc_a = tok.encode("Document A: the Pion server listens on port 1974 by default.\n",
+                       add_special_tokens=False)
+    doc_b = tok.encode("Document B: the reference recall floor for the vector gate is 0.940.\n",
+                       add_special_tokens=False)
     hr.ingest_pack("a", doc_a)
     hr.ingest_pack("b", doc_b)
     check("packs ingest behind the stub",
@@ -110,7 +114,8 @@ def main():
     check("V is not rotated", v_same)
 
     # ── 2. composition runs and stays coherent ──────────────────────────────
-    q = tok.encode("\nQuestion: which port does the Pion server listen on?\nAnswer:")
+    q = tok.encode("\nQuestion: which port does the Pion server listen on?\nAnswer:",
+                   add_special_tokens=False)
     cache, suffix = hr.prepare_multi(["a", "b"], q)
     check("prepare_multi returns a cache positioned past stub + both packs",
           cache[0].offset == hr._stub_len + len(doc_a) + len(doc_b),

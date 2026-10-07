@@ -1,0 +1,24 @@
+Cross-instance KV cache test
+loading two independent model instances...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 40524.68it/s]
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 85890.18it/s]
+
+[A] client A registers namespace and pushes K/V
+  client A: 73.8ms, hits=0 misses=1
+[B] client B (fresh instance, fresh socket, never prefilled) looks up namespace
+  B.lookup before any get_or_prefill call: +HIT
+  client B fetch: 2.0ms, hits=1 misses=0
+
+──────── cross-instance result ────────
+  A miss-path latency           73.8 ms (prefill + store)
+  B hit-path latency             2.0 ms (fetch only)
+  B speedup over A           37.56×
+  pre-lookup HIT before B's work?  YES
+  B first-token == ref?            YES  (B=4815 ref=4815)
+  B BLEU vs ref (50 tokens)        1.0000  (target ≥ 0.95)
+
+  cross-instance LOOKUP   PASS
+  cross-instance correctness (first-token)  PASS
+  cross-instance correctness (BLEU)         PASS
+  CROSS-INSTANCE          PASS
+rc=0

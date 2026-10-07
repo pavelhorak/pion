@@ -5,27 +5,27 @@
 [[claim]]
 file = "README.md"
 where = "The process that stored the prefix, asking again"
-numbers = ["1,242 ms", "61.9 ms", "20×"]
+numbers = ["1,193 ms", "46.2 ms", "26×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82"]
 
 [[claim]]
 file = "README.md"
 where = "A separate process, over the wire"
-numbers = ["1,242 ms", "73.9 ms", "17×"]
+numbers = ["1,193 ms", "69.0 ms", "17×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3"]
 
 [[claim]]
 file = "README.md"
 where = "A shorter prefix saves less: from a separate process"
-numbers = ["11×", "4.5×", "1.5×", "16 ms", "1.000"]
+numbers = ["12×", "4.6×", "1.4×", "14 ms", "1.000"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json", "benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
-expect = ["\"ratio\": 11.24", "\"ratio\": 4.51", "\"ratio\": 1.5,", "\"cold_median_ms\": 47.2", "\"hit_median_ms\": 31.4", "B BLEU vs ref (50 tokens)        1.0000"]
-note = "16 ms = 47.2 - 31.4 at 34 tokens"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt"]
+expect = ["\"ratio\": 12.35", "\"ratio\": 4.62", "\"ratio\": 1.44,", "\"cold_median_ms\": 45.0", "\"hit_median_ms\": 31.2", "B BLEU vs ref (50 tokens)        1.0000"]
+note = "14 ms = 45.0 - 31.2 at 34 tokens"
 
 [[claim]]
 file = "README.md"
@@ -38,10 +38,10 @@ note = "pion-0.9.5-macos-arm64.tar.gz is 2,931,707 bytes"
 [[claim]]
 file = "README.md"
 where = "In-process fast lane (default same-process consumer)"
-numbers = ["34.4 ms", "42.2 ms", "4.7×", "61.9 ms", "1,242 ms", "20×"]
+numbers = ["34.4 ms", "42.2 ms", "4.7×", "46.2 ms", "1,193 ms", "26×"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/w1_stage2.txt", "benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["TTFT mean=   42.2 ms  p50=   34.4", "TTFT mean speedup       4.74×", "\"same_median_ms\": 61.9"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/w1_stage2.txt", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["TTFT mean=   42.2 ms  p50=   34.4", "TTFT mean speedup       4.74×", "\"same_median_ms\": 46.2"]
 note = "4.74× rounds to 4.7×"
 
 [[claim]]
@@ -66,18 +66,18 @@ file = "README.md"
 where = "A mixed workload"
 numbers = ["3.6×", "90%", "4.7×", "0.016", "17×"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_workload_q10.txt", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_workload_q10_repeat.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_binary_lane.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_resp_lane.txt", "benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["TTFT mean speedup       3.61×", "TTFT mean speedup       3.56×", "cache hit rate     90.0%", "first-token agreement   98.0% (49/50)", "vanilla's top-2 margin 0.016", "TTFT mean speedup       4.74×", "first-token agreement   100.0% (50/50)", "\"ratio\": 16.8"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_workload_q10.txt", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_workload_q10_repeat.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_binary_lane.txt", "benchmarks/results/2026-10-07-mac-m4/w1_stage2_resp_lane.txt", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["TTFT mean speedup       3.61×", "TTFT mean speedup       3.56×", "cache hit rate     90.0%", "first-token agreement   98.0% (49/50)", "vanilla's top-2 margin 0.016", "TTFT mean speedup       4.74×", "first-token agreement   100.0% (50/50)", "\"ratio\": 17.3"]
 note = "Stage 1 3.61× and 3.56× over two runs, both 49/50 on the same near-tie request"
 
 [[claim]]
 file = "README.md"
 where = "on a 100-query SQuAD v2 run"
-numbers = ["3.0×", "98.3%", "2.7×"]
+numbers = ["3.5×", "96.1%", "3.2×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
-expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825"]
-note = "123.1/41.3 = 2.98; 123.1/45.6 = 2.70"
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json"]
+expect = ["\"ttft_p50_ms\": 113.81925013847649", "\"ttft_p50_ms\": 32.495331950485706", "\"ttft_p50_ms\": 35.754125099629164", "\"token_agreement_mean\": 0.961", "\"answer_found_rate\": 0.73", "\"answer_found_rate\": 0.72"]
+note = "113.8 / 32.5 = 3.50; 113.8 / 35.8 = 3.18"
 
 [[claim]]
 file = "README.md"
@@ -121,10 +121,10 @@ expect = ["* 100 > self.capacity * 70"]
 [[claim]]
 file = "README.md"
 where = "| Headline |"
-numbers = ["1,242 ms", "61.9 ms", "20×", "73.9 ms", "17×", "1.000"]
+numbers = ["1,193 ms", "46.2 ms", "26×", "69.0 ms", "17×", "1.000"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json", "benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08", "\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8", "B BLEU vs ref (50 tokens)        1.0000"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82", "\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3", "B BLEU vs ref (50 tokens)        1.0000"]
 
 [[claim]]
 file = "README.md"
@@ -137,41 +137,41 @@ expect = ["failover completed in 350ms"]
 [[claim]]
 file = "website/landing/sections.md"
 where = "2,049-token prefix, **same process**"
-numbers = ["1,242 ms", "61.9 ms", "20×"]
+numbers = ["1,193 ms", "46.2 ms", "26×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82"]
 
 [[claim]]
 file = "website/landing/sections.md"
 where = "**from a separate process**, over the wire"
-numbers = ["1,242 ms", "73.9 ms", "17×"]
+numbers = ["1,193 ms", "69.0 ms", "17×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3"]
 
 [[claim]]
 file = "doc/index.md"
 where = "2,049-token prefix, **same process**"
-numbers = ["1,242 ms", "61.9 ms", "20×"]
+numbers = ["1,193 ms", "46.2 ms", "26×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82"]
 
 [[claim]]
 file = "doc/index.md"
 where = "**from a separate process**, over the wire"
-numbers = ["1,242 ms", "73.9 ms", "17×"]
+numbers = ["1,193 ms", "69.0 ms", "17×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3"]
 
 [[claim]]
 file = "website/landing/sections.md"
 where = "Both rows answer the same 16-token question"
 numbers = ["1.000"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt"]
 expect = ["B BLEU vs ref (50 tokens)        1.0000"]
 
 [[claim]]
@@ -204,26 +204,26 @@ note = "54,378.6 ms = 54.4 s; 54,378.6 / 124.4 = 437.1"
 [[claim]]
 file = "website/landing/sections.md"
 where = "A 34-token prefix saves"
-numbers = ["1.5×", "16 ms"]
+numbers = ["1.4×", "14 ms"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"ratio\": 11.24", "\"ratio\": 4.51", "\"ratio\": 1.5,", "\"cold_median_ms\": 47.2", "\"hit_median_ms\": 31.4"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"ratio\": 12.35", "\"ratio\": 4.62", "\"ratio\": 1.44,", "\"cold_median_ms\": 45.0", "\"hit_median_ms\": 31.2"]
 
 [[claim]]
 file = "website/landing/sections.md"
 where = "The reuse has to be real, and the prefix has to be long"
-numbers = ["1.5×", "4.5×", "11×", "17×", "16 ms"]
+numbers = ["1.4×", "4.6×", "12×", "17×", "14 ms"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"ratio\": 11.24", "\"ratio\": 4.51", "\"ratio\": 1.5,", "\"cold_median_ms\": 47.2", "\"hit_median_ms\": 31.4", "\"ratio\": 16.8"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"ratio\": 12.35", "\"ratio\": 4.62", "\"ratio\": 1.44,", "\"cold_median_ms\": 45.0", "\"hit_median_ms\": 31.2", "\"ratio\": 17.3"]
 
 [[claim]]
 file = "pion-vllm-mlx/README.md"
 where = "Time to first token on Llama-3.2-1B-4bit with a 2,049-token prefix"
-numbers = ["1,242 ms", "61.9 ms", "20×", "73.9 ms", "17×", "11×", "4.5×", "1.5×", "16 ms"]
+numbers = ["1,193 ms", "46.2 ms", "26×", "69.0 ms", "17×", "12×", "4.6×", "1.4×", "14 ms"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08", "\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8", "\"ratio\": 11.24", "\"ratio\": 4.51", "\"ratio\": 1.5,", "\"cold_median_ms\": 47.2", "\"hit_median_ms\": 31.4"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82", "\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3", "\"ratio\": 12.35", "\"ratio\": 4.62", "\"ratio\": 1.44,", "\"cold_median_ms\": 45.0", "\"hit_median_ms\": 31.2"]
 
 [[claim]]
 file = "pion-vllm-mlx/README.md"
@@ -261,26 +261,27 @@ note = "two runs"
 [[claim]]
 file = "pion-vllm-mlx/README.md"
 where = "chunk-id-keyed K/V hydration"
-numbers = ["3.0×", "98.3%"]
+numbers = ["3.5×", "96.1%"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
-expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825"]
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json"]
+expect = ["\"ttft_p50_ms\": 113.81925013847649", "\"ttft_p50_ms\": 32.495331950485706", "\"ttft_p50_ms\": 35.754125099629164", "\"token_agreement_mean\": 0.961"]
+note = "113.8 / 32.5 = 3.50"
 
 [[claim]]
 file = "pion-vllm-mlx/README.md"
-where = "the 61.9 ms / 20× same-process row"
-numbers = ["61.9 ms", "20×"]
+where = "the 46.2 ms / 26× same-process row"
+numbers = ["46.2 ms", "26×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82"]
 
 [[claim]]
 file = "benchmarks/reproducers/README.md"
 where = "Llama-3.2-1B time to first token from a **separate process**"
-numbers = ["17×", "73.9 ms", "1.5×", "61.9 ms", "20×"]
+numbers = ["17×", "69.0 ms", "1.4×", "46.2 ms", "26×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08", "\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8", "\"ratio\": 1.5,"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82", "\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3", "\"ratio\": 1.44,"]
 
 [[claim]]
 file = "benchmarks/reproducers/README.md"
@@ -869,24 +870,24 @@ file = "doc/shared_kv_cache.md"
 where = "Cross-instance verified: a fresh second client"
 numbers = ["1.0000"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt"]
 expect = ["B BLEU vs ref (50 tokens)        1.0000"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "This row is this harness's own workload"
-numbers = ["17×", "20×"]
+numbers = ["17×", "26×"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08", "\"cold_median_ms\": 1241.9", "\"hit_median_ms\": 73.9", "\"ratio\": 16.8"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82", "\"cold_median_ms\": 1193.4", "\"hit_median_ms\": 69.0", "\"ratio\": 17.3"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "fp16 is the production default"
-numbers = ["1.0000", "0.969"]
+numbers = ["1.0000", "0.979"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_cross_instance.txt", "benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu.txt"]
-expect = ["B BLEU vs ref (50 tokens)        1.0000", "mean BLEU        0.9688"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_bleu.txt"]
+expect = ["B BLEU vs ref (50 tokens)        1.0000", "mean BLEU        0.9791"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
@@ -1019,34 +1020,36 @@ expect = ["\"max_layer_mb\": 33.55"]
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "fp16 (Stage 1's mean BLEU"
-numbers = ["0.969"]
+numbers = ["0.979"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu.txt"]
-expect = ["mean BLEU        0.9688"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_bleu.txt"]
+expect = ["mean BLEU        0.9791"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "| Backend | p50 TTFT | vs text-RAG"
-numbers = ["123.1 ms"]
+numbers = ["113.8 ms"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
-expect = ["\"ttft_p50_ms\": 123.10266611166298"]
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json"]
+expect = ["\"ttft_p50_ms\": 113.81925013847649"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
-where = "| inproc | 41.3 ms |"
-numbers = ["41.3 ms", "3.0×", "98.3%", "0.68"]
+where = "| inproc | 32.5 ms |"
+numbers = ["32.5 ms", "3.5×", "96.1%", "0.73", "0.72"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
-expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825", "\"answer_found_rate\": 0.68"]
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json"]
+expect = ["\"ttft_p50_ms\": 113.81925013847649", "\"ttft_p50_ms\": 32.495331950485706", "\"ttft_p50_ms\": 35.754125099629164", "\"token_agreement_mean\": 0.961", "\"answer_found_rate\": 0.73", "\"answer_found_rate\": 0.72"]
+note = "113.8 / 32.5 = 3.50"
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
-where = "| pion | 45.6 ms |"
-numbers = ["45.6 ms", "2.7×", "98.3%", "0.68"]
+where = "| pion | 35.8 ms |"
+numbers = ["35.8 ms", "3.2×", "96.1%", "0.73"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json"]
-expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825", "\"answer_found_rate\": 0.68"]
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_07.json"]
+expect = ["\"ttft_p50_ms\": 113.81925013847649", "\"ttft_p50_ms\": 32.495331950485706", "\"ttft_p50_ms\": 35.754125099629164", "\"token_agreement_mean\": 0.961", "\"answer_found_rate\": 0.73"]
+note = "113.8 / 35.8 = 3.18"
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
@@ -1080,10 +1083,10 @@ expect = ["context=64,000 tokens", "MISSED"]
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "Every warm path restores all prompt tokens but the last"
-numbers = ["61.9 ms"]
+numbers = ["46.2 ms"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_02.json"]
-expect = ["\"cold_median_ms\": 1241.9", "\"same_median_ms\": 61.9", "\"same_ratio\": 20.08"]
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"cold_median_ms\": 1193.4", "\"same_median_ms\": 46.2", "\"same_ratio\": 25.82"]
 
 [[claim]]
 file = "doc/vector_engine.md"
@@ -1527,42 +1530,51 @@ expect = ["Stage-2 wins: 1.56× faster than cache-rebuild."]
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "| **fp16** | 1.00× |"
-numbers = ["1.00×", "100%", "1.00", "0.969"]
+numbers = ["1.00×", "100%", "1.00", "0.979"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu.txt"]
-expect = ["mean BLEU        0.9688", "first-token match20/20"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_bleu.txt"]
+expect = ["mean BLEU        0.9791", "first-token match20/20"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
-where = "| int8 | ~2× | 0.677 |"
-numbers = ["0.677", "95%"]
+where = "| int8 | ~2× | 0.499 |"
+numbers = ["0.499", "95%"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu_int8.txt"]
-expect = ["mean BLEU        0.6774", "first-token match19/20"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_bleu_int8.txt"]
+expect = ["mean BLEU        0.4989", "first-token match19/20"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
-where = "| int8 | ~2× | 0.677 |"
+where = "| int8 | ~2× | 0.499 |"
 numbers = ["2×"]
 kind = "arithmetic"
 note = "one byte an element against fp16's two"
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
-where = "| turbo4 | 3.51× | 0.538 |"
-numbers = ["0.538", "90%"]
+where = "| turbo4 | 3.51× | 0.378 |"
+numbers = ["0.378", "90%"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/kv_prefix_bleu_turbo4.txt"]
-expect = ["mean BLEU        0.5376", "first-token match18/20"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/kv_prefix_bleu_turbo4.txt"]
+expect = ["mean BLEU        0.3779", "first-token match18/20"]
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
-where = "| turbo4 | 3.51× | 0.538 |"
+where = "| turbo4 | 3.51× | 0.378 |"
 numbers = ["3.51×"]
 kind = "code"
 evidence = ["src/network/attention_index.mojo"]
 expect = ["return 4 + num_blocks * 18"]
 note = "fp16 512-wide row = 1,024 B; turbo4 = 4 + 16 x 18 = 292 B; 1024/292 = 3.51"
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "the test's own gate is a mean BLEU of"
+numbers = ["0.969", "0.677", "0.538"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-07-mac-m4/before_fix/kv_prefix_bleu.txt", "benchmarks/results/2026-10-07-mac-m4/before_fix/kv_prefix_bleu_int8.txt", "benchmarks/results/2026-10-07-mac-m4/before_fix/kv_prefix_bleu_turbo4.txt"]
+expect = ["mean BLEU        0.9688", "mean BLEU        0.6774", "mean BLEU        0.5376"]
+note = "the figures the table read until 2026-10-07, measured with the second <bos>"
 
 [[claim]]
 file = "doc/shared_kv_cache.md"
@@ -1583,10 +1595,10 @@ expect = ["cache hit rate     96.7%", "TTFT mean speedup       9.21×"]
 [[claim]]
 file = "doc/shared_kv_cache.md"
 where = "through the public API"
-numbers = ["8.77×"]
+numbers = ["8.92×"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/prompt_cache_workload_q30_r8.txt"]
-expect = ["TTFT mean speedup       8.77×"]
+evidence = ["benchmarks/results/2026-10-07-mac-m4/prompt_cache_workload_q30_r8.txt"]
+expect = ["TTFT mean speedup       8.92×"]
 
 [[claim]]
 file = "doc/ai_gateway.md"
@@ -1647,3 +1659,12 @@ numbers = ["100"]
 kind = "code"
 evidence = ["src/commands/vector.mojo"]
 expect = ["if ef_query < k: ef_query = k"]
+
+[[claim]]
+file = "doc/shared_kv_cache.md"
+where = "Until then every question began with a second"
+numbers = ["3.0×", "2.7×", "98.3%", "3.55×", "3.24×", "99.3%", "0.68"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json", "benchmarks/results/2026-10-07-mac-m4/before_fix/stage1_hybrid_results.json"]
+expect = ["\"ttft_p50_ms\": 123.10266611166298", "\"ttft_p50_ms\": 41.33162391372025", "\"ttft_p50_ms\": 45.61245790682733", "\"token_agreement_mean\": 0.9825", "\"answer_found_rate\": 0.68", "\"ttft_p50_ms\": 113.55687491595745", "\"ttft_p50_ms\": 31.957167200744152", "\"ttft_p50_ms\": 35.02825018949807", "\"token_agreement_mean\": 0.9925"]
+note = "2026-10-02: 123.1/41.3 = 2.98, 123.1/45.6 = 2.70; same-day unfixed: 113.6/32.0 = 3.55, 113.6/35.0 = 3.24"
