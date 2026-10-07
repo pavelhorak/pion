@@ -1,0 +1,25 @@
+gh #60 Step 3 NIAH gate  model=mlx-community/gemma-4-e2b-it-4bit  lengths=[4096, 8192, 16384]  trials=2
+  depths=[0.25, 0.5, 0.75]  decode-tokens=12
+
+loading model...
+  layers: 35 total, 7 full, 28 sliding (window=512)
+
+total trials: 18
+
+[A] vanilla mlx-lm — cold every request
+   length= 4096  vanilla  acc=100.0%  (6/6)  TTFT p50= 8485.6ms
+   length= 8192  vanilla  acc=100.0%  (6/6)  TTFT p50=21143.1ms
+   length=16384  vanilla  acc=100.0%  (6/6)  TTFT p50=58514.0ms
+
+[B] Pion-patched mlx-lm (in-proc lane, stage2=True)
+   length= 4096  pion     acc=100.0%  (6/6)  TTFT p50=   76.7ms  (110.59× vs vanilla)
+   length= 8192  pion     acc=100.0%  (6/6)  TTFT p50=   82.6ms  (255.82× vs vanilla)
+   length=16384  pion     acc=100.0%  (6/6)  TTFT p50=   96.3ms  (607.38× vs vanilla)
+
+──────── gate ────────
+  length= 4096  pion/vanilla = 100.0%  (gate ≥ 95%)  PASS
+  length= 8192  pion/vanilla = 100.0%  (gate ≥ 95%)  PASS
+  length=16384  pion/vanilla = 100.0%  (gate ≥ 95%)  PASS
+
+OVERALL: PASS
+rc=0

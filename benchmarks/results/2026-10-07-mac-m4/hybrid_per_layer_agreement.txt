@@ -1,0 +1,11 @@
+hybrid per-layer agreement  model=mlx-community/gemma-4-e2b-it-4bit  prefix=2048  decode=16
+loading model (text-only filter view of cached multimodal 4bit)...
+  layers: 35 total, 7 full, 28 sliding (window=512)
+[A] vanilla mlx-lm — cold every request
+   vanilla: [107, 106, 106, 106, 107, 1, 106, 106]...
+[B] Pion-patched (in-proc lane, stage2=True)
+   pion:    [107, 106, 106, 106, 107, 1, 106, 106]...
+
+  agreement: 100.0% (16/16)
+  gate ≥ 99%: PASS
+rc=0

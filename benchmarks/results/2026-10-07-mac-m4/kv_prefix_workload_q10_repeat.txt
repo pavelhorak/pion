@@ -1,0 +1,38 @@
+§15.4 workload  model=mlx-community/Llama-3.2-1B-Instruct-4bit  prompts=5  q_per_prompt=10  vquant=fp16
+  pion: 127.0.0.1:1974
+loading model...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 22250.95it/s]
+  layers=16  n_kv_heads=8  head_dim=64
+  total requests: 50
+  prompt sizes (tokens): [316, 314, 318, 310, 312]
+
+[A] standalone mlx-lm — cold prefill every request
+[C] Pion S1 — V.STOREBATCH on first encounter, V.FETCH RANGE on hit (fp16)
+
+──────── §15.4 results ────────
+  workload          5 system prompts × 10 queries = 50 reqs
+
+  Config A (cold every request):
+    TTFT mean=  201.5 ms  p50=  200.3  p99=  207.4  max=  208.5
+    throughput   4.94 req/s  wall 10.1s
+
+  Config C (Pion S1, fp16 b=0):
+    TTFT mean=   56.6 ms  p50=   39.6  p99=  206.9  max=  207.9
+    throughput  12.57 req/s  wall 4.0s
+    cache hit rate     90.0%  (45/50)
+    fetch p50           8.1 ms
+    bytes up/down     98.1MB / 883.1MB
+
+  Pion vs standalone:
+    TTFT mean speedup       3.56×
+    TTFT p99 speedup        1.00×
+    throughput speedup      2.54×
+    first-token agreement   98.0% (49/50)
+      disagrees: prompt 0, query 'Question: how should I version a binary ': vanilla ' \n\n', pion ' ', vanilla's top-2 margin 0.016
+
+──────── verdict ────────
+  TTFT win        PASS
+  throughput win  PASS
+  correctness     FAIL
+  §15.4 OVERALL   FAIL
+rc=1

@@ -41,9 +41,10 @@ from mlx_lm.models.cache import make_prompt_cache
 
 # Reuse workload definition from W1 bench
 from test_kv_prefix_workload import (  # type: ignore
-    SYSTEM_PROMPTS, SYSTEM_PADDING, USER_QUERIES, system_prompt,
+    SYSTEM_PROMPTS, SYSTEM_PADDING, USER_QUERIES, request_ids, system_prompt,
 )
 from test_kv_prefix_mlx import forward_logits  # type: ignore
+from _prompt_ids import piece  # type: ignore
 
 DEFAULT_MODEL = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 
@@ -83,7 +84,7 @@ def main(args) -> int:
     print(f"  prompt sizes (tokens): {[len(t) for t in sys_tokens]}")
 
     # Warmup — vanilla path only (separate from Stage 2 install)
-    full_w = mx.array([sys_tokens[0] + tok.encode(USER_QUERIES[0])])
+    full_w = mx.array([request_ids(tok, sys_tokens[0], USER_QUERIES[0])])
     for _ in range(args.warmup):
         forward_logits(model, full_w)
 
@@ -93,7 +94,7 @@ def main(args) -> int:
     a_first_tokens_by_key = {}
     a_t0 = time.perf_counter()
     for (pi, q) in workload:
-        full = mx.array([sys_tokens[pi] + tok.encode(q)])
+        full = mx.array([request_ids(tok, sys_tokens[pi], q)])
         ttft, last = forward_logits(model, full)
         a_ttfts.append(ttft)
         a_first_tokens_by_key[(pi, q)] = int(mx.argmax(last).item())
@@ -124,7 +125,7 @@ def main(args) -> int:
                 # bench methodology), then separately push K/V to Pion. The
                 # ATTEND.PREFIX.STORE cost lands in wall-clock throughput, not
                 # per-request TTFT — same accounting as Stage 1's V.STOREBATCH.
-                full_ids = mx.array([sys_tokens[pi] + tok.encode(q)])
+                full_ids = mx.array([request_ids(tok, sys_tokens[pi], q)])
                 ttft, last = forward_logits(model, full_ids)
                 ns = f"w1_2_{run_id}_p{pi}"
                 prefix_ids_list = sys_tokens[pi][:-1]
@@ -138,7 +139,7 @@ def main(args) -> int:
                 cache = make_pion_prompt_cache(model, namespace=ns,
                                                 prompt_cache=pc, prefix_len=prefix_len)
                 # Suffix = last prefix token + user query (mlx-lm convention).
-                suffix_ids = mx.array([[sys_tokens[pi][-1]] + tok.encode(q)])
+                suffix_ids = mx.array([[sys_tokens[pi][-1]] + piece(tok, q)])
                 ttft, last = forward_logits(model, suffix_ids, cache=cache)
             d_ttfts.append(ttft)
             d_first_tokens_by_key[(pi, q)] = int(mx.argmax(last).item())

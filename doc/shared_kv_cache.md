@@ -450,20 +450,22 @@ or to validate cross-process behavior on a single machine.
 
 | Config | TTFT mean | **TTFT p50** | wire calls/req | speedup vs vanilla |
 |---|---:|---:|---:|---:|
-| RESP (legacy) | 108.3 ms | 127.5 ms | 32 (0.70 ms ea) | 1.85× |
-| Binary lane | 103.0 ms | 98.4 ms | 32 (0.64 ms ea) | 1.94× |
-| **In-process fast lane** | **41.9 ms** | **34.5 ms** | **0** | **4.79×** |
+| RESP (legacy), two runs | 101.3 / 109.6 ms | 110.3 / 128.1 ms | 32 (0.65 / 0.72 ms ea) | 1.98× / 1.90× |
+| Binary lane | 100.3 ms | 98.2 ms | 32 (0.63 ms ea) | 2.00× |
+| **In-process fast lane** | **42.2 ms** | **34.4 ms** | **0** | **4.74×** |
 
-Measured 2026-10-06 on an M4 Mac mini: ~316-token prefixes, vanilla ~200 ms a
+Measured 2026-10-07 on an M4 Mac mini: ~316-token prefixes, vanilla ~200 ms a
 request, 100% first-token agreement with vanilla mlx-lm (50/50) on every lane.
 The wire lanes are forced with `PION_PROMPT_CACHE_NO_INPROC=1` (binary) and
 also `PION_PROMPT_CACHE_NO_BINARY=1` (RESP). They make 32 calls a request
 because mlx-lm runs the suffix in two passes (all but its last token, then the
 last) and each pass queries every layer. Speedups are mean against mean. Raw
-output: [`benchmarks/results/2026-10-06-mac-m4/`](../benchmarks/results/2026-10-06-mac-m4/)
+output: [`benchmarks/results/2026-10-07-mac-m4/`](../benchmarks/results/2026-10-07-mac-m4/)
 (`w1_stage2*.txt`). Earlier versions of this table timed a vanilla side that
 evaluated logits at every prompt position, and read higher; the changelog has
-the correction.
+the correction. Until 2026-10-07 the harness also put a second `<bos>` before
+every question; removing it moved no figure beyond run-to-run variation
+([`before_fix/`](../benchmarks/results/2026-10-07-mac-m4/before_fix/)).
 
 #### Mental model — why the wire path was paying so much
 
@@ -479,7 +481,7 @@ of the forward drains everything in parallel.
 For cross-process consumers the wire is still the right path — no
 shared MLX context means no choice. The binary fast lane
 is the optimization for that case (RESP framing → 0xCA5E binary on
-`port+1`, single sendmsg scatter-gather: 0.64 ms a call against RESP's 0.70 ms in the table above).
+`port+1`, single sendmsg scatter-gather: 0.63 ms a call against RESP's 0.65–0.72 ms in the table above).
 
 ### SSM.PREFIX.* — recurrent-state companion
 

@@ -39,6 +39,7 @@ from pion_vllm_mlx.mlx_lm_patch import (
     install_pion_attention_patch, make_pion_prompt_cache,
 )
 from _gemma4_text_filter_load import load_text_only_from_cached
+from _prompt_ids import bos, one_bos, piece
 
 
 def greedy_decode(model, prompt_ids, n_steps: int, cache):
@@ -69,14 +70,15 @@ def main(args) -> int:
     print(f"  layers: {len(layer_types)} total, {n_full} full, {n_sliding} sliding (window={sliding_window})")
 
     # Build a prefix that's long enough to expose the sliding-window bug.
-    # Tokenize a paragraph and tile until we reach prefix_tokens.
-    base = tok.encode(
-        "The quick brown fox jumps over the lazy dog. " * 64
-    )
+    # Tokenize a paragraph and tile until we reach prefix_tokens. One <bos>,
+    # at position 0 (tests/_prompt_ids.py): tiling a plain tok.encode() copied
+    # its <bos> into the prefix, and the suffix began with another.
+    base = piece(tok, "The quick brown fox jumps over the lazy dog. " * 64)
     while len(base) < args.prefix_tokens:
         base = base + base
-    prefix_ids = base[: args.prefix_tokens]
-    suffix_ids = tok.encode(" Continue: ")
+    prefix_ids = (bos(tok) + base)[: args.prefix_tokens]
+    suffix_ids = piece(tok, " Continue: ")
+    one_bos(tok, prefix_ids + suffix_ids)
 
     full_ids = mx.array([prefix_ids + suffix_ids])
 

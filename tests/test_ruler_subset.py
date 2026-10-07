@@ -15,9 +15,11 @@ M values' blocks via the sparse top-K selector. F1 < 1.0 means at least
 one value was missed; F1 = 1.0 means the selector picked all M needles.
 
 Variable Tracking (VT) — chained assignments `VAR X1 = root; VAR X2 = X1;
-...` is the classic RULER multi-hop probe. Diagnostic in principle, but
-**vanilla Gemma-4-E2B-4bit gets 0% at 4K with 4-hop chains** — the model
-just isn't capable. Kept as `--include-vt` for larger models; off by default.
+...` is the classic RULER multi-hop probe. An earlier note here said vanilla
+Gemma-4-E2B-4bit gets 0% at 4K with 4-hop chains; on 2026-10-07 it solved
+3/3 at 4K, and so did Pion dense and sparse
+(benchmarks/results/2026-10-07-mac-m4/ruler_vt_4k.txt). Still opt-in with
+`--include-vt`: it has not been run at 32K or 64K.
 
 Acceptance: Pion-sparse F1 ≥ 95% of vanilla F1 on MV at every length tested.
 
@@ -43,6 +45,7 @@ from pion_vllm_mlx.mlx_lm_patch import (
     install_pion_attention_patch, make_pion_prompt_cache,
 )
 from _gemma4_text_filter_load import load_text_only_from_cached
+from _prompt_ids import bos, one_bos, piece
 
 
 FILLER = (
@@ -83,18 +86,18 @@ def build_vt_prompt(trial: VTTrial, tok) -> Tuple[List[int], int]:
             statements.append(f"\nVAR {name} = {trial.var_names[i - 1]}.\n")
 
     question = vt_suffix(trial)
-    stmt_tok_lists = [tok.encode(s) for s in statements]
-    qtoks = tok.encode(question)
+    stmt_tok_lists = [piece(tok, s) for s in statements]
+    qtoks = piece(tok, question)
     stmt_total = sum(len(s) for s in stmt_tok_lists)
-    target_filler_tokens = max(128, trial.length - stmt_total - len(qtoks) - 16)
+    target_filler_tokens = max(128, trial.length - len(bos(tok)) - stmt_total - len(qtoks) - 16)
 
-    base_filler = tok.encode(FILLER)
+    base_filler = piece(tok, FILLER)
     while len(base_filler) < target_filler_tokens:
         base_filler = base_filler + base_filler
     filler = base_filler[:target_filler_tokens]
 
     plan = sorted(zip(trial.depths, stmt_tok_lists), key=lambda x: x[0])
-    out: List[int] = []
+    out: List[int] = bos(tok)
     last = 0
     for depth, stmt in plan:
         pos = max(1, int(len(filler) * depth))
@@ -105,7 +108,7 @@ def build_vt_prompt(trial: VTTrial, tok) -> Tuple[List[int], int]:
         last = pos
     out.extend(filler[last:])
     out.extend(qtoks)
-    return out, trial.root_value
+    return one_bos(tok, out), trial.root_value
 
 
 def vt_suffix(t: VTTrial) -> str:
@@ -157,18 +160,18 @@ def build_mv_prompt(trial: MVTrial, tok) -> Tuple[List[int], List[int]]:
             f"\nThe {ord_str} magic number for the city of {trial.city} is {v}.\n"
         )
     question = mv_suffix(trial)
-    stmt_tok_lists = [tok.encode(s) for s in statements]
-    qtoks = tok.encode(question)
+    stmt_tok_lists = [piece(tok, s) for s in statements]
+    qtoks = piece(tok, question)
     stmt_total = sum(len(s) for s in stmt_tok_lists)
-    target_filler_tokens = max(128, trial.length - stmt_total - len(qtoks) - 16)
+    target_filler_tokens = max(128, trial.length - len(bos(tok)) - stmt_total - len(qtoks) - 16)
 
-    base_filler = tok.encode(FILLER)
+    base_filler = piece(tok, FILLER)
     while len(base_filler) < target_filler_tokens:
         base_filler = base_filler + base_filler
     filler = base_filler[:target_filler_tokens]
 
     plan = sorted(zip(trial.depths, stmt_tok_lists), key=lambda x: x[0])
-    out: List[int] = []
+    out: List[int] = bos(tok)
     last = 0
     for depth, stmt in plan:
         pos = max(1, int(len(filler) * depth))
@@ -179,7 +182,7 @@ def build_mv_prompt(trial: MVTrial, tok) -> Tuple[List[int], List[int]]:
         last = pos
     out.extend(filler[last:])
     out.extend(qtoks)
-    return out, list(trial.values)
+    return one_bos(tok, out), list(trial.values)
 
 
 def mv_suffix(t: MVTrial) -> str:
@@ -261,7 +264,7 @@ def run_task(model, tok, trials, args, label, mode, pc, sparse_cfg,
             cache = make_prompt_cache(model)
             decode_input = prompt_ids
         else:
-            qtoks = tok.encode(suffix_fn(t))
+            qtoks = piece(tok, suffix_fn(t))
             prefix_ids = prompt_ids[: len(prompt_ids) - len(qtoks)]
             ns = f"ruler|{ti}|L{t.length}|{id(t)}|{mode}"
             pc.get_or_prefill(prefix_ids, ns)

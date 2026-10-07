@@ -18,13 +18,13 @@ Stage 2 runs on three lanes, auto-selected by `PionPromptCache`:
 
 | Lane | Where it runs | TTFT p50, ~316-token system-prompt prefixes (Llama-3.2-1B-4bit, 100 requests; vanilla ~200 ms) |
 |---|---|---|
-| 1. **In-process** (default, same-process consumer) | MLX in the calling process; zero wire roundtrips | **34.5 ms** (4.8× vs vanilla cold, mean against mean) |
-| 2. **Binary fast lane** (port+1, `0xCA5E` frames) | Cross-process via `sendmsg` scatter-gather, one round trip per layer per pass | 98.4 ms |
-| 3. **RESP fallback** | Plain RESP, for older Pion servers without the binary listener | 127.5 ms |
+| 1. **In-process** (default, same-process consumer) | MLX in the calling process; zero wire roundtrips | **34.4 ms** (4.7× vs vanilla cold, mean against mean) |
+| 2. **Binary fast lane** (port+1, `0xCA5E` frames) | Cross-process via `sendmsg` scatter-gather, one round trip per layer per pass | 98.2 ms |
+| 3. **RESP fallback** | Plain RESP, for older Pion servers without the binary listener | 110–128 ms (two runs) |
 
 Measured with [`tests/bench_w1_stage2.py`](https://github.com/pavelhorak/pion/blob/main/tests/bench_w1_stage2.py)
-on an M4 Mac mini, 2026-10-06; raw output in
-[`benchmarks/results/2026-10-06-mac-m4/`](https://github.com/pavelhorak/pion/tree/main/benchmarks/results/2026-10-06-mac-m4).
+on an M4 Mac mini, 2026-10-07; raw output in
+[`benchmarks/results/2026-10-07-mac-m4/`](https://github.com/pavelhorak/pion/tree/main/benchmarks/results/2026-10-07-mac-m4).
 
 Plus `HybridRetrievalCache` for RAG: chunk-id-keyed K/V hydration (3.0× p50 TTFT and 98.3% token agreement on a 100-query SQuAD v2 run, [`stage1_hybrid_recall_bench.py`](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/stage1_hybrid_recall_bench.py), [raw results](https://github.com/pavelhorak/pion/blob/main/benchmarks/reproducers/results/stage1_hybrid_results_2026_10_02.json)).
 

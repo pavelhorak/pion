@@ -1,0 +1,38 @@
+W1.1 Stage 2 workload  model=mlx-community/Llama-3.2-1B-Instruct-4bit  prompts=5  q_per_prompt=20
+  pion: 127.0.0.1:1974  vquant=fp16
+loading model...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 57195.05it/s]
+  layers=16  n_kv_heads=8  head_dim=64
+  total requests: 100
+  prompt sizes (tokens): [316, 314, 318, 310, 312]
+
+[A] vanilla mlx-lm — cold prefill every request
+
+[D] Pion S2 — ATTEND.PREFIX.STORE on first encounter, ATTEND.PREFIX.QUERY on hit
+
+──────── W1.1 Stage 2 results ────────
+  workload          5 system prompts × 20 queries = 100 reqs
+  prefix size       316 tokens
+
+  Config A (vanilla, cold every request):
+    TTFT mean=  209.8 ms  p50=  212.2  p99=  214.3  max=  214.4
+    throughput   4.76 req/s  wall 21.0s
+
+  Config D (Pion S2, --metal-attention):
+    TTFT mean=  108.2 ms  p50=  125.7  p99=  213.5  max=  215.5
+    throughput   8.33 req/s  wall 12.0s
+    cache hits        0/5 (0.0%)
+    ATTEND.PREFIX.QUERY  3040 calls, 2122 ms total, 0.70 ms/call
+
+  Pion S2 vs vanilla:
+    TTFT mean speedup       1.94×
+    TTFT p99 speedup        1.00×
+    throughput speedup      1.75×
+    first-token agreement   100.0% (50/50)
+
+──────── verdict ────────
+  TTFT win        PASS
+  throughput win  PASS
+  correctness ≥95% PASS  (100.0%)
+  W1.1 OVERALL    PASS
+rc=0
