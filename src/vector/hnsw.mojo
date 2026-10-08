@@ -645,6 +645,10 @@ struct HNSWGraph(Movable):
         self.results.push(HeapNode(dist, entry_point_idx))
         self.visited_epoch[entry_point_idx] = self.cur_epoch
 
+        if self._int8_batchable():
+            self._search_layer_batched(query, ef, level)
+            return
+
         while len(self.candidates.data) > 0:
             var c = self.candidates.pop()
 
@@ -672,6 +676,93 @@ struct HNSWGraph(Movable):
                 var d = self._dist_int8_int8(query, self.nodes[neighbor_idx].vector)
                 if self.results.push_bounded(d, neighbor_idx, ef):
                     self.candidates.push(HeapNode(d, neighbor_idx))
+
+    @always_inline
+    def _int8_batchable(self) -> Bool:
+        """gh #399/#397: INT8 distances can go eight at a time through the
+        SABD+UDOT kernels when `_dist_int8_int8` would take its plain INT8 arm
+        at a dim `_code_dist8` covers. Both compute the same exact integer, so
+        neither the graph nor a search result changes; only the misses overlap
+        and the arithmetic gets cheaper."""
+        if self.use_bq: return False
+        if self.use_int4 and not self.polarquant: return False
+        return (self.dim == 1536 or self.dim == 1024 or self.dim == 768 or self.dim == 512
+                or self.dim == 384 or self.dim == 256 or self.dim == 128)
+
+    def _farthest_batched(self, base: UnsafePointer[Int8, MutUntrackedOrigin],
+                          node_ptr: UnsafePointer[HNSWNode, MutUntrackedOrigin],
+                          off: Int, nc: Int, mut worst_dist: Float32) -> Int:
+        """gh #399: position of the existing neighbor farthest from `base`, its
+        distances computed eight at a time. Same scan order and tie rule (the
+        first maximum) as the per-neighbor loops it replaces, and the same exact
+        INT8 distances, so the same choice. Returns -1 when the list holds an id
+        or vector the batch kernel cannot take; the caller then runs its own
+        loop unchanged."""
+        if not self._int8_batchable() or is_null(base): return -1
+        for ni in range(nc):
+            var ex = Int(node_ptr[].neighbors[off + ni])
+            if ex < 0 or ex >= self.num_nodes: return -1
+            if is_null(self.nodes[ex].vector): return -1
+        var ids8 = Array[Int, 8](fill=0)
+        var worst_pos = 0
+        worst_dist = Float32(-1.0)
+        var ni = 0
+        while ni + 8 <= nc:
+            comptime for j in range(8):
+                ids8[j] = Int(node_ptr[].neighbors[off + ni + j])
+            var d8 = self._code_dist8(base, ids8)
+            comptime for j in range(8):
+                if worst_dist < 0 or d8[j] > worst_dist:
+                    worst_dist = d8[j]; worst_pos = ni + j
+            ni += 8
+        while ni < nc:
+            var d = self._code_dist(base, self.nodes[Int(node_ptr[].neighbors[off + ni])].vector)
+            if worst_dist < 0 or d > worst_dist:
+                worst_dist = d; worst_pos = ni
+            ni += 1
+        return worst_pos
+
+    def _search_layer_batched(mut self, query: UnsafePointer[Int8, MutUntrackedOrigin], ef: Int, level: Int):
+        """gh #399: `_search_layer`'s loop with each node's unvisited neighbors
+        scored eight at a time. A node's neighbors are marked visited and
+        pushed in their original order, and a distance does not depend on the
+        heaps, so the push sequence, and with it the graph, is unchanged."""
+        var pend = Array[Int, 8](fill=0)
+        while len(self.candidates.data) > 0:
+            var c = self.candidates.pop()
+            if c.distance > self.results.peek_distance() and len(self.results.data) >= ef:
+                break
+            var np = 0
+            var neighbor_count = self.nodes[c.id].get_neighbor_count(level)
+            for i in range(neighbor_count):
+                var neighbor_idx = self.nodes[c.id].get_neighbor(level, i)
+                if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
+                if self.is_deleted(neighbor_idx): continue
+                if self.visited_epoch[neighbor_idx] == self.cur_epoch: continue
+                self.visited_epoch[neighbor_idx] = self.cur_epoch
+                if is_null(self.nodes[neighbor_idx].vector):
+                    # keep the push order: drain what is pending first
+                    for j in range(np):
+                        var dj = self._dist_int8_int8(query, self.nodes[pend[j]].vector)
+                        if self.results.push_bounded(dj, pend[j], ef):
+                            self.candidates.push(HeapNode(dj, pend[j]))
+                    np = 0
+                    var dn = self._dist_int8_int8(query, self.nodes[neighbor_idx].vector)
+                    if self.results.push_bounded(dn, neighbor_idx, ef):
+                        self.candidates.push(HeapNode(dn, neighbor_idx))
+                    continue
+                pend[np] = neighbor_idx
+                np += 1
+                if np == 8:
+                    var d8 = self._code_dist8(query, pend)
+                    comptime for j in range(8):
+                        if self.results.push_bounded(d8[j], pend[j], ef):
+                            self.candidates.push(HeapNode(d8[j], pend[j]))
+                    np = 0
+            for j in range(np):
+                var dj = self._code_dist(query, self.nodes[pend[j]].vector)
+                if self.results.push_bounded(dj, pend[j], ef):
+                    self.candidates.push(HeapNode(dj, pend[j]))
 
     @always_inline
     def is_deleted(self, idx: Int) -> Bool:
@@ -1613,15 +1704,19 @@ struct HNSWGraph(Movable):
                         # Shrink (O(M)): replace the farthest existing neighbor if new candidate is closer
                         var nc = Int(neighbor_node_ptr[].neighbor_counts[l])
                         var worst_dist = Float32(-1.0)
-                        var worst_pos = 0
                         var off = neighbor_node_ptr[]._get_offset(l)
-                        for ni in range(nc):
-                            var ex_nidx = Int(neighbor_node_ptr[].neighbors[off + ni]) # 3.1: internal index
-                            if ex_nidx == -1:
-                                worst_pos = ni; worst_dist = Float32(1e30); break
-                            var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[ex_nidx].vector)
-                            if worst_dist < 0 or d > worst_dist:
-                                worst_dist = d; worst_pos = ni
+                        var worst_pos = self._farthest_batched(neighbor_node_ptr[].vector, neighbor_node_ptr,
+                                                               off, nc, worst_dist)
+                        if worst_pos < 0:
+                            worst_pos = 0
+                            worst_dist = Float32(-1.0)
+                            for ni in range(nc):
+                                var ex_nidx = Int(neighbor_node_ptr[].neighbors[off + ni]) # 3.1: internal index
+                                if ex_nidx == -1:
+                                    worst_pos = ni; worst_dist = Float32(1e30); break
+                                var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[ex_nidx].vector)
+                                if worst_dist < 0 or d > worst_dist:
+                                    worst_dist = d; worst_pos = ni
                         var d_new = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[internal_id].vector)
                         if d_new < worst_dist:
                             # A1b: Capture evicted node before overwrite, remove stale backlink
@@ -1702,6 +1797,9 @@ struct HNSWGraph(Movable):
         cand.push(HeapNode(dist, entry_point_idx))
         res.push(HeapNode(dist, entry_point_idx))
         visited[entry_point_idx] = epoch
+        if self._int8_batchable():
+            self._search_layer_mt_batched(query, ef, level, cand, res, visited, epoch)
+            return
         while len(cand.data) > 0:
             var c = cand.pop()
             if c.distance > res.peek_distance() and len(res.data) >= ef:
@@ -1721,6 +1819,53 @@ struct HNSWGraph(Movable):
                 var d = self._dist_int8_int8(query, self.nodes[neighbor_idx].vector)
                 if res.push_bounded(d, neighbor_idx, ef):
                     cand.push(HeapNode(d, neighbor_idx))
+
+    def _search_layer_mt_batched(mut self, query: UnsafePointer[Int8, MutUntrackedOrigin],
+                                 ef: Int, level: Int, mut cand: MinHeap, mut res: MaxHeap,
+                                 visited: UnsafePointer[UInt16, MutUntrackedOrigin],
+                                 epoch: UInt16):
+        """gh #399: `_search_layer_mt` with each node's unvisited neighbors
+        scored eight at a time; same push order, same graph."""
+        var pend = Array[Int, 8](fill=0)
+        while len(cand.data) > 0:
+            var c = cand.pop()
+            if c.distance > res.peek_distance() and len(res.data) >= ef:
+                break
+            var node_ptr = self.nodes + c.id
+            if level > node_ptr[].max_level:
+                continue
+            var neighbor_count = Int(Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](
+                node_ptr[].neighbor_counts + level))
+            var off = node_ptr[]._get_offset(level)
+            var np = 0
+            for i in range(neighbor_count):
+                var neighbor_idx = Int(node_ptr[].neighbors[off + i])
+                if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
+                if self.is_deleted(neighbor_idx): continue
+                if visited[neighbor_idx] == epoch: continue
+                visited[neighbor_idx] = epoch
+                if is_null(self.nodes[neighbor_idx].vector):
+                    for j in range(np):
+                        var dj = self._dist_int8_int8(query, self.nodes[pend[j]].vector)
+                        if res.push_bounded(dj, pend[j], ef):
+                            cand.push(HeapNode(dj, pend[j]))
+                    np = 0
+                    var dn = self._dist_int8_int8(query, self.nodes[neighbor_idx].vector)
+                    if res.push_bounded(dn, neighbor_idx, ef):
+                        cand.push(HeapNode(dn, neighbor_idx))
+                    continue
+                pend[np] = neighbor_idx
+                np += 1
+                if np == 8:
+                    var d8 = self._code_dist8(query, pend)
+                    comptime for j in range(8):
+                        if res.push_bounded(d8[j], pend[j], ef):
+                            cand.push(HeapNode(d8[j], pend[j]))
+                    np = 0
+            for j in range(np):
+                var dj = self._code_dist(query, self.nodes[pend[j]].vector)
+                if res.push_bounded(dj, pend[j], ef):
+                    cand.push(HeapNode(dj, pend[j]))
 
     def _insert_to_graph_mt(mut self, internal_id: Int, level: Int,
                             vector: UnsafePointer[Float32, MutUntrackedOrigin],
@@ -1777,15 +1922,19 @@ struct HNSWGraph(Movable):
                         self._add_neighbor_published(neighbor_node_ptr, l, internal_id)
                     else:
                         var worst_dist = Float32(-1.0)
-                        var worst_pos = 0
                         var off = neighbor_node_ptr[]._get_offset(l)
-                        for ni in range(nc):
-                            var ex_nidx = Int(neighbor_node_ptr[].neighbors[off + ni])
-                            if ex_nidx < 0 or ex_nidx >= self.num_nodes:
-                                worst_pos = ni; worst_dist = Float32(1e30); break
-                            var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[ex_nidx].vector)
-                            if worst_dist < 0 or d > worst_dist:
-                                worst_dist = d; worst_pos = ni
+                        var worst_pos = self._farthest_batched(neighbor_node_ptr[].vector, neighbor_node_ptr,
+                                                               off, nc, worst_dist)
+                        if worst_pos < 0:
+                            worst_pos = 0
+                            worst_dist = Float32(-1.0)
+                            for ni in range(nc):
+                                var ex_nidx = Int(neighbor_node_ptr[].neighbors[off + ni])
+                                if ex_nidx < 0 or ex_nidx >= self.num_nodes:
+                                    worst_pos = ni; worst_dist = Float32(1e30); break
+                                var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[ex_nidx].vector)
+                                if worst_dist < 0 or d > worst_dist:
+                                    worst_dist = d; worst_pos = ni
                         var d_new = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[internal_id].vector)
                         if d_new < worst_dist:
                             evicted_idx = Int(neighbor_node_ptr[].neighbors[off + worst_pos])
@@ -3286,7 +3435,9 @@ struct HNSWGraph(Movable):
     @always_inline
     def _code_dist(self, q: UnsafePointer[Int8, MutUntrackedOrigin], v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
         if self.dim == 1536: return l2_int8_sabd_udot[1536](q, v)
+        elif self.dim == 1024: return l2_int8_sabd_udot[1024](q, v)
         elif self.dim == 768: return l2_int8_sabd_udot[768](q, v)
+        elif self.dim == 512: return l2_int8_sabd_udot[512](q, v)
         elif self.dim == 384: return l2_int8_sabd_udot[384](q, v)
         elif self.dim == 256: return l2_int8_sabd_udot[256](q, v)
         elif self.dim == 128: return l2_int8_sabd_udot[128](q, v)
@@ -3299,10 +3450,19 @@ struct HNSWGraph(Movable):
         var v4 = self.nodes[ids[4]].vector; var v5 = self.nodes[ids[5]].vector
         var v6 = self.nodes[ids[6]].vector; var v7 = self.nodes[ids[7]].vector
         if self.dim == 1536: return l2_int8_sabd_udot_batch8[1536](q, v0, v1, v2, v3, v4, v5, v6, v7)
+        elif self.dim == 1024: return l2_int8_sabd_udot_batch8[1024](q, v0, v1, v2, v3, v4, v5, v6, v7)
         elif self.dim == 768: return l2_int8_sabd_udot_batch8[768](q, v0, v1, v2, v3, v4, v5, v6, v7)
+        elif self.dim == 512: return l2_int8_sabd_udot_batch8[512](q, v0, v1, v2, v3, v4, v5, v6, v7)
         elif self.dim == 384: return l2_int8_sabd_udot_batch8[384](q, v0, v1, v2, v3, v4, v5, v6, v7)
         elif self.dim == 256: return l2_int8_sabd_udot_batch8[256](q, v0, v1, v2, v3, v4, v5, v6, v7)
-        return l2_int8_sabd_udot_batch8[128](q, v0, v1, v2, v3, v4, v5, v6, v7)
+        elif self.dim == 128: return l2_int8_sabd_udot_batch8[128](q, v0, v1, v2, v3, v4, v5, v6, v7)
+        # Any other dim: one exact distance per vector (callers gate on
+        # _int8_batchable, so this is a guard, not a path).
+        return SIMD[DType.float32, 8](
+            l2_distance_int8(q, v0, self.dim), l2_distance_int8(q, v1, self.dim),
+            l2_distance_int8(q, v2, self.dim), l2_distance_int8(q, v3, self.dim),
+            l2_distance_int8(q, v4, self.dim), l2_distance_int8(q, v5, self.dim),
+            l2_distance_int8(q, v6, self.dim), l2_distance_int8(q, v7, self.dim))
 
     @always_inline
     def _upper_greedy_codes(mut self) -> Int:
@@ -3893,6 +4053,8 @@ struct HNSWGraph(Movable):
             self.results.push(HeapNode(curr_dist_i8, curr_node_idx))
             # Non-1536 dims: combined fill+prune loop, no prefix pruning
             var valid_idxs = Array[Int, 65](uninitialized=True)
+            var ids8 = Array[Int, 8](fill=0)
+            var batch_codes = self._int8_batchable()
             var _evals_this_query = 0
             while len(self.candidates.data) > 0:
                 var c = self.candidates.pop()
@@ -3912,6 +4074,26 @@ struct HNSWGraph(Movable):
                 for i in range(valid_count):
                     var vptr = self.nodes[valid_idxs[i]].vector
                     prefetch(vptr); prefetch(vptr + 64); prefetch(vptr + 128); prefetch(vptr + 192)
+                if batch_codes:
+                    # gh #397: plain INT8 codes at a covered dim — eight at a
+                    # time through SABD+UDOT (512 and 1024 used to go one
+                    # neighbor per call), the same exact distances as before.
+                    var bi = 0
+                    while bi + 8 <= valid_count:
+                        comptime for j in range(8):
+                            ids8[j] = valid_idxs[bi + j]
+                        var d8 = self._code_dist8(self.query_int8, ids8)
+                        comptime for j in range(8):
+                            if self.results.push_bounded(d8[j], ids8[j], ef):
+                                self.candidates.push(HeapNode(d8[j], ids8[j]))
+                        bi += 8
+                    while bi < valid_count:
+                        var nb = valid_idxs[bi]
+                        var db = self._code_dist(self.query_int8, self.nodes[nb].vector)
+                        if self.results.push_bounded(db, nb, ef):
+                            self.candidates.push(HeapNode(db, nb))
+                        bi += 1
+                    continue
                 var vi = 0
                 while vi + 8 <= valid_count:
                     var i0 = valid_idxs[vi];     var i1 = valid_idxs[vi + 1]
@@ -4188,8 +4370,12 @@ struct HNSWGraph(Movable):
             return l2_distance_int8_jit[256](v1, v2)
         elif self.dim == 384:
             return l2_distance_int8_jit[384](v1, v2)
+        elif self.dim == 512:
+            return l2_distance_int8_jit[512](v1, v2)
         elif self.dim == 768:
             return l2_distance_int8_jit[768](v1, v2)
+        elif self.dim == 1024:
+            return l2_distance_int8_jit[1024](v1, v2)
         elif self.dim == 1536:
             return l2_distance_int8_jit[1536](v1, v2)
 
