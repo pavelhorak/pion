@@ -430,7 +430,7 @@ see `pixi.toml`).
 
 ---
 
-## 6. TLS in transit — terminate at a proxy
+## 6. TLS in transit: terminate at a proxy
 
 Pion has no TLS of its own and will not grow it soon. For encryption in
 transit, run a TLS-terminating proxy in front of a server that listens only on

@@ -162,7 +162,7 @@ companion; `pion-vllm-mlx serve` does not store them yet.
 
 ### 2. A Redis-compatible KV store with a write-ahead log
 
-354 command names (the generated command table), every one exercised by a
+355 command names (the generated command table), every one exercised by a
 dispatch sweep in five argument shapes, and a differential suite that compares
 replies against a real `redis-server`: strings, hashes, lists, sets, sorted
 sets, bitmaps, HyperLogLog, geo, streams and consumer groups, pub/sub,
@@ -264,7 +264,7 @@ run at a higher EF, so the comparison at 0.960 recall is still open.
 > `port+10000`, and gossip/Raft. Note that **replication and gossip are
 > unauthenticated** — anyone who can reach `port+10000` can stream the WAL — so
 > put those behind a private network, and terminate TLS at a proxy if you need
-> encryption in transit ([the tested recipe](doc/operations.md#6-tls-in-transit--terminate-at-a-proxy)). Running with `--bind 0.0.0.0` and no password prints a
+> encryption in transit ([the tested recipe](doc/operations.md#6-tls-in-transit-terminate-at-a-proxy)). Running with `--bind 0.0.0.0` and no password prints a
 > warning at startup and means exactly what it says. See
 > [`SECURITY.md`](SECURITY.md). **No
 > telemetry:** Pion never phones home — no update check, no analytics — and

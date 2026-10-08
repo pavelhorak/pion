@@ -557,6 +557,7 @@ RESP commands on port 1974:
 | V.CREATE | **SLOW** | ❌ | Create V-store session for token-ID-indexed value storage (used by KV.PREFIX.* and externalized attention) |
 | V.STOREBATCH | **SLOW** | ❌ | Append a batch of FP32 values quantized to session format (int8/turbo4/turbo3/turbo2/fp16) |
 | V.FETCH | **SLOW** | ❌ | Fetch values by token ID list, or contiguous range via `RANGE start end` (single round-trip per layer; bypasses 64-token RESP frame limit) |
+| V.EXPORT | **SLOW** | ❌ | `V.EXPORT <k_session> <v_session> <start> <end> <layers> <kv_heads> <head_dim>`: writes a prefix's K and V as a safetensors file (fp16, `[1, kv_heads, N, head_dim]` per layer) and replies with its path, for a client on the same machine to map with `mx.load`. Local peers only; the server picks the name, in `$PION_EXPORT_DIR` (default `./pion-export`), files 0600. A changed session gets a new file. The prompt cache's same-machine hit lane; see `doc/shared_kv_cache.md`. |
 | KV.PREFIX.BLOCKS | **SLOW** | ❌ | Per-block visibility for a stored prefix |
 | KV.PREFIX.MEMBERSHIP | **SLOW** | ❌ | Which blocks of a prefix are resident |
 | KV.PREFIX.OWNER | **SLOW** | ❌ | Which worker holds a prefix. `-w N` is N independent keyspaces, so this is how a client finds the right one |
@@ -652,7 +653,7 @@ Vector sets are separate from `FT.*` indexes and need no FT.CREATE. Persisted li
 
 ## Summary Statistics
 
-Pion dispatches 354 command names (`PION_COMMAND_COUNT` in the generated
+Pion dispatches 355 command names (`PION_COMMAND_COUNT` in the generated
 `src/commands/command_table.mojo`), and `tests/test_dispatch_sweep.py` sends
 every one of them in five argument shapes. The counts below are of the rows in
 this document; ✅ and 🟡 both count as supported, and a 🟡 row's notes say
