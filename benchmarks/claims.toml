@@ -1893,3 +1893,11 @@ numbers = ["37.0 ms", "69.0 ms"]
 kind = "result"
 evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_08.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
 expect = ["\"hit_median_ms\": 37.0", "\"hit_median_ms\": 69.0"]
+
+[[claim]]
+file = "doc/operations.md"
+where = "Pion has no TLS of its own and will not grow it soon"
+numbers = ["1 MiB"]
+kind = "test"
+evidence = ["tests/test_tls_proxy.py"]
+expect = ["os.urandom(1 << 20)"]
