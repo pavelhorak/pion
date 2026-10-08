@@ -60,7 +60,9 @@ pixi exec --spec "rattler-build>=0.30.0,<0.31" rattler-build build \
 ```
 
 All three built and passed their tests that way on macOS arm64 (2026-10-08).
-Linux was not tried.
+On Linux x86-64 and arm64, the gate tier's `tests/test_mojo_packages.py` ran
+the same assemble, precompile and test steps green on GitHub's runners the same
+day; rattler-build itself was not run there.
 
 ## Licence
 
