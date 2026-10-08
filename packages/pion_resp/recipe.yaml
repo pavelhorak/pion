@@ -29,7 +29,7 @@ requirements:
 
 tests:
   - script:
-      - mojo run packages/pion_resp/tests/test_resp.mojo
+      - mojo run -I $PREFIX/lib/mojo packages/pion_resp/tests/test_resp.mojo
     files:
       source:
         - packages/pion_resp/tests/

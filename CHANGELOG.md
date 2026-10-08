@@ -24,7 +24,9 @@ enumerated — there were roughly 1,100 of them.
   `pion-vllm-mlx` console script (`pion-vllm-mlx serve ...`, also `python -m
   pion_vllm_mlx serve ...`). The serve module's own docstring named that
   command since 0.1.x, but no release installed it, so the only way to start
-  serve was `python -m pion_vllm_mlx.serve`, which still works. `serve --help`
+  serve was `python -m pion_vllm_mlx.serve`, which still works. The package
+  version is 0.1.6, so the next tag uploads it to PyPI; the release job skips
+  a version PyPI already holds. `serve --help`
   now lists serve's flags before mlx-lm's. New guide: `doc/coding_agents.md`.
   New gate test: `tests/test_vllm_mlx_serve.py` checks the command, the
   Anthropic and Responses translation, and a SIGKILLed serve answering its

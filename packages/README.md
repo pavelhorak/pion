@@ -46,9 +46,23 @@ A precompiled package is tied to the compiler that built it (Mojo 1.1.0 here).
 `packages/<name>/recipe.yaml` is a draft rattler-build recipe in the
 channel's format: the source is a Pion release tag, the build assembles the
 package with `build.py --assemble-only` and precompiles it into
-`$PREFIX/lib/mojo/<name>.mojoc`, and the test runs the package's tests. None
-has been submitted yet; a submission needs a Pion tag that contains
-`packages/`.
+`$PREFIX/lib/mojo/<name>.mojoc`, and the test runs the package's tests against
+the installed `.mojoc` (`mojo run -I $PREFIX/lib/mojo …`). None has been
+submitted yet; a submission needs a Pion tag that contains `packages/`.
+
+To check a recipe locally before a tag exists, copy it, replace its `source`
+with `- path: <your pion checkout>` plus `use_gitignore: true`, and run:
+
+```bash
+pixi exec --spec "rattler-build>=0.30.0,<0.31" rattler-build build \
+  -c conda-forge -c https://conda.modular.com/max -c https://prefix.dev/modular-community \
+  --recipe <copy>/recipe.yaml --output-dir out
+```
+
+All three built and passed their tests that way on macOS arm64 (2026-10-08).
+On Linux x86-64 and arm64, the gate tier's `tests/test_mojo_packages.py` ran
+the same assemble, precompile and test steps green on GitHub's runners the same
+day; rattler-build itself was not run there.
 
 ## Licence
 
