@@ -22,15 +22,18 @@ text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)             #
 | mlx-lm's own prompt-cache file, read by a fresh process (67 MB) | **37.0 ms** | 32× |
 | Pion, **same process** | 46.2 ms | 26× |
 | Pion, **from a separate process**, over the wire | 69.0 ms | 17× |
+| Pion, **from a separate process** on the same machine (`V.EXPORT`) | **37.0 ms** | 32× |
 
-The two Pion rows differ only by *where the cache comes from*: the first is the
-process that computed it, the second fetches what a separate process wrote and
-reproduces the vanilla output at BLEU 1.000. Both come from
+The Pion rows differ only by *where the cache comes from*: the first is the
+process that computed it, the others read what a separate process wrote, and
+that reproduces the vanilla output at BLEU 1.000. Both come from
 [`cross_process_ttft.py`](../benchmarks/reproducers/cross_process_ttft.py)
 (`--same` adds the first); the file row from
 [`file_cache_ttft.py`](../benchmarks/reproducers/file_cache_ttft.py), timed the
-same way. **A file is faster:** if one program reuses one fixed prefix, use
-mlx-lm's `save_prompt_cache` / `load_prompt_cache`. Pion is for what a file
+same way. **On the same machine Pion matches the file:** a separate process
+maps the prefix as a file Pion wrote (`V.EXPORT`), 37.0 ms; over TCP it is
+69.0 ms. If one program reuses one fixed prefix, mlx-lm's `save_prompt_cache` /
+`load_prompt_cache` is the simpler tool. Pion is for what a file
 does not do: a cache every process reads over one wire, crash-consistent, and
 through [`pion-vllm-mlx serve`](coding_agents.md) a longest-prefix match that a
 restarted agent or a second session finds by itself.

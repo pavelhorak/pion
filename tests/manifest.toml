@@ -1168,6 +1168,12 @@ server = "-w 1"
 tier = "gate"
 
 [[test]]
+file = "tests/test_v_export.py"
+# gh #468: V.EXPORT, the prompt-cache export lane, checked against V.FETCH BATCH.
+server = "--kvcache -w 1"
+tier = "gate"
+
+[[test]]
 file = "tests/test_v_store.py"
 server = "--kvcache -w 1"
 tier = "full"

@@ -10,10 +10,13 @@ two sections below by heading, so keep the headings exactly as written. -->
 | mlx-lm's own prompt-cache file, a fresh process | **37.0 ms** | a 67 MB file (mmap) | 32× |
 | Pion, **same process** | 46.2 ms | its own MLX arrays | 26× |
 | Pion, **from a separate process**, over the wire | 69.0 ms | 67 MB over loopback TCP | 17× |
+| Pion, **from a separate process** on the same machine | **37.0 ms** | a file Pion wrote (`V.EXPORT`, mmap) | 32× |
 
-**A file is faster.** mlx-lm ships `save_prompt_cache` / `load_prompt_cache`,
-and mapping a file beats fetching the same rows over TCP: if one program
-reuses one fixed prefix, use the file
+**On the same machine, Pion hands over a file too.** mlx-lm ships
+`save_prompt_cache` / `load_prompt_cache`, and mapping a file beats fetching the
+same rows over TCP, so a hit on the same machine maps a file Pion wrote when
+the prefix was stored: 37.0 ms, the file's own time. If one program reuses one
+fixed prefix, mlx-lm's file is the simpler tool
 ([`file_cache_ttft.py`](../../benchmarks/reproducers/file_cache_ttft.py),
 [raw output](../../benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json)).
 Pion is for what a file does not do: one cache that any process, model object

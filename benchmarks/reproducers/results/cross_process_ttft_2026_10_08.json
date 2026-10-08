@@ -1,0 +1,458 @@
+{
+  "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+  "measured": "2026-10-08",
+  "lengths": [
+    {
+      "prefix_tokens": 34,
+      "cold_median_ms": 45.0,
+      "hit_median_ms": 30.5,
+      "ratio": 1.47,
+      "hit_tcp_median_ms": 31.2,
+      "tcp_ratio": 1.44,
+      "same_median_ms": 30.5,
+      "same_ratio": 1.48,
+      "store": {
+        "mode": "store",
+        "prefix_tokens": 34,
+        "ms": 79.08783294260502,
+        "first_token": 578,
+        "hits": 0,
+        "misses": 1
+      },
+      "runs": [
+        {
+          "mode": "cold",
+          "prefix_tokens": 34,
+          "ms": 45.175167033448815,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 34,
+          "ms": 30.462417053058743,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 34,
+          "ms": 31.11637500114739,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 34,
+          "ms": 30.488874996080995,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        },
+        {
+          "mode": "cold",
+          "prefix_tokens": 34,
+          "ms": 45.027416897937655,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 34,
+          "ms": 30.53975012153387,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 34,
+          "ms": 31.17366717197001,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 34,
+          "ms": 30.897041084244847,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        },
+        {
+          "mode": "cold",
+          "prefix_tokens": 34,
+          "ms": 44.94450008496642,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 34,
+          "ms": 30.79195786267519,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 34,
+          "ms": 31.325459014624357,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 34,
+          "ms": 30.50350002013147,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        }
+      ]
+    },
+    {
+      "prefix_tokens": 268,
+      "cold_median_ms": 166.0,
+      "hit_median_ms": 31.4,
+      "ratio": 5.29,
+      "hit_tcp_median_ms": 35.9,
+      "tcp_ratio": 4.63,
+      "same_median_ms": 32.0,
+      "same_ratio": 5.19,
+      "store": {
+        "mode": "store",
+        "prefix_tokens": 268,
+        "ms": 221.36816708371043,
+        "first_token": 578,
+        "hits": 0,
+        "misses": 1
+      },
+      "runs": [
+        {
+          "mode": "cold",
+          "prefix_tokens": 268,
+          "ms": 165.99254100583494,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 268,
+          "ms": 31.36458294466138,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 268,
+          "ms": 35.86941701360047,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 268,
+          "ms": 32.28920907713473,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        },
+        {
+          "mode": "cold",
+          "prefix_tokens": 268,
+          "ms": 165.83604109473526,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 268,
+          "ms": 31.192666152492166,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 268,
+          "ms": 36.266749957576394,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 268,
+          "ms": 31.930708093568683,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        },
+        {
+          "mode": "cold",
+          "prefix_tokens": 268,
+          "ms": 166.75950004719198,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 268,
+          "ms": 31.6921251360327,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 268,
+          "ms": 34.30412500165403,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 268,
+          "ms": 31.99916612356901,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        }
+      ]
+    },
+    {
+      "prefix_tokens": 1035,
+      "cold_median_ms": 588.9,
+      "hit_median_ms": 33.6,
+      "ratio": 17.51,
+      "hit_tcp_median_ms": 49.0,
+      "tcp_ratio": 12.03,
+      "same_median_ms": 59.7,
+      "same_ratio": 9.86,
+      "store": {
+        "mode": "store",
+        "prefix_tokens": 1035,
+        "ms": 707.8519170172513,
+        "first_token": 578,
+        "hits": 0,
+        "misses": 1
+      },
+      "runs": [
+        {
+          "mode": "cold",
+          "prefix_tokens": 1035,
+          "ms": 587.93312497437,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 1035,
+          "ms": 33.75279204919934,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 1035,
+          "ms": 48.961916007101536,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 1035,
+          "ms": 61.11524999141693,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        },
+        {
+          "mode": "cold",
+          "prefix_tokens": 1035,
+          "ms": 588.9965000096709,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 1035,
+          "ms": 33.62770797684789,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 1035,
+          "ms": 49.05679193325341,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 1035,
+          "ms": 59.74454083479941,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        },
+        {
+          "mode": "cold",
+          "prefix_tokens": 1035,
+          "ms": 588.8516660779715,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 1035,
+          "ms": 33.28524995595217,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 1035,
+          "ms": 44.67433295212686,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 1035,
+          "ms": 36.41279204748571,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        }
+      ]
+    },
+    {
+      "prefix_tokens": 2049,
+      "cold_median_ms": 1192.3,
+      "hit_median_ms": 37.0,
+      "ratio": 32.25,
+      "hit_tcp_median_ms": 67.4,
+      "tcp_ratio": 17.69,
+      "same_median_ms": 45.5,
+      "same_ratio": 26.18,
+      "store": {
+        "mode": "store",
+        "prefix_tokens": 2049,
+        "ms": 1397.9703749064356,
+        "first_token": 578,
+        "hits": 0,
+        "misses": 1
+      },
+      "runs": [
+        {
+          "mode": "cold",
+          "prefix_tokens": 2049,
+          "ms": 1192.9150000214577,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 2049,
+          "ms": 37.14725002646446,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 2049,
+          "ms": 67.81150004826486,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 2049,
+          "ms": 55.23854214698076,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        },
+        {
+          "mode": "cold",
+          "prefix_tokens": 2049,
+          "ms": 1192.1345409937203,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 2049,
+          "ms": 36.96929197758436,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 2049,
+          "ms": 67.41812499240041,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 2049,
+          "ms": 45.22916697897017,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        },
+        {
+          "mode": "cold",
+          "prefix_tokens": 2049,
+          "ms": 1192.33658304438,
+          "first_token": 578
+        },
+        {
+          "mode": "hit",
+          "prefix_tokens": 2049,
+          "ms": 36.65525000542402,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "hit_tcp",
+          "prefix_tokens": 2049,
+          "ms": 65.45154191553593,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0
+        },
+        {
+          "mode": "same",
+          "prefix_tokens": 2049,
+          "ms": 45.541000086814165,
+          "first_token": 578,
+          "hits": 1,
+          "misses": 0,
+          "stored_misses": 1
+        }
+      ]
+    }
+  ]
+}

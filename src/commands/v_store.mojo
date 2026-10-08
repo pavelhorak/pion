@@ -22,6 +22,7 @@ from std.collections import Array
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
+from std.ffi import external_call
 
 # Maximum heterogeneous schema length. The RESP token-array frame
 # limit caps a SCHEMA call at: cmd + sid + (default_dim) + SCHEMA + N + N specs
@@ -944,4 +945,244 @@ def handle_v_commit(
         return 1
     var ok = vstore.commit_session_snapshot(session_idx, UInt64(snap_raw))
     writer.append_int_response(Int64(1) if ok else Int64(0))
+    return 1
+
+
+# ── gh #468: V.EXPORT — the shared-memory lane for prompt-cache hits ─────────
+#
+# A cross-process hit used to ship the prefix K/V over loopback TCP and
+# rebuild MLX arrays from it: 69 ms at a 2,049-token prefix, where mlx-lm's own
+# cache file answers in 37 ms. Measured split of the 69 ms (M4 mini): fetch
+# 22-24 ms, array rebuild 7 ms, first-token forward 36.5 ms; the file pays the
+# same forward and ~0.2 ms to map. V.EXPORT gives a client on this machine the
+# file: the prefix's K/V written once as safetensors, fp16, laid out
+# [1, n_kv_heads, N, head_dim] per layer as mlx-lm's cache keeps it, so
+# `mx.load` maps it lazily and the arrays go straight into the cache.
+
+comptime _EXPORT_SUFFIX = ".safetensors"
+
+
+@always_inline
+def _fnv64(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, h0: UInt64) -> UInt64:
+    var h = h0
+    for i in range(n):
+        h = (h ^ UInt64(p[unsafe_offset=i])) * 0x100000001B3
+    return h
+
+
+@always_inline
+def _fnv64_u(v: UInt64, h0: UInt64) -> UInt64:
+    var h = h0
+    for b in range(8):
+        h = (h ^ ((v >> UInt64(b * 8)) & 0xFF)) * 0x100000001B3
+    return h
+
+
+def _hex16(v: UInt64) -> String:
+    comptime digits = "0123456789abcdef"
+    var out = String("")
+    for i in range(15, -1, -1):
+        var d = Int((v >> UInt64(i * 4)) & 0xF)
+        out += digits[byte=d]
+    return out
+
+
+def _export_dir() -> String:
+    """$PION_EXPORT_DIR, else `pion-export` beside the server's data files."""
+    var name = String("PION_EXPORT_DIR\0")
+    var p = external_call["getenv", Pointer[UInt8, MutUntrackedOrigin]](name.unsafe_ptr())
+    _ = name^
+    if is_not_null(p):
+        var n = Int(external_call["strlen", Int](p))
+        if n > 0:
+            var s = String("")
+            for i in range(n):
+                s += chr(Int(p[unsafe_offset=i]))
+            return s
+    return String("pion-export")
+
+
+def handle_v_export(
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
+    start: Int,
+    num_tokens: Int,
+    mut writer: ResponseWriter,
+    mut vstore: VStoreIndex,
+    fd: Int32,
+) raises -> Int:
+    """V.EXPORT <k_session> <v_session> <start_id> <end_id_exclusive> <num_layers> <n_kv_heads> <head_dim>
+
+    Writes tokens [start, end) of every layer < num_layers of the two V-store
+    sessions (the K side and the V side of one prompt prefix) to a safetensors
+    file and replies with its absolute path. Tensors `k.<l>` and `v.<l>` are
+    fp16, shape [1, n_kv_heads, end - start, head_dim]. Stored formats other
+    than fp16 are dequantized and rounded to fp16, as the TCP lane's client
+    does. Only a client on this machine may ask (the path means nothing
+    elsewhere), the server picks the name, and a file is reused while neither
+    session changes. Files live in $PION_EXPORT_DIR (default: ./pion-export),
+    the directory 0700 and the files 0600.
+    """
+    if not vstore.enabled:
+        writer.append_error_response("ERR V-store not enabled")
+        return 1
+    if start + 7 >= num_tokens:
+        writer.append_error_response(
+            "ERR V.EXPORT requires: k_session v_session start end num_layers n_kv_heads head_dim")
+        return 1
+    if external_call["pion_peer_is_local", Int32](fd) != 1:
+        writer.append_error_response("ERR V.EXPORT serves clients on this machine only; use V.FETCH")
+        return 1
+
+    var k_tok = tokens[unsafe_offset=start + 1]
+    var v_tok = tokens[unsafe_offset=start + 2]
+    var k_idx = vstore._find_session(k_tok.ptr, Int(k_tok.length))
+    var v_idx = vstore._find_session(v_tok.ptr, Int(v_tok.length))
+    if k_idx < 0 or v_idx < 0:
+        var missing = k_tok if k_idx < 0 else v_tok
+        if is_not_null(vstore.directory):
+            var owner = vstore_dir_lookup(vstore.directory, missing.ptr, Int(missing.length))
+            if owner >= 0 and owner != vstore.my_worker_id:
+                writer.append_error_response(
+                    "ERR session lives on worker " + String(owner) +
+                    " (this is worker " + String(vstore.my_worker_id) +
+                    "); reconnect for V.EXPORT")
+                return 1
+        writer.append_error_response("ERR session not found")
+        return 1
+
+    var rs = strict_atol(tokens[unsafe_offset=start + 3].value())
+    var re = strict_atol(tokens[unsafe_offset=start + 4].value())
+    var n_layers = strict_atol(tokens[unsafe_offset=start + 5].value())
+    var n_heads = strict_atol(tokens[unsafe_offset=start + 6].value())
+    var head_dim = strict_atol(tokens[unsafe_offset=start + 7].value())
+    if rs < 0 or re <= rs:
+        writer.append_error_response("ERR V.EXPORT invalid range: end must exceed start (>=0)")
+        return 1
+    if n_layers <= 0 or n_layers > MAX_VS_LAYERS or n_heads <= 0 or head_dim <= 0:
+        writer.append_error_response("ERR V.EXPORT num_layers, n_kv_heads and head_dim must be positive")
+        return 1
+    if n_layers > vstore.sessions[unsafe_offset=k_idx].num_layers or n_layers > vstore.sessions[unsafe_offset=v_idx].num_layers:
+        writer.append_error_response("ERR V.EXPORT num_layers exceeds the layers stored")
+        return 1
+    var kv_dim = n_heads * head_dim
+    for li in range(n_layers):
+        for side in range(2):
+            var sidx = k_idx if side == 0 else v_idx
+            var ld = vstore.layer_value_dim[unsafe_offset=sidx * MAX_VS_LAYERS + li]
+            if ld <= 0:
+                ld = vstore.sessions[unsafe_offset=sidx].value_dim
+            if ld != kv_dim:
+                writer.append_error_response(
+                    "ERR V.EXPORT layer " + String(li) + " holds " + String(ld) +
+                    " values per token, not n_kv_heads * head_dim = " + String(kv_dim))
+                return 1
+    var n = re - rs
+
+    # The name: worker, process nonce, what was asked, and both sessions' gens.
+    if vstore.export_nonce == 0:
+        var pid = UInt64(external_call["getpid", Int32]())
+        var ms = UInt64(external_call["pion_unix_ms", Int64]())
+        vstore.export_nonce = _fnv64_u(ms, _fnv64_u(pid, 0xCBF29CE484222325)) | 1
+    var ask = _fnv64(k_tok.ptr, Int(k_tok.length), 0xCBF29CE484222325)
+    ask = _fnv64(v_tok.ptr, Int(v_tok.length), _fnv64_u(0xFF, ask))
+    ask = _fnv64_u(UInt64(rs), _fnv64_u(UInt64(re), ask))
+    ask = _fnv64_u(UInt64(n_layers), _fnv64_u(UInt64(n_heads), _fnv64_u(UInt64(head_dim), ask)))
+    var gens = _fnv64_u(vstore.sessions[unsafe_offset=k_idx].gen,
+                        _fnv64_u(vstore.sessions[unsafe_offset=v_idx].gen, 0xCBF29CE484222325))
+    var worker_prefix = String("w") + String(vstore.my_worker_id) + "-"
+    var proc_prefix = worker_prefix + _hex16(vstore.export_nonce) + "-"
+    var ask_prefix = proc_prefix + _hex16(ask) + "-"
+    var final_name = ask_prefix + _hex16(gens) + _EXPORT_SUFFIX
+    var dir = _export_dir()
+    var dir_c = dir + "\0"
+    var final_c = final_name + "\0"
+
+    if external_call["pion_xf_exists", Int32](dir_c.unsafe_ptr(), final_c.unsafe_ptr()) != 1:
+        if not vstore.export_pruned:
+            # A previous process's files for this worker: never valid again.
+            var wp_c = worker_prefix + "\0"
+            var pp_c = proc_prefix + "\0"
+            _ = external_call["pion_xf_prune", Int32](dir_c.unsafe_ptr(), wp_c.unsafe_ptr(), pp_c.unsafe_ptr())
+            vstore.export_pruned = True
+        var tmp_c = String(".tmp-") + final_name + "\0"
+        var xfd = external_call["pion_xf_open", Int32](dir_c.unsafe_ptr(), tmp_c.unsafe_ptr())
+        if xfd < 0:
+            writer.append_error_response("ERR V.EXPORT cannot create a file in " + dir)
+            return 1
+        # Header: tensors in file order k.0, v.0, k.1, v.1, ...
+        var t_bytes = n * kv_dim * 2
+        var header = String("{")
+        var off = 0
+        for li in range(n_layers):
+            for side in range(2):
+                if li > 0 or side > 0:
+                    header += ","
+                header += "\"" + ("k." if side == 0 else "v.") + String(li) + "\":{\"dtype\":\"F16\",\"shape\":[1,"
+                header += String(n_heads) + "," + String(n) + "," + String(head_dim) + "],\"data_offsets\":["
+                header += String(off) + "," + String(off + t_bytes) + "]}"
+                off += t_bytes
+        header += "}"
+        while (8 + header.byte_length()) % 8 != 0:
+            header += " "
+        var hlen = alloc[UInt64](1)
+        hlen[0] = UInt64(header.byte_length())
+        var ok = external_call["pion_xf_write", Int32](xfd, hlen.bitcast[UInt8](), Int64(8)) == 0
+        hlen.free()
+        ok = ok and external_call["pion_xf_write", Int32](xfd, header.unsafe_ptr(), Int64(header.byte_length())) == 0
+        _ = header^
+
+        var ids = alloc[Int32](n)
+        for j in range(n):
+            ids[j] = Int32(Int(rs) + j)
+        var rows32 = alloc[Float32](n * kv_dim)        # stored rows, fp32 (dequantized path)
+        var rows16 = alloc[Float16](n * kv_dim)        # stored rows, fp16 [N, kv_dim]
+        var out16 = alloc[Float16](n * kv_dim)         # written tensor [heads, N, head_dim]
+        var rows32_p = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(rows32))
+        var ids_p = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(ids))
+        var rows16_u8 = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rows16))
+        for li in range(n_layers):
+            if not ok:
+                break
+            for side in range(2):
+                var sidx = k_idx if side == 0 else v_idx
+                if vstore.v_fmt[unsafe_offset=sidx * MAX_VS_LAYERS + li] == VFMT_FP16:
+                    _ = vstore.fetch_range_fp16_raw(sidx, li, Int(rs), n, rows16_u8)
+                else:
+                    _ = vstore.fetch_tokens(sidx, li, ids_p, n, rows32_p)
+                    for x in range(n * kv_dim):
+                        rows16[x] = rows32[x].cast[DType.float16]()
+                # [N, heads * head_dim] -> [heads, N, head_dim]
+                for h in range(n_heads):
+                    for t in range(n):
+                        unsafe_memcpy(dest=out16 + (h * n + t) * head_dim,
+                                      src=rows16 + t * kv_dim + h * head_dim, count=head_dim)
+                ok = ok and external_call["pion_xf_write", Int32](
+                    xfd, out16.bitcast[UInt8](), Int64(t_bytes)) == 0
+        ids.free()
+        rows32.free()
+        rows16.free()
+        out16.free()
+        var tmp_name_c = String(".tmp-") + final_name + "\0"
+        var committed = external_call["pion_xf_commit", Int32](
+            xfd, dir_c.unsafe_ptr(), tmp_name_c.unsafe_ptr(), final_c.unsafe_ptr(), Int32(1 if ok else 0)) == 0
+        _ = tmp_c^
+        _ = tmp_name_c^
+        if not committed:
+            writer.append_error_response("ERR V.EXPORT could not write the file in " + dir)
+            return 1
+        # Older generations of the same request are stale now.
+        var ap_c = ask_prefix + "\0"
+        _ = external_call["pion_xf_prune", Int32](dir_c.unsafe_ptr(), ap_c.unsafe_ptr(), final_c.unsafe_ptr())
+        _ = ap_c^
+
+    var pathbuf = alloc[UInt8](4096)
+    var plen = external_call["pion_xf_realpath", Int64](dir_c.unsafe_ptr(), final_c.unsafe_ptr(), pathbuf, Int64(4096))
+    _ = dir_c^
+    _ = final_c^
+    if plen <= 0:
+        pathbuf.free()
+        writer.append_error_response("ERR V.EXPORT cannot resolve the file path")
+        return 1
+    writer.append_bulk_string_response(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pathbuf)), Int(plen))
+    pathbuf.free()
     return 1

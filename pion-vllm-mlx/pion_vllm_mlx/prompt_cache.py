@@ -518,6 +518,13 @@ class PionPromptCache:
         # entry has shape (1, n_kv_heads, prefix_len, head_dim).
         self._mlx_prefix_kv: dict = {}
         self._inproc_disabled = (_os.environ.get("PION_PROMPT_CACHE_NO_INPROC", "0") == "1")
+        # gh #468 export lane: a server on this machine writes the prefix as a
+        # safetensors file and the hit maps it (mx.load), instead of copying
+        # it over loopback TCP. Off for a remote host, when the server is too
+        # old to know V.EXPORT, and with PION_PROMPT_CACHE_NO_EXPORT=1.
+        self._export_disabled = (
+            _os.environ.get("PION_PROMPT_CACHE_NO_EXPORT", "0") == "1"
+            or host not in ("127.0.0.1", "localhost", "::1"))
         # local manifest cache: ns_hash -> (prefix_len,)
         self._local: dict[str, int] = {}
         self._stage2_pushed: set[str] = set()
@@ -1524,6 +1531,13 @@ class PionPromptCache:
             for li, (k_np, v_np) in enumerate(per_layer):
                 self._storebatch(sid_k, li, k_np)
                 self._storebatch(sid_v, li, v_np)
+            if not self._export_disabled:
+                # gh #468: write the export file now, on the miss that already
+                # paid a prefill, so the first hit from another process maps it.
+                try:
+                    self._export(namespace, prefix_len)
+                except Exception:
+                    self._export_disabled = True
             self.store_ms_total += (time.perf_counter() - t0) * 1000
 
             self._local[namespace] = prefix_len
@@ -1563,6 +1577,35 @@ class PionPromptCache:
 
         return cache
 
+    def _export(self, namespace: str, prefix_len: int):
+        """gh #468: ask the server for the prefix as a file. Returns its path,
+        or None (and turns the lane off) when the server cannot."""
+        L = _require_layout(self.layout)
+        r = self.resp.call("V.EXPORT", f"{namespace}_pk", f"{namespace}_pv", "0",
+                           str(prefix_len), str(L.n_layers), str(L.n_kv_heads), str(L.head_dim))
+        if not r.startswith(b"$") or r.startswith(b"$-1"):
+            self._export_disabled = True
+            return None
+        nl = r.find(b"\r\n")
+        return r[nl + 2:-2].decode()
+
+    def _fetch_via_export(self, namespace: str, prefix_len: int):
+        """gh #468: the hit through the export lane — map the file and hand
+        its arrays to the cache as they are (mx.load is lazy; the first
+        forward reads them from the page cache, as with mlx-lm's own cache
+        file). Returns None when a layer's cache is not a plain KVCache."""
+        mx, make_prompt_cache = _require_mlx()
+        cache = make_prompt_cache(self.model)
+        if any(type(c).__name__ != "KVCache" for c in cache):
+            return None
+        path = self._export(namespace, prefix_len)
+        if path is None:
+            return None
+        arrays = mx.load(path)
+        for li, c in enumerate(cache):
+            c.state = (arrays[f"k.{li}"], arrays[f"v.{li}"])
+        return cache
+
     def _fetch_to_cache(self, namespace: str, prefix_len: int):
         # Dispatch on cache shape — a mixed-cache hybrid (Qwen3.5-style)
         # takes the split-substrate path. Cache-slot types are deterministic
@@ -1581,6 +1624,15 @@ class PionPromptCache:
         L = _require_layout(self.layout)
         per_layer = []
         t0 = time.perf_counter()
+        if not self._export_disabled:
+            try:
+                cache = self._fetch_via_export(namespace, prefix_len)
+            except Exception:
+                cache = None
+                self._export_disabled = True
+            if cache is not None:
+                self.fetch_ms_total += (time.perf_counter() - t0) * 1000
+                return cache
         # Try V.FETCH BATCH (single round-trip per side, 2 round-trips total
         # across all layers). Falls back to per-layer V.FETCH RANGE if the
         # server is older or returns an unexpected reply — keeps the client

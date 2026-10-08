@@ -420,6 +420,10 @@ struct VSSessionMeta(TrivialRegisterPassable):
     var block_count: UInt32
     var block_hashes: UnsafePointer[UInt64, MutUntrackedOrigin]
     var block_hashes_sorted: UnsafePointer[UInt64, MutUntrackedOrigin]
+    # gh #468: VStoreIndex.gen_clock at this session's last change. An export
+    # file is named by its sessions' gens, so a changed session never serves
+    # an old file.
+    var gen: UInt64
 
     def __init__(out self):
         self.active = False
@@ -434,6 +438,7 @@ struct VSSessionMeta(TrivialRegisterPassable):
         self.block_count = UInt32(0)
         self.block_hashes = null_ptr[UInt64, MutUntrackedOrigin]()
         self.block_hashes_sorted = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.gen = 0
 
 
 struct VStoreIndex(Movable):
@@ -529,6 +534,12 @@ struct VStoreIndex(Movable):
     # the V-store WAL/snapshot: a restart forgets the measurement and the
     # ledger falls back to its per-token estimate, which it labels as such.
     var prefix_prefill_us: UnsafePointer[UInt64, MutUntrackedOrigin]
+    # gh #468: export lane state. gen_clock only ever grows within a process;
+    # export_nonce (pid ^ start time) separates this process's export files
+    # from a previous one's, which the first export of a process deletes.
+    var gen_clock: UInt64
+    var export_nonce: UInt64
+    var export_pruned: Bool
 
     def __init__(out self, enabled: Bool = False):
         self.enabled = enabled
@@ -547,6 +558,9 @@ struct VStoreIndex(Movable):
         self.ns_prefix = String("")
         var _ppu = alloc[UInt64](MAX_VS_SESSIONS)
         self.prefix_prefill_us = UnsafePointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_ppu))
+        self.gen_clock = 0
+        self.export_nonce = 0
+        self.export_pruned = False
         for i in range(MAX_VS_SESSIONS):
             self.prefix_prefill_us[i] = UInt64(0)
 
@@ -656,8 +670,18 @@ struct VStoreIndex(Movable):
         self.my_worker_id = existing.my_worker_id
         self.ns_prefix = existing.ns_prefix
         self.prefix_prefill_us = existing.prefix_prefill_us
+        self.gen_clock = existing.gen_clock
+        self.export_nonce = existing.export_nonce
+        self.export_pruned = existing.export_pruned
 
     # ── Session management ──────────────────────────────────────────────
+
+    @always_inline
+    def _bump_gen(mut self, idx: Int):
+        """gh #468: mark session `idx` changed (see VSSessionMeta.gen)."""
+        if idx >= 0 and idx < MAX_VS_SESSIONS:
+            self.gen_clock += 1
+            self.sessions[idx].gen = self.gen_clock
 
     def _find_session(self, sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], sid_len: Int) -> Int:
         """Find session by ID. Returns index or -1."""
@@ -859,6 +883,7 @@ struct VStoreIndex(Movable):
                         self.v_scale[tpl_base + li] = self.snap_scales[lens_base + li]
                         self.v_min[tpl_base + li] = self.snap_mins[lens_base + li]
                 self.total_tokens -= diff
+                self._bump_gen(session_idx)
                 return True
         return False
 
@@ -968,6 +993,7 @@ struct VStoreIndex(Movable):
             self.v_fmt[li_slot] = actual_fmt
         self.session_count += 1
         self._touch(slot)
+        self._bump_gen(slot)
 
         return slot
 
@@ -1237,6 +1263,7 @@ struct VStoreIndex(Movable):
             self.sessions[session_idx].num_layers = layer_id + 1
         self.total_tokens += num_tokens
         self._touch(session_idx)
+        self._bump_gen(session_idx)
 
         return True
 
