@@ -436,6 +436,12 @@ server = "-w 1"
 tier = "gate"
 
 [[test]]
+file = "tests/test_fp32_scan.py"
+# gh #400: VSIM GEMV + kNN-LM four-chain kernels vs numpy, odd dims included.
+server = "--kvcache -w 1"
+tier = "gate"
+
+[[test]]
 file = "tests/test_gh156_vset_reply_pairing.py"
 server = "-w 1"
 tier = "gate"
