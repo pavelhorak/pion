@@ -30,6 +30,7 @@ dispatch site sets `i = cmd_end_tok - 1` and passes `cmd_end_tok` as
 `num_tokens`, so optional-argument scans stay inside their own command.
 """
 
+from src.vector.fp32_scan import dot_f32_4chain
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, stack_allocation
@@ -301,13 +302,18 @@ def handle_vsim(
             writer.append_error_response("ERR Vector dimension mismatch - got " + String(dim)
                                          + " but set has " + String(vs[].dim))
             return 0
-        var ss = Float32(0.0)
-        for d in range(dim):
-            ss += q[unsafe_offset=d] * q[unsafe_offset=d]
+        # gh #400: the query's norm on the same four-chain kernel as the
+        # scan, instead of one scalar FMA chain over all `dim` floats.
+        var ss = dot_f32_4chain(q, q, dim)
         if ss > 0.0:
             var inv = Float32(1.0) / sqrt(ss)
-            for d in range(dim):
+            var d = 0
+            while d + 8 <= dim:
+                (q + d).store((q + d).load[width=8]() * inv)
+                d += 8
+            while d < dim:
                 q[unsafe_offset=d] = q[unsafe_offset=d] * inv
+                d += 1
     var slots = List[Int]()
     var scores = List[Float64]()
     vs[].search(q, count, slots, scores)

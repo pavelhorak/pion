@@ -65,6 +65,7 @@ Wire commands (handled in src/commands/knn_lm.mojo):
   AI.KNN_LM.DROP       <ds_id>
 """
 
+from src.vector.fp32_scan import l2sq_f32_4chain
 from src.common.ptr import is_not_null, null_ptr
 from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc
@@ -278,25 +279,8 @@ def _l2_distance_fp32(
     b: UnsafePointer[Float32, MutUntrackedOrigin],
     dim: Int,
 ) -> Float32:
-    """Squared L2 distance over two FP32 vectors. SIMD-vectorized at width 8."""
-    comptime W = 8
-    var n_simd = (dim // W) * W
-    var acc = SIMD[DType.float32, W](0.0)
-    var i = 0
-    while i < n_simd:
-        var av = (a + i).load[width=W]()
-        var bv = (b + i).load[width=W]()
-        var d = av - bv
-        acc = acc + d * d
-        i += W
-    var s: Float32 = 0.0
-    for w in range(W):
-        s += acc[w]
-    while i < dim:
-        var d = a[i] - b[i]
-        s += d * d
-        i += 1
-    return s
+    """Squared L2 distance over two FP32 vectors (gh #400: four FMA chains)."""
+    return l2sq_f32_4chain(a, b, dim)
 
 
 struct KNNHNSW(Movable, Copyable):

@@ -13,6 +13,7 @@ from std.math import sqrt
 from src.common.value import GenericValue, ValueType
 from src.common.hash_map import SlabHashMap
 from src.common.prng import Xoshiro256PlusPlus
+from src.vector.fp32_scan import dot_f32_4chain, scan_dot_f32
 
 
 struct VectorSet(Movable):
@@ -166,25 +167,25 @@ struct VectorSet(Movable):
 
     def similarity(self, q: Pointer[Float32, MutUntrackedOrigin], slot: Int) -> Float64:
         """Redis's score: (1 + cos) / 2 against a unit query."""
-        var acc = SIMD[DType.float32, 8](0)
-        var v = self.vecs + slot * self.dim
-        var d = 0
-        while d + 8 <= self.dim:
-            acc = acc + (q + d).load[width=8]() * (v + d).load[width=8]()
-            d += 8
-        var dot = acc.reduce_add()
-        while d < self.dim:
-            dot += q[unsafe_offset=d] * v[unsafe_offset=d]
-            d += 1
+        var dot = dot_f32_4chain(q, self.vecs + slot * self.dim, self.dim)
         return (1.0 + Float64(dot)) / 2.0
 
     def search(self, q: Pointer[Float32, MutUntrackedOrigin], count: Int,
                mut out_slots: List[Int], mut out_scores: List[Float64]):
-        """Top-`count` live slots by similarity, best first (exact)."""
+        """Top-`count` live slots by similarity, best first (exact).
+
+        gh #400: the set is one contiguous [n x dim] block, so the scan is a
+        single GEMV (Accelerate on macOS, the four-chain kernel elsewhere)
+        followed by one pass that keeps the best `count`. Tombstoned slots
+        are scored and skipped."""
+        if self.n == 0 or count <= 0:
+            return
+        var dots = alloc[Float32](self.n)
+        scan_dot_f32(self.vecs, self.n, self.dim, q, dots)
         for s in range(self.n):
             if self.alive[unsafe_offset=s] == 0:
                 continue
-            var sc = self.similarity(q, s)
+            var sc = (1.0 + Float64(dots[unsafe_offset=s])) / 2.0
             if len(out_slots) < count:
                 out_slots.append(s)
                 out_scores.append(sc)
@@ -199,6 +200,7 @@ struct VectorSet(Movable):
                 var ts = out_scores[j]; out_scores[j] = out_scores[j - 1]; out_scores[j - 1] = ts
                 var ti = out_slots[j]; out_slots[j] = out_slots[j - 1]; out_slots[j - 1] = ti
                 j -= 1
+        dots.free()
 
 
 def free_vset(vs: Pointer[VectorSet, MutUntrackedOrigin]):
