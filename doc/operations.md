@@ -449,7 +449,10 @@ beside the TLS one.
 ```
 
 **2. stunnel in front of it.** Put the certificate and its private key in one
-file (`cat server.crt server.key > pion.pem; chmod 600 pion.pem`), then:
+file (`cat server.crt server.key > pion.pem; chmod 600 pion.pem`). A
+certificate from your own CA must carry the usual extensions: Python 3.13 and
+later verify strictly and refuse a leaf without an authority key identifier
+(the test's `make_certs` shows a minimal set). Then:
 
 ```ini
 ; /etc/stunnel/pion.conf

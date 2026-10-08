@@ -49,12 +49,24 @@ def free_port():
 
 def make_certs(d):
     run = lambda *a: subprocess.run(a, cwd=d, check=True, capture_output=True)
+    # The extensions a strict verifier requires (Python 3.13+ sets
+    # VERIFY_X509_STRICT): a CA marked as one, and key identifiers that chain
+    # the leaf to it. A bare `openssl req -x509` CA fails with "Missing
+    # Authority Key Identifier".
     run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
-        "-subj", "/CN=pion-test-ca", "-keyout", "ca.key", "-out", "ca.crt")
+        "-subj", "/CN=pion-test-ca", "-keyout", "ca.key", "-out", "ca.crt",
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+        "-addext", "subjectKeyIdentifier=hash")
     run("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1",
         "-keyout", "server.key", "-out", "server.csr")
     with open(os.path.join(d, "san.ext"), "w") as f:
-        f.write("subjectAltName=IP:127.0.0.1,DNS:localhost\n")
+        f.write("subjectAltName=IP:127.0.0.1,DNS:localhost\n"
+                "basicConstraints=critical,CA:FALSE\n"
+                "keyUsage=critical,digitalSignature,keyEncipherment\n"
+                "extendedKeyUsage=serverAuth\n"
+                "subjectKeyIdentifier=hash\n"
+                "authorityKeyIdentifier=keyid,issuer\n")
     run("openssl", "x509", "-req", "-in", "server.csr", "-CA", "ca.crt", "-CAkey", "ca.key",
         "-CAcreateserial", "-days", "2", "-extfile", "san.ext", "-out", "server.crt")
     # stunnel wants the certificate and its key; the doc keeps them in one file.
