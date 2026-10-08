@@ -154,6 +154,18 @@ jobs:
           xcrun -sdk macosx metal -c src/ffi/metal_compute.metal -o /tmp/metal_compute.air || true
           exit 1
 
+      - name: Keep the rebuilt metallib
+        # A source checkout loads the TRACKED metallib before compiling the
+        # .metal, so a shader change must commit a metallib built from it
+        # (tests/test_metallib_current.py checks the two travel together). A
+        # machine without full Xcode cannot build one: take it from here.
+        if: matrix.leg == 'macos-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal_compute.metallib
+          path: src/ffi/metal_compute.metallib
+          retention-days: 14
+
       - name: Report what was built
         run: |
           ls -la ${{ env.BINARY }}

@@ -57,6 +57,10 @@ struct MetalAttentionEngine(Movable):
                 # init is idempotent + thread-safe (mutex-guarded inside C).
                 var rc = external_call["pion_metal_sdpa_init", Int32]()
                 self.available = rc == 0
+                # gh #398: fp16 kernels read half K/V, so the store keeps half.
+                # Process-wide and set before any STORE; every worker agrees.
+                if self.available and fp16:
+                    external_call["pion_metal_sdpa_set_kv_half", NoneType](Int32(1))
                 if not self.available:
                     print("[MetalAttn] init failed (rc=", rc, "); ATTEND.PREFIX.* will fall back to MLX bridge")
 

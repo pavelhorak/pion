@@ -499,8 +499,8 @@ kernel void sdpa_q1_sparse_fp32(
 // the mlx-lm patch path (vanilla mlx-lm precision parity).
 kernel void sdpa_q1_sparse_fp16(
     const device float4* Q             [[buffer(0)]],
-    const device float4* K             [[buffer(1)]],
-    const device float4* V             [[buffer(2)]],
+    const device half4*  K             [[buffer(1)]],
+    const device half4*  V             [[buffer(2)]],
     device       float4* O             [[buffer(3)]],
     constant     uint&   N_tokens      [[buffer(4)]],
     constant     float&  scale         [[buffer(5)]],
@@ -539,8 +539,8 @@ kernel void sdpa_q1_sparse_fp16(
     half4 o[CHUNK_MAX];
     for (uint c = 0u; c < CHUNK_MAX; ++c) o[c] = half4(0.0h);
 
-    const device float4* k_base   = K + h_kv * N_tokens * D4;
-    const device float4* v_base   = V + h_kv * N_tokens * D4;
+    const device half4*  k_base   = K + h_kv * N_tokens * D4;
+    const device half4*  v_base   = V + h_kv * N_tokens * D4;
     const device int*    idx_base = indices + h * K_sparse_max;
 
     for (uint i = i_begin; i < i_end; ++i) {
@@ -554,7 +554,7 @@ kernel void sdpa_q1_sparse_fp16(
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 k = half4(k_base[t * D4 + idx]);
+                half4 k = k_base[t * D4 + idx];
                 partial += float(dot(q[c], k));
             }
         }
@@ -569,7 +569,7 @@ kernel void sdpa_q1_sparse_fp16(
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 v = half4(v_base[t * D4 + idx]);
+                half4 v = v_base[t * D4 + idx];
                 o[c] = o[c] * factor + exp_s * v;
             }
         }
@@ -785,8 +785,8 @@ kernel void sdpa_q1_sparse_fused_fp32(
 // ─── SDPA Q=1 SPARSE-MASK + DENSE SUFFIX FUSED (FP16) ─────────────────
 kernel void sdpa_q1_sparse_fused_fp16(
     const device float4* Q             [[buffer(0)]],
-    const device float4* K             [[buffer(1)]],
-    const device float4* V             [[buffer(2)]],
+    const device half4*  K             [[buffer(1)]],
+    const device half4*  V             [[buffer(2)]],
     device       float4* O             [[buffer(3)]],
     constant     uint&   N_tokens      [[buffer(4)]],
     constant     float&  scale         [[buffer(5)]],
@@ -828,8 +828,8 @@ kernel void sdpa_q1_sparse_fused_fp16(
     half4 o[CHUNK_MAX];
     for (uint c = 0u; c < CHUNK_MAX; ++c) o[c] = half4(0.0h);
 
-    const device float4* k_base   = K + h_kv * N_tokens * D4;
-    const device float4* v_base   = V + h_kv * N_tokens * D4;
+    const device half4*  k_base   = K + h_kv * N_tokens * D4;
+    const device half4*  v_base   = V + h_kv * N_tokens * D4;
     const device int*    idx_base = indices + h * K_sparse_max;
 
     // Sparse prefix loop
@@ -843,7 +843,7 @@ kernel void sdpa_q1_sparse_fused_fp16(
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 k = half4(k_base[t * D4 + idx]);
+                half4 k = k_base[t * D4 + idx];
                 partial += float(dot(q[c], k));
             }
         }
@@ -858,7 +858,7 @@ kernel void sdpa_q1_sparse_fused_fp16(
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 v = half4(v_base[t * D4 + idx]);
+                half4 v = v_base[t * D4 + idx];
                 o[c] = o[c] * factor + exp_s * v;
             }
         }
@@ -1166,10 +1166,19 @@ kernel void sdpa_batched_q_tiled_fp32(
 // The kernel reuses the same D_HEAD function constant — one source, one
 // PSO per supported D, just like the fp32 version.
 
+// gh #398: under --metal-attention-fp16 the session K/V are STORED as half
+// (pion_metal_sdpa_store_kv converts once on the host, round-to-nearest-even),
+// so all five fp16 kernels read half4 prefix K/V: half the bytes per token.
+// The kernels used to convert float4 to half4 on every load, and that cast
+// differs from the host's in the last bit of some elements, so the output is
+// not bit-identical to before: cosine against the fp32 CPU reference moved
+// 0.9999965 -> 0.9999966 at N=2048 and 0.9996163 -> 0.9996138 at N=28672 (H=8,
+// D=128), and Llama-3.2-1B decode still matches vanilla mlx-lm 40/40 tokens.
+// The fused kernels' suffix K/V arrive per call and stay float4.
 kernel void sdpa_q1_fp16(
     const device float4* Q [[buffer(0)]],
-    const device float4* K [[buffer(1)]],
-    const device float4* V [[buffer(2)]],
+    const device half4*  K [[buffer(1)]],
+    const device half4*  V [[buffer(2)]],
     device       float4* O [[buffer(3)]],
     constant     uint&   N_tokens [[buffer(4)]],
     constant     float&  scale    [[buffer(5)]],
@@ -1200,8 +1209,8 @@ kernel void sdpa_q1_fp16(
     half4 o[CHUNK_MAX];
     for (uint c = 0u; c < CHUNK_MAX; ++c) o[c] = half4(0.0h);
 
-    const device float4* k_base = K + h * N_tokens * D4;
-    const device float4* v_base = V + h * N_tokens * D4;
+    const device half4*  k_base = K + h * N_tokens * D4;
+    const device half4*  v_base = V + h * N_tokens * D4;
 
     for (uint t = t_begin; t < t_end; ++t) {
         // Dot accumulates in float for headroom (D=64 × |q*k| up to 9000 per-lane,
@@ -1211,7 +1220,7 @@ kernel void sdpa_q1_fp16(
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 k = half4(k_base[t * D4 + idx]);
+                half4 k = k_base[t * D4 + idx];
                 partial += float(dot(q[c], k));
             }
         }
@@ -1226,7 +1235,7 @@ kernel void sdpa_q1_fp16(
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 v = half4(v_base[t * D4 + idx]);
+                half4 v = v_base[t * D4 + idx];
                 o[c] = o[c] * factor + exp_s * v;
             }
         }
@@ -1277,8 +1286,8 @@ kernel void sdpa_q1_fp16(
 // can downcast LSE on receive if bit-exact merge is required.
 kernel void sdpa_batched_q_fp16(
     const device float4* Q   [[buffer(0)]],
-    const device float4* K   [[buffer(1)]],
-    const device float4* V   [[buffer(2)]],
+    const device half4*  K   [[buffer(1)]],
+    const device half4*  V   [[buffer(2)]],
     device       float4* O   [[buffer(3)]],
     device       float*  LSE [[buffer(4)]],
     constant     uint&   N_tokens [[buffer(5)]],
@@ -1315,15 +1324,15 @@ kernel void sdpa_batched_q_fp16(
     half4 o[CHUNK_MAX];
     for (uint c = 0u; c < CHUNK_MAX; ++c) o[c] = half4(0.0h);
 
-    const device float4* k_base = K + h * N_tokens * D4;
-    const device float4* v_base = V + h * N_tokens * D4;
+    const device half4*  k_base = K + h * N_tokens * D4;
+    const device half4*  v_base = V + h * N_tokens * D4;
 
     for (uint t = t_begin; t < t_end; ++t) {
         float partial = 0.0f;
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 k = half4(k_base[t * D4 + idx]);
+                half4 k = k_base[t * D4 + idx];
                 partial += float(dot(q[c], k));
             }
         }
@@ -1338,7 +1347,7 @@ kernel void sdpa_batched_q_fp16(
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 v = half4(v_base[t * D4 + idx]);
+                half4 v = v_base[t * D4 + idx];
                 o[c] = o[c] * factor + exp_s * v;
             }
         }
@@ -1684,8 +1693,8 @@ kernel void sdpa_batched_q_tiled_fused_fp32(
 // mlx-lm precision; numerical headroom matches sdpa_q1_fp16).
 kernel void sdpa_batched_q_fused_fp16(
     const device float4* Q       [[buffer(0)]],
-    const device float4* K       [[buffer(1)]],
-    const device float4* V       [[buffer(2)]],
+    const device half4*  K       [[buffer(1)]],
+    const device half4*  V       [[buffer(2)]],
     const device float4* K_suf   [[buffer(3)]],
     const device float4* V_suf   [[buffer(4)]],
     device       float4* O       [[buffer(5)]],
@@ -1726,15 +1735,15 @@ kernel void sdpa_batched_q_fused_fp16(
     half4 o[CHUNK_MAX];
     for (uint c = 0u; c < CHUNK_MAX; ++c) o[c] = half4(0.0h);
 
-    const device float4* k_base = K + h_kv * N_tokens * D4;
-    const device float4* v_base = V + h_kv * N_tokens * D4;
+    const device half4*  k_base = K + h_kv * N_tokens * D4;
+    const device half4*  v_base = V + h_kv * N_tokens * D4;
 
     for (uint t = t_begin; t < t_end; ++t) {
         float partial = 0.0f;
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 k = half4(k_base[t * D4 + idx]);
+                half4 k = k_base[t * D4 + idx];
                 partial += float(dot(q[c], k));
             }
         }
@@ -1749,7 +1758,7 @@ kernel void sdpa_batched_q_fused_fp16(
         for (uint c = 0u; c < CHUNK; ++c) {
             uint idx = c * 32u + lane;
             if (idx < D4) {
-                half4 v = half4(v_base[t * D4 + idx]);
+                half4 v = v_base[t * D4 + idx];
                 o[c] = o[c] * factor + exp_s * v;
             }
         }
