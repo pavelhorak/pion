@@ -9,7 +9,7 @@ dispatches, generated from the same table `MULTI` validates against.
 | Family | Needs | What it is |
 |---|---|---|
 | [`KV.PREFIX.*`](kv-prefix.md) | `--kvcache` | The prefix registry: register a prompt prefix once, look it up from any process, block-hash membership for cache-aware routers |
-| [`V.*`](v-store.md) | `--kvcache` | The V-store the prefix cache is built on: token-indexed K/V storage, `V.STOREBATCH` / `V.FETCH … RANGE` / `BATCH`, quantization tiers |
+| [`V.*`](v-store.md) | `--kvcache` | The V-store the prefix cache is built on: token-indexed K/V storage, `V.STOREBATCH` / `V.FETCH … RANGE` / `BATCH`, `V.EXPORT` (the same-machine file lane), quantization tiers |
 | [`ATTEND.*`](attend.md) | `--kvcache` (+ `--metal-attention`) | Stage 2: Pion computes the attention over cached K/V itself, including the sparse long-context selector |
 | [`SSM.PREFIX.*`](ssm-prefix.md) | `--kvcache` | Recurrent-state companion for Mamba / GDN / hybrid models |
 | [`MOE.EXPERT.*`](moe-expert.md) | `--moe-cache DIR` | MoE expert paging: tiered expert weights, access histograms, HIST-guided pruning |

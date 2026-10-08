@@ -5,7 +5,12 @@ Token-ID-indexed storage for K and V tensors, one session per `<ns>_pk` /
 `V.STOREBATCH` and `V.FETCH … RANGE` / `BATCH` are in the
 [externalized-attention table](attend.md#externalized-attention-commands)
 and the [`KV.PREFIX.*` page](kv-prefix.md); this page covers the storage
-formats.
+formats and `V.EXPORT`, the lane a client on the same machine reads a prefix
+through.
+
+## The export lane — `V.EXPORT`
+
+<!-- include-section: doc/shared_kv_cache.md | ### Stage 1 export lane (same machine) -->
 
 ## Quantization tiers
 
