@@ -852,8 +852,9 @@ typedef struct {
     uint32_t      H, N, D;
     uint8_t       state;        // gh #67: SDPA_SLOT_WARM | SDPA_SLOT_COLD (only valid when key not EMPTY/TOMBSTONE)
     uint64_t      last_access_ns; // gh #67: mach_absolute_time() at most recent STORE/QUERY — drives LRU pick.
-    id<MTLBuffer> K_buf;        // H*N*D float32, MTLResourceStorageModeShared
+    id<MTLBuffer> K_buf;        // H*N*D float32, or half when kv_half; MTLResourceStorageModeShared
     id<MTLBuffer> V_buf;
+    uint8_t       kv_half;      // gh #398: 1 = K_buf/V_buf hold half (--metal-attention-fp16)
     // gh #63 Phase 3b: server-side selector cache. K_mean is computed at
     // STORE time over the just-stored K tensor, in fixed-B blocks (B=64 v1).
     // Stored in host memory (not a Metal buffer) because the selector scoring
@@ -1197,6 +1198,15 @@ static int _sdpa_alloc_slot(PionSDPAWorker *w, uint64_t key, int *out_slot) {
     return 0;
 }
 
+// gh #398: under --metal-attention-fp16 every fp16 kernel converted each fp32
+// K/V element to half on load. Storing half once at STORE halves the bytes the
+// kernels stream and the slot's memory. The host's conversion and the kernel's
+// cast can differ in an element's last bit, so outputs move in the 6th-7th
+// significant digit (metal_compute.metal has the measurements). Process-wide:
+// the engine sets it from its fp16 flag at startup, before any STORE.
+static int g_sdpa_kv_half = 0;
+void pion_metal_sdpa_set_kv_half(int32_t on) { g_sdpa_kv_half = on ? 1 : 0; }
+
 // Bounds-check + return per-worker context, or NULL if invalid.
 static PionSDPAWorker* _sdpa_worker(uint32_t worker_id) {
     if (worker_id >= SDPA_MAX_WORKERS) return NULL;
@@ -1506,8 +1516,8 @@ int32_t pion_metal_sdpa_init(void) {
 // Forward decls for the selector-cache populators called from STORE
 // (definitions live below). Keeps the STORE-time precompute call
 // resolvable without reshuffling the file order.
-static int _sdpa_ensure_kmean(PionSDPASlot *s, uint32_t B);
-static int _sdpa_ensure_kminmax(PionSDPASlot *s, uint32_t B);
+static int _sdpa_ensure_kmean(PionSDPASlot *s, uint32_t B, const float *K_src);
+static int _sdpa_ensure_kminmax(PionSDPASlot *s, uint32_t B, const float *K_src);
 
 int32_t pion_metal_sdpa_store_kv(uint32_t worker_id,
                                  const char *session_id, uint32_t sid_len, uint32_t layer_id,
@@ -1525,17 +1535,27 @@ int32_t pion_metal_sdpa_store_kv(uint32_t worker_id,
         int slot = -1;
         if (_sdpa_alloc_slot(w, key, &slot) != 0) return -3;
 
-        size_t kv_bytes = (size_t)H * N * D * sizeof(float);
+        uint8_t want_half = (uint8_t)g_sdpa_kv_half;
+        size_t n_elems = (size_t)H * N * D;
+        size_t kv_bytes = n_elems * (want_half ? sizeof(_Float16) : sizeof(float));
         PionSDPASlot *s = &w->slots[slot];
 
-        // Reuse existing buffers if same shape; else reallocate.
-        if (!s->K_buf || s->H != H || s->N < N || s->D != D) {
+        // Reuse existing buffers if same shape and element type; else reallocate.
+        if (!s->K_buf || s->H != H || s->N < N || s->D != D || s->kv_half != want_half) {
             s->K_buf = [g_sdpa.device newBufferWithLength:kv_bytes options:MTLResourceStorageModeShared];
             s->V_buf = [g_sdpa.device newBufferWithLength:kv_bytes options:MTLResourceStorageModeShared];
         }
         s->H = H; s->N = N; s->D = D;
-        memcpy([s->K_buf contents], K, kv_bytes);
-        memcpy([s->V_buf contents], V, kv_bytes);
+        s->kv_half = want_half;
+        if (want_half) {
+            // Round-to-nearest-even, once, instead of a cast on every load.
+            _Float16 *kh = (_Float16 *)[s->K_buf contents];
+            _Float16 *vh = (_Float16 *)[s->V_buf contents];
+            for (size_t i = 0; i < n_elems; i++) { kh[i] = (_Float16)K[i]; vh[i] = (_Float16)V[i]; }
+        } else {
+            memcpy([s->K_buf contents], K, kv_bytes);
+            memcpy([s->V_buf contents], V, kv_bytes);
+        }
         // gh #63 Phase 3b: drop any stale K_mean — it's recomputed lazily on
         // the next QUERY_SPARSE_AUTO call. The selector caches with B=64 by
         // default; a future caller passing a different B reallocates here.
@@ -1582,11 +1602,13 @@ int32_t pion_metal_sdpa_store_kv(uint32_t worker_id,
             precompute_quest    = (env_off && env_off[0] == '1') ? 0
                                 : ((env_q && env_q[0] == '1') ? 1 : 0);
         }
+        // Selector statistics come from the fp32 input, so a half slot's
+        // eager precompute is the same as an fp32 slot's.
         if (precompute_block_mean) {
-            (void)_sdpa_ensure_kmean(s, 64u);
+            (void)_sdpa_ensure_kmean(s, 64u, K);
         }
         if (precompute_quest) {
-            (void)_sdpa_ensure_kminmax(s, 64u);
+            (void)_sdpa_ensure_kminmax(s, 64u, K);
         }
         // Failures tolerated silently — the lazy path retries on first query.
 
@@ -1610,7 +1632,13 @@ int32_t pion_metal_sdpa_store_kv(uint32_t worker_id,
 // against this slot.
 //
 // Returns 0 on success, -1 on alloc failure.
-static int _sdpa_ensure_kmean(PionSDPASlot *s, uint32_t B) {
+// gh #398: element i of a slot's K, whichever type the slot stores. K_src,
+// when given, is the fp32 tensor being stored (STORE-time precompute).
+static inline float _sdpa_k_elem(const void *base, int half, size_t i) {
+    return half ? (float)((const _Float16 *)base)[i] : ((const float *)base)[i];
+}
+
+static int _sdpa_ensure_kmean(PionSDPASlot *s, uint32_t B, const float *K_src) {
     if (s->K_mean && s->K_mean_B == B) return 0;
     if (B == 0u) return -1;
     if (s->K_mean) { free(s->K_mean); s->K_mean = NULL; }
@@ -1618,10 +1646,11 @@ static int _sdpa_ensure_kmean(PionSDPASlot *s, uint32_t B) {
     size_t bytes = (size_t)s->H * (size_t)n_blocks * (size_t)s->D * sizeof(float);
     float *buf = (float*)malloc(bytes);
     if (!buf) return -1;
-    const float *K = (const float*)[s->K_buf contents];
+    const void *K = K_src ? (const void *)K_src : [s->K_buf contents];
+    int kh = K_src ? 0 : s->kv_half;
     // K layout [H, N, D]; K_mean layout [H, n_blocks, D].
     for (uint32_t h = 0u; h < s->H; h++) {
-        const float *Kh = K + (size_t)h * s->N * s->D;
+        size_t Kh = (size_t)h * s->N * s->D;
         float       *Mh = buf + (size_t)h * n_blocks * s->D;
         for (uint32_t b = 0u; b < n_blocks; b++) {
             uint32_t t_begin = b * B;
@@ -1632,8 +1661,8 @@ static int _sdpa_ensure_kmean(PionSDPASlot *s, uint32_t B) {
             // Sum across `cnt` tokens at this (head, block).
             for (uint32_t d = 0u; d < s->D; d++) Mb[d] = 0.0f;
             for (uint32_t t = t_begin; t < t_end; t++) {
-                const float *Kt = Kh + (size_t)t * s->D;
-                for (uint32_t d = 0u; d < s->D; d++) Mb[d] += Kt[d];
+                size_t Kt = Kh + (size_t)t * s->D;
+                for (uint32_t d = 0u; d < s->D; d++) Mb[d] += _sdpa_k_elem(K, kh, Kt + d);
             }
             float inv = 1.0f / (float)cnt;
             for (uint32_t d = 0u; d < s->D; d++) Mb[d] *= inv;
@@ -1657,7 +1686,7 @@ static int _sdpa_ensure_kmean(PionSDPASlot *s, uint32_t B) {
 // N=64K D=512 B=64; cached for lifetime of the slot.
 //
 // Returns 0 on success, -1 on alloc failure.
-static int _sdpa_ensure_kminmax(PionSDPASlot *s, uint32_t B) {
+static int _sdpa_ensure_kminmax(PionSDPASlot *s, uint32_t B, const float *K_src) {
     if (s->K_min && s->K_max && s->K_minmax_B == B) return 0;
     if (B == 0u) return -1;
     if (s->K_min) { free(s->K_min); s->K_min = NULL; }
@@ -1667,9 +1696,10 @@ static int _sdpa_ensure_kminmax(PionSDPASlot *s, uint32_t B) {
     float *bmin = (float*)malloc(bytes);
     float *bmax = (float*)malloc(bytes);
     if (!bmin || !bmax) { if (bmin) free(bmin); if (bmax) free(bmax); return -1; }
-    const float *K = (const float*)[s->K_buf contents];
+    const void *K = K_src ? (const void *)K_src : [s->K_buf contents];
+    int kh = K_src ? 0 : s->kv_half;
     for (uint32_t h = 0u; h < s->H; h++) {
-        const float *Kh = K + (size_t)h * s->N * s->D;
+        size_t Kh = (size_t)h * s->N * s->D;
         float *MNh = bmin + (size_t)h * n_blocks * s->D;
         float *MXh = bmax + (size_t)h * n_blocks * s->D;
         for (uint32_t b = 0u; b < n_blocks; b++) {
@@ -1679,12 +1709,15 @@ static int _sdpa_ensure_kminmax(PionSDPASlot *s, uint32_t B) {
             float *Mnb = MNh + (size_t)b * s->D;
             float *Mxb = MXh + (size_t)b * s->D;
             // Initialise from the first token in the block.
-            const float *Kt0 = Kh + (size_t)t_begin * s->D;
-            for (uint32_t d = 0u; d < s->D; d++) { Mnb[d] = Kt0[d]; Mxb[d] = Kt0[d]; }
+            size_t Kt0 = Kh + (size_t)t_begin * s->D;
+            for (uint32_t d = 0u; d < s->D; d++) {
+                float v0 = _sdpa_k_elem(K, kh, Kt0 + d);
+                Mnb[d] = v0; Mxb[d] = v0;
+            }
             for (uint32_t t = t_begin + 1u; t < t_end; t++) {
-                const float *Kt = Kh + (size_t)t * s->D;
+                size_t Kt = Kh + (size_t)t * s->D;
                 for (uint32_t d = 0u; d < s->D; d++) {
-                    float v = Kt[d];
+                    float v = _sdpa_k_elem(K, kh, Kt + d);
                     if (v < Mnb[d]) Mnb[d] = v;
                     if (v > Mxb[d]) Mxb[d] = v;
                 }
@@ -1840,6 +1873,7 @@ int32_t pion_metal_sdpa_query(uint32_t worker_id,
 
     PionSDPASlot *s = &w->slots[slot];
     if (s->H != H || s->D != D) return -3;
+    if ((precision == 1u) != (s->kv_half != 0)) return -3;  // gh #398: kernel type must match the stored K/V
 
     @autoreleasepool {
         size_t q_bytes = (size_t)H * D * sizeof(float);
@@ -1910,6 +1944,7 @@ int32_t pion_metal_sdpa_query_sparse(uint32_t worker_id,
     PionSDPASlot *s = &w->slots[slot];
     if (H_kv == 0u) H_kv = H_q;             // non-GQA shortcut
     if (s->H != H_kv || s->D != D) return -3;
+    if ((precision == 1u) != (s->kv_half != 0)) return -3;  // gh #398: kernel type must match the stored K/V
     if (H_q < H_kv || (H_q % H_kv) != 0u) return -7;
 
     @autoreleasepool {
@@ -2025,6 +2060,7 @@ int32_t pion_metal_sdpa_query_sparse_auto(uint32_t worker_id,
     PionSDPASlot *s = &w->slots[slot];
     if (H_kv == 0u) H_kv = H_q;             // non-GQA shortcut
     if (s->H != H_kv || s->D != D) return -3;
+    if ((precision == 1u) != (s->kv_half != 0)) return -3;  // gh #398: kernel type must match the stored K/V
     if (H_q < H_kv || (H_q % H_kv) != 0u) return -7;
     uint32_t rep = H_q / H_kv;
 
@@ -2035,10 +2071,10 @@ int32_t pion_metal_sdpa_query_sparse_auto(uint32_t worker_id,
     // compatibility.
     uint32_t n_blocks = 0u;
     if (selector_id == 1u) {
-        if (_sdpa_ensure_kminmax(s, B) != 0) return -4;
+        if (_sdpa_ensure_kminmax(s, B, NULL) != 0) return -4;
         n_blocks = s->K_minmax_n_blocks;
     } else {
-        if (_sdpa_ensure_kmean(s, B) != 0) return -4;
+        if (_sdpa_ensure_kmean(s, B, NULL) != 0) return -4;
         n_blocks = s->K_mean_n_blocks;
     }
     if (K_top > n_blocks) K_top = n_blocks;
@@ -2305,6 +2341,7 @@ int32_t pion_metal_sdpa_query_sparse_auto_fused(uint32_t worker_id,
     PionSDPASlot *s = &w->slots[slot];
     if (H_kv == 0u) H_kv = H_q;
     if (s->H != H_kv || s->D != D) return -3;
+    if ((precision == 1u) != (s->kv_half != 0)) return -3;  // gh #398: kernel type must match the stored K/V
     if (H_q < H_kv || (H_q % H_kv) != 0u) return -7;
     uint32_t rep = H_q / H_kv;
 
@@ -2312,10 +2349,10 @@ int32_t pion_metal_sdpa_query_sparse_auto_fused(uint32_t worker_id,
     // Quest (1) uses K_min/K_max. Cached identically.
     uint32_t n_blocks = 0u;
     if (selector_id == 1u) {
-        if (_sdpa_ensure_kminmax(s, B) != 0) return -4;
+        if (_sdpa_ensure_kminmax(s, B, NULL) != 0) return -4;
         n_blocks = s->K_minmax_n_blocks;
     } else {
-        if (_sdpa_ensure_kmean(s, B) != 0) return -4;
+        if (_sdpa_ensure_kmean(s, B, NULL) != 0) return -4;
         n_blocks = s->K_mean_n_blocks;
     }
     if (K_top > n_blocks) K_top = n_blocks;
@@ -2522,6 +2559,7 @@ int32_t pion_metal_sdpa_query_batched(uint32_t worker_id,
     }
     PionSDPASlot *s = &w->slots[slot];
     if (s->H != H || s->D != D) return -3;
+    if ((precision == 1u) != (s->kv_half != 0)) return -3;  // gh #398: kernel type must match the stored K/V
 
     @autoreleasepool {
         size_t q_bytes  = (size_t)H * M * D * sizeof(float);
@@ -2624,6 +2662,7 @@ int32_t pion_metal_sdpa_query_batched_fused(uint32_t worker_id,
     }
     PionSDPASlot *s = &w->slots[slot];
     if (s->H != H_kv || s->D != D) return -3;
+    if ((precision == 1u) != (s->kv_half != 0)) return -3;  // gh #398: kernel type must match the stored K/V
 
     @autoreleasepool {
         size_t q_bytes  = (size_t)H_q  * M * D * sizeof(float);

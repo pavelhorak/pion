@@ -911,6 +911,12 @@ tier = "gate"
 requires = ["py:redis", "py:requests"]   # no `mcp`: the tools run under a stub FastMCP when it is absent
 
 [[test]]
+file = "tests/test_metallib_current.py"
+# gh #398: the tracked metallib is built from the tracked shader source.
+server = "none"
+tier = "gate"
+
+[[test]]
 file = "tests/test_metal_attention_window.py"
 server = "self"
 tier = "full"
