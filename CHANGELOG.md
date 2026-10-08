@@ -8,6 +8,42 @@ enumerated — there were roughly 1,100 of them.
 
 ### Added
 
+- **A prompt-cache hit on the same machine maps a file (`V.EXPORT`).** A hit
+  from another process used to copy the prefix's K/V over loopback TCP and
+  rebuild MLX arrays from it: 67.4 ms at a 2,049-token prefix on Llama-3.2-1B,
+  where mlx-lm's own cache file takes 37 ms. The server now writes the prefix
+  once as safetensors in mlx-lm's cache layout, and `PionPromptCache` maps it
+  with `mx.load`: 37.0 ms, the same first token. The server picks every name
+  and only a local peer may ask; files are 0600 in a 0700 directory
+  (`$PION_EXPORT_DIR`, default `./pion-export`) and are replaced when either
+  session changes. A remote client, or `PION_PROMPT_CACHE_NO_EXPORT=1`, keeps
+  the TCP lane. `benchmarks/reproducers/cross_process_ttft.py` times both.
+
+- **TLS in transit, as a tested recipe.** `doc/operations.md` §6: Pion on
+  loopback with a password, stunnel in front, `redis-cli --tls` and redis-py
+  over it, and what the proxy does not cover. `tests/test_tls_proxy.py` runs
+  the recipe as written.
+
+### Changed
+
+- **FT.OPTIMIZE builds 28–33% faster, with the same graph.** The build scores a
+  node's neighbors eight at a time through the SABD+UDOT kernels, in its search
+  layer and in its backlink eviction scan. A serial build writes a
+  byte-identical index file. 50K OpenAI vectors on an M4 mini: 5.3 s to 3.85 s
+  at 1536 dims, 3.55 s to 2.4 s at 1024, 1.85 s to 1.33 s at 512.
+- **Search at 1024 dims uses 27% less CPU per query.** 512 and 1024 dims used
+  to score one neighbor per call through a generic kernel; every non-1536
+  INT8 beam now goes eight at a time. Results are unchanged.
+- **VSIM scans a set with one GEMV.** On macOS through Accelerate, elsewhere
+  with a four-chain FMA kernel: 0.17–0.22 ms to 0.083 ms per call on 1,000
+  vectors of 1536 dims. kNN-LM's brute-force path uses the same kernels,
+  1.4–1.6× faster.
+- **`--metal-attention-fp16` stores session K/V as half.** The fp16 kernels
+  converted every element on load, so they streamed twice the bytes they used:
+  `ATTEND.PREFIX.QUERY` 1.2–1.3× faster, half the memory per session. Output
+  moves in the sixth or seventh significant digit; Llama-3.2-1B decode still
+  matches vanilla mlx-lm token for token.
+
 - **`pion-vllm-mlx serve` measured against the alternatives.** One recorded
   Claude Code session (21 requests, 14K-21K-token prompts) replayed against
   stock mlx-lm, Ollama, LM Studio, oMLX 0.7 and serve, with a restart after

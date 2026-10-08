@@ -86,7 +86,7 @@ from src.commands.sorted_set import zmpop_pop, handle_zrem, handle_zcard, handle
 from src.commands.vector import handle_ft_info, handle_ft_dropindex, handle_ft_optimize, handle_ft_create, handle_ft_addtext, handle_ft_searchtext, handle_ft_search, handle_ft_hybrid, write_ft_search_response
 from src.commands.kv_cache import handle_kv_store, handle_kv_fetch, handle_kv_info
 from src.commands.attend import handle_attend_create, handle_attend_store, handle_attend_query, handle_attend_finalize, handle_attend_info, ATTEND_MAX_K
-from src.commands.v_store import handle_v_create, handle_v_storebatch, handle_v_fetch, handle_v_info, handle_v_snapshot, handle_v_restore, handle_v_commit
+from src.commands.v_store import handle_v_create, handle_v_storebatch, handle_v_fetch, handle_v_info, handle_v_snapshot, handle_v_restore, handle_v_commit, handle_v_export
 from src.commands.state import handle_state_alloc, handle_state_write, handle_state_read, handle_state_free, handle_state_info
 from src.network.state_store import StateStore
 from src.commands.kv_prefix import handle_kv_prefix_register, handle_kv_prefix_lookup, handle_kv_prefix_info, handle_kv_prefix_save, handle_kv_prefix_commit, handle_kv_prefix_drop, handle_kv_prefix_owner, handle_kv_prefix_warm, handle_kv_prefix_blocks, handle_kv_prefix_membership
@@ -3445,6 +3445,10 @@ struct SlowPathHandler:
                         # optional-arg scan (FMT NATIVE) must never read into a
                         # pipelined neighbor (the gh #166/FT.* lesson).
                         _ = handle_v_fetch(tokens, i, cmd_end_tok, writer, self.v_store, server, fd, kq, self.ledger)
+                        i = cmd_end_tok - 1
+                    # ── V.EXPORT ── gh #468: prefix K/V as a file a local client maps
+                    elif cmd_eq(tp, tl, "v.export"):
+                        _ = handle_v_export(tokens, i, cmd_end_tok, writer, self.v_store, fd)
                         i = cmd_end_tok - 1
                     # ── V.INFO ── (6 bytes: v=118,.,i,n,f,o)
                     elif tl == 6 and (tp[0]|0x20)==118 and tp[1]==46 and (tp[2]|0x20)==105 and (tp[3]|0x20)==110 and (tp[4]|0x20)==102 and (tp[5]|0x20)==111:

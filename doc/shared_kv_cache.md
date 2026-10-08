@@ -437,6 +437,33 @@ TTFT-batched M>1 is the optimization that closes the small-N regime.
 The two are complementary; the same prefix can live in both V-store
 (Stage 1 path) and the MLX sidecar (Stage 2 path).
 
+### Stage 1 export lane (same machine)
+
+A Stage 1 hit from another process used to fetch the prefix's K/V over
+loopback TCP (`V.FETCH BATCH`) and rebuild MLX arrays from the reply. When
+the server is on the same machine, `PionPromptCache` now asks for the prefix
+as a file instead: `V.EXPORT <ns>_pk <ns>_pv <start> <end> <layers>
+<kv_heads> <head_dim>` writes it once as safetensors (fp16, `[1, kv_heads,
+N, head_dim]` per layer, the layout mlx-lm's own cache keeps) and replies
+with the path, and the hit maps it with `mx.load` and hands the arrays to the
+cache as they are, the way `load_prompt_cache` reads mlx-lm's own file. The
+file is written when the prefix is stored, so the first hit does not pay for
+it.
+
+- Only a client on this machine may ask, and the server picks the name: it
+  lives in `$PION_EXPORT_DIR` (default `./pion-export`), the directory 0700
+  and the files 0600, written under a temporary name and renamed.
+- A file is named by its sessions' generations, so storing into either
+  session makes the next export a new file and deletes the old one; a hit
+  can never map a stale prefix. A restarted server deletes its previous
+  process's files on its first export.
+- `PION_PROMPT_CACHE_NO_EXPORT=1` turns the lane off; a remote host, a server
+  that does not know `V.EXPORT`, and a cache that is not plain `KVCache`
+  (sliding-window or hybrid models) keep the TCP lane.
+
+The README's TTFT table has the measured row. Tests: `tests/test_v_export.py`
+(every tensor against `V.FETCH BATCH`, staleness, permissions, refusals).
+
 ### Stage 2 in-process fast lane
 
 When the cold prefill happens in the **same Python process** that serves

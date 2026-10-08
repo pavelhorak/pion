@@ -25,6 +25,12 @@ Redis wire, an acked write that survives a crash, and, in `pion-vllm-mlx
 serve`, a longest-prefix match over every stored conversation that a
 restarted agent or a second session picks up without naming a file.
 
+**From another process on the same machine**, a hit maps the prefix as a
+file the server wrote when it was stored (`V.EXPORT`), the way mlx-lm's
+`load_prompt_cache` reads its own file, instead of copying it over loopback
+TCP; the measured row is in Pion's README. A remote server, a cache that is
+not a plain `KVCache`, or `PION_PROMPT_CACHE_NO_EXPORT=1` keeps the TCP lane.
+
 Stage 2 runs on three lanes, auto-selected by `PionPromptCache`:
 
 | Lane | Where it runs | TTFT p50, ~316-token system-prompt prefixes (Llama-3.2-1B-4bit, 100 requests; vanilla ~200 ms) |

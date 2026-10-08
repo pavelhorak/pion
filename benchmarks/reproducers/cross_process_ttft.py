@@ -15,8 +15,13 @@ What each side measures, so the ratio means what it says:
         every token but the last in 2,048-token chunks with only the cache
         evaluated, then the last token alone — nothing cached anywhere.
   hit   a new process loads the model, then times PionPromptCache.get_or_prefill
-        (lookup + fetch over the wire + cache rebuild) and the question's
-        first token through the same function.
+        and the question's first token through the same function. On the same
+        machine the hit takes the export lane (gh #468): the server wrote the
+        prefix as a safetensors file when it was stored, and the hit maps it
+        with mx.load, as mlx-lm's own cache file is read.
+  hit_tcp  the same, with PION_PROMPT_CACHE_NO_EXPORT=1: the prefix comes over
+        loopback TCP (V.FETCH BATCH) and is rebuilt into MLX arrays, the path a
+        client on another machine takes.
   same  the process that stored the prefix asks again: Stage 2's in-process
         lane, where the prefix K/V it computed stayed resident as MLX arrays.
         Times the lookup, the cache it builds and the question's first token.
@@ -132,6 +137,8 @@ def child(mode: str, n_tokens: int, port: int) -> dict:
         return {"mode": mode, "prefix_tokens": len(prefix), "ms": ms, "first_token": tok_id,
                 "hits": 1, "misses": 0, "stored_misses": pc.misses}
 
+    if mode == "hit_tcp":
+        os.environ["PION_PROMPT_CACHE_NO_EXPORT"] = "1"
     pc = None if mode == "cold" else PionPromptCache(model, vquant="fp16", port=port)
     t0 = time.perf_counter()
     if mode == "cold":
@@ -174,21 +181,25 @@ def main() -> int:
         for _ in range(args.pairs):
             runs.append(run_child("cold", n, args.port))
             runs.append(run_child("hit", n, args.port))
+            runs.append(run_child("hit_tcp", n, args.port))
             if args.same:
                 runs.append(run_child("same", n, args.port))
         cold = [r["ms"] for r in runs if r["mode"] == "cold"]
         hit = [r for r in runs if r["mode"] == "hit"]
+        hit_tcp = [r for r in runs if r["mode"] == "hit_tcp"]
         same = [r for r in runs if r["mode"] == "same"]
-        bad = [r for r in hit if (r["hits"], r["misses"]) != (1, 0)]
+        bad = [r for r in hit + hit_tcp if (r["hits"], r["misses"]) != (1, 0)]
         bad += [r for r in same if r["stored_misses"] != 1]
         tokens = {r["first_token"] for r in runs} | {store["first_token"]}
         if bad or len(tokens) != 1:
             print(f"FAIL at {n} tokens: non-hits {bad} / first tokens {sorted(tokens)}", file=sys.stderr)
             return 1
         c, h = statistics.median(cold), statistics.median(r["ms"] for r in hit)
+        ht = statistics.median(r["ms"] for r in hit_tcp)
         row = {"prefix_tokens": n, "cold_median_ms": round(c, 1),
-               "hit_median_ms": round(h, 1), "ratio": round(c / h, 2)}
-        line = f"{n:>7}  {c:>8.1f}ms  {h:>18.1f}ms  {c / h:>6.2f}x"
+               "hit_median_ms": round(h, 1), "ratio": round(c / h, 2),
+               "hit_tcp_median_ms": round(ht, 1), "tcp_ratio": round(c / ht, 2)}
+        line = f"{n:>7}  {c:>8.1f}ms  {h:>18.1f}ms  {c / h:>6.2f}x  (tcp {ht:.1f}ms {c / ht:.2f}x)"
         if same:
             sm = statistics.median(r["ms"] for r in same)
             row.update(same_median_ms=round(sm, 1), same_ratio=round(c / sm, 2))

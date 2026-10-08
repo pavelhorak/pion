@@ -1608,11 +1608,44 @@ note = "1,193.4 / 37.0 = 32.3"
 
 [[claim]]
 file = "README.md"
-where = "**A file is faster.**"
-numbers = ["67 MB"]
+where = "**On the same machine, Pion hands over a file too.**"
+numbers = ["67 MB", "37.0 ms"]
 kind = "result"
-evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json"]
-expect = ["\"file_mb\": 67.1"]
+evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_08.json"]
+expect = ["\"file_mb\": 67.1", "\"hit_median_ms\": 37.0"]
+
+[[claim]]
+file = "README.md"
+where = "| Pion, a separate process on the same machine, through the export lane"
+numbers = ["37.0 ms", "32×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_08.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"ratio\": 32.25"]
+note = "gh #468; the 10-08 run times both lanes: export 37.0 ms, TCP 67.4 ms, cold 1,192.3 ms"
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "| Pion, **from a separate process** on the same machine |"
+numbers = ["37.0 ms", "32×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_08.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"ratio\": 32.25"]
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "**On the same machine, Pion hands over a file too.**"
+numbers = ["37.0 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_08.json"]
+expect = ["\"hit_median_ms\": 37.0"]
+
+[[claim]]
+file = "doc/index.md"
+where = "| Pion, **from a separate process** on the same machine ("
+numbers = ["37.0 ms", "32×"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_08.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"ratio\": 32.25"]
 
 [[claim]]
 file = "pion-vllm-mlx/README.md"
@@ -1852,3 +1885,19 @@ kind = "result"
 evidence = ["benchmarks/reproducers/results/agent_session_ab_2026_10_07/codex_llama_ollama.json"]
 expect = ["\"prompt\": 4290", "\"prompt\": 11863"]
 note = "Ollama's Codex prompts alternate between 4,290-7,880 and 8,001-11,863 tokens"
+
+[[claim]]
+file = "doc/index.md"
+where = "**On the same machine Pion matches the file:**"
+numbers = ["37.0 ms", "69.0 ms"]
+kind = "result"
+evidence = ["benchmarks/reproducers/results/cross_process_ttft_2026_10_08.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json"]
+expect = ["\"hit_median_ms\": 37.0", "\"hit_median_ms\": 69.0"]
+
+[[claim]]
+file = "doc/operations.md"
+where = "Pion has no TLS of its own and will not grow it soon"
+numbers = ["1 MiB"]
+kind = "test"
+evidence = ["tests/test_tls_proxy.py"]
+expect = ["os.urandom(1 << 20)"]

@@ -178,6 +178,8 @@ def clear_state():
                 os.remove(f)
             except OSError:
                 pass
+    # gh #468: V.EXPORT's files, written beside the server's state.
+    shutil.rmtree(os.path.join(REPO, "pion-export"), ignore_errors=True)
 
 
 def start_server(binary, flags, log_path):

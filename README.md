@@ -106,11 +106,16 @@ mlx-lm's own prompt-cache file:**
 | mlx-lm's own prompt-cache file, read by a fresh process (`load_prompt_cache`, a 67 MB file) | **37.0 ms** | 32× |
 | Pion, the process that stored the prefix, asking again | 46.2 ms | 26× |
 | Pion, a separate process, over the wire | 69.0 ms | 17× |
+| Pion, a separate process on the same machine, through the export lane (`V.EXPORT`) | **37.0 ms** | 32× |
 
-**A file is faster.** `save_prompt_cache` and `load_prompt_cache` ship with
-mlx-lm, and mapping a 67 MB file beats fetching the same rows over loopback
-TCP. If one program reuses one fixed prefix, use the file. Pion is for what a
-file does not do: one server that any process, model object or tool reads
+**On the same machine, Pion hands over a file too.** `save_prompt_cache` and
+`load_prompt_cache` ship with mlx-lm, and mapping a 67 MB file beats fetching
+the same rows over loopback TCP. So a hit from a process on the same machine
+asks Pion for the prefix as a file (`V.EXPORT`, written once when the prefix
+is stored) and maps it the way `load_prompt_cache` does: 37.0 ms, the cache
+file's own time. A client on another machine still fetches over TCP. If one
+program reuses one fixed prefix, mlx-lm's file is the simpler tool. Pion is
+for what a file does not do: one server that any process, model object or tool reads
 over the Redis wire, with an acked write that survives a crash, and, through
 `pion-vllm-mlx serve`, a longest-prefix match over every conversation it has
 stored, kept under a byte budget, so a restarted agent or a second session
@@ -259,7 +264,7 @@ run at a higher EF, so the comparison at 0.960 recall is still open.
 > `port+10000`, and gossip/Raft. Note that **replication and gossip are
 > unauthenticated** — anyone who can reach `port+10000` can stream the WAL — so
 > put those behind a private network, and terminate TLS at a proxy if you need
-> encryption in transit. Running with `--bind 0.0.0.0` and no password prints a
+> encryption in transit ([the tested recipe](doc/operations.md#6-tls-in-transit--terminate-at-a-proxy)). Running with `--bind 0.0.0.0` and no password prints a
 > warning at startup and means exactly what it says. See
 > [`SECURITY.md`](SECURITY.md). **No
 > telemetry:** Pion never phones home — no update check, no analytics — and

@@ -18,7 +18,7 @@ would fail to match every substrate command.
 from src.common.ptr import null_ptr, is_null, is_not_null
 
 
-comptime PION_COMMAND_COUNT = 354
+comptime PION_COMMAND_COUNT = 355
 
 
 @always_inline
@@ -273,6 +273,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "spublish") or
             _cmd_eq_ci(tp, tl, "v.commit") or
             _cmd_eq_ci(tp, tl, "v.create") or
+            _cmd_eq_ci(tp, tl, "v.export") or
             _cmd_eq_ci(tp, tl, "vgetattr") or
             _cmd_eq_ci(tp, tl, "vsetattr") or
             _cmd_eq_ci(tp, tl, "xpending") or
@@ -467,7 +468,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
     """Redis's arity for this command, or 0 when Pion does not know one.
 
-    266 of 354 commands have an entry; the rest are Pion-specific
+    266 of 355 commands have an entry; the rest are Pion-specific
     (FT.*, KV.PREFIX.*, AI.*, ATTEND.*) and are deliberately NOT validated.
 
     Encoding is Redis's own, kept verbatim so it can be checked against
@@ -767,7 +768,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
 def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command mutates the keyspace, per real Redis's `write` flag.
 
-    110 of 354 commands are writes. Used by gh #260 to refuse mutations
+    110 of 355 commands are writes. Used by gh #260 to refuse mutations
     once the WAL can no longer persist them, instead of acknowledging writes
     that will not survive a restart.
 
@@ -1034,7 +1035,7 @@ def command_is_noscript(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
 def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command is refused while memory is over --maxmemory (gh #261).
 
-    83 of 354 commands: real Redis's `denyoom` flag plus Pion's
+    83 of 355 commands: real Redis's `denyoom` flag plus Pion's
     substrate ingest commands (PION_DENYOOM in tools/gen_command_table.py).
     Reads, DEL and the POP family stay served under the limit, as in Redis.
     """

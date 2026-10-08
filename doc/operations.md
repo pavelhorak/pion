@@ -8,6 +8,7 @@
 | How do I tell a dead store from an empty result? | **FT.SEARCH errors on a missing index** (§3) |
 | What survives a restart? | **Every type, TTLs, streams, the vector index** (§3b–§4) |
 | How do I install it? | **Tarball or Docker** (§5) |
+| How do I encrypt traffic? | **A TLS proxy in front of a loopback server** (§6) |
 
 ---
 
@@ -426,3 +427,64 @@ docker run -p 1974:1974 -v pion-data:/data pion
 
 CUDA images are a separate lane (the linux-64 default build requires nvcc;
 see `pixi.toml`).
+
+---
+
+## 6. TLS in transit — terminate at a proxy
+
+Pion has no TLS of its own and will not grow it soon. For encryption in
+transit, run a TLS-terminating proxy in front of a server that listens only on
+loopback. The recipe below uses [stunnel](https://www.stunnel.org/), and
+`tests/test_tls_proxy.py` (gate tier) runs it as written: AUTH, a 1 MiB value,
+a 400-command pipeline, `redis-cli --tls`, a client that does not trust the
+CA, plaintext sent to the TLS port, and a client without the password.
+
+**1. Pion on loopback, with a password.** A password switches Pion's default
+bind to all interfaces (Redis's protected-mode convention), so pass `--bind`
+explicitly. Otherwise the plaintext port is reachable from the network right
+beside the TLS one.
+
+```bash
+./pion-server -w 1 --bind 127.0.0.1 --requirepass-file /etc/pion/password
+```
+
+**2. stunnel in front of it.** Put the certificate and its private key in one
+file (`cat server.crt server.key > pion.pem; chmod 600 pion.pem`). A
+certificate from your own CA must carry the usual extensions: Python 3.13 and
+later verify strictly and refuse a leaf without an authority key identifier
+(the test's `make_certs` shows a minimal set). Then:
+
+```ini
+; /etc/stunnel/pion.conf
+[pion]
+accept = 0.0.0.0:6380
+connect = 127.0.0.1:1974
+cert = /etc/stunnel/pion.pem
+sslVersionMin = TLSv1.2
+```
+
+```bash
+stunnel /etc/stunnel/pion.conf     # macOS: brew install stunnel · Debian/Ubuntu: apt install stunnel4
+```
+
+**3. Clients connect with TLS** to the proxy's port:
+
+```bash
+redis-cli --tls --cacert ca.crt -h pion.example.internal -p 6380 -a "$PASSWORD" PING
+```
+
+```python
+r = redis.Redis(host="pion.example.internal", port=6380, password=PASSWORD,
+                ssl=True, ssl_ca_certs="ca.crt")
+```
+
+What the proxy does **not** cover:
+
+- **The other listeners.** The binary lane on `port+1`, the replication stream
+  on `port+10000` and gossip/Raft are plaintext, and replication and gossip are
+  unauthenticated. `--bind 127.0.0.1` keeps them off the network. If a replica
+  must connect over a network, put that link inside a private network or a VPN;
+  this recipe does not cover it.
+- **Client certificates.** The recipe encrypts and authenticates the server.
+  To also require client certificates, add `verifyChain = yes` and `CAfile` to
+  the stunnel service; Pion's password still applies behind it.

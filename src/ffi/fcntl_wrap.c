@@ -687,3 +687,91 @@ int64_t pion_sync_readline(int fd, uint8_t *buf, int64_t cap, int timeout_ms) {
         len++;
     }
 }
+
+/* gh #468: the export lane. V.EXPORT writes a prompt prefix's K/V as a
+ * safetensors file that a client on the same machine maps with mx.load,
+ * instead of copying the bytes over loopback TCP. The server picks every
+ * name (no client-supplied path), the directory is 0700 and the files 0600,
+ * and a file is written under a temporary name and renamed, so a reader never
+ * maps a half-written one. */
+#include <dirent.h>
+
+static int pion_xf_join(char *out, size_t cap, const char *dir, const char *name) {
+    int n = snprintf(out, cap, "%s/%s", dir, name);
+    return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}
+
+/* Create `dir` (0700) if missing, then open `dir/tmp_name` for writing (0600,
+ * truncated). Returns the fd, or -1. */
+int pion_xf_open(const char *dir, const char *tmp_name) {
+    char path[PATH_MAX];
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST) return -1;
+    if (pion_xf_join(path, sizeof path, dir, tmp_name) != 0) return -1;
+    return open(path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+}
+
+/* Write all `n` bytes. Returns 0, or -1 on any error. */
+int pion_xf_write(int fd, const void *buf, int64_t n) {
+    const char *p = (const char *)buf;
+    while (n > 0) {
+        ssize_t w = write(fd, p, (size_t)(n > (1 << 30) ? (1 << 30) : n));
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        p += w;
+        n -= w;
+    }
+    return 0;
+}
+
+/* Close fd and rename dir/tmp_name to dir/final_name (atomic on one volume).
+ * ok == 0 discards the temporary file instead. Returns 0 on success. */
+int pion_xf_commit(int fd, const char *dir, const char *tmp_name, const char *final_name, int ok) {
+    char tmp[PATH_MAX], fin[PATH_MAX];
+    int rc = close(fd);
+    if (pion_xf_join(tmp, sizeof tmp, dir, tmp_name) != 0) return -1;
+    if (!ok || rc != 0) { unlink(tmp); return -1; }
+    if (pion_xf_join(fin, sizeof fin, dir, final_name) != 0) { unlink(tmp); return -1; }
+    if (rename(tmp, fin) != 0) { unlink(tmp); return -1; }
+    return 0;
+}
+
+/* 1 when dir/name is a regular file, else 0. */
+int pion_xf_exists(const char *dir, const char *name) {
+    char path[PATH_MAX];
+    struct stat st;
+    if (pion_xf_join(path, sizeof path, dir, name) != 0) return 0;
+    return (stat(path, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 0;
+}
+
+/* Delete the regular files in `dir` whose names start with `prefix` and do
+ * not start with `keep`. Returns how many were deleted (0 if dir is absent). */
+int pion_xf_prune(const char *dir, const char *prefix, const char *keep) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    size_t lp = strlen(prefix), lk = strlen(keep);
+    int n = 0;
+    struct dirent *e;
+    char path[PATH_MAX];
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, prefix, lp) != 0) continue;
+        if (lk > 0 && strncmp(e->d_name, keep, lk) == 0) continue;
+        if (pion_xf_join(path, sizeof path, dir, e->d_name) != 0) continue;
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode) && unlink(path) == 0) n++;
+    }
+    closedir(d);
+    return n;
+}
+
+/* Absolute form of dir/name into out (cap bytes). Returns its length, or -1. */
+int64_t pion_xf_realpath(const char *dir, const char *name, char *out, int64_t cap) {
+    char path[PATH_MAX], full[PATH_MAX];
+    if (pion_xf_join(path, sizeof path, dir, name) != 0) return -1;
+    if (!realpath(path, full)) return -1;
+    size_t n = strlen(full);
+    if ((int64_t)n + 1 > cap) return -1;
+    memcpy(out, full, n + 1);
+    return (int64_t)n;
+}

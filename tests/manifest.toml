@@ -1158,6 +1158,13 @@ server = "self"
 tier = "gate"
 
 [[test]]
+file = "tests/test_tls_proxy.py"
+# doc/operations.md §6: the stunnel recipe, run as written.
+server = "-w 1 --requirepass tlstest --bind 127.0.0.1"
+tier = "gate"
+requires = ["bin:stunnel", "bin:openssl", "bin:redis-cli"]
+
+[[test]]
 file = "tests/test_tx_probe.py"
 server = "-w 1"
 tier = "gate"
@@ -1165,6 +1172,12 @@ tier = "gate"
 [[test]]
 file = "tests/test_type_confusion.py"
 server = "-w 1"
+tier = "gate"
+
+[[test]]
+file = "tests/test_v_export.py"
+# gh #468: V.EXPORT, the prompt-cache export lane, checked against V.FETCH BATCH.
+server = "--kvcache -w 1"
 tier = "gate"
 
 [[test]]
