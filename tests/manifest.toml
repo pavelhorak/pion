@@ -341,6 +341,11 @@ tier = "full"
 timeout = 180
 
 [[test]]
+file = "tests/test_epoll_event_layout.mojo"
+server = "none"
+tier = "gate"
+
+[[test]]
 file = "tests/test_float_arg_validator.mojo"
 server = "none"
 tier = "gate"
