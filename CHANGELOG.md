@@ -99,6 +99,19 @@ enumerated — there were roughly 1,100 of them.
 
 ### Fixed
 
+- **`--epoll` on x86-64 dropped connections under concurrent load.** Linux
+  x86-64 packs `struct epoll_event` to 12 bytes; the loop read each event as a
+  16-byte struct (the aarch64 layout), so only the first event of every
+  `epoll_wait` batch decoded correctly. The rest came from the wrong bytes, and
+  a garbage mask carrying EPOLLERR or EPOLLHUP made the loop close a healthy
+  connection: memtier saw `Connection reset by peer` in 8 of 9 runs. Events are
+  now read through per-target helpers, and `tests/test_epoll_event_layout.mojo`
+  decodes three ready fds from one `epoll_wait`. Fixed, `--epoll` serves
+  126K / 969K / 1.92M ops/s at pipeline 1 / 10 / 50 on an EPYC 8124P, ahead of
+  the default io_uring loop (115K / 855K / 1.60M); raw runs in
+  `benchmarks/results/2026-10-09-linux-epyc-8124p/epoll_event_layout/`. The
+  default io_uring loop and aarch64 were not affected.
+
 - **serve re-prefilled every request on hybrid models.** To journal answers
   for resume, serve forces mlx-lm's single-request path, and that path skips
   the cache snapshots mlx-lm's batched path takes at segment ends, which are

@@ -1,0 +1,56 @@
+Json file /opt/out/M2_f465/epoll_P1_clean_r3.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+Connection error: Connection reset by peer
+Maximum reconnection attempts (0) exceeded for Connection error, ending this thread.
+Connection error: Connection reset by peer
+Maximum reconnection attempts (0) exceeded for Connection error, ending this thread.
+Thread 3: 50 client(s) stopped before reaching their stop condition.
+Thread 2: 50 client(s) stopped before reaching their stop condition.
+Connection error: Connection reset by peer
+Maximum reconnection attempts (0) exceeded for Connection error, ending this thread.
+Thread 0: 50 client(s) stopped before reaching their stop condition.
+connection dropped.
+Maximum reconnection attempts (0) exceeded for Connection dropped, ending this thread.
+Thread 4: 50 client(s) stopped before reaching their stop condition.
+connection dropped.
+Maximum reconnection attempts (0) exceeded for Connection dropped, ending this thread.
+Thread 6: 50 client(s) stopped before reaching their stop condition.
+Connection error: Connection reset by peer
+Maximum reconnection attempts (0) exceeded for Connection error, ending this thread.
+Thread 7: 50 client(s) stopped before reaching their stop condition.
+Connection error: Connection reset by peer
+Maximum reconnection attempts (0) exceeded for Connection error, ending this thread.
+Thread 1: 50 client(s) stopped before reaching their stop condition.
+[RUN #1 0%,   0 secs]  1 threads 50 conns 7 conn errors:       73857 ops,       0 (avg:  574271) ops/sec, 0.00KB/sec (avg: 86.05MB/sec),  0.00 (avg:  0.68) msec latency
+warning: high CPU on thread 5: 99.5% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 1%,   0 secs]  1 threads 50 conns 7 conn errors:      163932 ops,       0 (avg:  646343) ops/sec, 0.00KB/sec (avg: 96.79MB/sec),  0.00 (avg:  0.61) msec latency[RUN #1 1%,   0 secs]  1 threads 50 conns 7 conn errors:      253375 ops,       0 (avg:  669153) ops/sec, 0.00KB/sec (avg: 100.19MB/sec),  0.00 (avg:  0.59) msec latency[RUN #1 2%,   0 secs]  1 threads 50 conns 7 conn errors:      342018 ops,       0 (avg:  679047) ops/sec, 0.00KB/sec (avg: 101.56MB/sec),  0.00 (avg:  0.58) msec latency[RUN #1 2%,   0 secs]  1 threads 50 conns 7 conn errors:      430902 ops,       0 (avg:  685393) ops/sec, 0.00KB/sec (avg: 102.54MB/sec),  0.00 (avg:  0.58) msec latency[RUN #1 3%,   0 secs]  1 threads 50 conns 7 conn errors:      519645 ops,       0 (avg:  689439) ops/sec, 0.00KB/sec (avg: 103.26MB/sec),  0.00 (avg:  0.58) msec latency[RUN #1 3%,   0 secs]  1 threads 50 conns 7 conn errors:      608696 ops,       0 (avg:  692684) ops/sec, 0.00KB/sec (avg: 103.91MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 3%,   1 secs]  1 threads 50 conns 7 conn errors:      698615 ops,       0 (avg:  695983) ops/sec, 0.00KB/sec (avg: 104.57MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 4%,   1 secs]  1 threads 50 conns 7 conn errors:      787788 ops,       0 (avg:  697896) ops/sec, 0.00KB/sec (avg: 105.10MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 4%,   1 secs]  1 threads 50 conns 7 conn errors:      877641 ops,       0 (avg:  699966) ops/sec, 0.00KB/sec (avg: 105.72MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 5%,   1 secs]  1 threads 50 conns 7 conn errors:      967237 ops,       0 (avg:  701474) ops/sec, 0.00KB/sec (avg: 106.21MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 5%,   1 secs]  1 threads 50 conns 7 conn errors:     1056939 ops,       0 (avg:  702804) ops/sec, 0.00KB/sec (avg: 106.75MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 5%,   1 secs]  1 threads 50 conns 7 conn errors:     1146648 ops,       0 (avg:  703933) ops/sec, 0.00KB/sec (avg: 107.23MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 6%,   1 secs]  1 threads 50 conns 7 conn errors:     1235992 ops,       0 (avg:  704694) ops/sec, 0.00KB/sec (avg: 107.69MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 6%,   1 secs]  1 threads 50 conns 7 conn errors:     1325564 ops,       0 (avg:  705474) ops/sec, 0.00KB/sec (avg: 108.10MB/sec),  0.00 (avg:  0.57) msec latency[RUN #1 7%,   2 secs]  1 threads 50 conns 7 conn errors:     1415256 ops,       0 (avg:  706216) ops/sec, 0.00KB/sec (avg: 108.54MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 7%,   2 secs]  1 threads 50 conns 7 conn errors:     1504146 ops,       0 (avg:  706497) ops/sec, 0.00KB/sec (avg: 108.92MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 8%,   2 secs]  1 threads 50 conns 7 conn errors:     1593879 ops,       0 (avg:  707117) ops/sec, 0.00KB/sec (avg: 109.34MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 8%,   2 secs]  1 threads 50 conns 7 conn errors:     1683830 ops,       0 (avg:  707767) ops/sec, 0.00KB/sec (avg: 109.77MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 8%,   2 secs]  1 threads 50 conns 7 conn errors:     1773600 ops,       0 (avg:  708278) ops/sec, 0.00KB/sec (avg: 110.17MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 9%,   2 secs]  1 threads 50 conns 7 conn errors:     1863062 ops,       0 (avg:  708624) ops/sec, 0.00KB/sec (avg: 110.54MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 9%,   2 secs]  1 threads 50 conns 7 conn errors:     1951972 ops,       0 (avg:  708736) ops/sec, 0.00KB/sec (avg: 110.91MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 10%,   2 secs]  1 threads 50 conns 7 conn errors:     2041239 ops,       0 (avg:  708964) ops/sec, 0.00KB/sec (avg: 111.29MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 10%,   3 secs]  1 threads 50 conns 7 conn errors:     2130940 ops,       0 (avg:  709318) ops/sec, 0.00KB/sec (avg: 111.69MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 10%,   3 secs]  1 threads 50 conns 7 conn errors:     2219984 ops,       0 (avg:  709434) ops/sec, 0.00KB/sec (avg: 112.06MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 11%,   3 secs]  1 threads 50 conns 7 conn errors:     2309475 ops,       0 (avg:  709678) ops/sec, 0.00KB/sec (avg: 112.45MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 11%,   3 secs]  1 threads 50 conns 7 conn errors:     2399518 ops,       0 (avg:  710066) ops/sec, 0.00KB/sec (avg: 112.85MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 12%,   3 secs]  1 threads 50 conns 7 conn errors:     2489520 ops,       0 (avg:  710416) ops/sec, 0.00KB/sec (avg: 113.25MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 12%,   3 secs]  1 threads 50 conns 7 conn errors:     2579747 ops,       0 (avg:  710803) ops/sec, 0.00KB/sec (avg: 113.64MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 13%,   3 secs]  1 threads 50 conns 7 conn errors:     2669214 ops,       0 (avg:  711027) ops/sec, 0.00KB/sec (avg: 114.01MB/sec),  0.00 (avg:  0.56) msec latency[RUN #1 13%,   3 secs]  0 threads 50 conns 7 conn errors:     2669220 ops,       0 (avg:  711028) ops/sec, 0.00KB/sec (avg: 114.01MB/sec),  0.00 (avg:  0.56) msec latency
+
+error: [RUN #1] 7 of 8 thread(s) ended before the requested test time was reached (see errors above); the results of this run are not valid.
+warning: GET miss rate 55.30% above target 1.00% (1341940 misses / 2426508 ops)
+
+CPU Utilization Summary
+  Total CPU time:   30.056s  (user 6.161s, sys 23.895s)
+  Wall time:        30.007s
+  Cores used:       1.002   (avg 12.5% across 8 worker threads)
+  Peak utilization: 100.0%
+warning: thread 2 averaged 96.6% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 3 averaged 97.4% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 5 averaged 100.0% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 6 averaged 99.5% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+Saving JSON output file: /opt/out/M2_f465/epoll_P1_clean_r3.json
+Json file closed.
+8         Threads
+50        Connections per thread
+30        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets     58953607.00          ---          ---         0.56317         0.55100         0.83100         1.43900  17437799.59 
+Gets    589387418.02 263436482.88 325950935.15         0.56200         0.55100         0.83100         1.41500  89014495.44 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals  648341025.02 263436482.88 325950935.15         0.56211         0.55100         0.83100         1.41500 106452295.03 
