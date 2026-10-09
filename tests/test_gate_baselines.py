@@ -40,11 +40,14 @@ PRE_REFACTOR_MAC_P10 = {
     "LRANGE_500 (first 500 elements)": 53_429,
     "LRANGE_600 (first 600 elements)": 49_633,
 }
+# Ratcheted 2026-10-09 (#28, raise only): HSET LPUSH RPUSH ZADD ZPOPMIN MSET PING_*
+# and a first XADD floor, from the median of 5 recorded rounds on an EPYC 8124P.
 PRE_REFACTOR_LINUX_P10 = {
-    "GET": 589_950, "SET": 698_250, "INCR": 575_700, "HSET": 561_450,
-    "LPUSH": 668_800, "RPUSH": 582_350, "LPOP": 589_950, "RPOP": 582_350,
-    "SADD": 561_450, "SPOP": 589_950, "ZADD": 551_950, "ZPOPMIN": 549_100,
-    "MSET (10 keys)": 470_250, "PING_INLINE": 542_450, "PING_MBULK": 571_900,
+    "GET": 589_950, "SET": 698_250, "INCR": 575_700, "HSET": 562_130,
+    "LPUSH": 708_955, "RPUSH": 646_258, "LPOP": 589_950, "RPOP": 582_350,
+    "SADD": 561_450, "SPOP": 589_950, "ZADD": 703_703, "ZPOPMIN": 572_289,
+    "MSET (10 keys)": 641_891, "PING_INLINE": 669_014, "PING_MBULK": 669_014,
+    "XADD": 637_583,
     "LRANGE_100 (first 100 elements)": 167_200,
     "LRANGE_300 (first 300 elements)": 53_200,
     "LRANGE_500 (first 500 elements)": 31_350,
@@ -91,8 +94,8 @@ for label, profile, depth, expect in [
     drift = {c: (expect[c], got[c]) for c in expect if c in got and got[c] != expect[c]}
     check(f"{label}: every floor unchanged", not drift, f"moved: {drift}")
 
-# XADD is deliberately absent from the Linux table (never measured on that CPU).
-check("linux table still omits XADD", "XADD" not in mins("linux-epyc-8124p", 10))
+# XADD got its first Linux floor on 2026-10-09 (#28); it must stay in the table.
+check("linux table has XADD", "XADD" in mins("linux-epyc-8124p", 10))
 
 print("\n=== Unlisted depth must error, not silently reuse another table ===")
 try:

@@ -1,0 +1,32 @@
+5 recorded rounds: rec1, rec2, rec3, rec4, rec5
+
+row                                   n      median   new floor   old floor  verdict   rounds
+GET                                   5     613,496     582,821     589,950  WOULD FALL 598,802 746,268 613,496 595,238 645,161
+HSET                                  5     591,716     562,130     561,450  RAISE     591,716 581,395 740,740 680,272 581,395
+INCR                                  5     595,238     565,476     575,700  WOULD FALL 588,235 746,268 598,802 588,235 595,238
+LPOP                                  5     591,716     562,130     589,950  WOULD FALL 740,740 598,802 591,716 584,795 588,235
+LPUSH                                 5     746,268     708,955     668,800  RAISE     746,268 746,268 746,268 591,716 746,268
+LPUSH (needed to benchmark LRANGE)    5     595,238     565,476           -  new row   595,238 591,716 591,716 724,637 740,740
+LRANGE_100 (first 100 elements)       5     160,256     152,243     167,200  WOULD FALL 164,473 160,256 157,232 163,398 155,279
+LRANGE_300 (first 300 elements)       5      41,963      39,865      53,200  WOULD FALL 41,963 40,048 42,337 42,069 41,631
+LRANGE_500 (first 500 elements)       5      25,549      24,272      31,350  WOULD FALL 25,549 25,062 25,201 25,740 25,720
+LRANGE_600 (first 600 elements)       5      21,450      20,378      26,600  WOULD FALL 21,450 20,990 21,459 21,463 21,385
+MSET (10 keys)                        5     675,675     641,891     470,250  RAISE     534,759 675,675 675,675 680,272 653,594
+PING_INLINE                           5     704,225     669,014     542,450  RAISE     704,225 719,424 704,225 657,894 709,219
+PING_MBULK                            5     704,225     669,014     571,900  RAISE     609,756 704,225 709,219 595,238 735,294
+RPOP                                  5     591,716     562,130     582,350  WOULD FALL 609,756 595,238 591,716 591,716 584,795
+RPUSH                                 5     680,272     646,258     582,350  RAISE     740,740 740,740 680,272 591,716 657,894
+SADD                                  5     588,235     558,823     561,450  WOULD FALL 584,795 595,238 724,637 588,235 584,795
+SET                                   5     724,637     688,405     698,250  WOULD FALL 584,795 735,294 724,637 581,395 740,740
+SPOP                                  5     602,409     572,289     589,950  WOULD FALL 598,802 613,496 617,283 602,409 591,716
+XADD                                  5     671,140     637,583           -  new row   671,140 641,025 714,285 675,675 636,942
+ZADD                                  5     740,740     703,703     551,950  RAISE     740,740 584,795 746,268 704,225 740,740
+ZPOPMIN                               5     602,409     572,289     549,100  RAISE     602,409 598,802 636,942 606,060 602,409
+memtier pipeline P=10                 5   1,969,352   1,870,884   1,950,000  WOULD FALL 1,965,703 1,984,801 1,969,499 1,969,103 1,969,352
+memtier throughput P=1                5     262,234     249,122     252,000  WOULD FALL 263,980 261,240 263,916 262,234 260,724
+vector FT.OPTIMIZE s                  5      7.3170                          (info)    7.3591 7.3170 7.3593 7.3091 7.3100
+vector peak QPS                       5       7,697       7,312       4,280  RAISE     6,852 6,934 7,911 7,752 7,697
+vector recall                         5      0.9600                          (info)    0.9599 0.9600 0.9601 0.9602 0.9599
+
+Rule: known_good = median of the recorded rounds, floor = 95% of it. 9 rows raise (go into the PR); 13 would fall (listed for Pavel, never edited).
+  would fall: GET, INCR, LPOP, LRANGE_100 (first 100 elements), LRANGE_300 (first 300 elements), LRANGE_500 (first 500 elements), LRANGE_600 (first 600 elements), RPOP, SADD, SET, SPOP, memtier pipeline P=10, memtier throughput P=1
