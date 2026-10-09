@@ -4,6 +4,7 @@ summary = "SIMD vector-distance kernels: FP32 dot and L2, INT8/INT4 L2, Hamming,
 sources = [
   { from = "src/vector/kernels.mojo", as = "kernels.mojo" },
   { from = "src/vector/fma_mad.mojo", as = "fma_mad.mojo" },
+  { from = "src/vector/reg_tile.mojo", as = "reg_tile.mojo" },
 ]
 exports = [
   "from .kernels import dot_product_simd, l2_distance_int8, l2_distance_int8_jit, l2_distance_int4",
