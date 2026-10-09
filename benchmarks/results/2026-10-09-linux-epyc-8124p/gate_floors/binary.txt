@@ -1,0 +1,4 @@
+pion-server 0.9.7+4b672bb (2026-10-09)
+vector: libpion_vector abi=1 (closed, dims=1536) isa=vnni
+4b672bb2fb600bf175817ae5d43005e4512c8fa7
+always [madvise] never

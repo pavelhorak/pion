@@ -461,13 +461,14 @@ def main():
     # Gate mode: check Pion results against baselines
     if args.gate:
         # Mac (Apple Silicon) baselines — historical default. ef=150, w=10, 50K case.
-        # Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena) baselines — gh #56. Source: 2026-05-02 commit b214fbe,
-        # 50K case, w=16, ef=150 → measured 4,506 QPS / recall 0.9443 / FT.OPTIMIZE 26.8s.
-        # 95% thresholds: recall ≥ 0.940 (same), QPS ≥ 4280 (95% of 4506), FT.OPTIMIZE ≤ 28s (≈ 105% of 26.8).
+        # Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena) baselines — gh #56, re-derived 2026-10-09 (#28):
+        # native build at 4b672bb (VNNI default), 50K case, w=16, ef=150, median of 5 recorded rounds →
+        # 7,697 QPS / recall 0.960 / FT.OPTIMIZE 7.32s (raw runs: benchmarks/results/2026-10-09-linux-epyc-8124p/gate_floors/).
+        # QPS ≥ 7312 (95% of 7697); FT.OPTIMIZE ≤ 7.7s (≈ 105% of 7.32); recall stays ≥ 0.940 (raise only).
         if args.gate_profile == "linux-epyc-8124p":
             RECALL_MIN = 0.940
-            QPS_MIN = 4280
-            OPTIMIZE_MAX = 28.0
+            QPS_MIN = 7312
+            OPTIMIZE_MAX = 7.7
             profile_name = "Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena, w=16)"
         else:
             RECALL_MIN = 0.940

@@ -99,30 +99,28 @@
       "description": "Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena)",
       "pipelines": {
         "10": {
-          "source": "2026-05-02, commit b214fbe, valkey-benchmark -w 1 P=10 (gh #56)",
-          "excluded": {
-            "XADD": "not measured on the reference run; add a floor when re-measured on this CPU class."
-          },
+          "source": "2026-05-02, commit b214fbe, valkey-benchmark -w 1 P=10 (gh #56); HSET LPUSH RPUSH MSET PING_INLINE PING_MBULK ZADD ZPOPMIN XADD re-derived 2026-10-09 at 4b672bb (native build), median of 5 recorded rounds, floor = 95% (#28; raw runs in benchmarks/results/2026-10-09-linux-epyc-8124p/gate_floors/)",
           "commands": {
             "GET":                              {"min": 589950, "known_good": 621000},
             "SET":                              {"min": 698250, "known_good": 735000},
             "INCR":                             {"min": 575700, "known_good": 606000},
-            "HSET":                             {"min": 561450, "known_good": 591000},
-            "LPUSH":                            {"min": 668800, "known_good": 704000},
-            "RPUSH":                            {"min": 582350, "known_good": 613000},
+            "HSET":                             {"min": 562130, "known_good": 591716},
+            "LPUSH":                            {"min": 708955, "known_good": 746268},
+            "RPUSH":                            {"min": 646258, "known_good": 680272},
             "LPOP":                             {"min": 589950, "known_good": 621000},
             "RPOP":                             {"min": 582350, "known_good": 613000},
             "SADD":                             {"min": 561450, "known_good": 591000},
             "SPOP":                             {"min": 589950, "known_good": 621000},
-            "ZADD":                             {"min": 551950, "known_good": 581000},
-            "ZPOPMIN":                          {"min": 549100, "known_good": 578000},
-            "MSET (10 keys)":                   {"min": 470250, "known_good": 495000},
-            "PING_INLINE":                      {"min": 542450, "known_good": 571000},
-            "PING_MBULK":                       {"min": 571900, "known_good": 602000},
+            "ZADD":                             {"min": 703703, "known_good": 740740},
+            "ZPOPMIN":                          {"min": 572289, "known_good": 602409},
+            "MSET (10 keys)":                   {"min": 641891, "known_good": 675675},
+            "PING_INLINE":                      {"min": 669014, "known_good": 704225},
+            "PING_MBULK":                       {"min": 669014, "known_good": 704225},
             "LRANGE_100 (first 100 elements)":  {"min": 167200, "known_good": 176000},
             "LRANGE_300 (first 300 elements)":  {"min":  53200, "known_good":  56000},
             "LRANGE_500 (first 500 elements)":  {"min":  31350, "known_good":  33000},
-            "LRANGE_600 (first 600 elements)":  {"min":  26600, "known_good":  28000}
+            "LRANGE_600 (first 600 elements)":  {"min":  26600, "known_good":  28000},
+            "XADD":                             {"min": 637583, "known_good": 671140}
           }
         }
       }
