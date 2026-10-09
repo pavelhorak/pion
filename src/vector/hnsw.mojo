@@ -68,6 +68,7 @@ from src.vector.fma_mad import fma_mad
 from std.collections import List, Array
 from std.sys.intrinsics import prefetch
 from std.ffi import external_call
+from src.memory.hugepage import advise_hugepage
 from std.sys.info import CompilationTarget
 
 # gh #376: vectors the HSET-ingest build calibrates on. All of them for the
@@ -318,6 +319,7 @@ struct HNSWGraph(Movable):
         # Neighbor Pool Allocation
         self.neighbor_pool_per_node = (2 * M) + (6 * M) + 7 # Max level 6: supports M^6=16.7M nodes; saves ~34MB at N=50K
         self.neighbor_pool = alloc[UInt32](max_elements * self.neighbor_pool_per_node)
+        advise_hugepage(Int(self.neighbor_pool), max_elements * self.neighbor_pool_per_node * 4)   # gh #204
 
         # Vector Allocation Strategy
         # PolarQuant/TurboQuant: graph construction always uses INT8 (block quantization applied in compact_vectors)
@@ -343,6 +345,7 @@ struct HNSWGraph(Movable):
         # first _reset_visited() bumps cur_epoch to 1, so the zeroed array reads as unvisited.
         self.visited_bitset_bytes = (max_elements + 7) // 8
         self.visited_epoch = alloc[UInt16](max_elements)
+        advise_hugepage(Int(self.visited_epoch), max_elements * 2)   # gh #204
         unsafe_memset(self.visited_epoch.bitcast[UInt8](), 0, max_elements * 2)
         self.cur_epoch = 0
         self.visited_map = null_ptr[UInt32, MutUntrackedOrigin]()
@@ -1379,6 +1382,7 @@ struct HNSWGraph(Movable):
         # warm restart silently re-introduces the line-straddling the padded
         # stride paid to remove.
         self.compact_buffer = alloc[Int8](saved_num_nodes * saved_stride, alignment=64)
+        advise_hugepage(Int(self.compact_buffer), saved_num_nodes * saved_stride)   # gh #204
         if not self._pion_read_all(fd, self.compact_buffer.bitcast[UInt8](), saved_num_nodes * saved_stride):
             return False
 
@@ -1402,6 +1406,7 @@ struct HNSWGraph(Movable):
         if is_not_null(self.l0_compact):
             self.l0_compact.free()
         self.l0_compact = alloc[UInt32](saved_num_nodes * 33)
+        advise_hugepage(Int(self.l0_compact), saved_num_nodes * 33 * 4)   # gh #204
         if not self._pion_read_all(fd, self.l0_compact.bitcast[UInt8](), saved_num_nodes * 33 * 4):
             return False
 
@@ -2421,6 +2426,7 @@ struct HNSWGraph(Movable):
         nodes[] dereference for those. Build-time only; never on the query path."""
         if is_not_null(self.l0_slots): self.l0_slots.free()
         self.l0_slots = alloc[UInt32](self.num_nodes * 33)
+        advise_hugepage(Int(self.l0_slots), self.num_nodes * 33 * 4)   # gh #204
         var base = Int(self.compact_buffer) + self.compact_hdr
         var span = self.num_nodes * self.compact_stride
         for ni in range(self.num_nodes):
@@ -2474,6 +2480,7 @@ struct HNSWGraph(Movable):
         # header words 20-21), so pre-pad files keep loading with their own stride.
         var bpv_total = (bpv + hdr + 63) // 64 * 64
         var new_buf = alloc[Int8](self.num_nodes * bpv_total, alignment=64)
+        advise_hugepage(Int(new_buf), self.num_nodes * bpv_total)   # gh #204
         # Zero the pad bytes: they are written to the index file on save (whole
         # stride rows) — keep them deterministic instead of heap garbage.
         unsafe_memset(new_buf, 0, self.num_nodes * bpv_total)
@@ -2601,6 +2608,7 @@ struct HNSWGraph(Movable):
         # 6.6MB total vs 61MB neighbor_pool; hot nodes fit in SLC → fewer DRAM misses per beam step
         if is_not_null(self.l0_compact): self.l0_compact.free()
         self.l0_compact = alloc[UInt32](self.num_nodes * 33)
+        advise_hugepage(Int(self.l0_compact), self.num_nodes * 33 * 4)   # gh #204
         for ni in range(self.num_nodes):
             if self.is_deleted(ni):
                 self.l0_compact[ni * 33] = UInt32(0)
@@ -2757,6 +2765,7 @@ struct HNSWGraph(Movable):
         # Build l0_compact (same as standard path)
         if is_not_null(self.l0_compact): self.l0_compact.free()
         self.l0_compact = alloc[UInt32](self.num_nodes * 33)
+        advise_hugepage(Int(self.l0_compact), self.num_nodes * 33 * 4)   # gh #204
         for ni in range(self.num_nodes):
             if self.is_deleted(ni):
                 self.l0_compact[ni * 33] = UInt32(0)
@@ -2974,6 +2983,7 @@ struct HNSWGraph(Movable):
         # Build l0_compact (same as standard path)
         if is_not_null(self.l0_compact): self.l0_compact.free()
         self.l0_compact = alloc[UInt32](self.num_nodes * 33)
+        advise_hugepage(Int(self.l0_compact), self.num_nodes * 33 * 4)   # gh #204
         for ni in range(self.num_nodes):
             if self.is_deleted(ni):
                 self.l0_compact[ni * 33] = UInt32(0)
@@ -3142,6 +3152,7 @@ struct HNSWGraph(Movable):
         # Build l0_compact (same as standard path)
         if is_not_null(self.l0_compact): self.l0_compact.free()
         self.l0_compact = alloc[UInt32](self.num_nodes * 33)
+        advise_hugepage(Int(self.l0_compact), self.num_nodes * 33 * 4)   # gh #204
         for ni in range(self.num_nodes):
             if self.is_deleted(ni):
                 self.l0_compact[ni * 33] = UInt32(0)

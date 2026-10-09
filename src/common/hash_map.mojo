@@ -10,6 +10,8 @@ from std.collections import List
 from src.common.value import GenericValue, ValueType, BLOB_TAG
 from src.common.prng import Xoshiro256PlusPlus
 from src.common.vec_tomb import VecTomb
+from src.memory.hugepage import advise_hugepage
+from std.sys import size_of
 
 # Per-lane weights (1 << lane) for packing a 16-lane bool compare into a
 # movemask-style bitmask. Computed once at compile time.
@@ -80,9 +82,12 @@ struct SlabHashMap(Movable):
         self.vec_gen = 0
         self.rehashes = 0
         self.metadata = alloc[UInt8](real_cap + 16)
+        advise_hugepage(Int(self.metadata), real_cap + 16)   # gh #204
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), real_cap + 16)
         self.keys = alloc[GenericValue](real_cap)
         self.values = alloc[GenericValue](real_cap)
+        advise_hugepage(Int(self.keys), real_cap * size_of[GenericValue]())
+        advise_hugepage(Int(self.values), real_cap * size_of[GenericValue]())
         for i in range(real_cap):
             (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
             (self.values.unsafe_offset(i)).unsafe_write(GenericValue())
@@ -880,9 +885,12 @@ struct SlabHashMap(Movable):
         self.size = 0
         self.tombstones = 0
         self.metadata = alloc[UInt8](self.capacity + 16)
+        advise_hugepage(Int(self.metadata), self.capacity + 16)   # gh #204
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), self.capacity + 16)
         self.keys = alloc[GenericValue](self.capacity)
         self.values = alloc[GenericValue](self.capacity)
+        advise_hugepage(Int(self.keys), self.capacity * size_of[GenericValue]())
+        advise_hugepage(Int(self.values), self.capacity * size_of[GenericValue]())
         for i in range(self.capacity):
             (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
             (self.values.unsafe_offset(i)).unsafe_write(GenericValue())

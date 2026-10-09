@@ -5,6 +5,7 @@ from std.memory import unsafe_memcpy
 from std.sys import size_of, CompilationTarget
 from std.collections import List
 from std.ffi import external_call
+from src.memory.hugepage import advise_hugepage
 
 struct SlabAllocator[T: AnyType](Movable):
     var item_size: Int
@@ -66,6 +67,8 @@ struct SlabAllocator[T: AnyType](Movable):
             else:
                 ptr = external_call["mmap", Pointer[UInt8, MutUntrackedOrigin]](
                     null_ptr[UInt8, MutUntrackedOrigin](), alloc_size, 0x3, flags, -1, 0)
+            if Int(ptr) != -1:
+                advise_hugepage(Int(ptr), alloc_size)   # gh #204
         else:
             # macOS: MAP_ANON=0x1000, MAP_PRIVATE=0x0002
             var flags = 0x1002
