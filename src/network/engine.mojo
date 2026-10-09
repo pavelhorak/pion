@@ -1662,8 +1662,8 @@ struct NetworkEngine:
             if nevents <= 0: continue
 
             for i in range(nevents):
-                var fd = epoll_ev_fd(events, i)
-                var evmask = epoll_ev_events(events, i)
+                var fd = epoll_ev_fd(events, Int(i))
+                var evmask = epoll_ev_events(events, Int(i))
 
                 # Guard: fd 0/1/2 are stdin/stdout/stderr — never client fds.
                 # If they appear in epoll events, something went wrong (e.g., stale
