@@ -51,6 +51,57 @@ Pion's networking layer provides five event loop configurations plus a zero-copy
 
 Eliminates one syscall per event loop iteration on the hot path. Graceful fallback: if SQPOLL setup fails (requires root or CAP_SYS_NICE), retries without SQPOLL.
 
+### Optional ring features (off by default)
+
+Three switches change how the io_uring loop talks to the kernel. Each is also
+turned on by an environment variable, so a test run can enable it without
+editing anything. They are off until measurements decide otherwise.
+
+| Flag | Environment | What it does | Kernel |
+|---|---|---|---|
+| `--iouring-defer` | `PION_IOURING_DEFER=1` | Creates the ring with `SINGLE_ISSUER` + `DEFER_TASKRUN`: completion work runs only inside `io_uring_enter`, not as task-work interrupts. Each worker owns and drives its ring alone, which is the precondition. | 6.1 (6.0 for `SINGLE_ISSUER` alone) |
+| `--iouring-regfiles` | `PION_IOURING_REGFILES=1` | Registers the ring fd (`enter` names it by index) and a sparse file table: slot *n* holds the socket on fd *n* from accept until close, and SENDs name the slot (`IOSQE_FIXED_FILE`). | 5.18 for the ring fd |
+| `--iouring-pbuf` | `PION_IOURING_PBUF=1` | Gives the multishot RECV's 256 × 16 KB buffers to the kernel through a provided-buffer ring (a buffer goes back with a few stores, not a `PROVIDE_BUFFERS` SQE), and parses received bytes in the provided buffer itself. | 5.19 |
+
+Each feature is probed and falls back on its own, so an older kernel runs the
+plain loop and never fails to start. The server logs what the kernel granted,
+from worker 0 and from any worker that got less than it asked for:
+
+```
+io_uring features (worker 0): defer=ACTIVE(SINGLE_ISSUER+DEFER_TASKRUN) regfiles=ACTIVE(65536 slots) ring_fd=ACTIVE pbuf_ring=ACTIVE zero_copy_recv=ACTIVE
+```
+
+The rules that keep them correct:
+
+- **The loop enters on every pass, with `GETEVENTS`.** Under `DEFER_TASKRUN`
+  that is the only place the kernel posts completions. A 1 ms timeout is
+  always in flight, so the loop also ticks while no client sends anything.
+  `DEFER_TASKRUN` and `--sqpoll` exclude each other; the probe then keeps
+  `SINGLE_ISSUER` alone.
+- **A registered slot is emptied before its fd is closed.** The file table
+  holds its own reference to the socket. Left in place, the socket would
+  outlive `close()`, and a SEND naming the slot would reach it after the fd
+  number had gone to a new connection. Accept fills the slot before the first
+  SEND.
+- **Only SENDs use a registered slot.** A multishot RECV takes its file
+  reference once, when it is armed, so a slot saves it nothing. On kernels
+  before 6.13, a long-lived fixed-file request also holds back the release of
+  every file removed from the table after it was issued.
+- **Bytes are parsed in the provided buffer only when the connection holds
+  nothing unfinished.** Whatever the drain leaves (a frame cut at the buffer's
+  end, or commands behind one that parked) is copied into the connection's own
+  buffer, and from there on the copy-and-accumulate path runs as before. The
+  provided buffer goes back to the kernel once the drain returns, because
+  nothing a command keeps outlives it: MULTI and blocking commands copy their
+  frames, and replies are copied into the writer. The binary protocol lane
+  always copies.
+
+`tests/test_iouring_features.py` runs the same workloads with each switch and
+all of them: concurrent pipelined connections whose frames straddle the 16 KB
+buffers, a 1 MB value, a frame split across writes, parked BLPOP and XREAD
+with commands behind them, MULTI/EXEC, connection churn with resets, and a
+graceful stop.
+
 ---
 
 ## io_uring vs epoll Tradeoff
