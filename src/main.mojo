@@ -1074,6 +1074,8 @@ def main():
     # from another. Measured at -w 4 with 16 concurrently-opened connections:
     # 41 of 90 GETs of a just-acked key returned nil. Serially-opened
     # connections all land on one worker and hide it completely.
+    if config.server.apply_env_io_threads(config.server.kvcache_enabled):
+        print("IO_THREADS: " + String(config.server.io_threads) + " from PION_IO_THREADS (epoll)")
     # #465: the I/O-thread prototype serves one keyspace from one worker, on
     # epoll. Refused, not ignored, anywhere else: a flag that silently does
     # nothing is how a benchmark measures the wrong server.
@@ -1509,7 +1511,7 @@ def main():
     # Mojo 1.0: spawn workers via pthreads (see pion_worker_entry above the
     # heap import below). Blocks forever — workers never exit in normal
     # operation, same contract as the old parallelize[worker_task](n, n).
-    var _boot_ctx = alloc[Int64](8)
+    var _boot_ctx = alloc[Int64](9)
     _boot_ctx[unsafe_offset=0] = Int64(Int(shared_hnsw_ptr))
     _boot_ctx[unsafe_offset=1] = Int64(Int(cluster_ptr))
     _boot_ctx[unsafe_offset=2] = Int64(0)    # was the pub/sub ring (#42: per-worker inboxes in C)
@@ -1518,6 +1520,7 @@ def main():
     _boot_ctx[unsafe_offset=5] = Int64(Int(shared_listen_fd))
     _boot_ctx[unsafe_offset=6] = Int64(Int(binary_listen_fd))
     _boot_ctx[unsafe_offset=7] = Int64(n_workers)
+    _boot_ctx[unsafe_offset=8] = Int64(config.server.io_threads)   # #465
     _ = external_call["pion_spawn_workers", Int32](
         Int32(config.server.workers), _boot_ctx)
 
@@ -1549,7 +1552,8 @@ def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64
 # ctx layout (Int64 slots, packed in main(), outlives workers — main() blocks
 # in pion_spawn_workers): [0]=SharedHNSWView* [1]=ClusterState*
 # [2]=unused (was the pub/sub ring) [3]=secondary_listen_fds(Int32*) [4]=xdp_shared_fds
-# (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers.
+# (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers
+# [8]=io_threads (#465: main()'s final value).
 @export
 def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64):
     # #465: an I/O thread of `--io-threads`, started by the executor (pion_spawn_detached).
@@ -1849,6 +1853,12 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                             unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
                                 unsafe_ptr=_wenv, length=_wn)))
 
+        # #465: main()'s final --io-threads (flag or PION_IO_THREADS, after
+        # its fence) is the one that counts; this loop does not see every flag.
+        worker_config.server.io_threads = Int(ctx[unsafe_offset=8])
+        if worker_config.server.io_threads > 1:
+            worker_config.server.use_epoll = True
+            worker_config.server.use_iouring = False
         var worker_nodes = List[String]()
         worker_nodes.append("127.0.0.1:" + String(worker_config.server.port))
         

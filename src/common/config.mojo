@@ -1,5 +1,8 @@
 from src.common.env import Environment
 from std.sys import CompilationTarget
+from std.ffi import external_call
+from std.memory.unsafe_pointer import Pointer
+from src.common.ptr import is_not_null
 
 @fieldwise_init
 struct VectorConfig(Copyable, Movable, ImplicitlyCopyable):
@@ -120,6 +123,29 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # the client sockets (accept, recv, send). 1 = today's single-thread loop.
     # Linux epoll, -w 1 only, while it is a prototype.
     var io_threads: Int
+
+    def apply_env_io_threads(mut self, kvcache: Bool) -> Bool:
+        """#465: PION_IO_THREADS=N, for running whole test tiers through the
+        I/O-thread path. A default only: an explicit --io-threads wins, and it
+        applies only where the prototype serves (Linux, -w 1, no --kvcache),
+        selecting epoll. True when it applied."""
+        if self.io_threads > 1 or self.workers != 1 or kvcache or self.use_xdp:
+            return False
+        comptime if CompilationTarget.is_linux():
+            var p = external_call["getenv", Pointer[UInt8, MutUntrackedOrigin]](
+                "PION_IO_THREADS\0".unsafe_ptr())
+            if is_not_null(p):
+                var n = 0
+                var i = 0
+                while i < 3 and p[unsafe_offset=i] >= 48 and p[unsafe_offset=i] <= 57:
+                    n = n * 10 + Int(p[unsafe_offset=i]) - 48
+                    i += 1
+                if n > 1 and n <= 64:
+                    self.io_threads = n
+                    self.use_epoll = True
+                    self.use_iouring = False
+                    return True
+        return False
 
     def __init__(out self):
         self.port = 1974
