@@ -245,8 +245,17 @@ def run_config(binary, work, name, flags, extra_env, asked):
         except RuntimeError as e:
             check(f"[{name}] server answers PING", False, str(e))
             return
-        log = open(log_path).read()
-        if not check(f"[{name}] the io_uring loop runs", "IO_URING Engine Active" in log,
+        # A server answers as soon as ONE worker runs; the features line is
+        # worker 0's, so wait for every worker's loop to start.
+        workers = int(flags[flags.index("-w") + 1]) if "-w" in flags else 1
+        deadline = time.monotonic() + 20
+        while True:
+            log = open(log_path).read()
+            if log.count("IO_URING Engine Active") >= workers or time.monotonic() > deadline:
+                break
+            time.sleep(0.1)
+        if not check(f"[{name}] the io_uring loop runs on every worker",
+                     log.count("IO_URING Engine Active") == workers,
                      "the server picked another loop; every later check would be vacuous"):
             return
         feats = features_line(log)
