@@ -1421,6 +1421,13 @@ timeout = 180
 requires = ["linux"]
 
 [[test]]
+file = "tests/test_iouring_features.py"
+server = "self"
+tier = "gate"
+timeout = 600
+requires = ["linux"]
+
+[[test]]
 file = "tests/test_restart_rebind.py"
 server = "self"
 tier = "gate"
