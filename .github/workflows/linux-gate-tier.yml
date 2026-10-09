@@ -8,6 +8,12 @@ name: Linux gate tier
 # server log is uploaded, failures included.
 #
 #   gh workflow run "Linux gate tier" --ref <branch> [-f legs=linux-x86_64] [-f only="gh211 gh259"]
+#   gh workflow run "Linux gate tier" --ref <branch> -f tier=full
+#
+# `tier=full` runs every test the manifest lists, as `run_all.py --tier full`
+# does on the Mac. The first full run on Linux (EPYC 8124P, 2026-10-09) failed
+# 17 files that the gate tier never runs, so a change that touches a full-tier
+# surface is checked here before it merges.
 
 on:
   workflow_dispatch:
@@ -18,16 +24,21 @@ on:
         default: both
         options: [both, linux-x86_64, linux-arm64]
       only:
-        description: Space-separated run_all --only filters; empty runs the whole gate tier
+        description: Space-separated run_all --only filters; empty runs the whole tier
         type: string
         default: ''
+      tier:
+        description: run_all tier (full includes gate)
+        type: choice
+        default: gate
+        options: [gate, full]
 
 permissions:
   contents: read
 
 jobs:
   gate-tier:
-    name: ${{ matrix.leg }}
+    name: ${{ matrix.leg }} (${{ inputs.tier }})
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +49,8 @@ jobs:
       # portable build (x86-64-v2, GPU-free, written as pion-server-dev).
       BUILD_TASK: ${{ matrix.leg == 'linux-x86_64' && 'build-portable' || 'build' }}
       BINARY: ${{ matrix.leg == 'linux-x86_64' && 'pion-server-dev' || 'pion-server' }}
-    timeout-minutes: 150
+    # the full tier adds the soak and leak tests (up to 30 min each); 360 is GitHub's cap
+    timeout-minutes: ${{ inputs.tier == 'full' && 330 || 150 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -79,23 +91,24 @@ jobs:
         # fresh checkout lacks torch and transformers in.
         run: pixi run install-inference
 
-      - name: Gate tier
+      - name: Test tier
         env:
           ONLY: ${{ inputs.only }}
+          TIER: ${{ inputs.tier }}
         run: |
           set -o pipefail
           if [ -n "$ONLY" ]; then
-            python3 tests/run_all.py --tier gate --report build/gate-tests.json --only $ONLY
+            python3 tests/run_all.py --tier "$TIER" --report build/tier-tests.json --only $ONLY
           else
-            python3 tests/run_all.py --tier gate --report build/gate-tests.json
+            python3 tests/run_all.py --tier "$TIER" --report build/tier-tests.json
           fi
 
       - name: Upload every test's output and server log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gate-tier-${{ matrix.leg }}
+          name: ${{ inputs.tier }}-tier-${{ matrix.leg }}
           path: |
             build/test-logs/
-            build/gate-tests.json
+            build/tier-tests.json
           retention-days: 14

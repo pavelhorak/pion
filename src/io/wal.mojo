@@ -758,7 +758,7 @@ def wal_apply_aggregate(cmd_id: UInt8,
             regs = val.as_hash().unsafe_bitcast[UInt8]()
         else:
             return False
-        _ = hll_add(regs, GenericValue.from_ptr(vp, vl))
+        _ = hll_add(regs, GenericValue.borrow(vp, vl))   # gh #478: from_ptr leaked per element
         return True
 
     elif cmd_id == 28:   # VADD [4B nl][name][4B plen][f32 norm][dim x f32 unit]

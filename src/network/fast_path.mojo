@@ -2890,7 +2890,10 @@ struct FastPathHandler(Movable):
                         if elem_len < 0 or it_pos + elem_len + 2 > n:
                             pfadd_ok = False
                             break
-                        var elem_val = GenericValue.from_ptr(buffer + it_pos, elem_len)
+                        # gh #478: borrowed. hll_add only hashes the bytes, and
+                        # from_ptr's heap copy of an element over 23 bytes was
+                        # never freed: ~64 B per long element, every PFADD.
+                        var elem_val = GenericValue.borrow_buf(buffer + it_pos, elem_len)
                         var pf_changed = hll_add(hll_ptr, elem_val)
                         if pf_changed:
                             pfadd_updated = True

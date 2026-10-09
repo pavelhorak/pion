@@ -22,6 +22,11 @@ Multi-host routing (gh #43):
     (`PionAttentionHook(pion_host=...)`) keeps working unchanged.
 """
 
+# Annotations stay strings: the class below defines a `redis` property, and on
+# Python 3.10-3.13 an eagerly evaluated `-> redis.Redis` in a later method's
+# signature resolves to that property and the import fails (3.14 defers them).
+from __future__ import annotations
+
 import hashlib
 import socket
 from typing import List, Optional, Tuple

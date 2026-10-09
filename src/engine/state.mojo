@@ -189,17 +189,19 @@ struct Pion:
         self.ttl_map.unsafe_write(SlabHashMap(256))
         self.keyspace[].ttl_map = self.ttl_map    # a removed key drops its TTL
 
+        # gh #478: the list and skip-list pools hand out ZEROED objects (see
+        # ObjectPool.__init__). Constructing 1,000 of each here allocated
+        # buffers every acquire site threw away: a list's reset() frees them,
+        # a skip list is constructed over (which leaked the pre-built one).
+        # The hash pool stays pre-built. Its sites reset() a map they expect
+        # to have slots (a zero SlabHashMap has capacity 0, and the first
+        # set() faults), and past the pool they construct SlabHashMap(16)
+        # rather than take the zeroed overflow object.
         self.hash_map_pool.unsafe_write(ObjectPool[SlabHashMap](1000))
         for i in range(1000):
             self.hash_map_pool[].free_list[unsafe_offset=i].unsafe_write(SlabHashMap(16))
-
         self.skip_list_pool.unsafe_write(ObjectPool[SlabSkipList](1000))
-        for i in range(1000):
-            self.skip_list_pool[].free_list[unsafe_offset=i].unsafe_write(SlabSkipList(1024))
-
         self.list_pool.unsafe_write(ObjectPool[SlabList](1000))
-        for i in range(1000):
-            self.list_pool[].free_list[unsafe_offset=i].unsafe_write(SlabList())
 
         # === Phase 5: Snapshot + WAL recovery ===
         # 5a: Load snapshot (base keyspace state); WAL.checkpoint() was called after the snapshot

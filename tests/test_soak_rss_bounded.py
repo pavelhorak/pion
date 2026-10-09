@@ -19,8 +19,21 @@ Also: a store command whose DESTINATION already exists must free the
 container it replaces, or re-running the same `SUNIONSTORE d a b` leaks one
 container per call.
 
+A window that grows past the bound is measured again, up to SETTLE more
+times, and the workload passes once a window stays under it. A leak grows in
+EVERY window; growth that stops is a one-time cost being paid during the
+window. gh #478 found two on Linux that grew RSS by 2-25 MB and then nothing
+(8 consecutive windows): the io_uring receive buffers touched page by page,
+and the first 1,000 containers of each type replacing buffers the pools had
+pre-built. Both are now paid at startup or not at all; the re-measure keeps
+the next one from reading as a leak. On Linux the server also runs with
+transparent huge pages off for the test: with them on, RSS moves in 2 MB
+steps, so a small leak reads as 0 in most windows and a settled server as
++2 MB in some.
+
     python3 tests/test_soak_rss_bounded.py [./pion-server]
 """
+import ctypes
 import os
 import shutil
 import subprocess
@@ -40,6 +53,7 @@ CYCLES = 20000
 # heap-member paths leak at 0.05-0.7 KB a cycle (all LINEAR in CYCLES: 3x the
 # cycles gives 3x the growth, so it is not allocator caching).
 BOUND_KB = 512
+SETTLE = 4          # extra windows a growing workload gets to show it has stopped
 M = [b"heap-member-%02d-" % i + b"m" * 32 for i in range(6)]      # 48 bytes: heap, not SSO
 V = b"v" * 64
 B2K = b"q" * 2048
@@ -54,6 +68,21 @@ def run(c: Conn, cmds):
     for k in range(0, len(cmds), 500):
         out += c.pipeline(cmds[k:k + 500])
     return out
+
+
+def server_preexec():
+    """Linux: the measured server runs with transparent huge pages off
+    (PR_SET_THP_DISABLE survives exec), so RSS moves in pages, not 2 MB steps."""
+    if sys.platform.startswith("linux"):
+        ctypes.CDLL(None).prctl(41, 1, 0, 0, 0)
+
+
+def window(proc, c, make_cycle, first):
+    """RSS growth over CYCLES cycles starting at cycle `first`."""
+    base = rss_kb(proc.pid)
+    replies = run(c, [cmd for i in range(first, first + CYCLES) for cmd in make_cycle(i)])
+    errors = [r for r in replies if isinstance(r, RespError)]
+    return rss_kb(proc.pid) - base, errors
 
 
 def growth(proc, c, make_cycle):
@@ -147,7 +176,8 @@ def start(d):
     # --no-wal: the log grows with every command and would swamp the RSS signal.
     proc = subprocess.Popen([BINARY, "-p", str(PORT), "-w", "1", "--no-wal", "--no-crash-log",
                              "--no-auto-detect", "--no-auto-embed"],
-                            cwd=d, stdout=open(os.path.join(d, "log"), "a"), stderr=subprocess.STDOUT)
+                            cwd=d, stdout=open(os.path.join(d, "log"), "a"), stderr=subprocess.STDOUT,
+                            preexec_fn=server_preexec)
     try:
         wait_ready(PORT, 30, proc=proc)
     except RuntimeError:
@@ -172,6 +202,10 @@ def main():
                 c = Conn(PORT, timeout=60)
                 try:
                     grown, errors = growth(proc, c, mk)
+                    settled = 0
+                    while grown >= BOUND_KB and not errors and settled < SETTLE:
+                        settled += 1
+                        grown, errors = window(proc, c, mk, 2000 + settled * CYCLES)
                 except (ConnectionError, TimeoutError) as e:
                     fails.append(f"server died or hung during: {name} ({type(e).__name__})")
                     print(f"  FAIL  {name:48} server died or hung ({type(e).__name__})")
@@ -183,6 +217,7 @@ def main():
                 fixed = grown < BOUND_KB // 4 and not errors
                 verdict = ("XPASS" if fixed else "XFAIL") if known else ("PASS" if ok else "FAIL")
                 print(f"  {verdict:5} {name:48} grew {grown:7d} KB"
+                      + (f"  (window {settled + 1})" if settled else "")
                       + (f"  ({known})" if known else "")
                       + (f"  errors: {errors[:2]}" if errors else ""))
                 if verdict in ("FAIL", "XPASS"):

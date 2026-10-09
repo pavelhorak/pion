@@ -44,6 +44,7 @@ With a real redis-server on PATH the numeric/format expectations below are
 additionally confirmed against it (`--redis-port`, default: spawn one).
 """
 import argparse
+import ctypes
 import socket
 import subprocess
 import sys
@@ -296,11 +297,15 @@ def section_incrbyfloat(c):
     k = "gh232:ibf:pi"
     c("DEL", k); c("SET", k, "3.14159265358979")
     # Redis computes in long double and prints %.17Lg, so a value a Float32
-    # would truncate comes back with its digits — plus long-double's own
-    # trailing artifact. Pion matches Redis byte for byte here (probed against
-    # redis-server 8.10). The point is the digits survive, not that they are
-    # clean: 3.14159265358979001, not the Float32 truncation 3.141592.
-    check("pi + 0 keeps its digits", c("INCRBYFLOAT", k, "0"), b"3.14159265358979001")
+    # would truncate comes back with its digits. Pion matches Redis byte for
+    # byte here (§6 asks a real Redis the same probes). The point is the digits
+    # survive, not that they are clean, and what %.17Lg prints depends on the
+    # platform's long double: where it is just a double (macOS arm64) the
+    # double's own trailing artifact shows, 3.14159265358979001; where it is
+    # wider (x86-64's 80-bit, aarch64 Linux's 128-bit) the value prints clean.
+    # Either way, not the Float32 truncation 3.141592.
+    pi0 = b"3.14159265358979001" if ctypes.sizeof(ctypes.c_longdouble) == 8 else b"3.14159265358979"
+    check("pi + 0 keeps its digits", c("INCRBYFLOAT", k, "0"), pi0)
 
     print("\n  -- the other direction: ordinary arithmetic still works --")
     k = "gh232:ibf:ok"

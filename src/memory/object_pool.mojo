@@ -11,9 +11,22 @@ struct ObjectPool[T: AnyType](Movable):
         self.capacity = capacity
         self.head = 0
         self.free_list = alloc[Pointer[Self.T, MutUntrackedOrigin]](capacity)
-        
+
+        # Every object starts ZEROED, as `_acquire_overflow` hands them out.
+        # A list caller reset()s it (a zero SlabList is an empty list), and a
+        # skip-list caller constructs over it. The hash pool's owner constructs
+        # its objects after this (state.mojo), because a zero SlabHashMap has
+        # no slots. gh #478: the list and skip-list pools used to be filled
+        # with CONSTRUCTED objects, and that cost memory twice. A SlabList()
+        # allocates 24 KB of buffers, and the reset() on acquire freed them
+        # untouched and allocated new ones, which on Linux land on fresh pages:
+        # RSS grew ~24 KB for each of a worker's first 1,000 lists, then never
+        # again. A constructed SlabSkipList(1024) was overwritten without being
+        # freed.
         for i in range(capacity):
-            self.free_list[unsafe_offset=i] = alloc[Self.T](1)
+            var obj = alloc[Self.T](1)
+            unsafe_memset(obj.unsafe_bitcast[UInt8](), 0, size_of[Self.T]())
+            self.free_list[unsafe_offset=i] = obj
 
     def __init__(out self, *, deinit take: Self):
         self.capacity = take.capacity
@@ -27,10 +40,9 @@ struct ObjectPool[T: AnyType](Movable):
             self.head += 1
             return ptr
         # Past capacity we fall back to the heap. The pre-allocated objects
-        # above come from `alloc` at construction time, i.e. FRESH mmap pages,
-        # which are zero — and every caller's `reset()` silently depends on
-        # that. A plain `alloc` here returns RECYCLED heap full of the previous
-        # tenant's bytes, so `reset()` walked garbage pointers.
+        # above are zeroed at construction, and every caller's `reset()`
+        # depends on that. A plain `alloc` here returns RECYCLED heap full of
+        # the previous tenant's bytes, so `reset()` walked garbage pointers.
         #
         # Measured on 0.923: the 1001st sorted set created in a worker's
         # lifetime (capacity is 1000, and nothing ever calls `release`) killed
@@ -39,7 +51,7 @@ struct ObjectPool[T: AnyType](Movable):
         # no deletion involved.
         #
         # Zeroing makes the fallback match the state the pooled objects are in,
-        # which is the invariant reset() was always written against.
+        # which is the invariant reset() is written against.
         return self._acquire_overflow()
 
     @no_inline

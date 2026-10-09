@@ -811,7 +811,11 @@ struct CommandDispatcher:
         var updated = False
         for j in range(len(elements)):
             var element = GenericValue.from_string(elements[j])
-            if hll_add(hll_ptr, element):
+            var changed = hll_add(hll_ptr, element)
+            # gh #478: hll_add only hashes the element, and this copy of one
+            # over 23 bytes was never freed: ~64 B per long element.
+            element.free_str_payload()
+            if changed:
                 updated = True
                 # gh #174: the fast path logs PFADD too, but this is the path
                 # taken whenever the fast path bails (long key, odd framing), so

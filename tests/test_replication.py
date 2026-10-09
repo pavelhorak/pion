@@ -8,6 +8,7 @@ Usage:
     python3 tests/test_replication.py [--port 1974]
 """
 
+import socket
 import sys
 import time
 import redis
@@ -44,8 +45,23 @@ def test_single_node_commands():
     test("READWRITE returns OK", res == b"OK" or res is True, repr(res))
 
     print("=== Section 2: REPLCONF ACK ===")
-    res = r.execute_command("REPLCONF", "ACK", "0")
-    test("REPLCONF ACK returns OK", res == b"OK" or res is True, repr(res))
+    # A replica's ACK gets no reply, in Redis and (since #39) in Pion, so a
+    # client that waits for one times out. Send it with a PING behind it on a
+    # raw socket: the PONG must be the very next and only reply.
+    s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+    s.sendall(b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n*1\r\n$4\r\nPING\r\n")
+    got = b""
+    deadline = time.time() + 5
+    while not got.endswith(b"\r\n") and time.time() < deadline:
+        got += s.recv(4096)
+    time.sleep(0.2)                     # anything extra would have arrived by now
+    s.setblocking(False)
+    try:
+        got += s.recv(4096)
+    except BlockingIOError:
+        pass
+    s.close()
+    test("REPLCONF ACK answers nothing (PONG is the only reply)", got == b"+PONG\r\n", repr(got))
 
     print("=== Section 3: WAIT (no replicas) ===")
     res = r.execute_command("WAIT", "1", "100")  # 100ms timeout, 1 replica needed

@@ -194,6 +194,18 @@ def index_never_built(res):
         return False
 
 
+def ran_no_queries(res):
+    """True when the run reports zero QPS: no query reached the server.
+    VectorDBBench's Redis-family clients fail silently under redis-py 8.x (a
+    caught ModuleNotFoundError), run nothing, and still exit 0, so a third
+    install path that forgets the redis==4.6.0 pin yields a "result" with no
+    data in it."""
+    try:
+        return float(res["qps"]) == 0.0
+    except (KeyError, ValueError):
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pion-only", action="store_true",
@@ -204,6 +216,10 @@ def main():
                         help=f"ef_runtime for search (default: {EF_RUNTIME})")
     parser.add_argument("--workers", type=int, default=10,
                         help="Pion worker count (default: 10)")
+    parser.add_argument("--load-concurrency", type=int, default=1,
+                        help="VectorDBBench ingest connections for Pion (default 1, the shape "
+                             "every gate baseline was measured with; 0 = VectorDBBench's own "
+                             "default, one per CPU). Rows from any other value are labelled.")
     parser.add_argument("--gpu", action="store_true",
                         help="Enable Metal GPU vector search (macOS Apple Silicon)")
     parser.add_argument("--polarquant", action="store_true",
@@ -401,23 +417,28 @@ def main():
             f"--case-type {case} --m {M} --ef-construction {EF_CONSTRUCTION} --ef-runtime {ef} "
             f"--db-label pion --concurrency-duration {CONCURRENCY_DURATION} --num-concurrency 1,5,10"
             # vectordb-bench >= 1.0.x loads performance cases through
-            # ConcurrentInsertRunner (4 connections by default) instead of the
-            # SerialInsertRunner older releases used. Pion is shared-nothing:
-            # each connection is served by one worker that owns a private HNSW
-            # graph, and with num_shards=1 a query only searches its own
-            # worker's graph. Ingesting over 4 connections therefore scatters
-            # the 50K vectors across 4 graphs and recall collapses (0.7828 vs
-            # 0.9603 measured, 2026-08-04) — a benchmark-topology artifact, not
-            # an engine regression. Pin single-connection ingest so the load
-            # shape matches the one every gate baseline was measured with.
-            f" --load-concurrency 1"
+            # ConcurrentInsertRunner (one connection per CPU by default)
+            # instead of the SerialInsertRunner older releases used. On
+            # 2026-08-04 that scattered the 50K vectors across per-worker
+            # graphs and recall fell to 0.7828. It no longer does: HSET ingest
+            # goes through the shared view whichever worker accepted it, and
+            # FT.OPTIMIZE builds one graph every worker serves. Measured
+            # 2026-10-09 (Mac, -w 10 = 4 workers, 3 interleaved pairs): recall
+            # 0.9596-0.9601 at the default against 0.9600-0.9602 over one
+            # connection, the same FT.OPTIMIZE time, and FT.INFO on every
+            # worker's affinity port reports all 50,000 documents. The gate
+            # keeps one connection because every baseline was measured that
+            # way; --load-concurrency 0 gives VectorDBBench's own default.
+            f" --load-concurrency {args.load_concurrency}"
             f"{skip_load_flags}"
         )
         res = extract_results(out, "pion")
         never_built = bool(res) and index_never_built(res)
-        if res and not never_built:
+        no_queries = bool(res) and ran_no_queries(res)
+        if res and not never_built and not no_queries:
             gpu_tag = " GPU" if args.gpu else ""
-            res["name"] = f"Pion V27{gpu_tag} (ef={ef}, w={args.workers})"
+            load_tag = "" if args.load_concurrency == 1 else f", load={args.load_concurrency}"
+            res["name"] = f"Pion V27{gpu_tag} (ef={ef}, w={args.workers}{load_tag})"
             bench_results.append(res)
         # Skip stop_server + cleanup when PION_BENCH_NO_CLEANUP=1 (leaves
         # server alive on PION_PORT for the caller to drive a follow-up bench
@@ -428,6 +449,13 @@ def main():
         else:
             print(f"[Pion] Leaving server alive on port {PION_PORT} (PION_BENCH_NO_CLEANUP=1)")
         # After the server is stopped, so a refusal leaks no process.
+        if no_queries:
+            print(f"\nERROR: the run reports 0 QPS, so no query reached the server.\n"
+                  "VectorDBBench's Redis clients fail silently under redis-py 8.x.\n"
+                  "Run `pixi run install-vdbbench`: it pins redis==4.6.0 in the venv\n"
+                  "this harness runs VectorDBBench from.",
+                  file=sys.stderr)
+            sys.exit(1)
         if never_built:
             print(f"\nERROR: FT.OPTIMIZE never ran (index build {res['optimize_time']} s, "
                   f"recall {res['recall']}), so the queries searched an empty index.\n"

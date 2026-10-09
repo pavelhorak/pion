@@ -54,18 +54,24 @@ file = "pion-vllm-mlx/tests/test_boundary_protect.py"
 server = "--kvcache -w 1"
 tier = "full"
 timeout = 600
+requires = ["py:mlx_lm"]
+note = "loads a model through mlx_lm"
 
 [[test]]
 file = "pion-vllm-mlx/tests/test_cold_rehydrate.py"
 server = "none"
 tier = "full"
 timeout = 600
+requires = ["macos"]
+note = "ATTEND.PREFIX.STORE needs the Metal SDPA engine"
 
 [[test]]
 file = "pion-vllm-mlx/tests/test_gemma4_12b_layer_routing.py"
 server = "none"
 tier = "full"
 timeout = 600
+requires = ["py:mlx"]
+note = "imports mlx.core through mlx_lm_patch"
 
 [[test]]
 file = "pion-vllm-mlx/tests/test_hybrid_per_layer_agreement.py"
@@ -79,6 +85,8 @@ file = "pion-vllm-mlx/tests/test_hybrid_retrieval.py"
 server = "none"
 tier = "full"
 timeout = 600
+requires = ["py:mlx"]
+note = "imports mlx.core"
 
 [[test]]
 file = "pion-vllm-mlx/tests/test_hybrid_retrieval_v2.py"
@@ -93,6 +101,8 @@ file = "pion-vllm-mlx/tests/test_hybrid_wire_path.py"
 server = "--kvcache --metal-attention -w 1"
 tier = "full"
 timeout = 600
+requires = ["macos", "py:mlx"]
+note = "imports mlx.core; its server runs --metal-attention"
 
 [[test]]
 file = "pion-vllm-mlx/tests/test_mlx_lm_seam.py"
@@ -112,6 +122,8 @@ file = "pion-vllm-mlx/tests/test_prompt_cache_workload.py"
 server = "--kvcache -w 1"
 tier = "full"
 timeout = 600
+requires = ["py:mlx"]
+note = "imports mlx.core"
 
 [[test]]
 file = "tests/g1_criteria.py"
@@ -127,7 +139,9 @@ timeout = 600
 [[test]]
 file = "tests/smoke_gh199_build_pool.mojo"
 server = "none"
-cmd = "pixi run build-ffi >/dev/null && pixi run mojo build -I . tests/smoke_gh199_build_pool.mojo -Xlinker src/ffi/build_pool_wrap.o -Xlinker -export_dynamic -o build/smoke_gh199 && build/smoke_gh199"
+cmd = "gcc -O3 -c src/ffi/build_pool_wrap.c -o src/ffi/build_pool_wrap.o && pixi run mojo build -I . tests/smoke_gh199_build_pool.mojo -Xlinker src/ffi/build_pool_wrap.o -Xlinker $(if [ $(uname) = Darwin ]; then echo -export_dynamic; else echo --export-dynamic; fi) -o build/smoke_gh199 && build/smoke_gh199"
+# -export_dynamic is ld64's spelling; GNU ld parses it as `-e xport_dynamic` and the
+# binary starts at a garbage entry point (exit 139 on Linux)
 tier = "full"
 timeout = 900
 
@@ -208,6 +222,8 @@ requires = ["macos"]
 file = "tests/test_attend_prefix_lse.py"
 server = "--kvcache --metal-attention -w 1"
 tier = "full"
+requires = ["macos"]
+note = "ATTEND.PREFIX.* answers 'attention engine not available' without Metal (or CUDA)"
 
 [[test]]
 file = "tests/test_attend_prefix_merge.py"
@@ -324,7 +340,9 @@ tier = "gate"
 [[test]]
 file = "tests/test_export_imports_resolve.py"
 server = "none"
-cmd = "bash scripts/export_public.sh --keep-going >/dev/null 2>&1; python3 tests/test_export_imports_resolve.py build/export"
+cmd = "python3 tests/test_export_imports_resolve.py ."
+# The export tree is retired (development happens in the public repo since
+# 2026-10-02), so the checkout itself is what ships.
 tier = "full"
 timeout = 600
 
@@ -931,6 +949,8 @@ tier = "gate"
 file = "tests/test_metal_attention_window.py"
 server = "self"
 tier = "full"
+requires = ["macos"]
+note = "the Metal SDPA engine"
 
 [[test]]
 file = "tests/test_mlx_lm_patch.py"
