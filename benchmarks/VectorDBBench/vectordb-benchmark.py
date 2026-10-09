@@ -417,15 +417,18 @@ def main():
             f"--case-type {case} --m {M} --ef-construction {EF_CONSTRUCTION} --ef-runtime {ef} "
             f"--db-label pion --concurrency-duration {CONCURRENCY_DURATION} --num-concurrency 1,5,10"
             # vectordb-bench >= 1.0.x loads performance cases through
-            # ConcurrentInsertRunner (4 connections by default) instead of the
-            # SerialInsertRunner older releases used. Pion is shared-nothing:
-            # each connection is served by one worker that owns a private HNSW
-            # graph, and with num_shards=1 a query only searches its own
-            # worker's graph. Ingesting over 4 connections therefore scatters
-            # the 50K vectors across 4 graphs and recall collapses (0.7828 vs
-            # 0.9603 measured, 2026-08-04) — a benchmark-topology artifact, not
-            # an engine regression. Pin single-connection ingest so the load
-            # shape matches the one every gate baseline was measured with.
+            # ConcurrentInsertRunner (one connection per CPU by default)
+            # instead of the SerialInsertRunner older releases used. On
+            # 2026-08-04 that scattered the 50K vectors across per-worker
+            # graphs and recall fell to 0.7828. It no longer does: HSET ingest
+            # goes through the shared view whichever worker accepted it, and
+            # FT.OPTIMIZE builds one graph every worker serves. Measured
+            # 2026-10-09 (Mac, -w 10 = 4 workers, 3 interleaved pairs): recall
+            # 0.9596-0.9601 at the default against 0.9600-0.9602 over one
+            # connection, the same FT.OPTIMIZE time, and FT.INFO on every
+            # worker's affinity port reports all 50,000 documents. The gate
+            # keeps one connection because every baseline was measured that
+            # way; --load-concurrency 0 gives VectorDBBench's own default.
             f" --load-concurrency {args.load_concurrency}"
             f"{skip_load_flags}"
         )
