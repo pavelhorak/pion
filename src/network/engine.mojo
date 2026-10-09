@@ -1245,6 +1245,15 @@ struct NetworkEngine:
         # doesn't support multishot (< 6.0) or provide_buffers fails.
         var buf_group_id = UInt16(self.worker_id)
         self.multishot_bufs = alloc[UInt8](PBUF_RING_ENTRIES * PBUF_SIZE)
+        # gh #478: touch the whole pool now. The kernel hands provided buffers
+        # out first-in first-out (a recycled one goes to the back), so traffic
+        # walks all 256 of them, and each page became resident the first time
+        # a RECV landed in it: RSS crept up by as much as 4 MB per worker over
+        # the first 4 MB received, which a leak check (and an operator) reads
+        # as a leak, and every first landing was a page fault on the receive
+        # path. Faulting them in here costs the same 4 MB, once, before the
+        # first client.
+        unsafe_memset(self.multishot_bufs, 0, PBUF_RING_ENTRIES * PBUF_SIZE)
         self.ring[].submit_provide_buffers(
             self.multishot_bufs, PBUF_SIZE, PBUF_RING_ENTRIES,
             buf_group_id, UInt16(0))
