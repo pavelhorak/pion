@@ -26,6 +26,19 @@ enumerated — there were roughly 1,100 of them.
 
 ### Changed
 
+- **A worker starts 44 MB smaller, and its RSS no longer creeps up on Linux.**
+  Each worker pre-built 1,000 lists and 1,000 sorted sets at startup, and
+  none was used as built. A list's 24 KB of buffers was freed and replaced on
+  first use, and a sorted set was constructed over (which leaked the
+  pre-built one). Those pools now hold zeroed objects, as the objects past
+  the 1,000th always were. On macOS, where the pre-built objects were
+  resident from the start, an idle worker goes from 107 MB to 62.6 MB. On
+  Linux they were allocated lazily, and RSS grew ~24 KB for each of a
+  worker's first 1,000 lists and then stopped. The io_uring loop also faults
+  its 4 MB of receive buffers in at startup. Before, RSS grew by up to 4 MB
+  over the first 4 MB a worker received. Neither was a leak, but both read as
+  one: the full test tier's RSS tests failed on Linux for them.
+
 - **FT.OPTIMIZE builds 28–33% faster, with the same graph.** The build scores a
   node's neighbors eight at a time through the SABD+UDOT kernels, in its search
   layer and in its backlink eviction scan. A serial build writes a
@@ -98,6 +111,12 @@ enumerated — there were roughly 1,100 of them.
   detail the README carried is in `doc/operations.md` and `doc/architecture.md`.
 
 ### Fixed
+
+- **`pion-exo` could not be imported on Python 3.10–3.13.** Two classes
+  define a `redis` property and annotate a later method `-> redis.Redis`;
+  before 3.14 that annotation is evaluated in class scope, where `redis` is
+  the property, and the import raised `AttributeError`. The package declares
+  Python 3.10 and up. Annotations are now deferred.
 
 - **`--epoll` on x86-64 dropped connections under concurrent load.** Linux
   x86-64 packs `struct epoll_event` to 12 bytes; the loop read each event as a
