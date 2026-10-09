@@ -1,0 +1,6 @@
+pion-server 0.9.7+4b672bb (2026-10-09)
+vector: libpion_vector abi=1 (closed, dims=1536) isa=vnni
+perf version 6.8.12
+6.8.0-146-generic
+pion-server 0.9.7+4b672bb (2026-10-09)
+vector: libpion_vector abi=1 (closed, dims=1536) isa=vnni

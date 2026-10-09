@@ -106,11 +106,45 @@ comptime EPOLL_CTL_ADD = Int32(1)
 comptime EPOLL_CTL_DEL = Int32(2)
 comptime EPOLL_CTL_MOD = Int32(3)
 
+# Linux `struct epoll_event` is {u32 events; u64 data}, and its layout differs
+# by architecture: x86-64's glibc declares it __attribute__((packed)) (12 bytes,
+# data at offset 4); aarch64 does not (16 bytes, data at offset 8). A Mojo
+# struct of those two fields is always 16 bytes with data at 8, which is the
+# aarch64 layout only. On x86-64 every event after the first in an epoll_wait
+# batch was read from the wrong bytes. So events are raw bytes, sized and
+# read per target through the helpers below; `EpollEvent` stays for callers
+# that only need a 16-byte scratch area.
+comptime EPOLL_EV_SIZE = 12 if CompilationTarget.is_x86() else 16
+comptime EPOLL_EV_DATA = 4 if CompilationTarget.is_x86() else 8
+
+
+@always_inline
+def epoll_ev_events(evs: Pointer[UInt8, MutUntrackedOrigin], i: Int) -> UInt32:
+    """The `events` mask of event i in an epoll_wait buffer."""
+    return evs.unsafe_offset(i * EPOLL_EV_SIZE).bitcast[UInt32]()[]
+
+
+@always_inline
+def epoll_ev_fd(evs: Pointer[UInt8, MutUntrackedOrigin], i: Int) -> Int32:
+    """The fd stored in the low 32 bits of event i's `data`."""
+    return Int32(evs.unsafe_offset(i * EPOLL_EV_SIZE + EPOLL_EV_DATA).bitcast[UInt32]()[])
+
+
+def epoll_ctl_fd(epfd: Int32, op: Int32, fd: Int32, events: UInt32) -> Int32:
+    """epoll_ctl with `data` = fd, laid out for this target."""
+    var ev = stack_allocation[16, UInt8]()
+    unsafe_memset(ev, 0, 16)
+    ev.bitcast[UInt32]()[] = events
+    ev.unsafe_offset(EPOLL_EV_DATA).bitcast[UInt32]()[] = UInt32(fd)
+    return external_call["epoll_ctl", Int32](epfd, op, fd, ev)
+
+
 @fieldwise_init
 struct EpollEvent(Copyable, Movable):
-    """Linux epoll_event: 12 bytes packed (events:u32 + data:u64)."""
+    """16 bytes: the aarch64 layout of `struct epoll_event`. Do not index an
+    epoll_wait result with it; use epoll_ev_events / epoll_ev_fd."""
     var events: UInt32
-    var data: UInt64    # union — low 32 bits = fd
+    var data: UInt64
 
     def __init__(out self):
         self.events = 0
@@ -273,10 +307,7 @@ struct TCPServer(Copyable, Movable):
         comptime if CompilationTarget.is_linux():
             # epoll: modify to add EPOLLOUT (kq is epoll fd; -1 means io_uring path — skip)
             if kq >= 0:
-                var ev = stack_allocation[1, EpollEvent]()
-                ev[unsafe_offset=0].events = EPOLLIN | EPOLLOUT
-                ev[unsafe_offset=0].data = UInt64(fd)
-                _ = external_call["epoll_ctl", Int32](kq, EPOLL_CTL_MOD, fd, ev)
+                _ = epoll_ctl_fd(kq, EPOLL_CTL_MOD, fd, EPOLLIN | EPOLLOUT)
         else:
             var ev = stack_allocation[1, KEvent]()
             ev[unsafe_offset=0] = KEvent(UInt64(fd), Int16(-2), UInt16(0x0001 | 0x0004), UInt32(0), Int64(0), null_ptr[NoneType, MutUntrackedOrigin]())
@@ -288,10 +319,7 @@ struct TCPServer(Copyable, Movable):
         comptime if CompilationTarget.is_linux():
             # epoll: modify to remove EPOLLOUT (kq is epoll fd; -1 means io_uring path — skip)
             if kq >= 0:
-                var ev = stack_allocation[1, EpollEvent]()
-                ev[unsafe_offset=0].events = EPOLLIN
-                ev[unsafe_offset=0].data = UInt64(fd)
-                _ = external_call["epoll_ctl", Int32](kq, EPOLL_CTL_MOD, fd, ev)
+                _ = epoll_ctl_fd(kq, EPOLL_CTL_MOD, fd, EPOLLIN)
         else:
             var ev = stack_allocation[1, KEvent]()
             ev[unsafe_offset=0] = KEvent(UInt64(fd), Int16(-2), UInt16(0x0002), UInt32(0), Int64(0), null_ptr[NoneType, MutUntrackedOrigin]())
