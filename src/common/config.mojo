@@ -129,7 +129,7 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         I/O-thread path. A default only: an explicit --io-threads wins, and it
         applies only where the prototype serves (Linux, -w 1, no --kvcache),
         selecting epoll. True when it applied."""
-        if self.io_threads > 1 or self.workers != 1 or kvcache or self.use_xdp:
+        if self.io_threads > 1 or self.workers != 1 or kvcache or self.use_xdp or self.use_iouring:
             return False
         comptime if CompilationTarget.is_linux():
             var p = external_call["getenv", Pointer[UInt8, MutUntrackedOrigin]](
