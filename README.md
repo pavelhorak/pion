@@ -242,6 +242,13 @@ vector-set client, so the two clients are different programs sending the same
 queries. Pion's load is its insert (≈10.7 s) plus the index build (≈15.5 s);
 Redis builds while it inserts.*
 
+**Against RediSearch, on the same `FT.*` API:** VectorDBBench's own clients on
+both sides, the same case, both servers pinned to the same 8 cores of an EPYC
+8124P, median of 3. Pion serves **6,673 QPS** at 10 clients and Redis 8.10.2
+with RediSearch at its defaults 1,887 (3.5×), at recall@100 0.960 against
+0.963; one client's P99 is 1.3 ms against 5.0 ms. Method and raw runs:
+[`benchmarks/results/2026-10-09-linux-epyc-8124p/vectordbbench_50k/`](benchmarks/results/2026-10-09-linux-epyc-8124p/vectordbbench_50k/README.md).
+
 At equal or better recall, Pion is the faster of the two. At ef=100 — the
 smallest search effort for 100 results, since Pion raises a smaller ef to k —
 four runs measured a median **8,544 QPS at recall 0.939**, against Redis's 8,039
