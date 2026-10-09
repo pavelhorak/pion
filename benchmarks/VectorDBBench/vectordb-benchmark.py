@@ -216,6 +216,10 @@ def main():
                         help=f"ef_runtime for search (default: {EF_RUNTIME})")
     parser.add_argument("--workers", type=int, default=10,
                         help="Pion worker count (default: 10)")
+    parser.add_argument("--load-concurrency", type=int, default=1,
+                        help="VectorDBBench ingest connections for Pion (default 1, the shape "
+                             "every gate baseline was measured with; 0 = VectorDBBench's own "
+                             "default, one per CPU). Rows from any other value are labelled.")
     parser.add_argument("--gpu", action="store_true",
                         help="Enable Metal GPU vector search (macOS Apple Silicon)")
     parser.add_argument("--polarquant", action="store_true",
@@ -422,7 +426,7 @@ def main():
             # 0.9603 measured, 2026-08-04) — a benchmark-topology artifact, not
             # an engine regression. Pin single-connection ingest so the load
             # shape matches the one every gate baseline was measured with.
-            f" --load-concurrency 1"
+            f" --load-concurrency {args.load_concurrency}"
             f"{skip_load_flags}"
         )
         res = extract_results(out, "pion")
@@ -430,7 +434,8 @@ def main():
         no_queries = bool(res) and ran_no_queries(res)
         if res and not never_built and not no_queries:
             gpu_tag = " GPU" if args.gpu else ""
-            res["name"] = f"Pion V27{gpu_tag} (ef={ef}, w={args.workers})"
+            load_tag = "" if args.load_concurrency == 1 else f", load={args.load_concurrency}"
+            res["name"] = f"Pion V27{gpu_tag} (ef={ef}, w={args.workers}{load_tag})"
             bench_results.append(res)
         # Skip stop_server + cleanup when PION_BENCH_NO_CLEANUP=1 (leaves
         # server alive on PION_PORT for the caller to drive a follow-up bench
