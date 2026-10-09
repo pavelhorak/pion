@@ -7,7 +7,8 @@ from std.memory import alloc, unsafe_memcpy, stack_allocation
 from std.ffi import external_call
 from std.collections import List
 from src.common.skip_list import SlabSkipList
-from src.network.server import KEvent, EpollEvent, TCPServer, EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLET, EPOLLEXCLUSIVE, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
+from src.network.server import KEvent, TCPServer, EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLET, EPOLLEXCLUSIVE, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
+from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
 from src.common.list import SlabList
 from src.memory.slab_allocator import SlabAllocator
 from src.common.hash_map import SlabHashMap, StripedHashMap
@@ -1608,27 +1609,21 @@ struct NetworkEngine:
         # Register listen fd for EPOLLIN + EPOLLEXCLUSIVE (level-triggered).
         # EPOLLEXCLUSIVE: only one worker wakes per incoming connection, preventing
         # thundering herd and ensuring even connection distribution across workers.
-        var ev = stack_allocation[1, EpollEvent]()
         var listen_flags = EPOLLIN
         if self.num_workers > 1:
             listen_flags = EPOLLIN | EPOLLEXCLUSIVE
-        ev[unsafe_offset=0].events = listen_flags
-        ev[unsafe_offset=0].data = UInt64(self.server.fd)
-        _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_ADD, self.server.fd, ev)
+        _ = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, self.server.fd, listen_flags)
 
         # Secondary listen fd (affinity port)
         if self.secondary_listen_fd >= 0:
-            ev[unsafe_offset=0].events = listen_flags
-            ev[unsafe_offset=0].data = UInt64(self.secondary_listen_fd)
-            _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_ADD, self.secondary_listen_fd, ev)
+            _ = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, self.secondary_listen_fd, listen_flags)
 
         # Binary protocol listen fd
         if self.binary_listen_fd >= 0:
-            ev[unsafe_offset=0].events = listen_flags
-            ev[unsafe_offset=0].data = UInt64(self.binary_listen_fd)
-            _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_ADD, self.binary_listen_fd, ev)
+            _ = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, self.binary_listen_fd, listen_flags)
 
-        var events = alloc[EpollEvent](1024)
+        # Raw bytes, read through epoll_ev_*: x86-64's epoll_event is packed (12 B).
+        var events = alloc[UInt8](1024 * 16)
         # Pass epfd as kq — _flush_kqueue will use kevent_add_write/kevent_del_write
         # which now dispatch to epoll_ctl on Linux when kq >= 0.
         var kq = epfd
@@ -1667,7 +1662,8 @@ struct NetworkEngine:
             if nevents <= 0: continue
 
             for i in range(nevents):
-                var fd = Int32(events[unsafe_offset=i].data & 0xFFFFFFFF)
+                var fd = epoll_ev_fd(events, i)
+                var evmask = epoll_ev_events(events, i)
 
                 # Guard: fd 0/1/2 are stdin/stdout/stderr — never client fds.
                 # If they appear in epoll events, something went wrong (e.g., stale
@@ -1677,11 +1673,11 @@ struct NetworkEngine:
                     continue
 
                 # EPOLLOUT: flush pending writes
-                if events[unsafe_offset=i].events & EPOLLOUT:
+                if evmask & EPOLLOUT:
                     self.writer.flush_response(fd, self.server, kq)
                     self._close_after_reply(fd)    # #47
                     # If both EPOLLIN and EPOLLOUT are set, also process EPOLLIN below
-                    if not (events[unsafe_offset=i].events & EPOLLIN):
+                    if not (evmask & EPOLLIN):
                         continue
 
                 var is_listen_fd = (fd == self.server.fd or (self.secondary_listen_fd >= 0 and fd == self.secondary_listen_fd) or (self.binary_listen_fd >= 0 and fd == self.binary_listen_fd))
@@ -1715,9 +1711,7 @@ struct NetworkEngine:
                         self.writer.out_free(Int(new_fd))                     # #49
                         self.slow_path.clients.on_accept(new_fd)   # #47
                         # Register for EPOLLIN (level-triggered)
-                        ev[unsafe_offset=0].events = EPOLLIN
-                        ev[unsafe_offset=0].data = UInt64(new_fd)
-                        _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_ADD, new_fd, ev)
+                        _ = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, new_fd, EPOLLIN)
                 else:
                     # EPOLLERR/EPOLLHUP: always close — even if EPOLLIN is also set.
                     # Trying to read from an errored fd risks stale data or hangs.
@@ -1727,8 +1721,8 @@ struct NetworkEngine:
                     # null-check, so they wouldn't fire when client_buffers happened
                     # to be null. Routing through `_close_fd_common` aligns the
                     # EPOLLERR path with the recv-based close path.)
-                    if events[unsafe_offset=i].events & (EPOLLERR | EPOLLHUP):
-                        _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_DEL, fd, ev)
+                    if evmask & (EPOLLERR | EPOLLHUP):
+                        _ = epoll_ctl_fd(epfd, EPOLL_CTL_DEL, fd, 0)
                         self._close_fd_common(fd, Int(fd))
                         continue
 
@@ -1745,7 +1739,7 @@ struct NetworkEngine:
                         # can never complete. `continue` here spun the worker
                         # forever: level-triggered epoll reports the fd again
                         # at once. Close it, as kqueue and io_uring do.
-                        _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_DEL, fd, ev)
+                        _ = epoll_ctl_fd(epfd, EPOLL_CTL_DEL, fd, 0)
                         self._close_fd_common(fd, client_idx)
                         continue
                     var n = self.server.recv(fd, client_buffer.unsafe_offset(stored_len), recv_size)
@@ -1759,7 +1753,7 @@ struct NetworkEngine:
                                 continue
                         if do_close:
                             # gh #85: epoll-specific deregister + shared close cleanup.
-                            _ = external_call["epoll_ctl", Int32](epfd, EPOLL_CTL_DEL, fd, ev)
+                            _ = epoll_ctl_fd(epfd, EPOLL_CTL_DEL, fd, 0)
                             self._close_fd_common(fd, client_idx)
                         continue
 
