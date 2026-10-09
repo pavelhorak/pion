@@ -1,4 +1,4 @@
-from src.common.ptr import null_ptr
+from src.common.ptr import null_ptr, is_null
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
@@ -28,15 +28,26 @@ comptime IORING_OP_PROVIDE_BUFFERS = 31
 comptime IORING_ENTER_GETEVENTS = 1
 comptime IORING_ENTER_SQ_WAKEUP = 2
 comptime IORING_ENTER_SQ_WAIT   = 4
+comptime IORING_ENTER_REGISTERED_RING = 16   # fd is a registered ring index (5.18)
 
 # io_uring_setup flags
 comptime IORING_SETUP_SQPOLL    = 2
 comptime IORING_SETUP_SQ_AFF    = 4
+# gh #205: one thread creates and drives each ring (shared-nothing), which is
+# exactly what these promise. SINGLE_ISSUER (6.0) lets the kernel skip the
+# submission locking; DEFER_TASKRUN (6.1, needs SINGLE_ISSUER, not SQPOLL)
+# runs completion work only inside io_uring_enter(GETEVENTS) instead of
+# interrupting the thread with task-work IPIs. The loop enters with
+# GETEVENTS on every pass and a 1 ms timeout is always in flight, so
+# completions are still collected while idle.
+comptime IORING_SETUP_SINGLE_ISSUER = UInt32(1 << 12)
+comptime IORING_SETUP_DEFER_TASKRUN = UInt32(1 << 13)
 
 # SQ ring flags (read from sq_flags pointer in the ring)
 comptime IORING_SQ_NEED_WAKEUP  = 1
 
 # SQE flags
+comptime IOSQE_FIXED_FILE       = UInt8(1 << 0)  # sqe.fd is a registered-file slot
 comptime IOSQE_BUFFER_SELECT    = UInt8(1 << 5)  # select buffer from group (bit 5, not 3!)
 
 # CQE flags
@@ -49,6 +60,10 @@ comptime IORING_RECV_MULTISHOT  = UInt32(1 << 1)   # multishot recv (kernel 6.0+
 # Buffer ring constants
 comptime PBUF_RING_ENTRIES = 256     # number of buffers per group
 comptime PBUF_SIZE         = 16384   # 16KB per buffer (matches Redis querybuf)
+# Bytes past the last provided buffer. A buffer can be parsed in place
+# (gh #206), so a vector load at the end of the last one stays inside the
+# allocation.
+comptime PBUF_POOL_SLACK   = 4096
 
 # Per-fd tables are indexed by fd, like the engine's (client_buffers etc.).
 comptime URING_MAX_FDS = 65536
@@ -149,6 +164,34 @@ struct CQRingOffsets(Copyable, Movable, ImplicitlyCopyable):
         self.overflow = 0; self.cqes = 0; self.flags = 0; self.resv0 = 0; self.resv1 = 0
 
 
+struct UringExtras(Movable):
+    """gh #205 / #206: the optional features' state that no default-path SQE
+    reads, behind IOUring.ext (see the note on IOUring's fields)."""
+    # The ring's own fd. IOUring.ring_fd becomes the registered index once
+    # the ring fd is registered; io_uring_register still needs this one.
+    var real_fd:      Int32
+    # Setup flags granted beyond SQPOLL: 0, SINGLE_ISSUER, or
+    # SINGLE_ISSUER | DEFER_TASKRUN.
+    var setup_flags:  UInt32
+    # Registered-file table size (0 = not registered).
+    var fixed_slots:  Int
+    # The provided-buffer ring (IORING_REGISTER_PBUF_RING); null when the
+    # buffers go back with PROVIDE_BUFFERS SQEs instead.
+    var pbuf_ring:    Pointer[UInt8, MutUntrackedOrigin]
+    var pbuf_tail:    UInt16
+    # A multishot RECV's bytes are parsed in the provided buffer itself when
+    # the connection holds no unfinished request.
+    var zero_copy:    Bool
+
+    def __init__(out self):
+        self.real_fd = -1
+        self.setup_flags = 0
+        self.fixed_slots = 0
+        self.pbuf_ring = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.pbuf_tail = 0
+        self.zero_copy = False
+
+
 struct IOUring(Movable):
     var ring_fd:      Int32
     var sq_ring:      Pointer[UInt8, MutUntrackedOrigin]
@@ -181,6 +224,19 @@ struct IOUring(Movable):
     # waiting for its RECV/SEND completions to drain (two-phase close). Shared
     # with the ResponseWriter, which must not submit a SEND for such an fd.
     var fd_closing:   Pointer[UInt8, MutUntrackedOrigin]
+    # ── gh #205 / #206: optional features (off unless asked for, each
+    # resolved by a probe so the engine reports what the kernel granted).
+    # Only what a default-path SQE or enter() reads lives here; the rest is
+    # behind `ext`. An out-of-line `mut self` call (_make_sq_room, inlined at
+    # every submit site) copies every field of this struct in and out, so it
+    # stays small. ──
+    # 0, or IORING_ENTER_REGISTERED_RING: `ring_fd` is then the registered
+    # ring index and `ext[].real_fd` the fd io_uring_register needs.
+    var enter_flags:  UInt32
+    # Registered files: null when off. Per fd, 1 while slot fd holds the
+    # socket on fd.
+    var fd_fixed:     Pointer[UInt8, MutUntrackedOrigin]
+    var ext:          Pointer[UringExtras, MutUntrackedOrigin]
 
     def __init__(out self):
         self.ring_fd      = -1
@@ -206,6 +262,10 @@ struct IOUring(Movable):
         self.timeout_ts = Pointer[Int64, MutUntrackedOrigin](unsafe_from_address=Int(_ts))
         self.fd_gen = null_ptr[UInt32, MutUntrackedOrigin]()
         self.fd_closing = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.enter_flags = 0
+        self.fd_fixed = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.ext = alloc[UringExtras](1)
+        self.ext.unsafe_write(UringExtras())
 
     def __moveinit__(out self, deinit take: Self):
         self.ring_fd      = take.ring_fd
@@ -229,32 +289,54 @@ struct IOUring(Movable):
         self.timeout_ts   = take.timeout_ts
         self.fd_gen       = take.fd_gen
         self.fd_closing   = take.fd_closing
+        self.enter_flags  = take.enter_flags
+        self.fd_fixed     = take.fd_fixed
+        self.ext          = take.ext
 
-    def setup(mut self, entries: UInt32, sqpoll: Bool = False) -> Bool:
+    def setup(mut self, entries: UInt32, sqpoll: Bool = False, defer: Bool = False) -> Bool:
         # Allocate a 128-byte buffer for io_uring_params (kernel layout = 120 bytes).
         # Using alloc instead of address_of(embedded field) avoids origin tracking issues.
         var p = alloc[UInt8](128)
-        unsafe_memset(p, 0, 128)
 
-        # SQPOLL: set IORING_SETUP_SQPOLL flag in params.flags (offset 8).
-        # The kernel spawns a dedicated SQ polling thread that consumes SQEs without
-        # requiring io_uring_enter() for submission — only needed when the kernel thread
-        # has gone idle (signalled via IORING_SQ_NEED_WAKEUP in sq_flags).
-        # sq_thread_idle (offset 16) = 1000ms — kernel thread sleeps after 1s idle.
-        if sqpoll:
+        # gh #205: `defer` asks for SINGLE_ISSUER | DEFER_TASKRUN. A kernel
+        # that does not know a flag refuses the whole setup (EINVAL), as does
+        # DEFER_TASKRUN with SQPOLL, so each refusal is retried with less:
+        # SINGLE_ISSUER alone, then nothing. `setup_flags` keeps what stuck.
+        var extra = UInt32(0)
+        if defer:
+            extra = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN
+        var ring_fd = Int32(-1)
+        while True:
+            unsafe_memset(p, 0, 128)
             var flags_ptr = (p.unsafe_offset(8)).unsafe_bitcast[UInt32]()
-            flags_ptr[] = UInt32(IORING_SETUP_SQPOLL)
-            var idle_ptr = (p.unsafe_offset(16)).unsafe_bitcast[UInt32]()
-            idle_ptr[] = UInt32(1000)  # 1000ms idle timeout
+            flags_ptr[] = extra
+            # SQPOLL: set IORING_SETUP_SQPOLL flag in params.flags (offset 8).
+            # The kernel spawns a dedicated SQ polling thread that consumes SQEs without
+            # requiring io_uring_enter() for submission — only needed when the kernel thread
+            # has gone idle (signalled via IORING_SQ_NEED_WAKEUP in sq_flags).
+            # sq_thread_idle (offset 16) = 1000ms — kernel thread sleeps after 1s idle.
+            if sqpoll:
+                flags_ptr[] = extra | UInt32(IORING_SETUP_SQPOLL)
+                var idle_ptr = (p.unsafe_offset(16)).unsafe_bitcast[UInt32]()
+                idle_ptr[] = UInt32(1000)  # 1000ms idle timeout
 
-        # pion_io_uring_setup wraps syscall(SYS_io_uring_setup, entries, &params)
-        var ring_fd = external_call["pion_io_uring_setup", Int32](
-            entries, p.unsafe_bitcast[NoneType]()
-        )
+            # pion_io_uring_setup wraps syscall(SYS_io_uring_setup, entries, &params)
+            ring_fd = external_call["pion_io_uring_setup", Int32](
+                entries, p.unsafe_bitcast[NoneType]()
+            )
+            if ring_fd >= 0 or extra == 0:
+                break
+            if extra == (IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN):
+                extra = IORING_SETUP_SINGLE_ISSUER
+            else:
+                extra = 0
         if ring_fd < 0:
             p.unsafe_free()
             return False
         self.ring_fd = Int32(ring_fd)
+        self.ext[].real_fd = self.ring_fd
+        self.ext[].setup_flags = extra
+        self.enter_flags = 0
 
         # Read params fields from the kernel-filled buffer.
         # io_uring_params layout (all LE, confirmed against kernel headers):
@@ -388,13 +470,13 @@ struct IOUring(Movable):
                 return
             var r: Int32
             if self.sqpoll_active:
-                var flags = UInt32(IORING_ENTER_SQ_WAIT)
+                var flags = UInt32(IORING_ENTER_SQ_WAIT) | self.enter_flags
                 if self.needs_wakeup():
                     flags = flags | UInt32(IORING_ENTER_SQ_WAKEUP)
                 r = external_call["pion_io_uring_enter", Int32](self.ring_fd, UInt32(0), UInt32(0), flags)
             else:
                 r = external_call["pion_io_uring_enter", Int32](
-                    self.ring_fd, self.sq_tail_local - head, UInt32(0), UInt32(0))
+                    self.ring_fd, self.sq_tail_local - head, UInt32(0), self.enter_flags)
             if r < 0:
                 # EINTR: retry. EBUSY / EAGAIN: the kernel is out of completion
                 # space; yield and retry while it flushes its overflow list
@@ -544,7 +626,7 @@ struct IOUring(Movable):
     def submit_send(mut self, fd: Int32, buf: Pointer[UInt8, MutUntrackedOrigin], length: Int):
         var sqe = self._get_sqe()
         sqe[].opcode       = UInt8(IORING_OP_SEND)
-        sqe[].flags        = 0
+        sqe[].flags        = self.fixed_flag(fd)
         sqe[].ioprio       = 0
         sqe[].fd           = fd
         sqe[].off          = 0
@@ -557,6 +639,127 @@ struct IOUring(Movable):
         sqe[].addr3        = 0
         sqe[].pad          = 0
         sqe[].user_data    = self.make_ud(UD_SEND, fd)
+
+    # ── gh #205: registered ring fd and registered files ────────────────────
+
+    @always_inline
+    def register_ring_fd(mut self) -> Bool:
+        """IORING_REGISTER_RING_FDS (5.18): every enter() then names the ring
+        by its registered index, and the kernel skips the fd-table lookup it
+        does for a plain fd. Per thread, like the ring itself. False when the
+        kernel refuses; enter() keeps using the fd."""
+        var idx = external_call["pion_uring_register_ring_fd", Int32](self.ext[].real_fd)
+        if idx < 0:
+            return False
+        self.ring_fd = idx
+        self.enter_flags = UInt32(IORING_ENTER_REGISTERED_RING)
+        return True
+
+    @always_inline
+    def register_files(mut self, want: Int) -> Bool:
+        """IORING_REGISTER_FILES: an empty table of up to `want` slots
+        (clamped to RLIMIT_NOFILE). Slot i serves fd i, so no slot allocator
+        is needed: `fixed_add` fills a slot at accept, `fixed_remove` empties
+        it at close."""
+        var n = external_call["pion_uring_register_files_sparse", Int32](
+            self.ext[].real_fd, Int32(want))
+        if n <= 0:
+            return False
+        var t = alloc[UInt8](URING_MAX_FDS)
+        unsafe_memset(t, 0, URING_MAX_FDS)
+        self.ext[].fixed_slots = Int(n)
+        self.fd_fixed = t
+        return True
+
+    @always_inline
+    def fixed_add(mut self, fd: Int32):
+        """The connection just accepted on `fd` goes into slot `fd`, replacing
+        whatever the slot held. If the update fails the fd stays unregistered
+        and its SQEs name the plain fd."""
+        if is_null(self.fd_fixed):
+            return
+        var ci = Int(fd)
+        if ci < 0 or ci >= self.ext[].fixed_slots:
+            return
+        var r = external_call["pion_uring_files_update", Int32](self.ext[].real_fd, Int32(ci), fd)
+        self.fd_fixed[unsafe_offset=ci] = UInt8(1) if r == 1 else UInt8(0)
+
+    @always_inline
+    def fixed_remove(mut self, fd: Int32):
+        """Empty slot `fd` before the fd is closed. The table holds its own
+        reference to the socket: left in place, the socket would outlive
+        close(), and an SQE naming the slot would reach it after the fd
+        number had gone to a new connection."""
+        if is_null(self.fd_fixed):
+            return
+        var ci = Int(fd)
+        if ci < 0 or ci >= self.ext[].fixed_slots or self.fd_fixed[unsafe_offset=ci] == 0:
+            return
+        self.fd_fixed[unsafe_offset=ci] = 0
+        _ = external_call["pion_uring_files_update", Int32](self.ext[].real_fd, Int32(ci), Int32(-1))
+
+    @always_inline
+    def fixed_flag(self, fd: Int32) -> UInt8:
+        """IOSQE_FIXED_FILE when slot `fd` holds this fd's socket, else 0.
+        Only SENDs use it. A multishot RECV takes its file reference once,
+        when armed, so a slot saves it nothing; and on kernels before 6.13 a
+        long-lived fixed-file request holds back the release of every file
+        removed from the table after it was issued, which would keep closed
+        sockets alive for as long as some other connection stays idle."""
+        if is_null(self.fd_fixed):
+            return 0
+        return self.fd_fixed[unsafe_offset=Int(fd)]
+
+    # ── gh #206: provided-buffer ring ────────────────────────────────────────
+
+    @always_inline
+    def register_pbuf_ring(mut self, pool: Pointer[UInt8, MutUntrackedOrigin], bgid: UInt16) -> Bool:
+        """IORING_REGISTER_PBUF_RING (5.19) for buffer group `bgid`, holding
+        all PBUF_RING_ENTRIES buffers of `pool`. A buffer then goes back to
+        the kernel with a few stores (`pbuf_recycle`) instead of a
+        PROVIDE_BUFFERS SQE. Must run before any PROVIDE_BUFFERS for `bgid`
+        (the kernel refuses a group that already has legacy buffers)."""
+        var ring = external_call["pion_uring_pbuf_ring_alloc", Pointer[UInt8, MutUntrackedOrigin]](
+            Int32(PBUF_RING_ENTRIES))
+        if is_null(ring):
+            return False
+        var r = external_call["pion_uring_register_pbuf_ring", Int32](
+            self.ext[].real_fd, ring.unsafe_bitcast[NoneType](), Int32(PBUF_RING_ENTRIES), Int32(bgid))
+        if r < 0:
+            _ = external_call["pion_wal_munmap", Int32](ring.unsafe_bitcast[NoneType](), PBUF_RING_ENTRIES * 16)
+            return False
+        self.ext[].pbuf_ring = ring
+        self.ext[].pbuf_tail = 0
+        for bid in range(PBUF_RING_ENTRIES):
+            self._pbuf_put(pool, bid)
+        self._pbuf_publish()
+        return True
+
+    @always_inline
+    def _pbuf_put(mut self, pool: Pointer[UInt8, MutUntrackedOrigin], bid: Int):
+        """Write buffer `bid` into the next ring entry (struct io_uring_buf:
+        addr u64, len u32, bid u16, resv u16). The resv of entry 0 is the
+        ring's tail, so it is never written here."""
+        var x = self.ext
+        var e = x[].pbuf_ring.unsafe_offset(Int(x[].pbuf_tail & UInt16(PBUF_RING_ENTRIES - 1)) * 16)
+        e.unsafe_bitcast[UInt64]()[] = UInt64(Int(pool.unsafe_offset(bid * PBUF_SIZE)))
+        (e.unsafe_offset(8)).unsafe_bitcast[UInt32]()[] = UInt32(PBUF_SIZE)
+        (e.unsafe_offset(12)).unsafe_bitcast[UInt16]()[] = UInt16(bid)
+        x[].pbuf_tail += 1
+
+    @always_inline
+    def _pbuf_publish(mut self):
+        """Hand every entry written so far to the kernel: a RELEASE store of
+        the tail, so the entries are visible before it."""
+        var x = self.ext
+        Atomic[Scalar[DType.uint16]].store[ordering=Ordering.RELEASE](
+            (x[].pbuf_ring.unsafe_offset(14)).unsafe_bitcast[UInt16](), x[].pbuf_tail)
+
+    @always_inline
+    def pbuf_recycle(mut self, pool: Pointer[UInt8, MutUntrackedOrigin], bid: Int):
+        """Give provided buffer `bid` back to the kernel through the ring."""
+        self._pbuf_put(pool, bid)
+        self._pbuf_publish()
 
     @always_inline
     def needs_wakeup(self) -> Bool:
@@ -581,7 +784,7 @@ struct IOUring(Movable):
         #   2. We need to wait for completions (min_complete > 0) — GETEVENTS flag
         if self.sqpoll_active:
             if min_complete > 0:
-                var flags = UInt32(IORING_ENTER_GETEVENTS)
+                var flags = UInt32(IORING_ENTER_GETEVENTS) | self.enter_flags
                 if self.needs_wakeup():
                     flags = flags | UInt32(IORING_ENTER_SQ_WAKEUP)
                 _ = external_call["pion_io_uring_enter", Int32](
@@ -589,16 +792,20 @@ struct IOUring(Movable):
                 )
             elif self.needs_wakeup():
                 _ = external_call["pion_io_uring_enter", Int32](
-                    self.ring_fd, UInt32(0), UInt32(0), UInt32(IORING_ENTER_SQ_WAKEUP)
+                    self.ring_fd, UInt32(0), UInt32(0),
+                    UInt32(IORING_ENTER_SQ_WAKEUP) | self.enter_flags
                 )
             return
 
         # Standard mode: explicit submission + optional wait for completions.
         # A failure (-EINTR, -EBUSY with the CQ overflowing) submits nothing or
         # part; whatever is left stays counted by `pending` for the next call.
+        # Always with GETEVENTS, even with nothing to submit and
+        # min_complete 0: under DEFER_TASKRUN (gh #205) that is the only place
+        # the kernel posts completions.
         _ = external_call["pion_io_uring_enter", Int32](
             self.ring_fd, self.pending(), UInt32(min_complete),
-            UInt32(IORING_ENTER_GETEVENTS)
+            UInt32(IORING_ENTER_GETEVENTS) | self.enter_flags
         )
 
     # ── completion ──────────────────────────────────────────────────────────

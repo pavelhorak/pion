@@ -115,6 +115,12 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # with Redis's own -OOM error. 0 = unlimited. No eviction: refusal is the
     # whole policy (`maxmemory-policy noeviction`).
     var maxmemory: Int
+    # gh #205 / #206: optional io_uring features, all off by default (the
+    # PION_IOURING_* environment switches turn them on too). Each is probed
+    # at ring setup and the engine reports what the kernel granted.
+    var iouring_defer: Bool      # --iouring-defer: SINGLE_ISSUER + DEFER_TASKRUN
+    var iouring_regfiles: Bool   # --iouring-regfiles: REGISTER_FILES + REGISTER_RING_FD
+    var iouring_pbuf: Bool       # --iouring-pbuf: PBUF_RING + in-place parse of received bytes
 
     def __init__(out self):
         self.port = 1974
@@ -154,6 +160,9 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         self.enable_debug_command = 0
         self.bind_addr = ""
         self.maxmemory = 0
+        self.iouring_defer = False
+        self.iouring_regfiles = False
+        self.iouring_pbuf = False
 
 @fieldwise_init
 struct AIConfig(Copyable, Movable, ImplicitlyCopyable):

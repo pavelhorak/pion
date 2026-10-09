@@ -216,7 +216,8 @@ def _known_flags() -> List[String]:
         "--gpu", "--sqpoll", "--polarquant", "--turboquant", "--nanoquant", "--xdp",
         "--xdp-interface", "--xdp-iface", "--kvcache", "--no-wal", "--wal-size",
         "--wal-max-segments", "--wal-full-policy", "--blob-threshold", "--no-blob-tier",
-        "--iouring", "--epoll", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
+        "--iouring", "--iouring-defer", "--iouring-regfiles", "--iouring-pbuf", "--epoll",
+        "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
         "--tenant", "--moe-cache", "--moe-cache-mib", "--dim", "--max-elements", "--crash-log",
         "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory",
         "--lua-time-limit", "--lua-memory-limit", "--enable-debug-command",
@@ -346,6 +347,11 @@ def _print_help():
     print("      --epoll               epoll (Linux; best at P=1 / w=1 benchmarks)")
     print("      --iouring             io_uring (Linux default, best for production multi-connection)")
     print("      --sqpoll              io_uring SQPOLL — kernel-side polling, eliminates enter() syscall")
+    print("      --iouring-defer       io_uring SINGLE_ISSUER + DEFER_TASKRUN (Linux 6.1; env PION_IOURING_DEFER=1)")
+    print("      --iouring-regfiles    io_uring registered files + ring fd (5.18; env PION_IOURING_REGFILES=1)")
+    print("      --iouring-pbuf        io_uring provided-buffer ring, parse received bytes in place")
+    print("                            (5.19; env PION_IOURING_PBUF=1). Each is probed; the log")
+    print("                            line 'io_uring features' says what the kernel granted.")
     print("      --xdp                 AF_XDP zero-copy kernel bypass (Linux 5.4+, P=1 only)")
     print("      --xdp-iface IF        NIC for XDP attach (default eth0; alias: --xdp-interface)")
     print("")
@@ -670,6 +676,15 @@ def main():
             i += 1
         elif args[i] == "--iouring":
             config.server.use_iouring = True
+            i += 1
+        elif args[i] == "--iouring-defer":
+            config.server.iouring_defer = True
+            i += 1
+        elif args[i] == "--iouring-regfiles":
+            config.server.iouring_regfiles = True
+            i += 1
+        elif args[i] == "--iouring-pbuf":
+            config.server.iouring_pbuf = True
             i += 1
         elif args[i] == "--epoll":
             config.server.use_epoll = True
@@ -1649,6 +1664,12 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                 worker_config.server.no_blob_tier = True
             elif args[j] == "--iouring":
                 worker_config.server.use_iouring = True
+            elif args[j] == "--iouring-defer":
+                worker_config.server.iouring_defer = True
+            elif args[j] == "--iouring-regfiles":
+                worker_config.server.iouring_regfiles = True
+            elif args[j] == "--iouring-pbuf":
+                worker_config.server.iouring_pbuf = True
             elif args[j] == "--epoll":
                 worker_config.server.use_epoll = True
             elif args[j] == "--ns-prefix" and j + 1 < len(args):

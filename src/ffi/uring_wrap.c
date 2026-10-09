@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -243,11 +244,20 @@ int pion_kill(int32_t pid, int sig) {
 #define SYS_io_uring_enter  426
 #endif
 
+#ifndef SYS_io_uring_register
+#define SYS_io_uring_register 427
+#endif
+#include <sys/resource.h>
+
+/* The ring fd, or -errno: the caller probes setup flags one set at a time and
+   only an EINVAL means "this kernel does not know that flag". */
 int pion_io_uring_setup(uint32_t entries, void* params) {
-    return (int)syscall(SYS_io_uring_setup, entries, params);
+    int r = (int)syscall(SYS_io_uring_setup, entries, params);
+    return r < 0 ? -errno : r;
 }
 
-/* flags: IORING_ENTER_GETEVENTS=1 */
+/* flags: IORING_ENTER_GETEVENTS=1; ring_fd is a registered ring index when
+   flags carries IORING_ENTER_REGISTERED_RING (16). */
 int pion_io_uring_enter(int ring_fd, uint32_t to_submit,
                         uint32_t min_complete, uint32_t flags) {
     return (int)syscall(SYS_io_uring_enter,
@@ -262,6 +272,78 @@ void* pion_mmap_uring(size_t length, int prot, int flags, int fd, long offset) {
     return mmap(NULL, length, prot, flags, fd, offset);
 }
 
+/* gh #205/#206: io_uring_register, -errno on failure. */
+static int _uring_register(int ring_fd, unsigned opcode, void* arg, unsigned nr) {
+    int r = (int)syscall(SYS_io_uring_register, ring_fd, opcode, arg, nr);
+    return r < 0 ? -errno : r;
+}
+
+/* IORING_REGISTER_RING_FDS (20, Linux 5.18): the registered index enter()
+   then passes with IORING_ENTER_REGISTERED_RING, or -errno. Offset -1 asks
+   the kernel to pick the slot; it writes the slot back. */
+int pion_uring_register_ring_fd(int ring_fd) {
+    struct { uint32_t offset; uint32_t resv; uint64_t data; } up;
+    up.offset = 0xFFFFFFFFu;
+    up.resv = 0;
+    up.data = (uint64_t)ring_fd;
+    int r = _uring_register(ring_fd, 20, &up, 1);
+    if (r < 0) return r;
+    if (r != 1) return -EINVAL;
+    return (int)up.offset;
+}
+
+/* IORING_REGISTER_FILES (2): a sparse table (every slot -1) of `want` slots,
+   clamped to RLIMIT_NOFILE, which the kernel enforces. The slot count, or
+   -errno. */
+int pion_uring_register_files_sparse(int ring_fd, int want) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY
+        && (rlim_t)want > rl.rlim_cur)
+        want = (int)rl.rlim_cur;
+    if (want <= 0) return -EINVAL;
+    int32_t* fds = (int32_t*)malloc(sizeof(int32_t) * (size_t)want);
+    if (!fds) return -ENOMEM;
+    for (int i = 0; i < want; i++) fds[i] = -1;
+    int r = _uring_register(ring_fd, 2, fds, (unsigned)want);
+    free(fds);
+    return r < 0 ? r : want;
+}
+
+/* IORING_REGISTER_FILES_UPDATE (6): put `fd` (or -1, to empty it) in `slot`.
+   1 on success, or -errno. */
+int pion_uring_files_update(int ring_fd, int slot, int fd) {
+    int32_t one = fd;
+    struct { uint32_t offset; uint32_t resv; uint64_t fds; } up;
+    up.offset = (uint32_t)slot;
+    up.resv = 0;
+    up.fds = (uint64_t)(uintptr_t)&one;
+    return _uring_register(ring_fd, 6, &up, 1);
+}
+
+/* A page-aligned, zeroed ring of `entries` struct io_uring_buf (16 B each)
+   for IORING_REGISTER_PBUF_RING, or NULL. */
+void* pion_uring_pbuf_ring_alloc(int entries) {
+    size_t len = (size_t)entries * 16;
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+    len = (len + (size_t)pg - 1) & ~((size_t)pg - 1);
+    void* p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+}
+
+/* IORING_REGISTER_PBUF_RING (22, Linux 5.19): 0, or -errno. */
+int pion_uring_register_pbuf_ring(int ring_fd, void* ring_addr, int entries, int bgid) {
+    struct {
+        uint64_t ring_addr; uint32_t ring_entries; uint16_t bgid; uint16_t flags;
+        uint64_t resv[3];
+    } reg;
+    memset(&reg, 0, sizeof(reg));
+    reg.ring_addr = (uint64_t)(uintptr_t)ring_addr;
+    reg.ring_entries = (uint32_t)entries;
+    reg.bgid = (uint16_t)bgid;
+    return _uring_register(ring_fd, 22, &reg, 1);
+}
+
 #else
 /* macOS stubs — io_uring is Linux-only */
 int pion_io_uring_setup(uint32_t entries, void* params) { (void)entries; (void)params; return -1; }
@@ -272,6 +354,13 @@ int pion_io_uring_enter(int ring_fd, uint32_t to_submit,
 void* pion_mmap_uring(size_t length, int prot, int flags, int fd, long offset) {
     /* On macOS, fall through to real mmap (WAL needs this) */
     return mmap(NULL, length, prot, flags, fd, offset);
+}
+int pion_uring_register_ring_fd(int ring_fd) { (void)ring_fd; return -ENOSYS; }
+int pion_uring_register_files_sparse(int ring_fd, int want) { (void)ring_fd; (void)want; return -ENOSYS; }
+int pion_uring_files_update(int ring_fd, int slot, int fd) { (void)ring_fd; (void)slot; (void)fd; return -ENOSYS; }
+void* pion_uring_pbuf_ring_alloc(int entries) { (void)entries; return NULL; }
+int pion_uring_register_pbuf_ring(int ring_fd, void* ring_addr, int entries, int bgid) {
+    (void)ring_fd; (void)ring_addr; (void)entries; (void)bgid; return -ENOSYS;
 }
 #endif
 

@@ -27,7 +27,7 @@ from src.network.response_writer import ResponseWriter
 from src.network.fast_path import FastPathHandler
 from src.network.slow_path import SlowPathHandler
 from src.network.fast_path import _get_now_ns
-from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE, URING_MAX_FDS, UD_RECV, UD_SEND, UD_ACCEPT, UD_TIMEOUT
+from src.io.io_uring import IOUring, PBUF_RING_ENTRIES, PBUF_SIZE, PBUF_POOL_SLACK, URING_MAX_FDS, UD_RECV, UD_SEND, UD_ACCEPT, UD_TIMEOUT, IORING_SETUP_DEFER_TASKRUN, IORING_SETUP_SINGLE_ISSUER
 from src.io.xdp import XDPEngine, XDPFrameInfo, TCP_SYN, TCP_ACK, TCP_FIN, TCP_RST, TCP_PSH
 from src.network.cluster import ClusterState, REPL_PORT_OFFSET
 from src.commands.stream import write_xread_reply
@@ -46,6 +46,14 @@ comptime CLIENT_BUF_SIZE = 256 * 1024 * 1024  # 256 MB
 # kqueue loop: empty zero-timeout polls after the last event before it blocks
 # for 1 ms again. An empty kevent is ~1 us, so this is tens of microseconds.
 comptime KQ_SPIN_POLLS = 64
+
+
+def _env_on(name: StaticString) -> Bool:
+    """gh #205 / #206: an environment switch such as PION_IOURING_DEFER is on
+    when it is set to a value starting with 1."""
+    var cname = String(name)
+    var v = external_call["getenv", Pointer[UInt8, MutUntrackedOrigin]](cname.as_c_string_slice())
+    return is_not_null(v) and v[] == 49
 
 
 struct NetworkEngine:
@@ -1217,10 +1225,16 @@ struct NetworkEngine:
     def run_server_uring(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
         from src.network.replication import apply_wal_entries
         var use_sqpoll = self.config.server.use_sqpoll
-        var ring_ok = self.ring[].setup(UInt32(1024), sqpoll=use_sqpoll)
+        # gh #205 / #206: the optional ring features, by flag or environment
+        # (so a test tier can run with them on unchanged). Each is probed and
+        # falls back on its own; `_uring_report_features` says what stuck.
+        var want_defer = self.config.server.iouring_defer or _env_on("PION_IOURING_DEFER")
+        var want_regfiles = self.config.server.iouring_regfiles or _env_on("PION_IOURING_REGFILES")
+        var want_pbuf = self.config.server.iouring_pbuf or _env_on("PION_IOURING_PBUF")
+        var ring_ok = self.ring[].setup(UInt32(1024), sqpoll=use_sqpoll, defer=want_defer)
         if not ring_ok and use_sqpoll:
             print("io_uring SQPOLL setup failed (it needs root or CAP_SYS_NICE); trying without SQPOLL")
-            ring_ok = self.ring[].setup(UInt32(1024), sqpoll=False)
+            ring_ok = self.ring[].setup(UInt32(1024), sqpoll=False, defer=want_defer)
         if not ring_ok:
             # #21: this fell back to run_server_kqueue, which returns at once on
             # Linux, so the worker thread ended while the listening socket stayed
@@ -1239,27 +1253,44 @@ struct NetworkEngine:
         self.writer.bind_ring(self.ring)
         var kq = Int32(-1)  # no kqueue on uring path; flush_response ignores this
 
+        # gh #205: registered ring fd and registered files.
+        var ringfd_ok = False
+        var regfiles_ok = False
+        if want_regfiles:
+            ringfd_ok = self.ring[].register_ring_fd()
+            regfiles_ok = self.ring[].register_files(URING_MAX_FDS)
+
         # Multishot recv: allocate provided buffer pool and register with kernel.
         # 256 × 16KB = 4MB of provided buffers. Falls back to per-fd recv if kernel
         # doesn't support multishot (< 6.0) or provide_buffers fails.
         var buf_group_id = UInt16(self.worker_id)
-        self.multishot_bufs = alloc[UInt8](PBUF_RING_ENTRIES * PBUF_SIZE)
-        self.ring[].submit_provide_buffers(
-            self.multishot_bufs, PBUF_SIZE, PBUF_RING_ENTRIES,
-            buf_group_id, UInt16(0))
-        self.ring[].enter(Int32(1))
-        var pbuf_peek = self.ring[].peek_cqe()
-        if pbuf_peek.found and pbuf_peek.cqe.res >= 0:
+        self.multishot_bufs = alloc[UInt8](PBUF_RING_ENTRIES * PBUF_SIZE + PBUF_POOL_SLACK)
+        # gh #206: a provided-buffer ring first, when asked for; a kernel
+        # without it (< 5.19) gets the PROVIDE_BUFFERS group below.
+        if want_pbuf and self.ring[].register_pbuf_ring(self.multishot_bufs, buf_group_id):
             self.multishot_active = True
-            self.ring[].advance_cq()
-            print("Multishot recv: " + String(PBUF_RING_ENTRIES) + " × " + String(PBUF_SIZE) + "B provided buffers registered")
+            print("Multishot recv: " + String(PBUF_RING_ENTRIES) + " × " + String(PBUF_SIZE) + "B provided buffers registered (buffer ring)")
         else:
-            if pbuf_peek.found:
+            self.ring[].submit_provide_buffers(
+                self.multishot_bufs, PBUF_SIZE, PBUF_RING_ENTRIES,
+                buf_group_id, UInt16(0))
+            self.ring[].enter(Int32(1))
+            var pbuf_peek = self.ring[].peek_cqe()
+            if pbuf_peek.found and pbuf_peek.cqe.res >= 0:
+                self.multishot_active = True
                 self.ring[].advance_cq()
-            self.multishot_active = False
-            self.multishot_bufs.unsafe_free()
-            self.multishot_bufs = null_ptr[UInt8, MutUntrackedOrigin]()
-            print("Multishot recv: not available, using per-fd recv")
+                print("Multishot recv: " + String(PBUF_RING_ENTRIES) + " × " + String(PBUF_SIZE) + "B provided buffers registered")
+            else:
+                if pbuf_peek.found:
+                    self.ring[].advance_cq()
+                self.multishot_active = False
+                self.multishot_bufs.unsafe_free()
+                self.multishot_bufs = null_ptr[UInt8, MutUntrackedOrigin]()
+                print("Multishot recv: not available, using per-fd recv")
+        # gh #206: parse a multishot RECV's bytes in the provided buffer when
+        # the connection holds nothing unfinished (see _uring_dispatch_in_place).
+        self.ring[].ext[].zero_copy = want_pbuf and self.multishot_active
+        self._uring_report_features(want_defer, want_regfiles, want_pbuf, ringfd_ok, regfiles_ok)
 
         # Submit initial ACCEPT(s).
         self.ring[].submit_accept(self.server.fd)
@@ -1346,6 +1377,14 @@ struct NetworkEngine:
                             continue
                         var bid = Int(IOUring.cqe_buffer_id(cqe.flags))
                         var src_buf = self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE)
+                        if stored == 0 and self.ring[].ext[].zero_copy and self.local_affinity[unsafe_offset=ci] != UInt8(2):
+                            # gh #206: nothing unfinished, so the request
+                            # starts in this buffer: parse it there.
+                            self._uring_dispatch_in_place(fd, ci, src_buf, n, kq, hnsw, db_size)
+                            self._uring_recycle_pbuf(cqe.flags, buf_group_id)
+                            if self.uring_recv_armed[unsafe_offset=ci] == 0 and not self.slow_path.parked_waits.is_parked(ci):
+                                self._uring_arm_recv(fd, ci, buf_group_id)
+                            continue
                         if stored + n > CLIENT_BUF_SIZE:
                             # An unfinished request larger than the client
                             # buffer: close the connection, as the other loops
@@ -1434,6 +1473,7 @@ struct NetworkEngine:
                         self.writer.out_free(ci)                     # #49
                         self.writer.ctx[].uring_inflight[unsafe_offset=ci] = 0
                         self.slow_path.clients.on_accept(new_fd)   # #47
+                        self.ring[].fixed_add(new_fd)              # gh #205 (no-op unless registered)
                         self._uring_arm_recv(new_fd, ci, buf_group_id)
 
                 elif kind == UD_TIMEOUT:
@@ -1514,10 +1554,88 @@ struct NetworkEngine:
 
     @always_inline
     def _uring_recycle_pbuf(mut self, cqe_flags: UInt32, buf_group_id: UInt16):
-        """Hand a provided buffer a RECV completion carried back to the kernel."""
+        """Hand a provided buffer a RECV completion carried back to the kernel:
+        through the buffer ring when there is one (gh #206), else with a
+        one-buffer PROVIDE_BUFFERS SQE."""
         var bid = Int(IOUring.cqe_buffer_id(cqe_flags))
+        if is_not_null(self.ring[].ext[].pbuf_ring):
+            self.ring[].pbuf_recycle(self.multishot_bufs, bid)
+            return
         self.ring[].submit_provide_buffers(
             self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE), PBUF_SIZE, 1, buf_group_id, UInt16(bid))
+
+    @no_inline
+    def _uring_dispatch_in_place(mut self, fd: Int32, ci: Int, src_buf: Pointer[UInt8, MutUntrackedOrigin],
+                                 n: Int, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int) raises:
+        """gh #206: dispatch `n` received bytes where the kernel put them, in
+        provided buffer `src_buf`, for a connection that holds no unfinished
+        request (so they are the start of one). The shared dispatch body reads
+        `client_buffers[ci]`, so it is pointed at the provided buffer for the
+        call and put back after. Whatever the drain left (a partial frame, or
+        commands behind a WAIT that parked) is copied into the client buffer:
+        from there on it is today's copy-and-accumulate contract, unchanged.
+        Nothing a command keeps outlives the drain (MULTI and blocked commands
+        copy their frames; replies are copied into the writer), so the
+        provided buffer can go back to the kernel once this returns."""
+        var own = self.client_buffers[unsafe_offset=ci]
+        self.client_buffers[unsafe_offset=ci] = src_buf
+        try:
+            self._dispatch_recv_buffer(fd, ci, 0, n, kq, hnsw, db_size)
+        except e:
+            # Never leave the slot on a buffer the kernel gets back: a close
+            # would free() it.
+            self.client_buffers[unsafe_offset=ci] = own
+            self.client_buffer_lens[unsafe_offset=ci] = 0
+            raise e^
+        self.client_buffers[unsafe_offset=ci] = own
+        var left = self.client_buffer_lens[unsafe_offset=ci]
+        if left > 0:
+            # The drain moved the unconsumed tail to the buffer's start.
+            unsafe_memcpy(dest=own, src=src_buf, count=left)
+
+    def _uring_report_features(mut self, want_defer: Bool, want_regfiles: Bool, want_pbuf: Bool,
+                               ringfd_ok: Bool, regfiles_ok: Bool):
+        """gh #205 / #206: one line naming what the kernel granted for each
+        feature asked for, from worker 0, and from any other worker that got
+        less than it asked for. Silent when nothing was asked for."""
+        if not (want_defer or want_regfiles or want_pbuf):
+            return
+        var line = String("io_uring features (worker ") + String(self.worker_id) + "):"
+        var short = False
+        if want_defer:
+            var f = self.ring[].ext[].setup_flags
+            if (f & IORING_SETUP_DEFER_TASKRUN) != 0:
+                line += " defer=ACTIVE(SINGLE_ISSUER+DEFER_TASKRUN)"
+            elif (f & IORING_SETUP_SINGLE_ISSUER) != 0:
+                line += " defer=PARTIAL(SINGLE_ISSUER only; DEFER_TASKRUN refused" + (", SQPOLL" if self.ring[].sqpoll_active else "") + ")"
+                short = True
+            else:
+                line += " defer=NOT_ACTIVE(kernel refused SINGLE_ISSUER)"
+                short = True
+        if want_regfiles:
+            if regfiles_ok:
+                line += " regfiles=ACTIVE(" + String(self.ring[].ext[].fixed_slots) + " slots)"
+            else:
+                line += " regfiles=NOT_ACTIVE(kernel refused)"
+                short = True
+            if ringfd_ok:
+                line += " ring_fd=ACTIVE"
+            else:
+                line += " ring_fd=NOT_ACTIVE(kernel refused)"
+                short = True
+        if want_pbuf:
+            if is_not_null(self.ring[].ext[].pbuf_ring):
+                line += " pbuf_ring=ACTIVE"
+            else:
+                line += " pbuf_ring=NOT_ACTIVE(" + ("PROVIDE_BUFFERS" if self.multishot_active else "no multishot recv") + ")"
+                short = True
+            if self.ring[].ext[].zero_copy:
+                line += " zero_copy_recv=ACTIVE"
+            else:
+                line += " zero_copy_recv=NOT_ACTIVE(no multishot recv)"
+                short = True
+        if self.worker_id == 0 or short:
+            print(line)
 
     def _uring_stop_accepting(mut self):
         """#22: on a graceful stop, cancel this worker's ACCEPTs and wait for
@@ -1584,6 +1702,7 @@ struct NetworkEngine:
             return
         self.ring[].retire_fd(fd)
         self.ring[].fd_closing[unsafe_offset=ci] = 0
+        self.ring[].fixed_remove(fd)    # gh #205: before close(), see fixed_remove
         self._close_fd_common(fd, ci)
 
     def run_server_epoll(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
