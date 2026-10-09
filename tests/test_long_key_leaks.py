@@ -78,8 +78,12 @@ SETUP = [
     ("PFADD", K["hll"], "a", "b"),
     ("SETBIT", K["bitmap"], "7", "1"),
 ]
-TEARDOWN = [("DEL", *K.values(), DST)]
 SHAPES = [(), ("f",), ("f", "v"), ("0", "-1"), ("1",), (DST,), (DST, "a")]
+# The shapes' plain arguments are keys too, to a command that writes to its
+# argument (RPOPLPUSH key f, RENAME, COPY, SMOVE): left alone, those keys grow
+# every cycle and read as a leak of ~3 list elements a cycle (gh #478).
+SHAPE_KEYS = sorted({a for shape in SHAPES for a in shape} - {DST})
+TEARDOWN = [("DEL", *K.values(), DST, *SHAPE_KEYS)]
 
 # Not probed, each for a reason: they end the connection or the server, change
 # connection mode, block, or grow server-global state by design (a stored
