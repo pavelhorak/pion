@@ -4,6 +4,7 @@ from std.collections import List
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
+from src.network.io_threads import IOHub, io_thread_main, IO_THREAD_BASE
 from src.common.ptr import is_not_null
 
 from src.common.config import PionConfig
@@ -216,7 +217,7 @@ def _known_flags() -> List[String]:
         "--gpu", "--sqpoll", "--polarquant", "--turboquant", "--nanoquant", "--xdp",
         "--xdp-interface", "--xdp-iface", "--kvcache", "--no-wal", "--wal-size",
         "--wal-max-segments", "--wal-full-policy", "--blob-threshold", "--no-blob-tier",
-        "--iouring", "--epoll", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
+        "--iouring", "--epoll", "--io-threads", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
         "--tenant", "--moe-cache", "--moe-cache-mib", "--dim", "--max-elements", "--crash-log",
         "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory",
         "--lua-time-limit", "--lua-memory-limit", "--enable-debug-command",
@@ -235,7 +236,7 @@ def _value_flags() -> List[String]:
         "--requirepass", "--requirepass-file", "--bind", "--tenant", "--moe-cache",
         "--moe-cache-mib", "--dim", "--max-elements", "--crash-log", "--status-file",
         "--rss-warn-pct", "--maxmemory", "--lua-time-limit", "--lua-memory-limit",
-        "--enable-debug-command",
+        "--enable-debug-command", "--io-threads",
     ]
 
 
@@ -674,6 +675,15 @@ def main():
         elif args[i] == "--epoll":
             config.server.use_epoll = True
             i += 1
+        elif args[i] == "--io-threads" and i + 1 < len(args):
+            # #465: 1 executor + N-1 I/O threads over one keyspace
+            try:
+                config.server.io_threads = atol(args[i + 1])
+            except:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]))
+            if config.server.io_threads < 1 or config.server.io_threads > 64:
+                _refuse_arg(String(args[i + 1]), "--io-threads must be 1..64")
+            i += 2
         elif args[i] == "--ns-prefix" and i + 1 < len(args):
             # Multi-tenant isolation: KV.PREFIX.* must use this prefix.
             config.server.ns_prefix = args[i + 1]
@@ -1063,6 +1073,21 @@ def main():
     # from another. Measured at -w 4 with 16 concurrently-opened connections:
     # 41 of 90 GETs of a just-acked key returned nil. Serially-opened
     # connections all land on one worker and hide it completely.
+    # #465: the I/O-thread prototype serves one keyspace from one worker, on
+    # epoll. Refused, not ignored, anywhere else: a flag that silently does
+    # nothing is how a benchmark measures the wrong server.
+    if config.server.io_threads > 1:
+        var _why = String("")
+        if not CompilationTarget.is_linux():
+            _why = "needs Linux (epoll) for now"
+        elif config.server.workers != 1:
+            _why = "serves one keyspace: it needs -w 1 (got -w " + String(config.server.workers) + ")"
+        elif not config.server.use_epoll:
+            _why = "needs --epoll for now (io_uring and kqueue come later)"
+        if _why.byte_length() > 0:
+            print("FATAL: --io-threads " + String(config.server.io_threads) + " " + _why)
+            external_call["exit", NoneType](Int32(1))
+
     if config.server.workers > 1 and not config.server.independent_workers:
         print("")
         print("FATAL: -w " + String(config.server.workers) +
@@ -1524,6 +1549,11 @@ def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64
 # (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers.
 @export
 def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64):
+    # #465: an I/O thread of `--io-threads`, started by the executor (pion_spawn_detached).
+    if worker_idx >= IO_THREAD_BASE:
+        io_thread_main(Pointer[IOHub, MutUntrackedOrigin](unsafe_from_address=Int(ctx)),
+                       Int(worker_idx - IO_THREAD_BASE))
+        return
     # Re-derive the names the old closure captured; the body below is the old
     # worker_task body, unchanged.
     var shared_hnsw_ptr = Pointer[SharedHNSWView, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=0]))
@@ -1651,6 +1681,11 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                 worker_config.server.use_iouring = True
             elif args[j] == "--epoll":
                 worker_config.server.use_epoll = True
+            elif args[j] == "--io-threads" and j + 1 < len(args):
+                try:
+                    worker_config.server.io_threads = atol(args[j + 1])   # #465
+                except:
+                    pass
             elif args[j] == "--ns-prefix" and j + 1 < len(args):
                 worker_config.server.ns_prefix = args[j + 1]
             elif args[j] == "--requirepass" and j + 1 < len(args):

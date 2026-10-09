@@ -115,6 +115,11 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # with Redis's own -OOM error. 0 = unlimited. No eviction: refusal is the
     # whole policy (`maxmemory-policy noeviction`).
     var maxmemory: Int
+    # #465: threads serving ONE keyspace, as Redis's io-threads counts them: the
+    # worker thread executes every command, and io_threads - 1 I/O threads own
+    # the client sockets (accept, recv, send). 1 = today's single-thread loop.
+    # Linux epoll, -w 1 only, while it is a prototype.
+    var io_threads: Int
 
     def __init__(out self):
         self.port = 1974
@@ -154,6 +159,7 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         self.enable_debug_command = 0
         self.bind_addr = ""
         self.maxmemory = 0
+        self.io_threads = 1
 
 @fieldwise_init
 struct AIConfig(Copyable, Movable, ImplicitlyCopyable):
@@ -405,6 +411,9 @@ struct PionConfig(Copyable, Movable, ImplicitlyCopyable):
             print("WAL:        disabled (--no-wal benchmark mode)")
         if self.server.use_epoll:
             print("EPOLL:      forced (--epoll)")
+        if self.server.io_threads > 1:
+            print("IO_THREADS: " + String(self.server.io_threads) + " (1 executor + " +
+                  String(self.server.io_threads - 1) + " I/O threads, one keyspace)")
         elif self.server.use_iouring:
             print("IO_URING:   forced (--iouring)")
         if self.server.use_sqpoll:

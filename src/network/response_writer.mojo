@@ -134,6 +134,11 @@ struct WriterCtx(Movable):
     # sends nothing — the reply cannot be rolled back after it has left. -1
     # otherwise. The slow path sets it per command; other writers never do.
     var suppress_from: Int
+    # #465: the engine runs I/O threads. Replies never reach a socket from this
+    # (the executor's) thread: a flush or a spill queues them in the
+    # connection's pending block, and the I/O thread that owns the connection
+    # sends them once the executor hands the batch back.
+    var io_mode: Bool
 
     def __init__(out self, *, connections: Bool):
         """`connections` False makes a capture context (#36): no per-connection
@@ -166,6 +171,7 @@ struct WriterCtx(Movable):
         self.cap_len = 0
         self.cap_cap = 0
         self.suppress_from = -1
+        self.io_mode = False
 
     def _cap_push(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
         """A capture writer's reply past its buffer, kept for the script."""
@@ -310,6 +316,10 @@ struct WriterCtx(Movable):
         now; the rest is queued, and `queued` makes the engine flush after
         the batch, which arms the write event or submits the SEND."""
         var ci = Int(fd)
+        if self.io_mode:                    # #465: the owning I/O thread sends it
+            self.out_append(ci, src, n)
+            self.queued = True
+            return
         if self.use_uring and self.ring[].fd_closing[unsafe_offset=ci] != 0:
             return
         var sent = 0
@@ -743,6 +753,12 @@ struct ResponseWriter(Movable):
     @no_inline
     def _flush_kqueue(mut self, fd: Int32, server: TCPServer, kq: Int32):
         var fd_idx = Int(fd)
+        if self.ctx[].io_mode:
+            # #465: queue for the I/O thread that owns fd; it sends after the batch.
+            if self.offset > 0:
+                self.out_append(fd_idx, self.buffer, self.offset)
+                self.offset = 0
+            return
 
         # 1. Owed bytes already: queue this batch behind them, then send
         if self.owes(fd_idx):
