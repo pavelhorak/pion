@@ -1380,11 +1380,11 @@ struct NetworkEngine:
                         var src_buf = self.multishot_bufs.unsafe_offset(bid * PBUF_SIZE)
                         if stored == 0 and self.ring[].ext[].zero_copy and self.local_affinity[unsafe_offset=ci] != UInt8(2):
                             # gh #206: nothing unfinished, so the request
-                            # starts in this buffer: parse it there.
-                            self._uring_dispatch_in_place(fd, ci, src_buf, n, kq, hnsw, db_size)
-                            self._uring_recycle_pbuf(cqe.flags, buf_group_id)
-                            if self.uring_recv_armed[unsafe_offset=ci] == 0 and not self.slow_path.parked_waits.is_parked(ci):
-                                self._uring_arm_recv(fd, ci, buf_group_id)
+                            # starts in this buffer: parse it there. The
+                            # recycle and the re-arm happen in there too, so
+                            # this loop does not inline a second copy of them.
+                            self._uring_dispatch_in_place(fd, ci, src_buf, n, cqe.flags, buf_group_id,
+                                                          kq, hnsw, db_size)
                             continue
                         if stored + n > CLIENT_BUF_SIZE:
                             # An unfinished request larger than the client
@@ -1567,10 +1567,12 @@ struct NetworkEngine:
 
     @no_inline
     def _uring_dispatch_in_place(mut self, fd: Int32, ci: Int, src_buf: Pointer[UInt8, MutUntrackedOrigin],
-                                 n: Int, kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int) raises:
+                                 n: Int, cqe_flags: UInt32, buf_group_id: UInt16,
+                                 kq: Int32, mut hnsw: HNSWGraph, mut db_size: Int) raises:
         """gh #206: dispatch `n` received bytes where the kernel put them, in
         provided buffer `src_buf`, for a connection that holds no unfinished
-        request (so they are the start of one). The shared dispatch body reads
+        request (so they are the start of one); then give the buffer back and
+        re-arm, as the loop does after any dispatch. The shared dispatch body reads
         `client_buffers[ci]`, so it is pointed at the provided buffer for the
         call and put back after. Whatever the drain left (a partial frame, or
         commands behind a WAIT that parked) is copied into the client buffer:
@@ -1587,12 +1589,18 @@ struct NetworkEngine:
             # would free() it.
             self.client_buffers[unsafe_offset=ci] = own
             self.client_buffer_lens[unsafe_offset=ci] = 0
+            self._uring_recycle_pbuf(cqe_flags, buf_group_id)
             raise e^
         self.client_buffers[unsafe_offset=ci] = own
         var left = self.client_buffer_lens[unsafe_offset=ci]
         if left > 0:
             # The drain moved the unconsumed tail to the buffer's start.
             unsafe_memcpy(dest=own, src=src_buf, count=left)
+        self._uring_recycle_pbuf(cqe_flags, buf_group_id)
+        # As after any dispatch: re-arm unless a RECV is still armed (a live
+        # multishot) or a parked command owns the fd's next bytes.
+        if self.uring_recv_armed[unsafe_offset=ci] == 0 and not self.slow_path.parked_waits.is_parked(ci):
+            self._uring_arm_recv(fd, ci, buf_group_id)
 
     @no_inline
     def _uring_report_features(mut self, want_defer: Bool, want_regfiles: Bool, want_pbuf: Bool,

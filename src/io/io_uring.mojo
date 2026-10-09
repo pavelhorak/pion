@@ -164,6 +164,23 @@ struct CQRingOffsets(Copyable, Movable, ImplicitlyCopyable):
         self.overflow = 0; self.cqes = 0; self.flags = 0; self.resv0 = 0; self.resv1 = 0
 
 
+@no_inline
+def _uring_fixed_update(ext: Pointer[UringExtras, MutUntrackedOrigin],
+                        table: Pointer[UInt8, MutUntrackedOrigin], fd: Int32, add: Bool):
+    """gh #205: fill (`add`) or empty registered-file slot `fd`. Out of line:
+    every close site in the io_uring loop calls it, and only a ring with
+    registered files gets past the inlined null check in front of it."""
+    var ci = Int(fd)
+    if ci < 0 or ci >= ext[].fixed_slots:
+        return
+    if add:
+        var r = external_call["pion_uring_files_update", Int32](ext[].real_fd, Int32(ci), fd)
+        table[unsafe_offset=ci] = UInt8(1) if r == 1 else UInt8(0)
+    elif table[unsafe_offset=ci] != 0:
+        table[unsafe_offset=ci] = 0
+        _ = external_call["pion_uring_files_update", Int32](ext[].real_fd, Int32(ci), Int32(-1))
+
+
 struct UringExtras(Movable):
     """gh #205 / #206: the optional features' state that no default-path SQE
     reads, behind IOUring.ext (see the note on IOUring's fields)."""
@@ -695,11 +712,7 @@ struct IOUring(Movable):
         and its SQEs name the plain fd."""
         if is_null(self.fd_fixed):
             return
-        var ci = Int(fd)
-        if ci < 0 or ci >= self.ext[].fixed_slots:
-            return
-        var r = external_call["pion_uring_files_update", Int32](self.ext[].real_fd, Int32(ci), fd)
-        self.fd_fixed[unsafe_offset=ci] = UInt8(1) if r == 1 else UInt8(0)
+        _uring_fixed_update(self.ext, self.fd_fixed, fd, True)
 
     @always_inline
     def fixed_remove(mut self, fd: Int32):
@@ -709,11 +722,7 @@ struct IOUring(Movable):
         number had gone to a new connection."""
         if is_null(self.fd_fixed):
             return
-        var ci = Int(fd)
-        if ci < 0 or ci >= self.ext[].fixed_slots or self.fd_fixed[unsafe_offset=ci] == 0:
-            return
-        self.fd_fixed[unsafe_offset=ci] = 0
-        _ = external_call["pion_uring_files_update", Int32](self.ext[].real_fd, Int32(ci), Int32(-1))
+        _uring_fixed_update(self.ext, self.fd_fixed, fd, False)
 
     @always_inline
     def fixed_flag(self, fd: Int32) -> UInt8:
