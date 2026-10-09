@@ -182,6 +182,13 @@ struct UringExtras(Movable):
     # A multishot RECV's bytes are parsed in the provided buffer itself when
     # the connection holds no unfinished request.
     var zero_copy:    Bool
+    # What each register call answered when it failed (-errno, 0 = no
+    # failure), for the features line. pbuf_quirk: the buffer ring took the
+    # inverted-reserved-word retry (see pion_uring_register_pbuf_ring).
+    var ringfd_err:   Int32
+    var files_err:    Int32
+    var pbuf_err:     Int32
+    var pbuf_quirk:   Bool
 
     def __init__(out self):
         self.real_fd = -1
@@ -190,6 +197,10 @@ struct UringExtras(Movable):
         self.pbuf_ring = null_ptr[UInt8, MutUntrackedOrigin]()
         self.pbuf_tail = 0
         self.zero_copy = False
+        self.ringfd_err = 0
+        self.files_err = 0
+        self.pbuf_err = 0
+        self.pbuf_quirk = False
 
 
 struct IOUring(Movable):
@@ -650,6 +661,7 @@ struct IOUring(Movable):
         kernel refuses; enter() keeps using the fd."""
         var idx = external_call["pion_uring_register_ring_fd", Int32](self.ext[].real_fd)
         if idx < 0:
+            self.ext[].ringfd_err = idx
             return False
         self.ring_fd = idx
         self.enter_flags = UInt32(IORING_ENTER_REGISTERED_RING)
@@ -664,6 +676,7 @@ struct IOUring(Movable):
         var n = external_call["pion_uring_register_files_sparse", Int32](
             self.ext[].real_fd, Int32(want))
         if n <= 0:
+            self.ext[].files_err = n
             return False
         var t = alloc[UInt8](URING_MAX_FDS)
         unsafe_memset(t, 0, URING_MAX_FDS)
@@ -722,12 +735,15 @@ struct IOUring(Movable):
         var ring = external_call["pion_uring_pbuf_ring_alloc", Pointer[UInt8, MutUntrackedOrigin]](
             Int32(PBUF_RING_ENTRIES))
         if is_null(ring):
+            self.ext[].pbuf_err = -12   # ENOMEM
             return False
         var r = external_call["pion_uring_register_pbuf_ring", Int32](
             self.ext[].real_fd, ring.unsafe_bitcast[NoneType](), Int32(PBUF_RING_ENTRIES), Int32(bgid))
         if r < 0:
+            self.ext[].pbuf_err = r
             _ = external_call["pion_wal_munmap", Int32](ring.unsafe_bitcast[NoneType](), PBUF_RING_ENTRIES * 16)
             return False
+        self.ext[].pbuf_quirk = r == 1
         self.ext[].pbuf_ring = ring
         self.ext[].pbuf_tail = 0
         for bid in range(PBUF_RING_ENTRIES):

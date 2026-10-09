@@ -331,7 +331,15 @@ void* pion_uring_pbuf_ring_alloc(int entries) {
     return p == MAP_FAILED ? NULL : p;
 }
 
-/* IORING_REGISTER_PBUF_RING (22, Linux 5.19): 0, or -errno. */
+/* IORING_REGISTER_PBUF_RING (22, Linux 5.19): 0, 1 when it took the retry
+   below, or -errno.
+
+   Ubuntu's 6.8 kernels (from 6.8.0-139; the 2026-10 bench box runs
+   6.8.0-146) invert the check on the reserved words: every correct call,
+   resv zeroed, fails with EINVAL, and one with resv[0] != 0 succeeds.
+   Netty and other io_uring users hit the same. A correct kernel refuses
+   any nonzero reserved word, so the one retry can only succeed on a kernel
+   with the inverted check. */
 int pion_uring_register_pbuf_ring(int ring_fd, void* ring_addr, int entries, int bgid) {
     struct {
         uint64_t ring_addr; uint32_t ring_entries; uint16_t bgid; uint16_t flags;
@@ -341,7 +349,12 @@ int pion_uring_register_pbuf_ring(int ring_fd, void* ring_addr, int entries, int
     reg.ring_addr = (uint64_t)(uintptr_t)ring_addr;
     reg.ring_entries = (uint32_t)entries;
     reg.bgid = (uint16_t)bgid;
-    return _uring_register(ring_fd, 22, &reg, 1);
+    int r = _uring_register(ring_fd, 22, &reg, 1);
+    if (r == -EINVAL) {
+        reg.resv[0] = 1;
+        if (_uring_register(ring_fd, 22, &reg, 1) == 0) return 1;
+    }
+    return r;
 }
 
 #else

@@ -1612,24 +1612,26 @@ struct NetworkEngine:
             else:
                 line += " defer=NOT_ACTIVE(kernel refused SINGLE_ISSUER)"
                 short = True
+        var x = self.ring[].ext
         if want_regfiles:
             if regfiles_ok:
-                line += " regfiles=ACTIVE(" + String(self.ring[].ext[].fixed_slots) + " slots)"
+                line += " regfiles=ACTIVE(" + String(x[].fixed_slots) + " slots)"
             else:
-                line += " regfiles=NOT_ACTIVE(kernel refused)"
+                line += " regfiles=NOT_ACTIVE(kernel refused, errno " + String(-Int(x[].files_err)) + ")"
                 short = True
             if ringfd_ok:
                 line += " ring_fd=ACTIVE"
             else:
-                line += " ring_fd=NOT_ACTIVE(kernel refused)"
+                line += " ring_fd=NOT_ACTIVE(kernel refused, errno " + String(-Int(x[].ringfd_err)) + ")"
                 short = True
         if want_pbuf:
-            if is_not_null(self.ring[].ext[].pbuf_ring):
-                line += " pbuf_ring=ACTIVE"
+            if is_not_null(x[].pbuf_ring):
+                line += " pbuf_ring=ACTIVE" + ("(inverted-resv kernel)" if x[].pbuf_quirk else "")
             else:
-                line += " pbuf_ring=NOT_ACTIVE(" + ("PROVIDE_BUFFERS" if self.multishot_active else "no multishot recv") + ")"
+                line += " pbuf_ring=NOT_ACTIVE(errno " + String(-Int(x[].pbuf_err)) + "; " \
+                        + ("PROVIDE_BUFFERS" if self.multishot_active else "no multishot recv") + ")"
                 short = True
-            if self.ring[].ext[].zero_copy:
+            if x[].zero_copy:
                 line += " zero_copy_recv=ACTIVE"
             else:
                 line += " zero_copy_recv=NOT_ACTIVE(no multishot recv)"

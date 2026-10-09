@@ -71,6 +71,16 @@ from worker 0 and from any worker that got less than it asked for:
 io_uring features (worker 0): defer=ACTIVE(SINGLE_ISSUER+DEFER_TASKRUN) regfiles=ACTIVE(65536 slots) ring_fd=ACTIVE pbuf_ring=ACTIVE zero_copy_recv=ACTIVE
 ```
 
+A feature the kernel refused says so with its errno, for example
+`pbuf_ring=NOT_ACTIVE(errno 22; PROVIDE_BUFFERS)`.
+
+Ubuntu's 6.8 kernels (from 6.8.0-139) invert the reserved-word check of
+`IORING_REGISTER_PBUF_RING`: a correct call fails with `EINVAL`, and one with
+a nonzero reserved word succeeds. The registration retries once that way after
+an `EINVAL`. A correct kernel refuses a nonzero reserved word, so the retry
+can only succeed on an affected one, and the line then reads
+`pbuf_ring=ACTIVE(inverted-resv kernel)`.
+
 The rules that keep them correct:
 
 - **The loop enters on every pass, with `GETEVENTS`.** Under `DEFER_TASKRUN`
