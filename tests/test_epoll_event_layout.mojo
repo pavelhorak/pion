@@ -45,7 +45,7 @@ def _run() raises:
         var w = fds[unsafe_offset=2 * k + 1]
         var b = stack_allocation[1, UInt8]()
         b[] = 120
-        _ = external_call["write", Int64](w, b, 1)
+        _ = external_call["write", Int](Int(w), b, 1)
         if epoll_ctl_fd(ep, EPOLL_CTL_ADD, r, EPOLLIN) != 0:
             raise Error("epoll_ctl failed")
         want.append(r)
