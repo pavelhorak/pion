@@ -657,6 +657,30 @@ evidence = ["src/network/response_writer.mojo"]
 expect = ["comptime RESP_BUF_SIZE = 4 * 1024 * 1024", "comptime OUT_DELIVER_LIMIT = 32 * 1024 * 1024"]
 
 [[claim]]
+file = "doc/networking.md"
+where = "Gives the multishot RECV's 256 × 16 KB buffers"
+numbers = ["16 KB"]
+kind = "code"
+evidence = ["src/io/io_uring.mojo"]
+expect = ["comptime PBUF_RING_ENTRIES = 256", "comptime PBUF_SIZE         = 16384"]
+
+[[claim]]
+file = "doc/networking.md"
+where = "A 1 ms timeout is"
+numbers = ["1 ms"]
+kind = "code"
+evidence = ["src/network/engine.mojo"]
+expect = ["self.ring[].submit_timeout(1)"]
+
+[[claim]]
+file = "doc/networking.md"
+where = "concurrent pipelined connections whose frames straddle the 16 KB"
+numbers = ["16 KB", "1 MB"]
+kind = "test"
+evidence = ["tests/test_iouring_features.py"]
+expect = ["straddle the 16 KB provided buffers", "os.urandom(1 << 20)"]
+
+[[claim]]
 file = "doc/operations.md"
 where = "initial backoff, doubles to"
 numbers = ["60 s"]
