@@ -111,12 +111,12 @@ def is_sleeping(flag: Pointer[UInt64, MutUntrackedOrigin]) -> Bool:
 def evfd_signal(fd: Int32):
     var one = stack_allocation[1, UInt64]()
     one[] = 1
-    _ = external_call["write", Int64](fd, one, 8)
+    _ = external_call["write", Int](Int(fd), one, 8)
 
 
 def evfd_drain(fd: Int32):
     var v = stack_allocation[1, UInt64]()
-    _ = external_call["read", Int64](fd, v, 8)
+    _ = external_call["read", Int](Int(fd), v, 8)
 
 
 @always_inline
