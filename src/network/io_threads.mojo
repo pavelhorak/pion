@@ -151,6 +151,15 @@ struct _IOThread:
         """Stop serving fd and tell the executor, which closes the socket."""
         var ci = Int(fd)
         _ = epoll_ctl_fd(self.ep, EPOLL_CTL_DEL, fd, 0)
+        # The input buffer is this thread's: free it HERE, before the executor
+        # closes the socket. The executor's close frees the buffer after
+        # close(), and in that gap the fd number can be accepted again and read
+        # into the old buffer, which it then frees (seen: a null batch, SIGSEGV
+        # in process_data_plane). It finds null here and leaves it alone.
+        var buf = self.hub[].client_buffers[unsafe_offset=ci]
+        if is_not_null(buf):
+            buf.unsafe_free()
+            self.hub[].client_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
         self.hub[].in_len[unsafe_offset=ci] = 0
         self.hub[].handed[unsafe_offset=ci] = 0
         self.hub[].closing[unsafe_offset=ci] = 0

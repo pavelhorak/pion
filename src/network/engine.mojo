@@ -246,7 +246,12 @@ struct NetworkEngine:
         self.slow_path.parked_waits.remove_fd(fd)   # gh #390
         self.server.close_client(fd)
         self.client_buffer_lens[unsafe_offset=ci] = 0
-        if self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+        # #465: with I/O threads the input buffer belongs to the I/O thread,
+        # which freed it before reporting the close. Once close() above has
+        # released the fd number, another I/O thread may already be reading a
+        # NEW connection into client_buffers[ci]: never touch it from here.
+        if not self.writer.ctx[].io_mode and \
+           self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
             self.client_buffers[unsafe_offset=ci].unsafe_free()
             self.client_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
         if self.writer.ctx[].pending_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
