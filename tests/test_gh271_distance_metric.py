@@ -207,13 +207,26 @@ def section_dim(r):
     print("\n[4] A DIM that disagrees with the server's dimension still WORKS")
     print("    Asserted because this issue was FILED on the opposite claim and a")
     print("    README warning shipped saying so; if someone 'fixes' DIM on the")
-    print("    strength of that, this catches it.")
-    for D in (8, 128, 1536, 4096):
+    print("    strength of that, this catches it. 'Disagrees' means SMALLER: the")
+    print("    vector slabs are sized for the startup --dim, so a larger DIM is")
+    print("    refused before any state changes (gh #407 review).")
+    for D in (8, 128, 1536):
         rng = np.random.default_rng(7)
         docs = {f"d:{i}": unit(rng.normal(size=D)) for i in range(30)}
         build(r, f"dim{D}", D, "COSINE", docs)
         got = search(r, f"dim{D}", docs["d:5"], k=1)
         check(f"DIM {D} returns the exact match first", got[:1] == ["d:5"], f"got {got}")
+    try:
+        r.execute_command("FT.CREATE", "dim4096", "SCHEMA", "vec", "VECTOR", "HNSW", "6",
+                          "TYPE", "FLOAT32", "DIM", "4096", "DISTANCE_METRIC", "COSINE")
+        refused = None
+    except redis.ResponseError as e:
+        refused = str(e)
+    check("DIM 4096 on a 1536 server is refused, naming --dim",
+          refused is not None and "exceeds this server's vector dimension" in refused
+          and "--dim 4096" in refused, repr(refused))
+    got = search(r, "dim1536", docs["d:5"], k=1)
+    check("the index served before the refusal still answers", got[:1] == ["d:5"], f"got {got}")
 
 
 # --------------------------------------------------------------------------
