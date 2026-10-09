@@ -112,6 +112,25 @@ static void* _pion_io_trampoline(void* p) {
     return NULL;
 }
 
+/* #465: a connection's output queue is written by the executor and drained by
+ * the I/O thread that owns the socket; this word guards it. Held for an append
+ * or for one send loop, never across anything that can block for long. */
+void pion_spin_lock(uint32_t* w) {
+    while (__atomic_exchange_n(w, 1u, __ATOMIC_ACQUIRE) != 0u) {
+        while (__atomic_load_n(w, __ATOMIC_RELAXED) != 0u) {
+#if defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#elif defined(__aarch64__)
+            __asm__ __volatile__("yield");
+#endif
+        }
+    }
+}
+
+void pion_spin_unlock(uint32_t* w) {
+    __atomic_store_n(w, 0u, __ATOMIC_RELEASE);
+}
+
 int32_t pion_spawn_detached(int32_t n, int64_t* ctx, int64_t base) {
     pion_worker_fn fn = (pion_worker_fn)dlsym(RTLD_DEFAULT, "pion_worker_entry");
     if (!fn || n <= 0) return -1;

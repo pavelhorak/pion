@@ -38,97 +38,16 @@ from src.network.server import EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLET, E
 from src.network.server import EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
 from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
 from src.network.response_writer import WriterCtx
-
-comptime IO_MSG_DATA = UInt64(1)
-comptime IO_MSG_ACCEPT = UInt64(2)
-comptime IO_MSG_CLOSE = UInt64(3)
-comptime IO_MSG_REPLY = UInt64(4)
-
-# pion_worker_entry's index at or above this is an I/O thread, not a worker.
-comptime IO_THREAD_BASE = Int64(1 << 20)
-
-comptime IO_RING_CAP = 1 << 16          # messages; more than one thread's connections
-comptime IO_RING_MASK = IO_RING_CAP - 1
-comptime IO_RING_WORDS = 16 + 2 * IO_RING_CAP   # [head, pad x7, tail, pad x7, slots...]
-comptime IO_MAX_FDS = 65536
-comptime IO_SPIN = 256                  # empty polls before a thread sleeps
-comptime EPOLLRDHUP = UInt32(0x2000)
-
-
-@fieldwise_init
-struct IOMsg(Copyable, Movable):
-    var ok: Bool
-    var kind: UInt64
-    var fd: Int32
-    var arg: Int
-
-
-@always_inline
-def ring_at(base: Pointer[UInt64, MutUntrackedOrigin], t: Int) -> Pointer[UInt64, MutUntrackedOrigin]:
-    return base.unsafe_offset(t * IO_RING_WORDS)
-
-
-@always_inline
-def ring_push(r: Pointer[UInt64, MutUntrackedOrigin], kind: UInt64, fd: Int32, arg: Int) -> Bool:
-    """Producer side. False when the ring is full."""
-    var tail = r[unsafe_offset=8]                     # only the producer writes it
-    var head = Atomic[Scalar[DType.uint64]].load[ordering=Ordering.ACQUIRE](r)
-    if tail - head >= UInt64(IO_RING_CAP):
-        return False
-    var i = 16 + 2 * (Int(tail) & IO_RING_MASK)
-    r[unsafe_offset=i] = (kind << 32) | UInt64(UInt32(fd))
-    r[unsafe_offset=i + 1] = UInt64(arg)
-    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](r.unsafe_offset(8), tail + 1)
-    return True
-
-
-@always_inline
-def ring_pop(r: Pointer[UInt64, MutUntrackedOrigin]) -> IOMsg:
-    """Consumer side."""
-    var head = r[unsafe_offset=0]                     # only the consumer writes it
-    var tail = Atomic[Scalar[DType.uint64]].load[ordering=Ordering.ACQUIRE](r.unsafe_offset(8))
-    if head == tail:
-        return IOMsg(False, 0, 0, 0)
-    var i = 16 + 2 * (Int(head) & IO_RING_MASK)
-    var w0 = r[unsafe_offset=i]
-    var w1 = r[unsafe_offset=i + 1]
-    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](r, head + 1)
-    return IOMsg(True, w0 >> 32, Int32(UInt32(w0 & 0xFFFFFFFF)), Int(w1))
-
-
-@always_inline
-def ring_nonempty(r: Pointer[UInt64, MutUntrackedOrigin]) -> Bool:
-    return Atomic[Scalar[DType.uint64]].load[ordering=Ordering.ACQUIRE](r.unsafe_offset(8)) != \
-           Atomic[Scalar[DType.uint64]].load[ordering=Ordering.ACQUIRE](r)
-
-
-@always_inline
-def is_sleeping(flag: Pointer[UInt64, MutUntrackedOrigin]) -> Bool:
-    """Full barrier, then the flag: pairs with the sleeper's store-then-check."""
-    return Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.SEQUENTIAL](flag, UInt64(0)) != 0
-
-
-def evfd_signal(fd: Int32):
-    var one = stack_allocation[1, UInt64]()
-    one[] = 1
-    _ = external_call["write", Int](Int(fd), one, 8)
-
-
-def evfd_drain(fd: Int32):
-    var v = stack_allocation[1, UInt64]()
-    _ = external_call["read", Int](Int(fd), v, 8)
-
-
-@always_inline
-def _errno() -> Int32:
-    return external_call["__errno_location", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
-
+from src.network.io_ring import (
+    IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE, IO_MSG_REPLY, IO_MSG_KICK, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_RING_WORDS, IO_MAX_FDS, IO_SPIN, EPOLLRDHUP, IOMsg, ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping, evfd_signal, evfd_drain, _errno,
+)
 
 struct IOHub(Movable):
     """What the executor and the I/O threads share. Heap-allocated once by the
     executor; lives as long as the process."""
     var n_io: Int
     var listen_fd: Int32
+    var listen_fd2: Int32           # the worker's affinity port (port + 2 + worker id), -1 = none
     var buf_cap: Int
     var stop: Pointer[UInt64, MutUntrackedOrigin]
     var rings_in: Pointer[UInt64, MutUntrackedOrigin]     # I/O t -> executor
@@ -146,12 +65,15 @@ struct IOHub(Movable):
     var closing: Pointer[UInt8, MutUntrackedOrigin]   # EOF seen while a batch was out
     var out_wait: Pointer[UInt8, MutUntrackedOrigin]  # EPOLLOUT armed: reply bytes left
     var owner_ep: Pointer[Int32, MutUntrackedOrigin]  # the owning thread's epoll fd
+    var owner_t: Pointer[Int32, MutUntrackedOrigin]   # the owning thread's index, -1 = none
+    var out_lock: Pointer[UInt32, MutUntrackedOrigin] # guards WriterCtx's queue for the fd
 
     def __init__(out self, n_io: Int, listen_fd: Int32, buf_cap: Int,
                  client_buffers: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
                  wctx: Pointer[WriterCtx, MutUntrackedOrigin]):
         self.n_io = n_io
         self.listen_fd = listen_fd
+        self.listen_fd2 = Int32(-1)
         self.buf_cap = buf_cap
         self.stop = alloc[UInt64](8)
         self.stop[] = 0
@@ -176,12 +98,16 @@ struct IOHub(Movable):
         self.closing = alloc[UInt8](IO_MAX_FDS)
         self.out_wait = alloc[UInt8](IO_MAX_FDS)
         self.owner_ep = alloc[Int32](IO_MAX_FDS)
+        self.owner_t = alloc[Int32](IO_MAX_FDS)
+        self.out_lock = alloc[UInt32](IO_MAX_FDS)
         for i in range(IO_MAX_FDS):
             self.in_len[unsafe_offset=i] = 0
             self.handed[unsafe_offset=i] = 0
             self.closing[unsafe_offset=i] = 0
             self.out_wait[unsafe_offset=i] = 0
             self.owner_ep[unsafe_offset=i] = -1
+            self.owner_t[unsafe_offset=i] = -1
+            self.out_lock[unsafe_offset=i] = 0
 
 
 # ── the I/O thread ────────────────────────────────────────────────────────────
@@ -230,13 +156,14 @@ struct _IOThread:
         self.hub[].closing[unsafe_offset=ci] = 0
         self.hub[].out_wait[unsafe_offset=ci] = 0
         self.hub[].owner_ep[unsafe_offset=ci] = -1
+        self.hub[].owner_t[unsafe_offset=ci] = -1
         self.push(IO_MSG_CLOSE, fd, 0)
 
-    def accept_all(mut self):
+    def accept_all(mut self, lfd: Int32):
         comptime if not CompilationTarget.is_linux():
             return
         while True:
-            var nfd = external_call["accept4", Int32](self.hub[].listen_fd,
+            var nfd = external_call["accept4", Int32](lfd,
                 null_ptr[NoneType, MutUntrackedOrigin](), null_ptr[NoneType, MutUntrackedOrigin](),
                 Int32(0x800))                                   # SOCK_NONBLOCK
             if nfd < 0:
@@ -253,6 +180,7 @@ struct _IOThread:
             self.hub[].closing[unsafe_offset=ci] = 0
             self.hub[].out_wait[unsafe_offset=ci] = 0
             self.hub[].owner_ep[unsafe_offset=ci] = self.ep
+            self.hub[].owner_t[unsafe_offset=ci] = Int32(self.t)
             # ACCEPT first: the executor learns of the fd before any of its data.
             self.push(IO_MSG_ACCEPT, nfd, 0)
             _ = epoll_ctl_fd(self.ep, EPOLL_CTL_ADD, nfd, EPOLLIN | EPOLLRDHUP | EPOLLET)
@@ -285,7 +213,9 @@ struct _IOThread:
             # close follows the batch (after_reply). A batch already out ends the same way.
             self.hub[].closing[unsafe_offset=ci] = 1
             if self.hub[].handed[unsafe_offset=ci] == 0:
-                if self.hub[].out_wait[unsafe_offset=ci] == 0 and self.hub[].in_len[unsafe_offset=ci] > 0:
+                if self.hub[].out_wait[unsafe_offset=ci] != 0:
+                    return                # its reply is still going out; EPOLLOUT closes it
+                if self.hub[].in_len[unsafe_offset=ci] > 0:
                     self.handoff(fd)
                 else:
                     self.close_conn(fd)
@@ -295,7 +225,16 @@ struct _IOThread:
             self.handoff(fd)
 
     def send_conn(mut self, fd: Int32) -> Bool:
-        """Send what the connection is owed. True when all of it went out."""
+        """Send what the connection is owed. True when all of it went out.
+        Holds the fd's output lock: the executor may queue an out-of-band
+        reply (pub/sub, a woken client) for it at any time."""
+        var lk = self.hub[].out_lock.unsafe_offset(Int(fd))
+        external_call["pion_spin_lock", NoneType](lk)
+        var r = self._send_locked(fd)
+        external_call["pion_spin_unlock", NoneType](lk)
+        return r
+
+    def _send_locked(mut self, fd: Int32) -> Bool:
         var ci = Int(fd)
         var ctx = self.hub[].wctx
         while True:
@@ -327,9 +266,12 @@ struct _IOThread:
             ctx[].out_free(ci)
             return True
 
-    def after_reply(mut self, fd: Int32, consumed: Int):
+    def after_reply(mut self, fd: Int32, arg: Int):
         """The executor is done with fd's batch: its reply is queued."""
         var ci = Int(fd)
+        var consumed = arg & (IO_CLOSE_FLAG - 1)
+        if (arg & IO_CLOSE_FLAG) != 0:
+            self.hub[].closing[unsafe_offset=ci] = 1     # QUIT, a protocol error, CLIENT KILL of itself
         var handed = self.hub[].handed[unsafe_offset=ci]
         self.hub[].handed[unsafe_offset=ci] = 0
         var have = self.hub[].in_len[unsafe_offset=ci]
@@ -343,8 +285,9 @@ struct _IOThread:
             self.hub[].in_len[unsafe_offset=ci] = have
         var drained = self.send_conn(fd)
         if self.hub[].closing[unsafe_offset=ci] != 0:
-            self.close_conn(fd)
-            return
+            if drained:
+                self.close_conn(fd)
+            return                        # else: closes once EPOLLOUT drains the rest
         # Bytes the executor has not looked at yet arrived meanwhile: next batch.
         if drained and have > handed - consumed:
             self.handoff(fd)
@@ -356,8 +299,19 @@ struct _IOThread:
             if not m.ok:
                 return n
             n += 1
+            var ci = Int(m.fd)
+            if self.hub[].owner_ep[unsafe_offset=ci] != self.ep:
+                continue                  # closed meanwhile (its number may be another thread's now)
             if m.kind == IO_MSG_REPLY:
                 self.after_reply(m.fd, m.arg)
+            elif m.kind == IO_MSG_KICK:
+                _ = self.send_conn(m.fd)
+            elif m.kind == IO_MSG_RESUME:
+                # A parked client was answered: its reply is queued; then what it
+                # pipelined behind the command that parked it.
+                if self.send_conn(m.fd) and self.hub[].handed[unsafe_offset=ci] == 0 \
+                   and self.hub[].in_len[unsafe_offset=ci] > 0:
+                    self.handoff(m.fd)
 
 
 def io_thread_main(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
@@ -368,6 +322,8 @@ def io_thread_main(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
 def _io_thread_loop(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
     var ep = external_call["epoll_create1", Int32](Int32(0x80000))
     _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, hub[].listen_fd, EPOLLIN | EPOLLEXCLUSIVE)
+    if hub[].listen_fd2 >= 0:
+        _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, hub[].listen_fd2, EPOLLIN | EPOLLEXCLUSIVE)
     var evfd = hub[].io_evfd[unsafe_offset=t]
     _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, evfd, EPOLLIN)
     var st = _IOThread(hub, t, ep)
@@ -398,16 +354,19 @@ def _io_thread_loop(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
             if fd == evfd:
                 evfd_drain(evfd)
                 continue
-            if fd == hub[].listen_fd:
-                st.accept_all()
+            if fd == hub[].listen_fd or fd == hub[].listen_fd2:
+                st.accept_all(fd)
                 continue
             var ci = Int(fd)
             if hub[].owner_ep[unsafe_offset=ci] != ep:
                 continue              # closed earlier in this batch
             if mask & EPOLLOUT:
-                if st.send_conn(fd) and hub[].handed[unsafe_offset=ci] == 0 \
-                   and hub[].in_len[unsafe_offset=ci] > 0:
-                    st.handoff(fd)
+                if st.send_conn(fd) and hub[].handed[unsafe_offset=ci] == 0:
+                    if hub[].closing[unsafe_offset=ci] != 0:
+                        st.close_conn(fd)
+                        continue
+                    if hub[].in_len[unsafe_offset=ci] > 0:
+                        st.handoff(fd)
             if mask & (EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP):
                 st.read_conn(fd)
         st.wake_executor()

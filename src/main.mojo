@@ -4,7 +4,8 @@ from std.collections import List
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
-from src.network.io_threads import IOHub, io_thread_main, IO_THREAD_BASE
+from src.network.io_threads import IOHub, io_thread_main
+from src.network.io_ring import IO_THREAD_BASE
 from src.common.ptr import is_not_null
 
 from src.common.config import PionConfig
@@ -1084,6 +1085,8 @@ def main():
             _why = "serves one keyspace: it needs -w 1 (got -w " + String(config.server.workers) + ")"
         elif not config.server.use_epoll:
             _why = "needs --epoll for now (io_uring and kqueue come later)"
+        elif config.server.kvcache_enabled:
+            _why = "does not serve the binary lane (--kvcache) yet"
         if _why.byte_length() > 0:
             print("FATAL: --io-threads " + String(config.server.io_threads) + " " + _why)
             external_call["exit", NoneType](Int32(1))

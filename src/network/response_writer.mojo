@@ -1,4 +1,5 @@
 from src.common.ptr import null_ptr, is_null, is_not_null
+from src.network.io_ring import ring_at, ring_push, is_sleeping, evfd_signal, IO_MSG_KICK
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
@@ -139,6 +140,15 @@ struct WriterCtx(Movable):
     # connection's pending block, and the I/O thread that owns the connection
     # sends them once the executor hands the batch back.
     var io_mode: Bool
+    # #465: in io_mode, what the writer needs to queue bytes for a connection
+    # the executor is NOT serving right now (pub/sub, MONITOR, a woken client)
+    # and to tell its I/O thread: the per-fd output locks, which thread owns
+    # each fd, and that thread's ring, sleep flag and eventfd.
+    var io_locks: Pointer[UInt32, MutUntrackedOrigin]
+    var io_owner: Pointer[Int32, MutUntrackedOrigin]
+    var io_rings_out: Pointer[UInt64, MutUntrackedOrigin]
+    var io_sleep: Pointer[UInt64, MutUntrackedOrigin]
+    var io_evfd: Pointer[Int32, MutUntrackedOrigin]
 
     def __init__(out self, *, connections: Bool):
         """`connections` False makes a capture context (#36): no per-connection
@@ -172,6 +182,30 @@ struct WriterCtx(Movable):
         self.cap_cap = 0
         self.suppress_from = -1
         self.io_mode = False
+        self.io_locks = null_ptr[UInt32, MutUntrackedOrigin]()
+        self.io_owner = null_ptr[Int32, MutUntrackedOrigin]()
+        self.io_rings_out = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.io_sleep = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.io_evfd = null_ptr[Int32, MutUntrackedOrigin]()
+
+    def io_append(mut self, ci: Int, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+        """#465: queue n bytes for ci under its output lock."""
+        var lk = self.io_locks.unsafe_offset(ci)
+        external_call["pion_spin_lock", NoneType](lk)
+        self.out_append(ci, src, n)
+        external_call["pion_spin_unlock", NoneType](lk)
+
+    def io_tell(mut self, fd: Int32, kind: UInt64):
+        """#465: tell fd's I/O thread there is work for it (KICK, RESUME)."""
+        var t = Int(self.io_owner[unsafe_offset=Int(fd)])
+        if t < 0:
+            return                      # not (or no longer) served by an I/O thread
+        var r = ring_at(self.io_rings_out, t)
+        while not ring_push(r, kind, fd, 0):
+            evfd_signal(self.io_evfd[unsafe_offset=t])
+            _ = external_call["sched_yield", Int32]()
+        if is_sleeping(self.io_sleep.unsafe_offset(t * 8)):
+            evfd_signal(self.io_evfd[unsafe_offset=t])
 
     def _cap_push(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
         """A capture writer's reply past its buffer, kept for the script."""
@@ -317,7 +351,7 @@ struct WriterCtx(Movable):
         the batch, which arms the write event or submits the SEND."""
         var ci = Int(fd)
         if self.io_mode:                    # #465: the owning I/O thread sends it
-            self.out_append(ci, src, n)
+            self.io_append(ci, src, n)
             self.queued = True
             return
         if self.use_uring and self.ring[].fd_closing[unsafe_offset=ci] != 0:
@@ -676,6 +710,19 @@ struct ResponseWriter(Movable):
         if length <= 0 or (kq == -1 and not self.ctx[].use_uring):
             return
         var ci = Int(fd)
+        if self.ctx[].io_mode:
+            # #465: another connection, served by an I/O thread: queue under its
+            # lock, then tell that thread. Same 32 MB rule as below.
+            var lk = self.ctx[].io_locks.unsafe_offset(ci)
+            external_call["pion_spin_lock", NoneType](lk)
+            if self.out_owed(ci) + length > OUT_DELIVER_LIMIT:
+                external_call["pion_spin_unlock", NoneType](lk)
+                _ = external_call["shutdown", Int32](fd, Int32(2))
+                return
+            self.out_append(ci, data, length)
+            external_call["pion_spin_unlock", NoneType](lk)
+            self.ctx[].io_tell(fd, IO_MSG_KICK)
+            return
         var p = data
         var left = length
         if self.ctx[].use_uring and self.ctx[].ring[].fd_closing[unsafe_offset=ci] != 0:
@@ -756,7 +803,7 @@ struct ResponseWriter(Movable):
         if self.ctx[].io_mode:
             # #465: queue for the I/O thread that owns fd; it sends after the batch.
             if self.offset > 0:
-                self.out_append(fd_idx, self.buffer, self.offset)
+                self.ctx[].io_append(fd_idx, self.buffer, self.offset)
                 self.offset = 0
             return
 

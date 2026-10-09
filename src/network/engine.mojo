@@ -9,9 +9,10 @@ from std.collections import List
 from src.common.skip_list import SlabSkipList
 from src.network.server import KEvent, TCPServer, EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLET, EPOLLEXCLUSIVE, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
 from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
-from src.network.io_threads import IOHub, ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping
-from src.network.io_threads import evfd_signal, evfd_drain, IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE
-from src.network.io_threads import IO_MSG_REPLY, IO_THREAD_BASE, IO_SPIN
+from src.network.io_threads import IOHub
+from src.network.io_ring import ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping
+from src.network.io_ring import evfd_signal, evfd_drain, IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE
+from src.network.io_ring import IO_MSG_REPLY, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_SPIN
 from src.common.list import SlabList
 from src.memory.slab_allocator import SlabAllocator
 from src.common.hash_map import SlabHashMap, StripedHashMap
@@ -468,6 +469,9 @@ struct NetworkEngine:
             else:
                 self.writer.append_int_response(Int64(acked))
             self.writer.flush_response(fd, self.server, kq)
+            if self.writer.ctx[].io_mode:      # #465: its I/O thread holds its bytes
+                self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
+                continue
             var stored = self.client_buffer_lens[unsafe_offset=ci]
             if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                 self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
@@ -518,6 +522,9 @@ struct NetworkEngine:
             reg[].remove_at(k)            # entry k is now a different one: no k += 1
             self.slow_path.parked_waits.unpark_fd(fd)
             self.writer.flush_response(fd, self.server, kq)
+            if self.writer.ctx[].io_mode:      # #465: its I/O thread holds its bytes
+                self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
+                continue
             var stored = self.client_buffer_lens[unsafe_offset=ci]
             if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                 self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
@@ -595,6 +602,9 @@ struct NetworkEngine:
                          uring_group: Int) raises:
         """A parked client was answered: run what it pipelined behind the
         command that parked it, and on io_uring arm its receive again."""
+        if self.writer.ctx[].io_mode:          # #465: its I/O thread holds its bytes
+            self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
+            return
         var ci = Int(fd)
         var stored = self.client_buffer_lens[unsafe_offset=ci]
         if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
@@ -1886,9 +1896,15 @@ struct NetworkEngine:
         # reads it. Allocate it before any thread starts, so its pointers never change.
         if is_null(self.writer.ctx[].ovf_lens):
             self.writer.ctx[]._ovf_init()
-        self.writer.ctx[].io_mode = True
         var hub = alloc[IOHub](1)
         hub.unsafe_write(IOHub(n_io, self.server.fd, CLIENT_BUF_SIZE, self.client_buffers, self.writer.ctx))
+        hub[].listen_fd2 = self.secondary_listen_fd
+        self.writer.ctx[].io_locks = hub[].out_lock
+        self.writer.ctx[].io_owner = hub[].owner_t
+        self.writer.ctx[].io_rings_out = hub[].rings_out
+        self.writer.ctx[].io_sleep = hub[].io_sleep
+        self.writer.ctx[].io_evfd = hub[].io_evfd
+        self.writer.ctx[].io_mode = True
         var rc = external_call["pion_spawn_detached", Int32](
             Int32(n_io), Pointer[Int64, MutUntrackedOrigin](unsafe_from_address=Int(hub)), IO_THREAD_BASE)
         if rc != 0:
@@ -1914,6 +1930,8 @@ struct NetworkEngine:
                     did += 1
                     if m.kind == IO_MSG_DATA:
                         var consumed = self._dispatch_io_batch(m.fd, m.arg, kq, hnsw, db_size)
+                        if self.slow_path.clients.close_after[unsafe_offset=Int(m.fd)] != 0:
+                            consumed |= IO_CLOSE_FLAG     # QUIT, a protocol error, CLIENT KILL of itself
                         while not ring_push(rout, IO_MSG_REPLY, m.fd, consumed):
                             evfd_signal(hub[].io_evfd[unsafe_offset=t])
                             _ = external_call["sched_yield", Int32]()
@@ -1935,9 +1953,20 @@ struct NetworkEngine:
                     self.ttl_sweep_counter = 0
                     if self.slow_path.clients.pause_until_ms == 0:
                         self.fast_path.sweep_expired_keys(20)
+                # Parked clients, as the epoll loop serves them each tick. A woken
+                # one gets its reply queued and its I/O thread told to resume it.
+                if self.slow_path.blocked_readers._count() > 0:
+                    self._service_blocked_readers(kq, hnsw, db_size)
+                if self.slow_path.blocked_clients._count() > 0:
+                    self._service_blocked_clients(kq, hnsw, db_size)
                 _ = self.slow_path.moe_tier.drain_warm_into_cache()
                 if self.slow_path.deferred_count > 0:
                     self.slow_path.drain_deferred_shard_responses(hnsw, self.writer, self.server, kq)
+                if self.slow_path.parked_waits.count() > 0:
+                    self._service_parked_waits(kq, hnsw, db_size)
+                if self.slow_path.clients.pause_until_ms != 0 or self.slow_path.clients.pause_changed \
+                   or len(self.slow_path.clients.released) > 0:
+                    self._service_pause(kq, hnsw, db_size)
                 if self.ttl_sweep_counter & 0x3F == 0:
                     self._housekeeping_64tick(hnsw)
                     if self.shutting_down:
