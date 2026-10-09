@@ -22,12 +22,21 @@ clean command measures 0, or a one-off allocator step of up to ~80 KB that
 does NOT grow with the cycle count (checked: 2000 and 6000 cycles both read
 80 KB) — the bound sits between the two.
 
+A window that grows past the bound is measured again, up to SETTLE more
+times, and the command passes once a window stays under it: a leak grows in
+every window, a server still settling does not. On Linux the first window
+used to grow 2-10 MB for every command and every later one ~0 (8 consecutive
+windows, gh #478). The measured server runs with transparent huge pages off
+there, so RSS moves in pages rather than 2 MB steps (see
+test_soak_rss_bounded.py).
+
 A command that errors on every shape still has to look its key up first
 (that is where the copy was made), so errors are fine and expected here —
 this is a leak check, not a semantics check.
 
     python3 tests/test_long_key_leaks.py [./pion-server] [--only CMD ...]
 """
+import ctypes
 import os
 import re
 import shutil
@@ -47,6 +56,7 @@ PORT = 6560
 CYCLES = 6000
 WARMUP = 300
 BOUND_KB = 160
+SETTLE = 3          # extra windows a growing command gets to show it has stopped
 TABLE = Path(__file__).resolve().parents[1] / "src" / "commands" / "command_table.mojo"
 
 
@@ -111,11 +121,19 @@ def run(c, cmds):
         c.pipeline(cmds[i:i + 400])
 
 
+def server_preexec():
+    """Linux: transparent huge pages off for the measured server (PR_SET_THP_DISABLE
+    survives exec), so RSS moves in pages, not 2 MB steps."""
+    if sys.platform.startswith("linux"):
+        ctypes.CDLL(None).prctl(41, 1, 0, 0, 0)
+
+
 def start(d):
     # --no-wal: the log grows with every write and would swamp the signal.
     proc = subprocess.Popen([BINARY, "-p", str(PORT), "-w", "1", "--no-wal", "--no-crash-log",
                              "--no-auto-detect", "--no-auto-embed"],
-                            cwd=d, stdout=open(os.path.join(d, "log"), "a"), stderr=subprocess.STDOUT)
+                            cwd=d, stdout=open(os.path.join(d, "log"), "a"), stderr=subprocess.STDOUT,
+                            preexec_fn=server_preexec)
     try:
         wait_ready(PORT, 30, proc=proc)
     except RuntimeError:
@@ -176,13 +194,20 @@ def main():
                     base = rss_kb(proc.pid)
                     run(c, one * CYCLES)
                     grown = rss_kb(proc.pid) - base
+                    settled = 0
+                    while grown >= BOUND_KB and settled < SETTLE:
+                        settled += 1
+                        base = rss_kb(proc.pid)
+                        run(c, one * CYCLES)
+                        grown = rss_kb(proc.pid) - base
                 except (ConnectionError, TimeoutError, OSError) as e:
                     fails.append(f"{name}: server died or hung ({type(e).__name__})")
                     print(f"  FAIL  {name:24} server died or hung")
                     continue
                 if grown >= BOUND_KB:
                     fails.append(f"{name}: grew {grown} KB ({grown * 1024 / CYCLES:.0f} B/cycle)")
-                    print(f"  FAIL  {name:24} grew {grown:6d} KB  ({grown * 1024 / CYCLES:.0f} B/cycle)")
+                    print(f"  FAIL  {name:24} grew {grown:6d} KB  ({grown * 1024 / CYCLES:.0f} B/cycle)"
+                          f" in window {settled + 1}")
                 else:
                     clean += 1
                 if proc.poll() is not None:
