@@ -48,6 +48,7 @@ comptime CLIENT_BUF_SIZE = 256 * 1024 * 1024  # 256 MB
 comptime KQ_SPIN_POLLS = 64
 
 
+@no_inline
 def _env_on(name: StaticString) -> Bool:
     """gh #205 / #206: an environment switch such as PION_IOURING_DEFER is on
     when it is set to a value starting with 1."""
@@ -1593,6 +1594,7 @@ struct NetworkEngine:
             # The drain moved the unconsumed tail to the buffer's start.
             unsafe_memcpy(dest=own, src=src_buf, count=left)
 
+    @no_inline
     def _uring_report_features(mut self, want_defer: Bool, want_regfiles: Bool, want_pbuf: Bool,
                                ringfd_ok: Bool, regfiles_ok: Bool):
         """gh #205 / #206: one line naming what the kernel granted for each

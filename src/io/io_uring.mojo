@@ -652,8 +652,12 @@ struct IOUring(Movable):
         sqe[].user_data    = self.make_ud(UD_SEND, fd)
 
     # ── gh #205: registered ring fd and registered files ────────────────────
+    # The register_* calls run once, at loop start, and stay out of line: a
+    # single-call-site function gets inlined into run_server_uring, and the
+    # buffer ring's 256-entry fill unrolled there grew the loop's function by
+    # a fifth.
 
-    @always_inline
+    @no_inline
     def register_ring_fd(mut self) -> Bool:
         """IORING_REGISTER_RING_FDS (5.18): every enter() then names the ring
         by its registered index, and the kernel skips the fd-table lookup it
@@ -667,7 +671,7 @@ struct IOUring(Movable):
         self.enter_flags = UInt32(IORING_ENTER_REGISTERED_RING)
         return True
 
-    @always_inline
+    @no_inline
     def register_files(mut self, want: Int) -> Bool:
         """IORING_REGISTER_FILES: an empty table of up to `want` slots
         (clamped to RLIMIT_NOFILE). Slot i serves fd i, so no slot allocator
@@ -725,7 +729,7 @@ struct IOUring(Movable):
 
     # ── gh #206: provided-buffer ring ────────────────────────────────────────
 
-    @always_inline
+    @no_inline
     def register_pbuf_ring(mut self, pool: Pointer[UInt8, MutUntrackedOrigin], bgid: UInt16) -> Bool:
         """IORING_REGISTER_PBUF_RING (5.19) for buffer group `bgid`, holding
         all PBUF_RING_ENTRIES buffers of `pool`. A buffer then goes back to
