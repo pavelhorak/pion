@@ -1,0 +1,1 @@
++ RESULTS_LOCAL_DIR=/opt/out/M3_vdbb475/redis_2 taskset -c 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31 /opt/venv_vdbb_fork/bin/vectordbbench redis --host localhost --port 6379 --no-ssl --cmd --case-type Performance1536D50K --k 100 --m 16 --ef-construction 128 --ef-runtime 150 --db-label redis --task-label m3 --num-concurrency 1,5,10 --concurrency-duration 5

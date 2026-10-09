@@ -1,0 +1,9 @@
+server cpus: 0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23
+client cpus: 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31
+pion-server 0.9.7+4b672bb (2026-10-09)
+vector: libpion_vector abi=1 (closed, dims=1536) isa=vnni
+Redis server v=8.10.2 sha=498ecd0d:0 malloc=jemalloc-5.3.0 bits=64 build=cfc25888cd488a6e
+CPU(s):                                  32
+Model name:                              AMD EPYC 8124P 16-Core Processor
+BIOS Model name:                         AMD EPYC 8124P 16-Core Processor                 CPU @ 2.4GHz
+CPU(s) scaling MHz:                      76%
