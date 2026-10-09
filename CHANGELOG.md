@@ -112,6 +112,12 @@ enumerated — there were roughly 1,100 of them.
 
 ### Fixed
 
+- **PFADD leaked ~64 bytes for every element longer than 23 bytes.** The
+  element was copied to the heap to be hashed, and the copy was never freed,
+  so a HyperLogLog of user ids, emails or URLs grew the server by its input.
+  It now hashes the bytes in place. WAL replay of PFADD leaked the same way
+  at startup.
+
 - **`pion-exo` could not be imported on Python 3.10–3.13.** Two classes
   define a `redis` property and annotate a later method `-> redis.Redis`;
   before 3.14 that annotation is evaluated in class scope, where `redis` is
