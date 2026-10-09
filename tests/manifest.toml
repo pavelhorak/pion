@@ -762,6 +762,12 @@ tier = "gate"
 timeout = 900
 
 [[test]]
+file = "tests/test_reg_tile_kernels.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
 file = "tests/test_intent_router.py"
 server = "-w 1"
 tier = "full"

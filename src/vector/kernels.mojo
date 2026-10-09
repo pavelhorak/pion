@@ -5,6 +5,8 @@ from std.sys import simd_width_of
 from std.sys import CompilationTarget
 from std.sys.intrinsics import prefetch, llvm_intrinsic
 from std.memory.unsafe import bitcast
+from std.collections import Array
+from src.vector.reg_tile import RegTile, pack_rows, ptr_rows4, ptr_rows8
 
 # ── Platform-intrinsic rounding (inspired by MAX quantization/_utils.mojo) ────
 # Fused float→int32 with round-to-nearest-even: single instruction on ARM NEON
@@ -528,6 +530,22 @@ def l2_int8_sabd_udot[dim: Int](a: UnsafePointer[Int8, MutUntrackedOrigin],
 
 
 @always_inline
+def _l2_sabd_udot_rows[dim: Int, rows: Int](
+    q: UnsafePointer[Int8, MutUntrackedOrigin],
+    v: Array[UnsafePointer[Int8, MutUntrackedOrigin], rows],
+) -> SIMD[DType.float32, rows]:
+    """gh #127: the SABD+UDOT microkernel behind `l2_int8_sabd_udot_batch8`
+    (NEON +dotprod only): one query load per 16 lanes, `rows` UINT32 chains
+    in a RegTile. `dim` must be a multiple of 16."""
+    var acc = RegTile[DType.uint32, rows, 4]()
+    for i in range(0, dim, 16):
+        var qv = q.load[width=16](i)
+        comptime for r in range(rows):
+            var d = _sabd_u8(qv, v[r].load[width=16](i))
+            acc[r] = _udot_u8(acc[r], d, d)
+    return pack_rows[rows](acc.reduce_f32())
+
+@always_inline
 def l2_int8_sabd_udot_batch8[dim: Int](
     q: UnsafePointer[Int8, MutUntrackedOrigin],
     v0: UnsafePointer[Int8, MutUntrackedOrigin], v1: UnsafePointer[Int8, MutUntrackedOrigin],
@@ -539,28 +557,9 @@ def l2_int8_sabd_udot_batch8[dim: Int](
     load per 16 lanes and eight independent chains, so the eight vectors' cache
     misses overlap. Exact, like the single form."""
     comptime if CompilationTarget.has_neon_int8_dotprod() and dim % 16 == 0:
-        var s0 = SIMD[DType.uint32, 4](0); var s1 = SIMD[DType.uint32, 4](0)
-        var s2 = SIMD[DType.uint32, 4](0); var s3 = SIMD[DType.uint32, 4](0)
-        var s4 = SIMD[DType.uint32, 4](0); var s5 = SIMD[DType.uint32, 4](0)
-        var s6 = SIMD[DType.uint32, 4](0); var s7 = SIMD[DType.uint32, 4](0)
-        for i in range(0, dim, 16):
-            var qv = q.load[width=16](i)
-            var d0 = _sabd_u8(qv, v0.load[width=16](i)); s0 = _udot_u8(s0, d0, d0)
-            var d1 = _sabd_u8(qv, v1.load[width=16](i)); s1 = _udot_u8(s1, d1, d1)
-            var d2 = _sabd_u8(qv, v2.load[width=16](i)); s2 = _udot_u8(s2, d2, d2)
-            var d3 = _sabd_u8(qv, v3.load[width=16](i)); s3 = _udot_u8(s3, d3, d3)
-            var d4 = _sabd_u8(qv, v4.load[width=16](i)); s4 = _udot_u8(s4, d4, d4)
-            var d5 = _sabd_u8(qv, v5.load[width=16](i)); s5 = _udot_u8(s5, d5, d5)
-            var d6 = _sabd_u8(qv, v6.load[width=16](i)); s6 = _udot_u8(s6, d6, d6)
-            var d7 = _sabd_u8(qv, v7.load[width=16](i)); s7 = _udot_u8(s7, d7, d7)
-        return SIMD[DType.float32, 8](
-            s0.reduce_add().cast[DType.float32](), s1.reduce_add().cast[DType.float32](),
-            s2.reduce_add().cast[DType.float32](), s3.reduce_add().cast[DType.float32](),
-            s4.reduce_add().cast[DType.float32](), s5.reduce_add().cast[DType.float32](),
-            s6.reduce_add().cast[DType.float32](), s7.reduce_add().cast[DType.float32]())
+        return _l2_sabd_udot_rows[dim, 8](q, ptr_rows8(v0, v1, v2, v3, v4, v5, v6, v7))
     else:
         return l2_distance_int8_int8_batch8_jit[dim](q, v0, v1, v2, v3, v4, v5, v6, v7)
-
 
 @always_inline
 def l2_distance_gpu(v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], dim: Int, min_val: Float32, range_val: Float32) -> Float32:
@@ -821,153 +820,43 @@ def l2_distance_fp32_int8_sq8_jit[dim: Int](
     return total
 
 @always_inline
-def l2_distance_fp32_int8_sq8_batch4_jit[dim: Int](
-    v1:   UnsafePointer[Float32, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
-    sq8_scale: UnsafePointer[Float32, MutUntrackedOrigin],
-    sq8_offset: UnsafePointer[Float32, MutUntrackedOrigin]) -> SIMD[DType.float32, 4]:
-    """SQ8 per-dim batch-4: per-dim scale/offset loaded once per position chunk, shared across 4 neighbors."""
+def _l2_fp32_int8_pervec_rows[rows: Int](
+    v1: UnsafePointer[Float32, MutUntrackedOrigin],
+    v: Array[UnsafePointer[Int8, MutUntrackedOrigin], rows],
+    dim: Int,
+    mins: Array[Float32, rows],
+    ranges: Array[Float32, rows],
+) -> SIMD[DType.float32, rows]:
+    """gh #127: the per-vector SQ8 microkernel behind
+    `l2_distance_fp32_int8_pervec_batch4`. FP32, so each row runs exactly the
+    expression tree the unrolled form ran (dequantize with fma_mad, subtract,
+    fma_mad into the row's chain; the same scalar tail); only the rows'
+    interleaving differs, and rows never touch each other."""
     comptime width = simd_width_of[DType.float32]()
-    var sum0 = SIMD[DType.float32, width](0.0)
-    var sum1 = SIMD[DType.float32, width](0.0)
-    var sum2 = SIMD[DType.float32, width](0.0)
-    var sum3 = SIMD[DType.float32, width](0.0)
-    for i in range(0, dim - width + 1, width):
+    var s = Array[Float32, rows](uninitialized=True)
+    var o = Array[Float32, rows](uninitialized=True)
+    comptime for r in range(rows):
+        s[r] = ranges[r] / 254.0
+        o[r] = 127.0 * s[r] + mins[r]
+    var acc = RegTile[DType.float32, rows, width]()
+    var n_simd = (dim // width) * width
+    var i = 0
+    while i < n_simd:
         var f1 = v1.load[width=width](i)
-        var sc = sq8_scale.load[width=width](i)
-        var of = sq8_offset.load[width=width](i)
-        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), sc, of)
-        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
-    var r0 = sum0.reduce_add(); var r1 = sum1.reduce_add()
-    var r2 = sum2.reduce_add(); var r3 = sum3.reduce_add()
-    comptime tail_start = (dim // width) * width
-    for i in range(tail_start, dim):
-        var f1 = v1[i]; var sc = sq8_scale[i]; var of = sq8_offset[i]
-        var d0 = f1 - (v2_0[i].cast[DType.float32]() * sc + of); r0 += d0 * d0
-        var d1 = f1 - (v2_1[i].cast[DType.float32]() * sc + of); r1 += d1 * d1
-        var d2 = f1 - (v2_2[i].cast[DType.float32]() * sc + of); r2 += d2 * d2
-        var d3 = f1 - (v2_3[i].cast[DType.float32]() * sc + of); r3 += d3 * d3
-    return SIMD[DType.float32, 4](r0, r1, r2, r3)
-
-@always_inline
-def l2_distance_fp32_int8_sq8_batch8_jit[dim: Int](
-    v1:   UnsafePointer[Float32, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_4: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_6: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_7: UnsafePointer[Int8, MutUntrackedOrigin],
-    sq8_scale: UnsafePointer[Float32, MutUntrackedOrigin],
-    sq8_offset: UnsafePointer[Float32, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
-    """SQ8 per-dim batch-8: per-dim scale/offset loaded once per position chunk, shared across 8 neighbors."""
-    comptime width = simd_width_of[DType.float32]()
-    var sum0 = SIMD[DType.float32, width](0.0)
-    var sum1 = SIMD[DType.float32, width](0.0)
-    var sum2 = SIMD[DType.float32, width](0.0)
-    var sum3 = SIMD[DType.float32, width](0.0)
-    var sum4 = SIMD[DType.float32, width](0.0)
-    var sum5 = SIMD[DType.float32, width](0.0)
-    var sum6 = SIMD[DType.float32, width](0.0)
-    var sum7 = SIMD[DType.float32, width](0.0)
-    for i in range(0, dim - width + 1, width):
-        var f1 = v1.load[width=width](i)
-        var sc = sq8_scale.load[width=width](i)
-        var of = sq8_offset.load[width=width](i)
-        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq4 = fma_mad[width](v2_4.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq5 = fma_mad[width](v2_5.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq6 = fma_mad[width](v2_6.load[width=width](i).cast[DType.float32](), sc, of)
-        var dq7 = fma_mad[width](v2_7.load[width=width](i).cast[DType.float32](), sc, of)
-        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
-        var d4 = f1 - dq4; sum4 = fma_mad[width](d4, d4, sum4)
-        var d5 = f1 - dq5; sum5 = fma_mad[width](d5, d5, sum5)
-        var d6 = f1 - dq6; sum6 = fma_mad[width](d6, d6, sum6)
-        var d7 = f1 - dq7; sum7 = fma_mad[width](d7, d7, sum7)
-    var r0 = sum0.reduce_add(); var r1 = sum1.reduce_add()
-    var r2 = sum2.reduce_add(); var r3 = sum3.reduce_add()
-    var r4 = sum4.reduce_add(); var r5 = sum5.reduce_add()
-    var r6 = sum6.reduce_add(); var r7 = sum7.reduce_add()
-    comptime tail_start = (dim // width) * width
-    for i in range(tail_start, dim):
-        var f1 = v1[i]; var sc = sq8_scale[i]; var of = sq8_offset[i]
-        var d0 = f1 - (v2_0[i].cast[DType.float32]() * sc + of); r0 += d0 * d0
-        var d1 = f1 - (v2_1[i].cast[DType.float32]() * sc + of); r1 += d1 * d1
-        var d2 = f1 - (v2_2[i].cast[DType.float32]() * sc + of); r2 += d2 * d2
-        var d3 = f1 - (v2_3[i].cast[DType.float32]() * sc + of); r3 += d3 * d3
-        var d4 = f1 - (v2_4[i].cast[DType.float32]() * sc + of); r4 += d4 * d4
-        var d5 = f1 - (v2_5[i].cast[DType.float32]() * sc + of); r5 += d5 * d5
-        var d6 = f1 - (v2_6[i].cast[DType.float32]() * sc + of); r6 += d6 * d6
-        var d7 = f1 - (v2_7[i].cast[DType.float32]() * sc + of); r7 += d7 * d7
-    return SIMD[DType.float32, 8](r0, r1, r2, r3, r4, r5, r6, r7)
-
-@always_inline
-def l2_distance_fp32_int8_batch4_jit[dim: Int](
-    v1:   UnsafePointer[Float32, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
-    min_val: Float32, range_val: Float32) -> SIMD[DType.float32, 4]:
-    """Compute FP32-vs-INT8 L2 distance for 4 neighbors simultaneously.
-    Loads each query chunk ONCE and uses it for all 4 dequant+diff operations.
-    Returns SIMD[float32, 4] = (dist0, dist1, dist2, dist3).
-    """
-    comptime width = simd_width_of[DType.float32]()
-    var scale = range_val / 254.0
-    var scale_simd = SIMD[DType.float32, width](scale)
-    var offset_simd = SIMD[DType.float32, width](127.0 * scale + min_val)
-
-    var sum0 = SIMD[DType.float32, width](0.0)
-    var sum1 = SIMD[DType.float32, width](0.0)
-    var sum2 = SIMD[DType.float32, width](0.0)
-    var sum3 = SIMD[DType.float32, width](0.0)
-
-    for i in range(0, dim - width + 1, width):
-        var f1 = v1.load[width=width](i)  # query chunk — loaded once, used 4×
-        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
-
-    var r0 = sum0.reduce_add()
-    var r1 = sum1.reduce_add()
-    var r2 = sum2.reduce_add()
-    var r3 = sum3.reduce_add()
-
-    # Tail (dim % width != 0 — not triggered for dim=1536 with width=8 or 16)
-    comptime tail_start = (dim // width) * width
-    for i in range(tail_start, dim):
+        comptime for r in range(rows):
+            var dq = fma_mad[width](v[r].load[width=width](i).cast[DType.float32](),
+                                    SIMD[DType.float32, width](s[r]), SIMD[DType.float32, width](o[r]))
+            var d = f1 - dq
+            acc[r] = fma_mad[width](d, d, acc[r])
+        i += width
+    var red = acc.reduce_f32()
+    while i < dim:
         var f1 = v1[i]
-        var sc = range_val / 254.0
-        var off = 127.0 * sc + min_val
-        var d0 = f1 - (v2_0[i].cast[DType.float32]() * sc + off); r0 += d0 * d0
-        var d1 = f1 - (v2_1[i].cast[DType.float32]() * sc + off); r1 += d1 * d1
-        var d2 = f1 - (v2_2[i].cast[DType.float32]() * sc + off); r2 += d2 * d2
-        var d3 = f1 - (v2_3[i].cast[DType.float32]() * sc + off); r3 += d3 * d3
-
-    return SIMD[DType.float32, 4](r0, r1, r2, r3)
+        comptime for r in range(rows):
+            var d = f1 - (v[r][i].cast[DType.float32]() * s[r] + o[r])
+            red[r] += d * d
+        i += 1
+    return pack_rows[rows](red)
 
 @always_inline
 def l2_distance_fp32_int8_pervec_batch4(
@@ -983,121 +872,42 @@ def l2_distance_fp32_int8_pervec_batch4(
     min3: Float32, range3: Float32,
 ) -> SIMD[DType.float32, 4]:
     """Per-vector SQ8 batch-4 (gh #42 follow-up). Each of the 4 neighbors
-    has its own (min, range) — unlike `*_batch4_jit` which assumes shared
-    quantization. Loads the query chunk ONCE and reuses it for 4 dequant +
-    L2² accumulators. Used by KNNHNSW._search_layer to attack memory stall
-    from random graph traversal: 4 neighbor base loads share 1 query load.
+    has its own (min, range), unlike a shared-quantization batch. Loads the
+    query chunk ONCE and reuses it for 4 dequant + L2² accumulators. Used by
+    KNNHNSW._search_layer to attack memory stall from random graph traversal:
+    4 neighbor base loads share 1 query load.
     Returns SIMD[float32, 4] = (dist0, dist1, dist2, dist3)."""
-    comptime width = simd_width_of[DType.float32]()
-    var s0 = range0 / 254.0; var o0 = 127.0 * s0 + min0
-    var s1 = range1 / 254.0; var o1 = 127.0 * s1 + min1
-    var s2 = range2 / 254.0; var o2 = 127.0 * s2 + min2
-    var s3 = range3 / 254.0; var o3 = 127.0 * s3 + min3
-    var sv0 = SIMD[DType.float32, width](s0); var ov0 = SIMD[DType.float32, width](o0)
-    var sv1 = SIMD[DType.float32, width](s1); var ov1 = SIMD[DType.float32, width](o1)
-    var sv2 = SIMD[DType.float32, width](s2); var ov2 = SIMD[DType.float32, width](o2)
-    var sv3 = SIMD[DType.float32, width](s3); var ov3 = SIMD[DType.float32, width](o3)
-    var sum0 = SIMD[DType.float32, width](0.0)
-    var sum1 = SIMD[DType.float32, width](0.0)
-    var sum2 = SIMD[DType.float32, width](0.0)
-    var sum3 = SIMD[DType.float32, width](0.0)
-    var n_simd = (dim // width) * width
-    var i = 0
-    while i < n_simd:
-        var f1 = v1.load[width=width](i)
-        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), sv0, ov0)
-        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), sv1, ov1)
-        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), sv2, ov2)
-        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), sv3, ov3)
-        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
-        i += width
-    var r0 = sum0.reduce_add()
-    var r1 = sum1.reduce_add()
-    var r2 = sum2.reduce_add()
-    var r3 = sum3.reduce_add()
-    while i < dim:
-        var f1 = v1[i]
-        var d0 = f1 - (v2_0[i].cast[DType.float32]() * s0 + o0); r0 += d0 * d0
-        var d1 = f1 - (v2_1[i].cast[DType.float32]() * s1 + o1); r1 += d1 * d1
-        var d2 = f1 - (v2_2[i].cast[DType.float32]() * s2 + o2); r2 += d2 * d2
-        var d3 = f1 - (v2_3[i].cast[DType.float32]() * s3 + o3); r3 += d3 * d3
-        i += 1
-    return SIMD[DType.float32, 4](r0, r1, r2, r3)
-
+    var mins = Array[Float32, 4](uninitialized=True)
+    mins[0] = min0; mins[1] = min1; mins[2] = min2; mins[3] = min3
+    var ranges = Array[Float32, 4](uninitialized=True)
+    ranges[0] = range0; ranges[1] = range1; ranges[2] = range2; ranges[3] = range3
+    return _l2_fp32_int8_pervec_rows[4](
+        v1, ptr_rows4(v2_0, v2_1, v2_2, v2_3), dim, mins, ranges)
 
 @always_inline
-def l2_distance_fp32_int8_batch8_jit[dim: Int](
-    v1:   UnsafePointer[Float32, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_4: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_6: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_7: UnsafePointer[Int8, MutUntrackedOrigin],
-    min_val: Float32, range_val: Float32) -> SIMD[DType.float32, 8]:
-    """Compute FP32-vs-INT8 L2 distance for 8 neighbors simultaneously.
-    Loads each query chunk ONCE and uses it for all 8 dequant+diff operations.
-    Returns SIMD[float32, 8] = (dist0..dist7).
-    """
-    comptime width = simd_width_of[DType.float32]()
-    var scale = range_val / 254.0
-    var scale_simd = SIMD[DType.float32, width](scale)
-    var offset_simd = SIMD[DType.float32, width](127.0 * scale + min_val)
-
-    var sum0 = SIMD[DType.float32, width](0.0)
-    var sum1 = SIMD[DType.float32, width](0.0)
-    var sum2 = SIMD[DType.float32, width](0.0)
-    var sum3 = SIMD[DType.float32, width](0.0)
-    var sum4 = SIMD[DType.float32, width](0.0)
-    var sum5 = SIMD[DType.float32, width](0.0)
-    var sum6 = SIMD[DType.float32, width](0.0)
-    var sum7 = SIMD[DType.float32, width](0.0)
-
+def _l2_int8_int8_rows[dim: Int, rows: Int](
+    q: UnsafePointer[Int8, MutUntrackedOrigin],
+    v: Array[UnsafePointer[Int8, MutUntrackedOrigin], rows],
+) -> SIMD[DType.float32, rows]:
+    """gh #127: the INT8-INT8 L2 microkernel behind the batch-4 and batch-8
+    entry points: one query load per 16 lanes, `rows` INT32 chains in a
+    RegTile, Float32 tail per row. Exact, like the unrolled forms it replaces
+    (INT32 sums are order-free; the per-row tail order is unchanged)."""
+    comptime width = 16
+    var acc = RegTile[DType.int32, rows, width]()
     for i in range(0, dim - width + 1, width):
-        var f1 = v1.load[width=width](i)  # query chunk — loaded once, used 8×
-        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq4 = fma_mad[width](v2_4.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq5 = fma_mad[width](v2_5.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq6 = fma_mad[width](v2_6.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var dq7 = fma_mad[width](v2_7.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
-        var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
-        var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
-        var d3 = f1 - dq3; sum3 = fma_mad[width](d3, d3, sum3)
-        var d4 = f1 - dq4; sum4 = fma_mad[width](d4, d4, sum4)
-        var d5 = f1 - dq5; sum5 = fma_mad[width](d5, d5, sum5)
-        var d6 = f1 - dq6; sum6 = fma_mad[width](d6, d6, sum6)
-        var d7 = f1 - dq7; sum7 = fma_mad[width](d7, d7, sum7)
-
-    var r0 = sum0.reduce_add(); var r1 = sum1.reduce_add()
-    var r2 = sum2.reduce_add(); var r3 = sum3.reduce_add()
-    var r4 = sum4.reduce_add(); var r5 = sum5.reduce_add()
-    var r6 = sum6.reduce_add(); var r7 = sum7.reduce_add()
-
-    # Tail (not triggered for dim=1536 with width=8 or 16)
+        var qv = q.load[width=width](i).cast[DType.int32]()
+        comptime for r in range(rows):
+            var d = qv - v[r].load[width=width](i).cast[DType.int32]()
+            acc[r] += d * d
+    var red = acc.reduce_f32()
     comptime tail_start = (dim // width) * width
     for i in range(tail_start, dim):
-        var f1 = v1[i]
-        var sc = range_val / 254.0
-        var off = 127.0 * sc + min_val
-        var d0 = f1 - (v2_0[i].cast[DType.float32]() * sc + off); r0 += d0 * d0
-        var d1 = f1 - (v2_1[i].cast[DType.float32]() * sc + off); r1 += d1 * d1
-        var d2 = f1 - (v2_2[i].cast[DType.float32]() * sc + off); r2 += d2 * d2
-        var d3 = f1 - (v2_3[i].cast[DType.float32]() * sc + off); r3 += d3 * d3
-        var d4 = f1 - (v2_4[i].cast[DType.float32]() * sc + off); r4 += d4 * d4
-        var d5 = f1 - (v2_5[i].cast[DType.float32]() * sc + off); r5 += d5 * d5
-        var d6 = f1 - (v2_6[i].cast[DType.float32]() * sc + off); r6 += d6 * d6
-        var d7 = f1 - (v2_7[i].cast[DType.float32]() * sc + off); r7 += d7 * d7
-
-    return SIMD[DType.float32, 8](r0, r1, r2, r3, r4, r5, r6, r7)
+        var qi = q[i].cast[DType.int32]()
+        comptime for r in range(rows):
+            var di = qi - v[r][i].cast[DType.int32]()
+            red[r] += Float32(di * di)
+    return pack_rows[rows](red)
 
 @always_inline
 def l2_distance_int8_int8_batch8_jit[dim: Int](
@@ -1113,81 +923,8 @@ def l2_distance_int8_int8_batch8_jit[dim: Int](
     """INT8-INT8 L2 batch-8: no dequantization, matches graph build metric.
     Query quantized to INT8 once per search call; ~1.3x faster than FP32-INT8.
     Accumulates in INT32 (max: 1536 * 254^2 = 99M < INT32_MAX)."""
-    comptime width = 16
-    var sum0 = SIMD[DType.int32, width](0); var sum1 = SIMD[DType.int32, width](0)
-    var sum2 = SIMD[DType.int32, width](0); var sum3 = SIMD[DType.int32, width](0)
-    var sum4 = SIMD[DType.int32, width](0); var sum5 = SIMD[DType.int32, width](0)
-    var sum6 = SIMD[DType.int32, width](0); var sum7 = SIMD[DType.int32, width](0)
-    for i in range(0, dim - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
-        var d0 = qv - v2_0.load[width=width](i).cast[DType.int32](); sum0 += d0 * d0
-        var d1 = qv - v2_1.load[width=width](i).cast[DType.int32](); sum1 += d1 * d1
-        var d2 = qv - v2_2.load[width=width](i).cast[DType.int32](); sum2 += d2 * d2
-        var d3 = qv - v2_3.load[width=width](i).cast[DType.int32](); sum3 += d3 * d3
-        var d4 = qv - v2_4.load[width=width](i).cast[DType.int32](); sum4 += d4 * d4
-        var d5 = qv - v2_5.load[width=width](i).cast[DType.int32](); sum5 += d5 * d5
-        var d6 = qv - v2_6.load[width=width](i).cast[DType.int32](); sum6 += d6 * d6
-        var d7 = qv - v2_7.load[width=width](i).cast[DType.int32](); sum7 += d7 * d7
-    var r0 = sum0.reduce_add().cast[DType.float32](); var r1 = sum1.reduce_add().cast[DType.float32]()
-    var r2 = sum2.reduce_add().cast[DType.float32](); var r3 = sum3.reduce_add().cast[DType.float32]()
-    var r4 = sum4.reduce_add().cast[DType.float32](); var r5 = sum5.reduce_add().cast[DType.float32]()
-    var r6 = sum6.reduce_add().cast[DType.float32](); var r7 = sum7.reduce_add().cast[DType.float32]()
-    comptime tail_start = (dim // width) * width
-    for i in range(tail_start, dim):
-        var qi = q[i].cast[DType.int32]()
-        var d0i = qi - v2_0[i].cast[DType.int32](); r0 += Float32(d0i * d0i)
-        var d1i = qi - v2_1[i].cast[DType.int32](); r1 += Float32(d1i * d1i)
-        var d2i = qi - v2_2[i].cast[DType.int32](); r2 += Float32(d2i * d2i)
-        var d3i = qi - v2_3[i].cast[DType.int32](); r3 += Float32(d3i * d3i)
-        var d4i = qi - v2_4[i].cast[DType.int32](); r4 += Float32(d4i * d4i)
-        var d5i = qi - v2_5[i].cast[DType.int32](); r5 += Float32(d5i * d5i)
-        var d6i = qi - v2_6[i].cast[DType.int32](); r6 += Float32(d6i * d6i)
-        var d7i = qi - v2_7[i].cast[DType.int32](); r7 += Float32(d7i * d7i)
-    return SIMD[DType.float32, 8](r0, r1, r2, r3, r4, r5, r6, r7)
-
-@always_inline
-def cosine_distance_int8_int8_batch8_jit[dim: Int](
-    q:    UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_4: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_6: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_7: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
-    """INT8-INT8 Cosine (Dot Product) batch-8. Returns negative dot product so smaller is better."""
-    comptime width = 16
-    var sum0 = SIMD[DType.int32, width](0); var sum1 = SIMD[DType.int32, width](0)
-    var sum2 = SIMD[DType.int32, width](0); var sum3 = SIMD[DType.int32, width](0)
-    var sum4 = SIMD[DType.int32, width](0); var sum5 = SIMD[DType.int32, width](0)
-    var sum6 = SIMD[DType.int32, width](0); var sum7 = SIMD[DType.int32, width](0)
-    for i in range(0, dim - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
-        sum0 += qv * v2_0.load[width=width](i).cast[DType.int32]()
-        sum1 += qv * v2_1.load[width=width](i).cast[DType.int32]()
-        sum2 += qv * v2_2.load[width=width](i).cast[DType.int32]()
-        sum3 += qv * v2_3.load[width=width](i).cast[DType.int32]()
-        sum4 += qv * v2_4.load[width=width](i).cast[DType.int32]()
-        sum5 += qv * v2_5.load[width=width](i).cast[DType.int32]()
-        sum6 += qv * v2_6.load[width=width](i).cast[DType.int32]()
-        sum7 += qv * v2_7.load[width=width](i).cast[DType.int32]()
-    var r0 = -sum0.reduce_add().cast[DType.float32](); var r1 = -sum1.reduce_add().cast[DType.float32]()
-    var r2 = -sum2.reduce_add().cast[DType.float32](); var r3 = -sum3.reduce_add().cast[DType.float32]()
-    var r4 = -sum4.reduce_add().cast[DType.float32](); var r5 = -sum5.reduce_add().cast[DType.float32]()
-    var r6 = -sum6.reduce_add().cast[DType.float32](); var r7 = -sum7.reduce_add().cast[DType.float32]()
-    comptime tail_start = (dim // width) * width
-    for i in range(tail_start, dim):
-        var qi = q[i].cast[DType.int32]()
-        r0 -= Float32(qi * v2_0[i].cast[DType.int32]())
-        r1 -= Float32(qi * v2_1[i].cast[DType.int32]())
-        r2 -= Float32(qi * v2_2[i].cast[DType.int32]())
-        r3 -= Float32(qi * v2_3[i].cast[DType.int32]())
-        r4 -= Float32(qi * v2_4[i].cast[DType.int32]())
-        r5 -= Float32(qi * v2_5[i].cast[DType.int32]())
-        r6 -= Float32(qi * v2_6[i].cast[DType.int32]())
-        r7 -= Float32(qi * v2_7[i].cast[DType.int32]())
-    return SIMD[DType.float32, 8](r0, r1, r2, r3, r4, r5, r6, r7)
+    return _l2_int8_int8_rows[dim, 8](
+        q, ptr_rows8(v2_0, v2_1, v2_2, v2_3, v2_4, v2_5, v2_6, v2_7))
 
 @always_inline
 def cosine_distance_int8_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
@@ -1206,33 +943,6 @@ def cosine_distance_int8_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigi
     return result
 
 @always_inline
-def cosine_distance_int8_int8_batch4_jit[dim: Int](
-    q:    UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 4]:
-    comptime width = 16
-    var sum0 = SIMD[DType.int32, width](0); var sum1 = SIMD[DType.int32, width](0)
-    var sum2 = SIMD[DType.int32, width](0); var sum3 = SIMD[DType.int32, width](0)
-    for i in range(0, dim - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
-        sum0 += qv * v2_0.load[width=width](i).cast[DType.int32]()
-        sum1 += qv * v2_1.load[width=width](i).cast[DType.int32]()
-        sum2 += qv * v2_2.load[width=width](i).cast[DType.int32]()
-        sum3 += qv * v2_3.load[width=width](i).cast[DType.int32]()
-    var r0 = -sum0.reduce_add().cast[DType.float32](); var r1 = -sum1.reduce_add().cast[DType.float32]()
-    var r2 = -sum2.reduce_add().cast[DType.float32](); var r3 = -sum3.reduce_add().cast[DType.float32]()
-    comptime tail_start = (dim // width) * width
-    for i in range(tail_start, dim):
-        var qi = q[i].cast[DType.int32]()
-        r0 -= Float32(qi * v2_0[i].cast[DType.int32]())
-        r1 -= Float32(qi * v2_1[i].cast[DType.int32]())
-        r2 -= Float32(qi * v2_2[i].cast[DType.int32]())
-        r3 -= Float32(qi * v2_3[i].cast[DType.int32]())
-    return SIMD[DType.float32, 4](r0, r1, r2, r3)
-
-@always_inline
 def l2_distance_int8_int8_batch4_jit[dim: Int](
     q:    UnsafePointer[Int8, MutUntrackedOrigin],
     v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
@@ -1240,88 +950,7 @@ def l2_distance_int8_int8_batch4_jit[dim: Int](
     v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
     v2_3: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 4]:
     """INT8-INT8 L2 batch-4: no dequantization, matches graph build metric."""
-    comptime width = 16
-    var sum0 = SIMD[DType.int32, width](0); var sum1 = SIMD[DType.int32, width](0)
-    var sum2 = SIMD[DType.int32, width](0); var sum3 = SIMD[DType.int32, width](0)
-    for i in range(0, dim - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
-        var d0 = qv - v2_0.load[width=width](i).cast[DType.int32](); sum0 += d0 * d0
-        var d1 = qv - v2_1.load[width=width](i).cast[DType.int32](); sum1 += d1 * d1
-        var d2 = qv - v2_2.load[width=width](i).cast[DType.int32](); sum2 += d2 * d2
-        var d3 = qv - v2_3.load[width=width](i).cast[DType.int32](); sum3 += d3 * d3
-    var r0 = sum0.reduce_add().cast[DType.float32](); var r1 = sum1.reduce_add().cast[DType.float32]()
-    var r2 = sum2.reduce_add().cast[DType.float32](); var r3 = sum3.reduce_add().cast[DType.float32]()
-    comptime tail_start = (dim // width) * width
-    for i in range(tail_start, dim):
-        var qi = q[i].cast[DType.int32]()
-        var d0i = qi - v2_0[i].cast[DType.int32](); r0 += Float32(d0i * d0i)
-        var d1i = qi - v2_1[i].cast[DType.int32](); r1 += Float32(d1i * d1i)
-        var d2i = qi - v2_2[i].cast[DType.int32](); r2 += Float32(d2i * d2i)
-        var d3i = qi - v2_3[i].cast[DType.int32](); r3 += Float32(d3i * d3i)
-    return SIMD[DType.float32, 4](r0, r1, r2, r3)
-
-@always_inline
-def l2_distance_8query_fp32_int8_jit[dim: Int](
-    neighbor: UnsafePointer[Int8, MutUntrackedOrigin],
-    q0: UnsafePointer[Float32, MutUntrackedOrigin],
-    q1: UnsafePointer[Float32, MutUntrackedOrigin],
-    q2: UnsafePointer[Float32, MutUntrackedOrigin],
-    q3: UnsafePointer[Float32, MutUntrackedOrigin],
-    q4: UnsafePointer[Float32, MutUntrackedOrigin],
-    q5: UnsafePointer[Float32, MutUntrackedOrigin],
-    q6: UnsafePointer[Float32, MutUntrackedOrigin],
-    q7: UnsafePointer[Float32, MutUntrackedOrigin],
-    min_val: Float32, range_val: Float32) -> SIMD[DType.float32, 8]:
-    """Compute L2 distance from 1 INT8 neighbor to 8 FP32 query vectors simultaneously.
-    Loads the neighbor once from DRAM, serves 8 queries from L2-cached query vectors.
-    Returns SIMD[float32, 8] = (dist_q0..dist_q7).
-    """
-    comptime width = simd_width_of[DType.float32]()
-    var scale = range_val / 254.0
-    var scale_simd = SIMD[DType.float32, width](scale)
-    var offset_simd = SIMD[DType.float32, width](127.0 * scale + min_val)
-
-    var sum0 = SIMD[DType.float32, width](0.0)
-    var sum1 = SIMD[DType.float32, width](0.0)
-    var sum2 = SIMD[DType.float32, width](0.0)
-    var sum3 = SIMD[DType.float32, width](0.0)
-    var sum4 = SIMD[DType.float32, width](0.0)
-    var sum5 = SIMD[DType.float32, width](0.0)
-    var sum6 = SIMD[DType.float32, width](0.0)
-    var sum7 = SIMD[DType.float32, width](0.0)
-
-    for i in range(0, dim - width + 1, width):
-        # Load neighbor chunk once, dequantize once → shared across all 8 queries
-        var dq = fma_mad[width](neighbor.load[width=width](i).cast[DType.float32](), scale_simd, offset_simd)
-        var d0 = q0.load[width=width](i) - dq; sum0 = fma_mad[width](d0, d0, sum0)
-        var d1 = q1.load[width=width](i) - dq; sum1 = fma_mad[width](d1, d1, sum1)
-        var d2 = q2.load[width=width](i) - dq; sum2 = fma_mad[width](d2, d2, sum2)
-        var d3 = q3.load[width=width](i) - dq; sum3 = fma_mad[width](d3, d3, sum3)
-        var d4 = q4.load[width=width](i) - dq; sum4 = fma_mad[width](d4, d4, sum4)
-        var d5 = q5.load[width=width](i) - dq; sum5 = fma_mad[width](d5, d5, sum5)
-        var d6 = q6.load[width=width](i) - dq; sum6 = fma_mad[width](d6, d6, sum6)
-        var d7 = q7.load[width=width](i) - dq; sum7 = fma_mad[width](d7, d7, sum7)
-
-    var r0 = sum0.reduce_add(); var r1 = sum1.reduce_add()
-    var r2 = sum2.reduce_add(); var r3 = sum3.reduce_add()
-    var r4 = sum4.reduce_add(); var r5 = sum5.reduce_add()
-    var r6 = sum6.reduce_add(); var r7 = sum7.reduce_add()
-
-    comptime tail_start = (dim // width) * width
-    for i in range(tail_start, dim):
-        var sc = range_val / 254.0
-        var off = 127.0 * sc + min_val
-        var dq_s = neighbor[i].cast[DType.float32]() * sc + off
-        var d0s = q0[i] - dq_s; r0 += d0s * d0s
-        var d1s = q1[i] - dq_s; r1 += d1s * d1s
-        var d2s = q2[i] - dq_s; r2 += d2s * d2s
-        var d3s = q3[i] - dq_s; r3 += d3s * d3s
-        var d4s = q4[i] - dq_s; r4 += d4s * d4s
-        var d5s = q5[i] - dq_s; r5 += d5s * d5s
-        var d6s = q6[i] - dq_s; r6 += d6s * d6s
-        var d7s = q7[i] - dq_s; r7 += d7s * d7s
-
-    return SIMD[DType.float32, 8](r0, r1, r2, r3, r4, r5, r6, r7)
+    return _l2_int8_int8_rows[dim, 4](q, ptr_rows4(v2_0, v2_1, v2_2, v2_3))
 
 @always_inline
 def pq_distance_8way[nsub: Int, pq_k: Int](
@@ -1348,169 +977,6 @@ def pq_distance_8way[nsub: Int, pq_k: Int](
     return dists
 
 # l2_distance_int8_suffix_early_exit_jit: tuned batch kernel, closed in libpion_vector (D11).
-
-@always_inline
-def l2_distance_int8_prefix_suffix_fused_batch8_jit[prefix: Int, total: Int](
-    q:  UnsafePointer[Int8, MutUntrackedOrigin],
-    v0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v4: UnsafePointer[Int8, MutUntrackedOrigin],
-    v5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v6: UnsafePointer[Int8, MutUntrackedOrigin],
-    v7: UnsafePointer[Int8, MutUntrackedOrigin],
-    thresh: Float32) -> SIMD[DType.float32, 8]:
-    """Fused prefix+suffix INT8-INT8 L2 batch-8 with inline threshold pruning.
-    Phase 1: dims [0,prefix). Prune check. Phase 2: dims [prefix,total) unconditional.
-    Pruned lanes return 1e30 sentinel. Eliminates query reload and call boundary."""
-    comptime width = 16
-    # ── Phase 1: prefix [0, prefix) ──────────────────────────────────────────
-    var sum0 = SIMD[DType.int32, width](0); var sum1 = SIMD[DType.int32, width](0)
-    var sum2 = SIMD[DType.int32, width](0); var sum3 = SIMD[DType.int32, width](0)
-    var sum4 = SIMD[DType.int32, width](0); var sum5 = SIMD[DType.int32, width](0)
-    var sum6 = SIMD[DType.int32, width](0); var sum7 = SIMD[DType.int32, width](0)
-    for i in range(0, prefix - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
-        var d0 = qv - v0.load[width=width](i).cast[DType.int32](); sum0 += d0 * d0
-        var d1 = qv - v1.load[width=width](i).cast[DType.int32](); sum1 += d1 * d1
-        var d2 = qv - v2.load[width=width](i).cast[DType.int32](); sum2 += d2 * d2
-        var d3 = qv - v3.load[width=width](i).cast[DType.int32](); sum3 += d3 * d3
-        var d4 = qv - v4.load[width=width](i).cast[DType.int32](); sum4 += d4 * d4
-        var d5 = qv - v5.load[width=width](i).cast[DType.int32](); sum5 += d5 * d5
-        var d6 = qv - v6.load[width=width](i).cast[DType.int32](); sum6 += d6 * d6
-        var d7 = qv - v7.load[width=width](i).cast[DType.int32](); sum7 += d7 * d7
-    var r0 = sum0.reduce_add().cast[DType.float32](); var r1 = sum1.reduce_add().cast[DType.float32]()
-    var r2 = sum2.reduce_add().cast[DType.float32](); var r3 = sum3.reduce_add().cast[DType.float32]()
-    var r4 = sum4.reduce_add().cast[DType.float32](); var r5 = sum5.reduce_add().cast[DType.float32]()
-    var r6 = sum6.reduce_add().cast[DType.float32](); var r7 = sum7.reduce_add().cast[DType.float32]()
-    comptime prefix_tail = (prefix // width) * width
-    for i in range(prefix_tail, prefix):
-        var qi = q[i].cast[DType.int32]()
-        var d0i = qi - v0[i].cast[DType.int32](); r0 += Float32(d0i * d0i)
-        var d1i = qi - v1[i].cast[DType.int32](); r1 += Float32(d1i * d1i)
-        var d2i = qi - v2[i].cast[DType.int32](); r2 += Float32(d2i * d2i)
-        var d3i = qi - v3[i].cast[DType.int32](); r3 += Float32(d3i * d3i)
-        var d4i = qi - v4[i].cast[DType.int32](); r4 += Float32(d4i * d4i)
-        var d5i = qi - v5[i].cast[DType.int32](); r5 += Float32(d5i * d5i)
-        var d6i = qi - v6[i].cast[DType.int32](); r6 += Float32(d6i * d6i)
-        var d7i = qi - v7[i].cast[DType.int32](); r7 += Float32(d7i * d7i)
-    # Threshold check — prune flags
-    var p0 = r0 > thresh; var p1 = r1 > thresh; var p2 = r2 > thresh; var p3 = r3 > thresh
-    var p4 = r4 > thresh; var p5 = r5 > thresh; var p6 = r6 > thresh; var p7 = r7 > thresh
-    # ── Phase 2: suffix [prefix, total) unconditional ────────────────────────
-    # All 8 neighbor vectors already in L1/L2 from Phase 2 prefetch in hnsw.mojo.
-    # Computing all 8 unconditionally is faster than branching per lane.
-    comptime suffix = total - prefix
-    var t0 = SIMD[DType.int32, width](0); var t1 = SIMD[DType.int32, width](0)
-    var t2 = SIMD[DType.int32, width](0); var t3 = SIMD[DType.int32, width](0)
-    var t4 = SIMD[DType.int32, width](0); var t5 = SIMD[DType.int32, width](0)
-    var t6 = SIMD[DType.int32, width](0); var t7 = SIMD[DType.int32, width](0)
-    for i in range(0, suffix - width + 1, width):
-        var qi = q.load[width=width](prefix + i).cast[DType.int32]()
-        var e0 = qi - v0.load[width=width](prefix + i).cast[DType.int32](); t0 += e0 * e0
-        var e1 = qi - v1.load[width=width](prefix + i).cast[DType.int32](); t1 += e1 * e1
-        var e2 = qi - v2.load[width=width](prefix + i).cast[DType.int32](); t2 += e2 * e2
-        var e3 = qi - v3.load[width=width](prefix + i).cast[DType.int32](); t3 += e3 * e3
-        var e4 = qi - v4.load[width=width](prefix + i).cast[DType.int32](); t4 += e4 * e4
-        var e5 = qi - v5.load[width=width](prefix + i).cast[DType.int32](); t5 += e5 * e5
-        var e6 = qi - v6.load[width=width](prefix + i).cast[DType.int32](); t6 += e6 * e6
-        var e7 = qi - v7.load[width=width](prefix + i).cast[DType.int32](); t7 += e7 * e7
-    var s0 = t0.reduce_add().cast[DType.float32](); var s1 = t1.reduce_add().cast[DType.float32]()
-    var s2 = t2.reduce_add().cast[DType.float32](); var s3 = t3.reduce_add().cast[DType.float32]()
-    var s4 = t4.reduce_add().cast[DType.float32](); var s5 = t5.reduce_add().cast[DType.float32]()
-    var s6 = t6.reduce_add().cast[DType.float32](); var s7 = t7.reduce_add().cast[DType.float32]()
-    comptime suffix_tail = (suffix // width) * width
-    for i in range(suffix_tail, suffix):
-        var qi = q[prefix + i].cast[DType.int32]()
-        var e0i = qi - v0[prefix + i].cast[DType.int32](); s0 += Float32(e0i * e0i)
-        var e1i = qi - v1[prefix + i].cast[DType.int32](); s1 += Float32(e1i * e1i)
-        var e2i = qi - v2[prefix + i].cast[DType.int32](); s2 += Float32(e2i * e2i)
-        var e3i = qi - v3[prefix + i].cast[DType.int32](); s3 += Float32(e3i * e3i)
-        var e4i = qi - v4[prefix + i].cast[DType.int32](); s4 += Float32(e4i * e4i)
-        var e5i = qi - v5[prefix + i].cast[DType.int32](); s5 += Float32(e5i * e5i)
-        var e6i = qi - v6[prefix + i].cast[DType.int32](); s6 += Float32(e6i * e6i)
-        var e7i = qi - v7[prefix + i].cast[DType.int32](); s7 += Float32(e7i * e7i)
-    # Combine: prefix + suffix; sentinel for pruned lanes
-    var sentinel = Float32(1e30)
-    var out0 = r0 + s0
-    if p0: out0 = sentinel
-    var out1 = r1 + s1
-    if p1: out1 = sentinel
-    var out2 = r2 + s2
-    if p2: out2 = sentinel
-    var out3 = r3 + s3
-    if p3: out3 = sentinel
-    var out4 = r4 + s4
-    if p4: out4 = sentinel
-    var out5 = r5 + s5
-    if p5: out5 = sentinel
-    var out6 = r6 + s6
-    if p6: out6 = sentinel
-    var out7 = r7 + s7
-    if p7: out7 = sentinel
-    return SIMD[DType.float32, 8](out0, out1, out2, out3, out4, out5, out6, out7)
-
-@always_inline
-def l2_distance_int8_prefix_suffix_fused_batch4_jit[prefix: Int, total: Int](
-    q:  UnsafePointer[Int8, MutUntrackedOrigin],
-    v0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v3: UnsafePointer[Int8, MutUntrackedOrigin],
-    thresh: Float32) -> SIMD[DType.float32, 4]:
-    """Fused prefix+suffix INT8-INT8 L2 batch-4 with inline threshold pruning."""
-    comptime width = 16
-    var sum0 = SIMD[DType.int32, width](0); var sum1 = SIMD[DType.int32, width](0)
-    var sum2 = SIMD[DType.int32, width](0); var sum3 = SIMD[DType.int32, width](0)
-    for i in range(0, prefix - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
-        var d0 = qv - v0.load[width=width](i).cast[DType.int32](); sum0 += d0 * d0
-        var d1 = qv - v1.load[width=width](i).cast[DType.int32](); sum1 += d1 * d1
-        var d2 = qv - v2.load[width=width](i).cast[DType.int32](); sum2 += d2 * d2
-        var d3 = qv - v3.load[width=width](i).cast[DType.int32](); sum3 += d3 * d3
-    var r0 = sum0.reduce_add().cast[DType.float32](); var r1 = sum1.reduce_add().cast[DType.float32]()
-    var r2 = sum2.reduce_add().cast[DType.float32](); var r3 = sum3.reduce_add().cast[DType.float32]()
-    comptime prefix_tail = (prefix // width) * width
-    for i in range(prefix_tail, prefix):
-        var qi = q[i].cast[DType.int32]()
-        var d0i = qi - v0[i].cast[DType.int32](); r0 += Float32(d0i * d0i)
-        var d1i = qi - v1[i].cast[DType.int32](); r1 += Float32(d1i * d1i)
-        var d2i = qi - v2[i].cast[DType.int32](); r2 += Float32(d2i * d2i)
-        var d3i = qi - v3[i].cast[DType.int32](); r3 += Float32(d3i * d3i)
-    var p0 = r0 > thresh; var p1 = r1 > thresh; var p2 = r2 > thresh; var p3 = r3 > thresh
-    comptime suffix = total - prefix
-    var t0 = SIMD[DType.int32, width](0); var t1 = SIMD[DType.int32, width](0)
-    var t2 = SIMD[DType.int32, width](0); var t3 = SIMD[DType.int32, width](0)
-    for i in range(0, suffix - width + 1, width):
-        var qi = q.load[width=width](prefix + i).cast[DType.int32]()
-        var e0 = qi - v0.load[width=width](prefix + i).cast[DType.int32](); t0 += e0 * e0
-        var e1 = qi - v1.load[width=width](prefix + i).cast[DType.int32](); t1 += e1 * e1
-        var e2 = qi - v2.load[width=width](prefix + i).cast[DType.int32](); t2 += e2 * e2
-        var e3 = qi - v3.load[width=width](prefix + i).cast[DType.int32](); t3 += e3 * e3
-    var s0 = t0.reduce_add().cast[DType.float32](); var s1 = t1.reduce_add().cast[DType.float32]()
-    var s2 = t2.reduce_add().cast[DType.float32](); var s3 = t3.reduce_add().cast[DType.float32]()
-    comptime suffix_tail = (suffix // width) * width
-    for i in range(suffix_tail, suffix):
-        var qi = q[prefix + i].cast[DType.int32]()
-        var e0i = qi - v0[prefix + i].cast[DType.int32](); s0 += Float32(e0i * e0i)
-        var e1i = qi - v1[prefix + i].cast[DType.int32](); s1 += Float32(e1i * e1i)
-        var e2i = qi - v2[prefix + i].cast[DType.int32](); s2 += Float32(e2i * e2i)
-        var e3i = qi - v3[prefix + i].cast[DType.int32](); s3 += Float32(e3i * e3i)
-    var sentinel = Float32(1e30)
-    var out0 = r0 + s0
-    if p0: out0 = sentinel
-    var out1 = r1 + s1
-    if p1: out1 = sentinel
-    var out2 = r2 + s2
-    if p2: out2 = sentinel
-    var out3 = r3 + s3
-    if p3: out3 = sentinel
-    return SIMD[DType.float32, 4](out0, out1, out2, out3)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# M6 PolarQuant: Walsh-Hadamard Transform + INT4 quantization kernels
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @no_inline
 def wht_fp32_inplace_512(data: UnsafePointer[Float32, MutUntrackedOrigin]):
@@ -1615,98 +1081,6 @@ def norm_sq_int4_jit[dim: Int](v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Fl
         var hi = ((b >> 4) & 0x0F).cast[DType.int32]()
         total += lo * lo + hi * hi
     return total.cast[DType.float32]()
-
-@no_inline
-def l2_distance_int4_int4_batch8_jit[dim: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v4: UnsafePointer[Int8, MutUntrackedOrigin],
-    v5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v6: UnsafePointer[Int8, MutUntrackedOrigin],
-    v7: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
-    """Batch-8 INT4-INT4 L2 distance. q and v0..v7 are packed INT4 (dim/2 bytes each).
-    Extracts lo/hi nibbles, computes squared differences, accumulates int32."""
-    comptime bytes = dim // 2
-    comptime width = simd_width_of[DType.int8]()  # 16
-    var s0 = SIMD[DType.int32, width](0); var s1 = SIMD[DType.int32, width](0)
-    var s2 = SIMD[DType.int32, width](0); var s3 = SIMD[DType.int32, width](0)
-    var s4 = SIMD[DType.int32, width](0); var s5 = SIMD[DType.int32, width](0)
-    var s6 = SIMD[DType.int32, width](0); var s7 = SIMD[DType.int32, width](0)
-    var mask = SIMD[DType.int8, width](0x0F)
-
-    for i in range(0, bytes - width + 1, width):
-        var qb = q.load[width=width](i)
-        var ql = (qb & mask).cast[DType.int32]()
-        var qh = ((qb >> 4) & mask).cast[DType.int32]()
-
-        var b0 = v0.load[width=width](i)
-        var dl0 = ql - (b0 & mask).cast[DType.int32](); var dh0 = qh - ((b0 >> 4) & mask).cast[DType.int32]()
-        s0 += dl0 * dl0 + dh0 * dh0
-        var b1 = v1.load[width=width](i)
-        var dl1 = ql - (b1 & mask).cast[DType.int32](); var dh1 = qh - ((b1 >> 4) & mask).cast[DType.int32]()
-        s1 += dl1 * dl1 + dh1 * dh1
-        var b2 = v2.load[width=width](i)
-        var dl2 = ql - (b2 & mask).cast[DType.int32](); var dh2 = qh - ((b2 >> 4) & mask).cast[DType.int32]()
-        s2 += dl2 * dl2 + dh2 * dh2
-        var b3 = v3.load[width=width](i)
-        var dl3 = ql - (b3 & mask).cast[DType.int32](); var dh3 = qh - ((b3 >> 4) & mask).cast[DType.int32]()
-        s3 += dl3 * dl3 + dh3 * dh3
-        var b4 = v4.load[width=width](i)
-        var dl4 = ql - (b4 & mask).cast[DType.int32](); var dh4 = qh - ((b4 >> 4) & mask).cast[DType.int32]()
-        s4 += dl4 * dl4 + dh4 * dh4
-        var b5 = v5.load[width=width](i)
-        var dl5 = ql - (b5 & mask).cast[DType.int32](); var dh5 = qh - ((b5 >> 4) & mask).cast[DType.int32]()
-        s5 += dl5 * dl5 + dh5 * dh5
-        var b6 = v6.load[width=width](i)
-        var dl6 = ql - (b6 & mask).cast[DType.int32](); var dh6 = qh - ((b6 >> 4) & mask).cast[DType.int32]()
-        s6 += dl6 * dl6 + dh6 * dh6
-        var b7 = v7.load[width=width](i)
-        var dl7 = ql - (b7 & mask).cast[DType.int32](); var dh7 = qh - ((b7 >> 4) & mask).cast[DType.int32]()
-        s7 += dl7 * dl7 + dh7 * dh7
-
-    return SIMD[DType.float32, 8](
-        s0.reduce_add().cast[DType.float32](), s1.reduce_add().cast[DType.float32](),
-        s2.reduce_add().cast[DType.float32](), s3.reduce_add().cast[DType.float32](),
-        s4.reduce_add().cast[DType.float32](), s5.reduce_add().cast[DType.float32](),
-        s6.reduce_add().cast[DType.float32](), s7.reduce_add().cast[DType.float32]())
-
-@no_inline
-def l2_distance_int4_int4_batch4_jit[dim: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v3: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 4]:
-    """Batch-4 INT4-INT4 L2 distance."""
-    comptime bytes = dim // 2
-    comptime width = simd_width_of[DType.int8]()
-    var s0 = SIMD[DType.int32, width](0); var s1 = SIMD[DType.int32, width](0)
-    var s2 = SIMD[DType.int32, width](0); var s3 = SIMD[DType.int32, width](0)
-    var mask = SIMD[DType.int8, width](0x0F)
-
-    for i in range(0, bytes - width + 1, width):
-        var qb = q.load[width=width](i)
-        var ql = (qb & mask).cast[DType.int32]()
-        var qh = ((qb >> 4) & mask).cast[DType.int32]()
-        var b0 = v0.load[width=width](i)
-        var dl0 = ql - (b0 & mask).cast[DType.int32](); var dh0 = qh - ((b0 >> 4) & mask).cast[DType.int32]()
-        s0 += dl0 * dl0 + dh0 * dh0
-        var b1 = v1.load[width=width](i)
-        var dl1 = ql - (b1 & mask).cast[DType.int32](); var dh1 = qh - ((b1 >> 4) & mask).cast[DType.int32]()
-        s1 += dl1 * dl1 + dh1 * dh1
-        var b2 = v2.load[width=width](i)
-        var dl2 = ql - (b2 & mask).cast[DType.int32](); var dh2 = qh - ((b2 >> 4) & mask).cast[DType.int32]()
-        s2 += dl2 * dl2 + dh2 * dh2
-        var b3 = v3.load[width=width](i)
-        var dl3 = ql - (b3 & mask).cast[DType.int32](); var dh3 = qh - ((b3 >> 4) & mask).cast[DType.int32]()
-        s3 += dl3 * dl3 + dh3 * dh3
-
-    return SIMD[DType.float32, 4](
-        s0.reduce_add().cast[DType.float32](), s1.reduce_add().cast[DType.float32](),
-        s2.reduce_add().cast[DType.float32](), s3.reduce_add().cast[DType.float32]())
 
 @no_inline
 def l2_distance_int4_suffix_early_exit_jit[suffix: Int, block: Int](
