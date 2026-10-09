@@ -5,6 +5,7 @@ sources = [
   { from = "src/memory/slab_allocator.mojo", as = "slab_allocator.mojo" },
   { from = "src/memory/object_pool.mojo", as = "object_pool.mojo" },
   { from = "src/common/ptr.mojo", as = "ptr.mojo" },
+  { from = "src/memory/hugepage.mojo", as = "hugepage.mojo" },
 ]
 exports = [
   "from .slab_allocator import SlabAllocator",
