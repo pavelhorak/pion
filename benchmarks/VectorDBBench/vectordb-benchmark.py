@@ -194,6 +194,18 @@ def index_never_built(res):
         return False
 
 
+def ran_no_queries(res):
+    """True when the run reports zero QPS: no query reached the server.
+    VectorDBBench's Redis-family clients fail silently under redis-py 8.x (a
+    caught ModuleNotFoundError), run nothing, and still exit 0, so a third
+    install path that forgets the redis==4.6.0 pin yields a "result" with no
+    data in it."""
+    try:
+        return float(res["qps"]) == 0.0
+    except (KeyError, ValueError):
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pion-only", action="store_true",
@@ -415,7 +427,8 @@ def main():
         )
         res = extract_results(out, "pion")
         never_built = bool(res) and index_never_built(res)
-        if res and not never_built:
+        no_queries = bool(res) and ran_no_queries(res)
+        if res and not never_built and not no_queries:
             gpu_tag = " GPU" if args.gpu else ""
             res["name"] = f"Pion V27{gpu_tag} (ef={ef}, w={args.workers})"
             bench_results.append(res)
@@ -428,6 +441,13 @@ def main():
         else:
             print(f"[Pion] Leaving server alive on port {PION_PORT} (PION_BENCH_NO_CLEANUP=1)")
         # After the server is stopped, so a refusal leaks no process.
+        if no_queries:
+            print(f"\nERROR: the run reports 0 QPS, so no query reached the server.\n"
+                  "VectorDBBench's Redis clients fail silently under redis-py 8.x.\n"
+                  "Run `pixi run install-vdbbench`: it pins redis==4.6.0 in the venv\n"
+                  "this harness runs VectorDBBench from.",
+                  file=sys.stderr)
+            sys.exit(1)
         if never_built:
             print(f"\nERROR: FT.OPTIMIZE never ran (index build {res['optimize_time']} s, "
                   f"recall {res['recall']}), so the queries searched an empty index.\n"

@@ -651,8 +651,10 @@ def main():
             if baseline is None:
                 baseline = GATE_BASELINES[1]
             if total_ops < baseline:
+                # The same per-row shape as GATE PASS, so a reader that greps rows
+                # for GATE sees the failures too (it used to see only the passes).
                 gate_failures.append(
-                    f"  {profile_name} (P={pipeline}): {total_ops:,.0f} ops/sec < {baseline:,} (baseline)")
+                    f"  GATE FAIL  {profile_name} (P={pipeline}): {total_ops:,.0f} ops/sec < {baseline:,} (baseline)")
             else:
                 print(f"  GATE PASS  {profile_name} (P={pipeline}): "
                       f"{total_ops:,.0f} ops/sec >= {baseline:,}")
