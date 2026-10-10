@@ -62,6 +62,16 @@ first tokens are 0.016 logits apart, and the fp16-stored cache picks the other
 one. The test requires 99% agreement, so 49 of 50 fails it. The unfixed
 harness reported 50/50 on the same day; its stray `<bos>` changed the prompt.
 
+*Correction, 2026-10-10:* the fp16-stored cache is not what picks the other
+token. Llama-3.2-1B-4bit's cache is fp16 already, so storing it as fp16 changes
+nothing, and mlx-lm's own in-memory prefix cache, with no Pion involved, picks
+`' '` on the same request too. Prefilling the prefix and then the question
+rounds differently from one pass over both (logits up to 0.05 apart), which
+decides a 0.016 tie. Pion's fetched cache gave logits bit-equal to the
+in-process cache's on all 50 requests. The test now checks a hit against that
+in-process cache and prints agreement with the one-pass baseline without
+gating on it.
+
 The TTFT columns of the long-context tests are not comparable with the
 example's: their vanilla side prefills unchunked by default, which swaps on a
 16 GB machine.
