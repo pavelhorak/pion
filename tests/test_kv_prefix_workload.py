@@ -20,7 +20,10 @@ Measurements:
   Throughput (req/s wall-clock)
   Cache hit rate (Pion path)
   KV cache memory footprint
-  First-token agreement against the cold baseline (correctness)
+  Correctness: a hit's first token against the same prefix cache kept in
+    process (and, for fp16 storage of an fp16 cache, bit-equal logits); a
+    miss's against the cold baseline. Agreement of hits with the cold one-pass
+    baseline is printed but not gated (see the comment at the check).
 
 Requires: ./pion-server --kvcache -w 1
 """
@@ -155,6 +158,9 @@ def main(args) -> int:
     c_fetch_ms = []
     c_hits = 0
     c_first_tokens_by_key = {}
+    c_hit_logits_by_key = {}   # a hit's last-token logits, for the bit-equality check
+    local_arrays = {}          # pi -> the K/V exactly as sent to Pion, kept in process
+    kv_dtype = None
     bytes_up_total = 0
     bytes_dn_total = 0
     c_t0 = time.perf_counter()
@@ -171,7 +177,9 @@ def main(args) -> int:
             # Capture prefix-only KV for storage
             cache = make_prompt_cache(model)
             _ = model(prefix_ids, cache=cache); mx.eval(cache[0].keys)
+            kv_dtype = cache[0].keys.dtype
             arrays = cache_to_arrays(cache, layout, len(prefix_ids_list))
+            local_arrays[pi] = arrays
             prefix_hash = hashlib.sha256(
                 f"{args.model}|{args.vquant}|b{args.boundary}|p{pi}".encode()
             ).hexdigest()[:16]
@@ -195,14 +203,39 @@ def main(args) -> int:
             c_fetch_ms.append(fetch_ms)
             c_hits += 1
             bytes_dn_total += bytes_dn
+            c_hit_logits_by_key[(pi, q)] = last
         c_first_tokens_by_key[(pi, q)] = int(mx.argmax(last).item())
     c_wall = time.perf_counter() - c_t0
     c_throughput = len(workload) / c_wall
 
     # ── Correctness ────────────────────────────────────────────────────────
-    matches = sum(1 for k in a_first_tokens_by_key
-                  if a_first_tokens_by_key[k] == c_first_tokens_by_key.get(k))
-    correctness = matches / len(a_first_tokens_by_key) if a_first_tokens_by_key else 0.0
+    # What Pion must preserve is the cache: a hit has to answer as the same
+    # prefix cache would had it never left the process. So a hit is checked
+    # against that cache rebuilt locally from the arrays sent to Pion, and a
+    # miss (a cold full prefill on both sides) against A.
+    #
+    # Agreement with A on hits is reported, not gated. Prefilling the prefix
+    # and then the suffix rounds differently from one pass over both, with no
+    # Pion involved: mlx-lm's own in-memory prompt cache does the same. On
+    # 2026-10-10 the in-process cache, the fp16-rebuilt cache and Pion's
+    # fetched cache all chose ' ' where one pass chose ' \n\n' (prompt 0,
+    # "how should I version a binary ...", top-2 margin 0.016), and Pion's
+    # logits were bit-equal to the in-process cache's on all 50 requests.
+    ref_tokens = dict(a_first_tokens_by_key)       # misses: the cold prefill
+    hits_bit_equal = 0
+    for key, c_last in c_hit_logits_by_key.items():
+        pi, q = key
+        local = arrays_to_cache(model, local_arrays[pi], layout, prompt_cache_meta[pi][4])
+        _, r_last = forward_logits(model, mx.array([piece(tok, q)]), cache=local)
+        ref_tokens[key] = int(mx.argmax(r_last).item())
+        hits_bit_equal += bool(mx.array_equal(c_last, r_last).item())
+    matches = sum(1 for k, t in ref_tokens.items() if c_first_tokens_by_key.get(k) == t)
+    correctness = matches / len(ref_tokens) if ref_tokens else 0.0
+    oneshot_matches = sum(1 for k in a_first_tokens_by_key
+                          if a_first_tokens_by_key[k] == c_first_tokens_by_key.get(k))
+    # fp16 storage of an fp16 cache is lossless, so a hit must reproduce the
+    # in-process logits bit for bit; any other format or model dtype may round.
+    lossless = args.vquant == "fp16" and kv_dtype == mx.float16
 
     def stats(arr):
         if not arr:
@@ -233,18 +266,30 @@ def main(args) -> int:
     print(f"    TTFT mean speedup       {a_mean / c_mean if c_mean else float('inf'):.2f}×")
     print(f"    TTFT p99 speedup        {a_p99 / c_p99 if c_p99 else float('inf'):.2f}×")
     print(f"    throughput speedup      {c_throughput / a_throughput if a_throughput else float('inf'):.2f}×")
-    print(f"    first-token agreement   {correctness*100:.1f}% ({matches}/{len(a_first_tokens_by_key)})")
+    print(f"    first-token agreement   {correctness*100:.1f}% ({matches}/{len(ref_tokens)})"
+          f"  hits vs the same cache kept in process, misses vs A")
+    for k, r_tok in ref_tokens.items():
+        c_tok = c_first_tokens_by_key.get(k)
+        if c_tok != r_tok:
+            pi, q = k
+            print(f"      disagrees: prompt {pi}, query {q[:40]!r}: reference {tok.decode([r_tok])!r}, "
+                  f"pion {tok.decode([c_tok]) if c_tok is not None else None!r}")
+    print(f"    hit logits bit-equal    {hits_bit_equal}/{len(c_hit_logits_by_key)}"
+          f"  ({'required' if lossless else 'not required'}: {args.vquant} storage of a {kv_dtype} cache)")
+    print(f"    agreement with A        {oneshot_matches}/{len(a_first_tokens_by_key)}"
+          f"  (informational: one pass vs prefix-then-suffix)")
     for k, a_tok in a_first_tokens_by_key.items():
         c_tok = c_first_tokens_by_key.get(k)
         if c_tok != a_tok:
             pi, q = k
-            print(f"      disagrees: prompt {pi}, query {q[:40]!r}: vanilla {tok.decode([a_tok])!r}, "
+            print(f"      differs from A: prompt {pi}, query {q[:40]!r}: A {tok.decode([a_tok])!r}, "
                   f"pion {tok.decode([c_tok]) if c_tok is not None else None!r}, "
-                  f"vanilla's top-2 margin {a_margin_by_key[k]:.3f}")
+                  f"A's top-2 margin {a_margin_by_key[k]:.3f}")
 
     # Pass criteria from §15.4 win condition: Pion beats standalone on TTFT AND quality equivalent
     pass_ttft = c_mean < a_mean
-    pass_corr = correctness >= 0.99
+    pass_corr = correctness >= 0.99 and (
+        not lossless or hits_bit_equal == len(c_hit_logits_by_key))
     pass_throughput = c_throughput > a_throughput
     print(f"\n──────── verdict ────────")
     print(f"  TTFT win        {'PASS' if pass_ttft else 'FAIL'}")

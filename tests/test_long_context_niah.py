@@ -19,9 +19,16 @@ Targets (per gh #60 Step 3):
     aspirational pre-Step-2).
 
 Lengths default to {4096, 8192, 16384}; pass --lengths 4096,8192,16384,32768
-to push higher (32K + Gemma-4-E2B-4bit is borderline on a 16GB Mac).
+to push higher.
 
-No Pion server required — in-proc lane only.
+Both sides prefill in 2048-token chunks by default, as mlx_lm.generate_step
+does and as the multi-needle and RULER tests do. Until 2026-10-10 the default
+was one unchunked forward: at 16K that peaked at a 14 GB footprint on a 16 GB
+Mac and swapped (a vanilla trial took 57 s at 16K against 9.3 s chunked, and
+8.0 s against 1.9 s at 4K), and with the disk low the swap could not grow.
+
+Needs a Pion server on 1974 (PionPromptCache connects to it), even though
+the lane under test is in-process.
 """
 from __future__ import annotations
 
@@ -312,9 +319,9 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threshold", type=float, default=0.95,
                     help="Pion-acc / vanilla-acc must be at least this ratio")
-    ap.add_argument("--prefill-chunk-size", type=int, default=None,
-                    help="If set, prefill in chunks of this many tokens with "
-                         "mx.eval between chunks. Required for 32K+ on 16GB M-series.")
+    ap.add_argument("--prefill-chunk-size", type=int, default=2048,
+                    help="Prefill in chunks of this many tokens with mx.eval "
+                         "between chunks (mlx_lm.generate_step's default step).")
     ap.add_argument("--sparse-full", action="store_true",
                     help="gh #60 Phase 3: enable block-mean top-K sparse selection "
                          "on full-attention layers in the Pion in-proc lane. "

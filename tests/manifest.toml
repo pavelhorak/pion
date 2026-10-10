@@ -915,12 +915,14 @@ file = "tests/test_long_context_niah.py"
 server = "-w 1"
 tier = "full"
 requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
+timeout = 900    # 254 s on an M4 with 16 GB (2026-10-10)
 
 [[test]]
 file = "tests/test_long_context_niah_multi.py"
 server = "-w 1"
 tier = "full"
 requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
+timeout = 1800   # 792 s on an M4 with 16 GB, 13 GB peak footprint (2026-10-10)
 
 [[test]]
 file = "tests/test_lua_rename_payload.py"
@@ -1138,6 +1140,7 @@ file = "tests/test_ruler_subset.py"
 server = "-w 1"
 tier = "full"
 requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
+timeout = 1800   # 862 s on an M4 with 16 GB, 13 GB peak footprint (2026-10-10)
 
 [[test]]
 file = "tests/test_sdot_int8_exact.mojo"

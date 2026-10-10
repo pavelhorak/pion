@@ -21,6 +21,27 @@ enumerated — there were roughly 1,100 of them.
   meant for a Linux server with cores to spare; those numbers are not in yet.
   `PION_IO_THREADS=N` makes N the default for every server a test tier starts.
 
+### Fixed
+
+- **`test_kv_prefix_workload` checks a cache hit against the cache it
+  fetched.** Its 99% first-token check failed 49 of 50 on every macOS full
+  tier since 0.9.7, whose entry put that down to the fp16-stored cache. That
+  was wrong. The model's cache is fp16 already, and mlx-lm's own in-memory
+  prefix cache, with no Pion involved, picks the same other token: prefilling
+  the prefix and then the question rounds differently from one pass over both,
+  and that request's top two tokens are 0.016 logits apart. Pion's fetched
+  cache gave logits bit-equal to the in-process cache's on all 50 requests. A
+  hit is now checked against the same K/V rebuilt in process (bit-equal logits
+  required for fp16 storage of an fp16 cache), a miss against the cold
+  prefill, and agreement with the one-pass baseline is printed, not gated.
+  With int8 storage the check fails, as it should: 0 of 45 hits bit-equal.
+- **The long-context tests pass in the macOS full tier.**
+  `test_long_context_niah` prefilled in one unchunked forward by default,
+  unlike its two siblings and mlx-lm: at 16K that peaked at 14 GB on a 16 GB
+  Mac and swapped (a vanilla trial took 57 s against 9.3 s chunked). It now
+  uses 2048-token chunks. The three tests also declare timeouts; they had run
+  under the runner's 120 s default and take 254, 792 and 862 s.
+
 ## [0.9.8] — 2026-10-10
 
 A worker starts 44 MB smaller, and on Linux its memory no longer grows
