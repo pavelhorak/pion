@@ -75,7 +75,8 @@ note = "imports mlx.core through mlx_lm_patch"
 
 [[test]]
 file = "pion-vllm-mlx/tests/test_hybrid_per_layer_agreement.py"
-server = "none"
+# its PionPromptCache connects to the runner's server, like its siblings
+server = "--kvcache -w 1"
 tier = "full"
 timeout = 600
 requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
