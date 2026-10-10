@@ -10,7 +10,7 @@ from src.common.skip_list import SlabSkipList
 from src.network.server import KEvent, TCPServer, EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLET, EPOLLEXCLUSIVE, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
 from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
 from src.network.io_threads import IOHub
-from src.network.io_ring import ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping
+from src.network.io_ring import ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping, sleep_fence
 from src.network.io_ring import evfd_signal, wake_wait, IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE
 from src.network.io_ring import IO_MSG_REPLY, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_SPIN
 from src.common.list import SlabList
@@ -1985,6 +1985,7 @@ struct NetworkEngine:
                 continue
             # Sleep until an I/O thread pushes, or 1 ms for the ticks.
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.SEQUENTIAL](hub[].exec_sleep, UInt64(1))
+            sleep_fence()
             var any = False
             for t in range(n_io):
                 if ring_nonempty(ring_at(hub[].rings_in, t)):

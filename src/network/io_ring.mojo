@@ -95,6 +95,13 @@ def ring_nonempty(r: Pointer[UInt64, MutUntrackedOrigin]) -> Bool:
 
 
 @always_inline
+def sleep_fence():
+    """The sleeper's fence: after storing its sleep flag, before it looks at the
+    ring once more (see pion_full_fence in worker_spawn_wrap.c)."""
+    external_call["pion_full_fence", NoneType]()
+
+
+@always_inline
 def is_sleeping(flag: Pointer[UInt64, MutUntrackedOrigin]) -> Bool:
     """Full barrier, then the flag: pairs with the sleeper's store-then-check."""
     return Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.SEQUENTIAL](flag, UInt64(0)) != 0

@@ -131,6 +131,16 @@ void pion_spin_unlock(uint32_t* w) {
     __atomic_store_n(w, 0u, __ATOMIC_RELEASE);
 }
 
+/* #465: a full fence, for the sleeper's side of the wake-up handshake: store
+ * "I am sleeping", FENCE, then look at the ring once more. A sequentially
+ * consistent store followed by an acquire load is not enough on ARM64, where
+ * LLVM lowers the load to LDAPR (RCpc), which may be satisfied before the
+ * earlier STLR is visible: the waker then reads "not sleeping" while the
+ * sleeper read "ring empty", and the wake-up is lost until the poll times out. */
+void pion_full_fence(void) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
 int32_t pion_spawn_detached(int32_t n, int64_t* ctx, int64_t base) {
     pion_worker_fn fn = (pion_worker_fn)dlsym(RTLD_DEFAULT, "pion_worker_entry");
     if (!fn || n <= 0) return -1;

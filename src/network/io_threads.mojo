@@ -45,7 +45,7 @@ from src.network.server import EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
 from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
 from src.network.response_writer import WriterCtx
 from src.network.io_ring import (
-    IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE, IO_MSG_REPLY, IO_MSG_KICK, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_RING_WORDS, IO_MAX_FDS, IO_SPIN, EPOLLRDHUP, IOMsg, ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping, evfd_signal, evfd_drain, io_errno, io_eagain, wake_new,
+    IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE, IO_MSG_REPLY, IO_MSG_KICK, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_RING_WORDS, IO_MAX_FDS, IO_SPIN, EPOLLRDHUP, IOMsg, ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping, sleep_fence, evfd_signal, evfd_drain, io_errno, io_eagain, wake_new,
     KEV_BYTES, EVFILT_READ, EVFILT_WRITE, EVFILT_USER, KEV_ADD, KEV_DELETE, KEV_CLEAR, kev_change,
 )
 
@@ -471,6 +471,7 @@ def io_thread_main(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
         var timeout = 0
         if did == 0 and idle >= IO_SPIN:
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.SEQUENTIAL](flag, UInt64(1))
+            sleep_fence()
             if not ring_nonempty(st.rout):
                 timeout = 1
         var n = _poll_wait(ep, events, ts, timeout)
