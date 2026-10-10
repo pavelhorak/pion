@@ -1,0 +1,30 @@
+Json file ./raw/redis_io4_P1_r3.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 11%,   1 secs]  4 threads 50 conns:      231766 ops,  212348 (avg:  212348) ops/sec, 13.27MB/sec (avg: 13.27MB/sec),  0.94 (avg:  0.94) msec latency
+warning: high CPU on thread 0: 95.8% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 1: 95.8% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 2: 95.8% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 3: 95.9% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 22%,   2 secs]  4 threads 50 conns:      461039 ops,  213058 (avg:  212700) ops/sec, 14.26MB/sec (avg: 13.76MB/sec),  0.94 (avg:  0.94) msec latency[RUN #1 33%,   3 secs]  4 threads 50 conns:      703231 ops,  211730 (avg:  212365) ops/sec, 15.18MB/sec (avg: 14.25MB/sec),  0.94 (avg:  0.94) msec latency[RUN #1 43%,   4 secs]  4 threads 50 conns:      918117 ops,  212392 (avg:  212372) ops/sec, 16.11MB/sec (avg: 14.69MB/sec),  0.94 (avg:  0.94) msec latency[RUN #1 55%,   5 secs]  4 threads 50 conns:     1160281 ops,  212589 (avg:  212417) ops/sec, 17.03MB/sec (avg: 15.18MB/sec),  0.94 (avg:  0.94) msec latency[RUN #1 66%,   6 secs]  4 threads 50 conns:     1402133 ops,  213974 (avg:  212684) ops/sec, 18.16MB/sec (avg: 15.69MB/sec),  0.93 (avg:  0.94) msec latency[RUN #1 76%,   7 secs]  4 threads 50 conns:     1622900 ops,  211958 (avg:  212585) ops/sec, 18.76MB/sec (avg: 16.11MB/sec),  0.94 (avg:  0.94) msec latency[RUN #1 87%,   8 secs]  4 threads 50 conns:     1863112 ops,  215407 (avg:  212944) ops/sec, 19.98MB/sec (avg: 16.60MB/sec),  0.93 (avg:  0.94) msec latency[RUN #1 98%,   9 secs]  4 threads 50 conns:     2089139 ops,  214023 (avg:  213061) ops/sec, 20.78MB/sec (avg: 17.05MB/sec),  0.93 (avg:  0.94) msec latency[RUN #1 100%,  10 secs]  0 threads 50 conns:     2130705 ops,  214023 (avg:  213045) ops/sec, 20.78MB/sec (avg: 17.13MB/sec),  0.93 (avg:  0.94) msec latency
+
+warning: GET miss rate 90.91% above target 1.00% (1760895 misses / 1936915 ops)
+Saving JSON output file: ./raw/redis_io4_P1_r3.json
+Json file closed.
+4         Threads
+50        Connections per thread
+10        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets        19377.30          ---          ---         0.94027         0.92700         1.47900         1.80700      5731.62 
+Gets       193674.55     17600.46    176074.09         0.93853         0.92700         1.47100         1.98300     11806.94 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals     213051.86     17600.46    176074.09         0.93869         0.92700         1.47100         1.95100     17538.57 

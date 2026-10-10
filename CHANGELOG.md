@@ -6,6 +6,21 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Added
+
+- **`--io-threads N`: one keyspace served by N threads.** `-w N` gives N
+  independent keyspaces; `--io-threads N` (with `-w 1`) keeps one, as Redis's
+  `io-threads` does: the worker thread executes every command, and N − 1 I/O
+  threads accept, receive and send. The executor still owns every piece of
+  command state, so nothing it runs takes a lock. The I/O threads poll with
+  epoll on Linux and kqueue on macOS. The default stays 1, the single-thread
+  loop, which measured the same as before on the Mac KV gate (geometric mean
+  1.0000 over 21 rows, paired). On a Mac with the client on the same machine
+  it lowers throughput, as Redis's `io-threads` does there
+  ([Mac results](benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)). It is
+  meant for a Linux server with cores to spare; those numbers are not in yet.
+  `PION_IO_THREADS=N` makes N the default for every server a test tier starts.
+
 ## [0.9.8] — 2026-10-10
 
 A worker starts 44 MB smaller, and on Linux its memory no longer grows

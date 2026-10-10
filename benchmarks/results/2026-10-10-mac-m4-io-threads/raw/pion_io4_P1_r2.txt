@@ -1,0 +1,26 @@
+Json file ./raw/pion_io4_P1_r2.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 10%,   1 secs]  4 threads 50 conns:      233618 ops,  228962 (avg:  228962) ops/sec, 14.30MB/sec (avg: 14.30MB/sec),  0.87 (avg:  0.87) msec latency[RUN #1 21%,   2 secs]  4 threads 50 conns:      462889 ops,  217663 (avg:  223222) ops/sec, 14.60MB/sec (avg: 14.45MB/sec),  0.92 (avg:  0.90) msec latency
+warning: high CPU on thread 0: 97.6% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 3: 99.4% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 32%,   3 secs]  4 threads 50 conns:      702150 ops,  218040 (avg:  221429) ops/sec, 15.62MB/sec (avg: 14.85MB/sec),  0.92 (avg:  0.90) msec latency[RUN #1 43%,   4 secs]  4 threads 50 conns:      951899 ops,  217442 (avg:  220369) ops/sec, 16.58MB/sec (avg: 15.31MB/sec),  0.92 (avg:  0.91) msec latency[RUN #1 54%,   5 secs]  4 threads 50 conns:     1184342 ops,  216021 (avg:  219502) ops/sec, 17.49MB/sec (avg: 15.75MB/sec),  0.93 (avg:  0.91) msec latency[RUN #1 64%,   6 secs]  4 threads 50 conns:     1403740 ops,  214723 (avg:  218741) ops/sec, 18.26MB/sec (avg: 16.15MB/sec),  0.93 (avg:  0.91) msec latency[RUN #1 75%,   7 secs]  4 threads 50 conns:     1625562 ops,  214375 (avg:  218135) ops/sec, 19.06MB/sec (avg: 16.55MB/sec),  0.93 (avg:  0.92) msec latency[RUN #1 85%,   8 secs]  4 threads 50 conns:     1842418 ops,  215848 (avg:  217863) ops/sec, 20.03MB/sec (avg: 16.97MB/sec),  0.93 (avg:  0.92) msec latency[RUN #1 95%,   9 secs]  4 threads 50 conns:     2079799 ops,  217769 (avg:  217852) ops/sec, 21.04MB/sec (avg: 17.43MB/sec),  0.92 (avg:  0.92) msec latency[RUN #1 100%,  10 secs]  0 threads 50 conns:     2178655 ops,  217769 (avg:  217837) ops/sec, 21.04MB/sec (avg: 17.62MB/sec),  0.92 (avg:  0.92) msec latency
+
+warning: GET miss rate 90.69% above target 1.00% (1796115 misses / 1980509 ops)
+Saving JSON output file: ./raw/pion_io4_P1_r2.json
+Json file closed.
+4         Threads
+50        Connections per thread
+10        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets        19810.36          ---          ---         0.92559         0.63100         2.44700         2.94300      5859.72 
+Gets       198008.55     18435.46    179573.09         0.91732         0.63100         2.43100         2.78300     12182.71 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals     217818.91     18435.46    179573.09         0.91807         0.63100         2.43100         2.78300     18042.43 

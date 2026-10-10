@@ -156,6 +156,13 @@ and parked clients, and pub/sub, so none of it takes a lock.
   (an I/O thread) or on a wake-up fd (the executor: an eventfd on Linux, a
   kqueue `EVFILT_USER` on macOS). A sleeper announces itself, fences, and looks
   at its ring once more; a waker signals only a sleeper.
+- **Measured on a Mac, and why not to use it there:** with the client on the
+  same M4 Mac, 4 threads gave 0.58× the throughput of 1 at P=1 and 0.83× at
+  P=10, and Redis's `io-threads 4` lost the same way; Pion's single thread led
+  Redis's best Mac configuration at P=1, 10 and 50
+  ([2026-10-10 Mac results](../benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)).
+  The case for I/O threads is a Linux server with cores to spare; its numbers
+  come from `benchmarks/kv-io-threads/run_on_box.sh`.
 - **Tests:** `tests/test_gh465_io_threads.py` (order and visibility across 48
   concurrent connections, pub/sub, MONITOR, blocking pops, XREAD BLOCK, WAIT,
   MULTI, CLIENT KILL/PAUSE/REPLY, a backlog many times the writer buffer to a client that stops
