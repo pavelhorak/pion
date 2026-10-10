@@ -158,7 +158,7 @@ and parked clients, and pub/sub, so none of it takes a lock.
   at its ring once more; a waker signals only a sleeper.
 - **Tests:** `tests/test_gh465_io_threads.py` (order and visibility across 48
   concurrent connections, pub/sub, MONITOR, blocking pops, XREAD BLOCK, WAIT,
-  MULTI, CLIENT KILL/PAUSE/REPLY, a 64 MB backlog to a client that stops
+  MULTI, CLIENT KILL/PAUSE/REPLY, a backlog many times the writer buffer to a client that stops
   reading, churn, AUTH and `--maxmemory`). `PION_IO_THREADS=N` makes N the
   default for every server a test tier starts, which runs the whole tier
   through this path.
