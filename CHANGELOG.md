@@ -6,6 +6,18 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-10-10
+
+A worker starts 44 MB smaller, and on Linux its memory no longer grows
+with its first traffic and first 1,000 lists. PFADD no longer leaks about
+64 bytes for every element longer than 23 bytes. `--epoll` on x86-64 no
+longer drops connections under concurrent load. A prompt-cache hit from
+another process on the same machine maps a file instead of copying over TCP
+(37.0 ms against 67.4 ms at a 2,049-token prefix). FT.OPTIMIZE builds 28–33%
+faster with the same graph, and `pion-vllm-mlx` 0.1.6 ships the `serve`
+command. The full test tier now passes on Linux (x86-64 and arm64) as well
+as macOS.
+
 ### Added
 
 - **A prompt-cache hit on the same machine maps a file (`V.EXPORT`).** A hit
@@ -23,6 +35,15 @@ enumerated — there were roughly 1,100 of them.
   loopback with a password, stunnel in front, `redis-cli --tls` and redis-py
   over it, and what the proxy does not cover. `tests/test_tls_proxy.py` runs
   the recipe as written.
+
+- **Three Mojo packages built from Pion's own source.** `packages/` builds
+  `pion_resp` (the RESP2/RESP3 request parser), `pion_slab` (the slab
+  allocator and object pool) and `pion_simd` (the open vector-distance
+  kernels) from the files under `src/` the server compiles, with no second
+  copy. `packages/build.py` assembles each one, rewrites Pion's absolute
+  imports to package-relative ones, precompiles it, and runs its tests; the
+  gate tier runs it (`tests/test_mojo_packages.py`). Each package has a draft
+  recipe for the modular-community channel; none has been submitted.
 
 ### Changed
 
@@ -44,13 +65,16 @@ enumerated — there were roughly 1,100 of them.
   layer and in its backlink eviction scan. A serial build writes a
   byte-identical index file. 50K OpenAI vectors on an M4 mini: 5.3 s to 3.85 s
   at 1536 dims, 3.55 s to 2.4 s at 1024, 1.85 s to 1.33 s at 512.
+
 - **Search at 1024 dims uses 27% less CPU per query.** 512 and 1024 dims used
   to score one neighbor per call through a generic kernel; every non-1536
   INT8 beam now goes eight at a time. Results are unchanged.
+
 - **VSIM scans a set with one GEMV.** On macOS through Accelerate, elsewhere
   with a four-chain FMA kernel: 0.17–0.22 ms to 0.083 ms per call on 1,000
   vectors of 1536 dims. kNN-LM's brute-force path uses the same kernels,
   1.4–1.6× faster.
+
 - **`--metal-attention-fp16` stores session K/V as half.** The fp16 kernels
   converted every element on load, so they streamed twice the bytes they used:
   `ATTEND.PREFIX.QUERY` 1.2–1.3× faster, half the memory per session. Output
@@ -81,17 +105,6 @@ enumerated — there were roughly 1,100 of them.
   Anthropic and Responses translation, and a SIGKILLed serve answering its
   next request from Pion with an identical greedy reply. Until now serve's
   tests ran only in the full tier.
-
-- **Three Mojo packages built from Pion's own source.** `packages/` builds
-  `pion_resp` (the RESP2/RESP3 request parser), `pion_slab` (the slab
-  allocator and object pool) and `pion_simd` (the open vector-distance
-  kernels) from the files under `src/` the server compiles, with no second
-  copy. `packages/build.py` assembles each one, rewrites Pion's absolute
-  imports to package-relative ones, precompiles it, and runs its tests; the
-  gate tier runs it (`tests/test_mojo_packages.py`). Each package has a draft
-  recipe for the modular-community channel; none has been submitted.
-
-### Changed
 
 - **The README documents three things, and marks the rest experimental.**
   The README described about thirty planes, many with no outside user and
