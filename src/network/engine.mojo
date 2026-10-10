@@ -11,7 +11,7 @@ from src.network.server import KEvent, TCPServer, EPOLLIN, EPOLLOUT, EPOLLERR, E
 from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
 from src.network.io_threads import IOHub
 from src.network.io_ring import ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping
-from src.network.io_ring import evfd_signal, evfd_drain, IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE
+from src.network.io_ring import evfd_signal, wake_wait, IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE
 from src.network.io_ring import IO_MSG_REPLY, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_SPIN
 from src.common.list import SlabList
 from src.memory.slab_allocator import SlabAllocator
@@ -213,13 +213,15 @@ struct NetworkEngine:
             if self.config.server.use_xdp:
                 self.run_server_xdp(hnsw, db_size)
             elif self.config.server.io_threads > 1:
-                self.run_server_io(hnsw, db_size)       # #465 (main() fenced it to -w 1 + epoll)
+                self.run_server_io(hnsw, db_size)       # #465 (main() fenced it to -w 1)
             elif self.config.server.use_epoll:
                 self.run_server_epoll(hnsw, db_size)
             else:
                 # io_uring is default on Linux: better syscall batching at high concurrency.
                 # Use --epoll for low-concurrency benchmarks (P=1 per-command).
                 self.run_server_uring(hnsw, db_size)
+        elif self.config.server.io_threads > 1:
+            self.run_server_io(hnsw, db_size)           # #465 on kqueue
         else:
             self.run_server_kqueue(hnsw, db_size)
 
@@ -1892,8 +1894,6 @@ struct NetworkEngine:
         """#465 executor loop. Runs on the worker thread; owns all command state.
         Spawns config.server.io_threads - 1 I/O threads, then serves the
         batches they hand over, in arrival order per thread ring."""
-        comptime if not CompilationTarget.is_linux():
-            return
         if self.server.fd < 0 and not self.server.listen():
             return
         var n_io = self.config.server.io_threads - 1
@@ -1919,7 +1919,6 @@ struct NetworkEngine:
               " io_threads=" + String(n_io) + " (+1 executor)")
         var kq = Int32(-3)       # not -1 (the XDP no-op flush): flushes go to _flush_kqueue's io_mode branch
         var need_wake = alloc[UInt8](n_io)
-        var pfd = alloc[Int32](2)   # struct pollfd {int fd; short events; short revents}
         var idle = 0
         var last_tick = _get_now_ns()
         while True:
@@ -1991,10 +1990,7 @@ struct NetworkEngine:
                 if ring_nonempty(ring_at(hub[].rings_in, t)):
                     any = True
             if not any:
-                pfd[unsafe_offset=0] = hub[].exec_evfd
-                pfd[unsafe_offset=1] = Int32(1)          # events = POLLIN, revents = 0
-                if external_call["poll", Int32](pfd, Int64(1), Int32(1)) > 0:
-                    evfd_drain(hub[].exec_evfd)
+                wake_wait(hub[].exec_evfd, 1)
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELAXED](hub[].exec_sleep, UInt64(0))
 
     def run_server_kqueue(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:

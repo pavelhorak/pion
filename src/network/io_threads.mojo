@@ -1,4 +1,4 @@
-"""#465: I/O threads for ONE keyspace (prototype: Linux, epoll, -w 1).
+"""#465: I/O threads for ONE keyspace (-w 1; Linux epoll, macOS kqueue).
 
 The worker thread stays the only thread that touches the keyspace, the WAL,
 transactions, ACL/tenant state, blocked clients and pub/sub: it is the
@@ -19,14 +19,20 @@ Reply bytes travel in the writer's existing per-connection output queue
 (WriterCtx.pending_buffers / the overflow queue): the executor fills it while
 it holds the batch, the I/O thread drains it once the REPLY arrives.
 
-A side with nothing to do sleeps: an I/O thread in epoll_wait, the executor in
-poll() on an eventfd. The other side writes the sleeper's eventfd only when
+A side with nothing to do sleeps: an I/O thread in its poller, the executor on
+its wake-up fd (io_ring.mojo). The other side signals the sleeper only when
 the sleeper has announced it is sleeping, behind a full barrier on both sides
 (store flag / load ring vs store ring / load flag), so a wake-up is never lost.
 
-Step 2 of #465 is everything a reply that does not answer a request needs:
-pub/sub and MONITOR delivery, blocked and parked clients, CLIENT KILL, the
-binary lane and the affinity ports. Until then those paths are not wired here.
+Replies that answer no request of the batch (pub/sub and MONITOR delivery, a
+woken blocked or parked client) are queued by the executor under the fd's
+output lock, and the owning thread is told (KICK, RESUME). CLIENT KILL of
+another client shuts the socket down; its I/O thread reads the end and closes
+it as any other. The binary lane (--kvcache) is not served here.
+
+The poller is per platform (the `_poll_*` / `_ev_*` helpers below): epoll,
+edge-triggered, on Linux; kqueue with EV_CLEAR on macOS. Everything above them
+is shared.
 """
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.atomic import Atomic, Ordering
@@ -39,7 +45,8 @@ from src.network.server import EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
 from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
 from src.network.response_writer import WriterCtx
 from src.network.io_ring import (
-    IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE, IO_MSG_REPLY, IO_MSG_KICK, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_RING_WORDS, IO_MAX_FDS, IO_SPIN, EPOLLRDHUP, IOMsg, ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping, evfd_signal, evfd_drain, _errno,
+    IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE, IO_MSG_REPLY, IO_MSG_KICK, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_RING_WORDS, IO_MAX_FDS, IO_SPIN, EPOLLRDHUP, IOMsg, ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping, evfd_signal, evfd_drain, io_errno, io_eagain, wake_new,
+    KEV_BYTES, EVFILT_READ, EVFILT_WRITE, EVFILT_USER, KEV_ADD, KEV_DELETE, KEV_CLEAR, kev_change,
 )
 
 struct IOHub(Movable):
@@ -84,11 +91,10 @@ struct IOHub(Movable):
         self.io_evfd = alloc[Int32](n_io)
         self.io_sleep = alloc[UInt64](n_io * 8)
         unsafe_memset(self.io_sleep.bitcast[UInt8](), 0, n_io * 64)
-        self.exec_evfd = Int32(-1)
-        comptime if CompilationTarget.is_linux():
-            for t in range(n_io):
-                self.io_evfd[unsafe_offset=t] = external_call["eventfd", Int32](UInt32(0), Int32(0x800 | 0x80000))
-            self.exec_evfd = external_call["eventfd", Int32](UInt32(0), Int32(0x800 | 0x80000))
+        # macOS: an I/O thread's wake-up fd is its own kqueue (see io_ring.mojo).
+        for t in range(n_io):
+            self.io_evfd[unsafe_offset=t] = wake_new()
+        self.exec_evfd = wake_new()
         self.exec_sleep = alloc[UInt64](8)
         self.exec_sleep[] = 0
         self.client_buffers = client_buffers
@@ -108,6 +114,136 @@ struct IOHub(Movable):
             self.owner_ep[unsafe_offset=i] = -1
             self.owner_t[unsafe_offset=i] = -1
             self.out_lock[unsafe_offset=i] = 0
+
+
+# ── the poller, per platform ─────────────────────────────────────────────────
+
+comptime IO_EVENTS = 512
+comptime EV_IN = 1        # readable, end of input, or an error
+comptime EV_OUT = 2       # writable
+comptime EV_WAKE = 4      # the thread's wake-up
+
+
+@always_inline
+def _poll_create(evfd: Int32) -> Int32:
+    """The thread's poller, watching its wake-up fd."""
+    comptime if CompilationTarget.is_linux():
+        var ep = external_call["epoll_create1", Int32](Int32(0x80000))
+        _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, evfd, EPOLLIN)
+        return ep
+    else:
+        return evfd                 # the kqueue IS the wake-up: it carries the EVFILT_USER event
+
+
+@always_inline
+def _poll_listen(ep: Int32, fd: Int32):
+    """Level-triggered. On macOS every I/O thread wakes for a connection and
+    the losers' accept() finds EAGAIN; epoll wakes one (EPOLLEXCLUSIVE)."""
+    comptime if CompilationTarget.is_linux():
+        _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, fd, EPOLLIN | EPOLLEXCLUSIVE)
+    else:
+        _ = kev_change(ep, Int(fd), EVFILT_READ, KEV_ADD, UInt32(0))
+
+
+@always_inline
+def _poll_conn_add(ep: Int32, fd: Int32):
+    comptime if CompilationTarget.is_linux():
+        _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, fd, EPOLLIN | EPOLLRDHUP | EPOLLET)
+    else:
+        _ = kev_change(ep, Int(fd), EVFILT_READ, KEV_ADD | KEV_CLEAR, UInt32(0))
+
+
+@always_inline
+def _poll_conn_del(ep: Int32, fd: Int32, out_armed: Bool):
+    comptime if CompilationTarget.is_linux():
+        _ = epoll_ctl_fd(ep, EPOLL_CTL_DEL, fd, 0)
+    else:
+        # One change per call: kevent stops at the first failing change when it
+        # has no room to report it.
+        if out_armed:
+            _ = kev_change(ep, Int(fd), EVFILT_WRITE, KEV_DELETE, UInt32(0))
+        _ = kev_change(ep, Int(fd), EVFILT_READ, KEV_DELETE, UInt32(0))
+
+
+@always_inline
+def _poll_out(ep: Int32, fd: Int32, on: Bool):
+    """Watch fd for writability (on), or stop (off)."""
+    comptime if CompilationTarget.is_linux():
+        if on:
+            _ = epoll_ctl_fd(ep, EPOLL_CTL_MOD, fd, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET)
+        else:
+            _ = epoll_ctl_fd(ep, EPOLL_CTL_MOD, fd, EPOLLIN | EPOLLRDHUP | EPOLLET)
+    else:
+        if on:
+            _ = kev_change(ep, Int(fd), EVFILT_WRITE, KEV_ADD | KEV_CLEAR, UInt32(0))
+        else:
+            _ = kev_change(ep, Int(fd), EVFILT_WRITE, KEV_DELETE, UInt32(0))
+
+
+@always_inline
+def _poll_wait(ep: Int32, events: Pointer[UInt8, MutUntrackedOrigin],
+               ts: Pointer[Int, MutUntrackedOrigin], timeout_ms: Int) -> Int:
+    """ts: the thread's heap timespec (kevent's timeout)."""
+    comptime if CompilationTarget.is_linux():
+        return Int(external_call["epoll_wait", Int32](ep, events, Int32(IO_EVENTS), Int32(timeout_ms)))
+    else:
+        ts[0] = 0
+        ts[1] = timeout_ms * 1_000_000
+        return Int(external_call["kevent", Int32](ep, null_ptr[UInt8, MutUntrackedOrigin](), Int32(0),
+                                                  events, Int32(IO_EVENTS), ts))
+
+
+@always_inline
+def _ev_fd(events: Pointer[UInt8, MutUntrackedOrigin], i: Int) -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return epoll_ev_fd(events, i)
+    else:
+        return Int32(events.unsafe_offset(i * KEV_BYTES).bitcast[UInt64]()[])
+
+
+@always_inline
+def _ev_what(events: Pointer[UInt8, MutUntrackedOrigin], i: Int, evfd: Int32) -> Int:
+    """EV_IN / EV_OUT (both on epoll), or EV_WAKE."""
+    comptime if CompilationTarget.is_linux():
+        if epoll_ev_fd(events, i) == evfd:
+            return EV_WAKE
+        var m = epoll_ev_events(events, i)
+        var r = 0
+        if m & EPOLLOUT:
+            r |= EV_OUT
+        if m & (EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP):
+            r |= EV_IN
+        return r
+    else:
+        var f = events.unsafe_offset(i * KEV_BYTES + 8).bitcast[Int16]()[]
+        if f == EVFILT_USER:
+            return EV_WAKE
+        if f == EVFILT_WRITE:
+            return EV_OUT
+        return EV_IN                # EVFILT_READ, EV_EOF and EV_ERROR included
+
+
+@always_inline
+def _accept_nb(lfd: Int32) -> Int32:
+    """accept() a non-blocking connection, or -1."""
+    comptime if CompilationTarget.is_linux():
+        return external_call["accept4", Int32](lfd,
+            null_ptr[NoneType, MutUntrackedOrigin](), null_ptr[NoneType, MutUntrackedOrigin](),
+            Int32(0x800))                                       # SOCK_NONBLOCK
+    else:
+        var nfd = external_call["accept", Int32](lfd,
+            null_ptr[NoneType, MutUntrackedOrigin](), null_ptr[NoneType, MutUntrackedOrigin]())
+        if nfd >= 0:
+            _ = external_call["set_nonblock_c", Int32](nfd)
+        return nfd
+
+
+@always_inline
+def _send_flags() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return Int32(0x4000)        # MSG_NOSIGNAL
+    else:
+        return Int32(0)             # SIGPIPE is ignored process-wide (main)
 
 
 # ── the I/O thread ────────────────────────────────────────────────────────────
@@ -150,7 +286,7 @@ struct _IOThread:
     def close_conn(mut self, fd: Int32):
         """Stop serving fd and tell the executor, which closes the socket."""
         var ci = Int(fd)
-        _ = epoll_ctl_fd(self.ep, EPOLL_CTL_DEL, fd, 0)
+        _poll_conn_del(self.ep, fd, self.hub[].out_wait[unsafe_offset=ci] != 0)
         # The input buffer is this thread's: free it HERE, before the executor
         # closes the socket. The executor's close frees the buffer after
         # close(), and in that gap the fd number can be accepted again and read
@@ -169,12 +305,8 @@ struct _IOThread:
         self.push(IO_MSG_CLOSE, fd, 0)
 
     def accept_all(mut self, lfd: Int32):
-        comptime if not CompilationTarget.is_linux():
-            return
         while True:
-            var nfd = external_call["accept4", Int32](lfd,
-                null_ptr[NoneType, MutUntrackedOrigin](), null_ptr[NoneType, MutUntrackedOrigin](),
-                Int32(0x800))                                   # SOCK_NONBLOCK
+            var nfd = _accept_nb(lfd)
             if nfd < 0:
                 return
             if Int(nfd) >= IO_MAX_FDS:
@@ -182,7 +314,7 @@ struct _IOThread:
                 continue
             var one = stack_allocation[1, Int32]()
             one[] = 1
-            _ = external_call["setsockopt", Int32](nfd, Int32(6), Int32(1), one, UInt32(4))  # TCP_NODELAY
+            _ = external_call["setsockopt", Int32](nfd, Int32(6), Int32(1), one, Int32(4))   # TCP_NODELAY
             var ci = Int(nfd)
             self.hub[].in_len[unsafe_offset=ci] = 0
             self.hub[].handed[unsafe_offset=ci] = 0
@@ -192,7 +324,7 @@ struct _IOThread:
             self.hub[].owner_t[unsafe_offset=ci] = Int32(self.t)
             # ACCEPT first: the executor learns of the fd before any of its data.
             self.push(IO_MSG_ACCEPT, nfd, 0)
-            _ = epoll_ctl_fd(self.ep, EPOLL_CTL_ADD, nfd, EPOLLIN | EPOLLRDHUP | EPOLLET)
+            _poll_conn_add(self.ep, nfd)
 
     def read_conn(mut self, fd: Int32):
         """Edge-triggered: read until EAGAIN, appending behind any batch that is out."""
@@ -214,7 +346,7 @@ struct _IOThread:
                 continue
             if n == 0:
                 eof = True
-            elif _errno() != 11:      # EAGAIN
+            elif io_errno() != io_eagain():
                 eof = True
             break
         if eof:
@@ -252,11 +384,11 @@ struct _IOThread:
                 if ctx[].pending_offsets[unsafe_offset=ci] == 0:
                     if self.hub[].out_wait[unsafe_offset=ci] != 0:
                         self.hub[].out_wait[unsafe_offset=ci] = 0
-                        _ = epoll_ctl_fd(self.ep, EPOLL_CTL_MOD, fd, EPOLLIN | EPOLLRDHUP | EPOLLET)
+                        _poll_out(self.ep, fd, False)
                     return True
             var owed = ctx[].pending_offsets[unsafe_offset=ci]
             var buf = ctx[].pending_buffers[unsafe_offset=ci]
-            var n = Int(external_call["send", Int64](fd, buf, owed, Int32(0x4000)))   # MSG_NOSIGNAL
+            var n = Int(external_call["send", Int64](fd, buf, owed, _send_flags()))
             if n >= owed:
                 ctx[].pending_offsets[unsafe_offset=ci] = 0
                 continue
@@ -265,10 +397,10 @@ struct _IOThread:
                     buf.unsafe_bitcast[NoneType](), buf.unsafe_offset(n).unsafe_bitcast[NoneType](), owed - n)
                 ctx[].pending_offsets[unsafe_offset=ci] = owed - n
                 continue
-            if _errno() == 11:        # EAGAIN: finish on EPOLLOUT
+            if io_errno() == io_eagain():    # finish once writable
                 if self.hub[].out_wait[unsafe_offset=ci] == 0:
                     self.hub[].out_wait[unsafe_offset=ci] = 1
-                    _ = epoll_ctl_fd(self.ep, EPOLL_CTL_MOD, fd, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET)
+                    _poll_out(self.ep, fd, True)
                 return False
             # A dead connection: drop what it is owed; the read side sees the error.
             ctx[].pending_offsets[unsafe_offset=ci] = 0
@@ -324,29 +456,24 @@ struct _IOThread:
 
 
 def io_thread_main(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
-    comptime if CompilationTarget.is_linux():
-        _io_thread_loop(hub, t)
-
-
-def _io_thread_loop(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
-    var ep = external_call["epoll_create1", Int32](Int32(0x80000))
-    _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, hub[].listen_fd, EPOLLIN | EPOLLEXCLUSIVE)
-    if hub[].listen_fd2 >= 0:
-        _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, hub[].listen_fd2, EPOLLIN | EPOLLEXCLUSIVE)
     var evfd = hub[].io_evfd[unsafe_offset=t]
-    _ = epoll_ctl_fd(ep, EPOLL_CTL_ADD, evfd, EPOLLIN)
+    var ep = _poll_create(evfd)
+    _poll_listen(ep, hub[].listen_fd)
+    if hub[].listen_fd2 >= 0:
+        _poll_listen(ep, hub[].listen_fd2)
     var st = _IOThread(hub, t, ep)
-    var events = alloc[UInt8](512 * 16)
+    var events = alloc[UInt8](IO_EVENTS * KEV_BYTES)    # the larger of epoll's and kqueue's record
+    var ts = alloc[Int](2)
     var flag = hub[].io_sleep.unsafe_offset(t * 8)
     var idle = 0
     while hub[].stop[] == 0:
         var did = st.drain_replies()
-        var timeout = Int32(0)
+        var timeout = 0
         if did == 0 and idle >= IO_SPIN:
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.SEQUENTIAL](flag, UInt64(1))
             if not ring_nonempty(st.rout):
-                timeout = Int32(1)
-        var n = Int(external_call["epoll_wait", Int32](ep, events, Int32(512), timeout))
+                timeout = 1
+        var n = _poll_wait(ep, events, ts, timeout)
         if timeout != 0 or did == 0:
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELAXED](flag, UInt64(0))
         if n <= 0:
@@ -358,24 +485,24 @@ def _io_thread_loop(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
             continue
         idle = 0
         for i in range(n):
-            var fd = epoll_ev_fd(events, i)
-            var mask = epoll_ev_events(events, i)
-            if fd == evfd:
+            var what = _ev_what(events, i, evfd)
+            if what == EV_WAKE:
                 evfd_drain(evfd)
                 continue
+            var fd = _ev_fd(events, i)
             if fd == hub[].listen_fd or fd == hub[].listen_fd2:
                 st.accept_all(fd)
                 continue
             var ci = Int(fd)
-            if hub[].owner_ep[unsafe_offset=ci] != ep:
+            if ci < 0 or ci >= IO_MAX_FDS or hub[].owner_ep[unsafe_offset=ci] != ep:
                 continue              # closed earlier in this batch
-            if mask & EPOLLOUT:
+            if what & EV_OUT:
                 if st.send_conn(fd) and hub[].handed[unsafe_offset=ci] == 0:
                     if hub[].closing[unsafe_offset=ci] != 0:
                         st.close_conn(fd)
                         continue
                     if hub[].in_len[unsafe_offset=ci] > 0:
                         st.handoff(fd)
-            if mask & (EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP):
+            if what & EV_IN:
                 st.read_conn(fd)
         st.wake_executor()

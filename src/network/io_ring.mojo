@@ -1,14 +1,20 @@
 """#465: the handoff primitives between the executor and its I/O threads.
 
 Single-producer / single-consumer rings of two-word messages, the sleep flags
-and eventfd wake-ups. In their own module so the response writer (which queues
+and the wake-ups. In their own module so the response writer (which queues
 out-of-band replies and must tell the owning I/O thread) and io_threads.mojo
 (which imports the writer) can both use them without an import cycle.
+
+A wake-up is an fd. On Linux it is an eventfd. On macOS it is a kqueue that
+carries one EVFILT_USER event: an I/O thread's own kqueue (so its poller wakes
+on it), and a kqueue of its own for the executor.
 """
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
-from std.memory import stack_allocation
+from std.memory import stack_allocation, unsafe_memset
 from std.memory.unsafe_pointer import Pointer
+from std.sys import CompilationTarget
+from src.common.ptr import null_ptr
 
 comptime IO_MSG_DATA = UInt64(1)
 comptime IO_MSG_ACCEPT = UInt64(2)
@@ -27,6 +33,18 @@ comptime IO_RING_WORDS = 16 + 2 * IO_RING_CAP   # [head, pad x7, tail, pad x7, s
 comptime IO_MAX_FDS = 65536
 comptime IO_SPIN = 256                  # empty polls before a thread sleeps
 comptime EPOLLRDHUP = UInt32(0x2000)
+
+# macOS kqueue. A struct kevent is 32 bytes: ident u64, filter i16, flags u16,
+# fflags u32, data i64, udata ptr.
+comptime KEV_BYTES = 32
+comptime EVFILT_READ = Int16(-1)
+comptime EVFILT_WRITE = Int16(-2)
+comptime EVFILT_USER = Int16(-10)
+comptime KEV_ADD = UInt16(0x0001)
+comptime KEV_DELETE = UInt16(0x0002)
+comptime KEV_CLEAR = UInt16(0x0020)
+comptime NOTE_TRIGGER = UInt32(0x01000000)
+comptime WAKE_IDENT = 1                 # EVFILT_USER's ident: its own namespace, not an fd
 
 
 @fieldwise_init
@@ -82,19 +100,75 @@ def is_sleeping(flag: Pointer[UInt64, MutUntrackedOrigin]) -> Bool:
     return Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.SEQUENTIAL](flag, UInt64(0)) != 0
 
 
+@always_inline
+def kev_change(kq: Int32, ident: Int, filter: Int16, flags: UInt16, fflags: UInt32) -> Int32:
+    """macOS: apply one kevent change, return no events."""
+    var ev = stack_allocation[KEV_BYTES, UInt8]()
+    unsafe_memset(ev, 0, KEV_BYTES)
+    ev.bitcast[UInt64]()[] = UInt64(ident)
+    ev.unsafe_offset(8).bitcast[Int16]()[] = filter
+    ev.unsafe_offset(10).bitcast[UInt16]()[] = flags
+    ev.unsafe_offset(12).bitcast[UInt32]()[] = fflags
+    return external_call["kevent", Int32](kq, ev, Int32(1), null_ptr[UInt8, MutUntrackedOrigin](),
+                                          Int32(0), null_ptr[NoneType, MutUntrackedOrigin]())
+
+
+def wake_new() -> Int32:
+    """A new wake-up fd (see the module docstring)."""
+    comptime if CompilationTarget.is_linux():
+        return external_call["eventfd", Int32](UInt32(0), Int32(0x800 | 0x80000))   # EFD_NONBLOCK | EFD_CLOEXEC
+    else:
+        var kq = external_call["kqueue", Int32]()
+        if kq >= 0:
+            _ = kev_change(kq, WAKE_IDENT, EVFILT_USER, KEV_ADD | KEV_CLEAR, UInt32(0))
+        return kq
+
+
 def evfd_signal(fd: Int32):
-    var one = stack_allocation[1, UInt64]()
-    one[] = 1
-    _ = external_call["write", Int](Int(fd), one, 8)
+    comptime if CompilationTarget.is_linux():
+        var one = stack_allocation[1, UInt64]()
+        one[] = 1
+        _ = external_call["write", Int](Int(fd), one, 8)
+    else:
+        _ = kev_change(fd, WAKE_IDENT, EVFILT_USER, UInt16(0), NOTE_TRIGGER)
 
 
 def evfd_drain(fd: Int32):
-    var v = stack_allocation[1, UInt64]()
-    _ = external_call["read", Int](Int(fd), v, 8)
+    """Linux: reset the eventfd. macOS: nothing to do; EV_CLEAR resets the
+    user event when it is delivered."""
+    comptime if CompilationTarget.is_linux():
+        var v = stack_allocation[1, UInt64]()
+        _ = external_call["read", Int](Int(fd), v, 8)
+
+
+def wake_wait(fd: Int32, timeout_ms: Int):
+    """Sleep until fd is signalled or timeout_ms passes (the executor's sleep)."""
+    comptime if CompilationTarget.is_linux():
+        var pfd = stack_allocation[2, Int32]()   # struct pollfd {int fd; short events; short revents}
+        pfd[0] = fd
+        pfd[1] = Int32(1)                        # events = POLLIN, revents = 0
+        if external_call["poll", Int32](pfd, Int64(1), Int32(timeout_ms)) > 0:
+            evfd_drain(fd)
+    else:
+        var ev = stack_allocation[KEV_BYTES, UInt8]()
+        var ts = stack_allocation[2, Int]()      # struct timespec
+        ts[0] = 0
+        ts[1] = timeout_ms * 1_000_000
+        _ = external_call["kevent", Int32](fd, null_ptr[UInt8, MutUntrackedOrigin](), Int32(0),
+                                           ev, Int32(1), ts)
 
 
 @always_inline
-def _errno() -> Int32:
-    return external_call["__errno_location", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
+def io_errno() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return external_call["__errno_location", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
+    else:
+        return external_call["__error", Pointer[Int32, MutUntrackedOrigin]]()[unsafe_offset=0]
 
 
+@always_inline
+def io_eagain() -> Int32:
+    comptime if CompilationTarget.is_linux():
+        return 11
+    else:
+        return 35

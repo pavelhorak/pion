@@ -1075,18 +1075,20 @@ def main():
     # 41 of 90 GETs of a just-acked key returned nil. Serially-opened
     # connections all land on one worker and hide it completely.
     if config.server.apply_env_io_threads(config.server.kvcache_enabled):
-        print("IO_THREADS: " + String(config.server.io_threads) + " from PION_IO_THREADS (epoll)")
-    # #465: the I/O-thread prototype serves one keyspace from one worker, on
-    # epoll. Refused, not ignored, anywhere else: a flag that silently does
-    # nothing is how a benchmark measures the wrong server.
+        print("IO_THREADS: " + String(config.server.io_threads) + " from PION_IO_THREADS")
+    # #465: I/O threads serve one keyspace from one worker; their sockets are
+    # polled with epoll on Linux and kqueue on macOS. Refused, not ignored,
+    # anywhere else: a flag that silently does nothing is how a benchmark
+    # measures the wrong server. The I/O threads are not workers, so the macOS
+    # cap on -w does not count them.
     if config.server.io_threads > 1:
         var _why = String("")
-        if not CompilationTarget.is_linux():
-            _why = "needs Linux (epoll) for now"
-        elif config.server.workers != 1:
+        if config.server.workers != 1:
             _why = "serves one keyspace: it needs -w 1 (got -w " + String(config.server.workers) + ")"
-        elif not config.server.use_epoll:
-            _why = "needs --epoll for now (io_uring and kqueue come later)"
+        elif config.server.use_xdp:
+            _why = "does not run on the XDP lane"
+        elif config.server.use_iouring:
+            _why = "polls its sockets with epoll: drop --iouring"
         elif config.server.kvcache_enabled:
             _why = "does not serve the binary lane (--kvcache) yet"
         if _why.byte_length() > 0:

@@ -20,7 +20,7 @@ the control) and for 2 and 4:
   4. MULTI/EXEC, a reply larger than the 4 MB writer buffer, QUIT (the reply
      arrives, then the close), and a client that disconnects mid-pipeline.
 
-Linux only (the prototype runs on epoll).
+Linux (epoll) and macOS (kqueue).
     python3 tests/test_gh465_io_threads.py [./pion-server]
 """
 import os, socket, subprocess, sys, threading, time, shutil
@@ -48,7 +48,7 @@ def start(io_threads):
     wd = f"/tmp/pion_gh465_{PORT}"
     shutil.rmtree(wd, ignore_errors=True); os.makedirs(wd)
     wait_port_free(PORT)
-    args = [BINARY, "-p", str(PORT), "-w", "1", "--epoll", "--no-wal", "--no-auto-detect",
+    args = [BINARY, "-p", str(PORT), "-w", "1", "--no-wal", "--no-auto-detect",
             "--no-auto-embed", "--no-crash-log"]
     if io_threads > 1:
         args += ["--io-threads", str(io_threads)]
@@ -176,9 +176,6 @@ def run_suite(io_threads):
 
 
 def main():
-    if not sys.platform.startswith("linux"):
-        print("SKIP: --io-threads is Linux-only (epoll) for now")
-        return 0
     for io in (1, 2, 4):
         run_suite(io)
     print(f"\n{len(passes)} passed, {len(failures)} failed")
