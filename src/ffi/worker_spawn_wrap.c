@@ -101,6 +101,68 @@ int64_t pion_raise_nofile(int64_t want, int64_t* before) {
     return (int64_t)rl.rlim_cur;
 }
 
+/* gh #465: the I/O threads of `--io-threads`. Detached: they serve until the
+ * process exits. Each runs pion_worker_entry(ctx, base + i); the entry tells
+ * an I/O thread from a worker by base (IO_THREAD_BASE in io_threads.mojo), so
+ * no second exported symbol (and no new -u link flag) is needed. */
+static void* _pion_io_trampoline(void* p) {
+    struct _pion_worker_arg* a = (struct _pion_worker_arg*)p;
+    a->fn(a->ctx, a->idx);
+    fprintf(stderr, "[pion] I/O thread %lld returned\n", (long long)a->idx);
+    return NULL;
+}
+
+/* gh #465: a connection's output queue is written by the executor and drained by
+ * the I/O thread that owns the socket; this word guards it. Held for an append
+ * or for one send loop, never across anything that can block for long. */
+void pion_spin_lock(uint32_t* w) {
+    while (__atomic_exchange_n(w, 1u, __ATOMIC_ACQUIRE) != 0u) {
+        while (__atomic_load_n(w, __ATOMIC_RELAXED) != 0u) {
+#if defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#elif defined(__aarch64__)
+            __asm__ __volatile__("yield");
+#endif
+        }
+    }
+}
+
+void pion_spin_unlock(uint32_t* w) {
+    __atomic_store_n(w, 0u, __ATOMIC_RELEASE);
+}
+
+/* gh #465: a full fence, for the sleeper's side of the wake-up handshake: store
+ * "I am sleeping", FENCE, then look at the ring once more. A sequentially
+ * consistent store followed by an acquire load is not enough on ARM64, where
+ * LLVM lowers the load to LDAPR (RCpc), which may be satisfied before the
+ * earlier STLR is visible: the waker then reads "not sleeping" while the
+ * sleeper read "ring empty", and the wake-up is lost until the poll times out. */
+void pion_full_fence(void) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+int32_t pion_spawn_detached(int32_t n, int64_t* ctx, int64_t base) {
+    pion_worker_fn fn = (pion_worker_fn)dlsym(RTLD_DEFAULT, "pion_worker_entry");
+    if (!fn || n <= 0) return -1;
+    struct _pion_worker_arg* args =
+        (struct _pion_worker_arg*)malloc(sizeof(struct _pion_worker_arg) * (size_t)n);
+    if (!args) return -1;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 16 * 1024 * 1024);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int32_t rc = 0;
+    for (int32_t i = 0; i < n; i++) {
+        pthread_t tid;
+        args[i].fn = fn;
+        args[i].ctx = ctx;
+        args[i].idx = base + (int64_t)i;
+        if (pthread_create(&tid, &attr, _pion_io_trampoline, &args[i]) != 0) rc = -1;
+    }
+    pthread_attr_destroy(&attr);
+    return rc;   /* args stays allocated: the threads read it for their lifetime */
+}
+
 int32_t pion_spawn_workers(int32_t n, int64_t* ctx) {
     pion_worker_fn fn = (pion_worker_fn)dlsym(RTLD_DEFAULT, "pion_worker_entry");
     if (!fn) {

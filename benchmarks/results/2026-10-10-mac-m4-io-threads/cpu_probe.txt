@@ -1,0 +1,20 @@
+== io1 P1
+186.5 memtier_benchmark
+98.9 0.0 0.0 0.0 0.0 0.0 
+CPU usage: 12.62% user, 39.11% sys, 48.26% idle 
+io1 P1 369704.19
+== io4 P1
+374.1 memtier_benchmark
+100.0 99.3 82.4 47.1 0.0 0.0 
+CPU usage: 16.23% user, 75.69% sys, 8.6% idle 
+io4 P1 217483.28
+== io1 P10
+308.3 memtier_benchmark
+99.6 0.0 0.0 0.0 0.0 0.0 
+CPU usage: 22.62% user, 38.41% sys, 38.96% idle 
+io1 P10 2633288.35
+== io4 P10
+389.2 memtier_benchmark
+99.6 84.7 72.9 64.3 0.0 0.0 
+CPU usage: 27.60% user, 66.5% sys, 6.33% idle 
+io4 P10 2196061.55

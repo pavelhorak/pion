@@ -1,5 +1,8 @@
 from src.common.env import Environment
 from std.sys import CompilationTarget
+from std.ffi import external_call
+from std.memory.unsafe_pointer import Pointer
+from src.common.ptr import is_not_null
 
 @fieldwise_init
 struct VectorConfig(Copyable, Movable, ImplicitlyCopyable):
@@ -115,6 +118,31 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # with Redis's own -OOM error. 0 = unlimited. No eviction: refusal is the
     # whole policy (`maxmemory-policy noeviction`).
     var maxmemory: Int
+    # gh #465: threads serving ONE keyspace, as Redis's io-threads counts them: the
+    # worker thread executes every command, and io_threads - 1 I/O threads own
+    # the client sockets (accept, recv, send). 1 = today's single-thread loop.
+    # -w 1 only; epoll on Linux, kqueue on macOS.
+    var io_threads: Int
+
+    def apply_env_io_threads(mut self, kvcache: Bool) -> Bool:
+        """gh #465: PION_IO_THREADS=N, for running whole test tiers through the
+        I/O-thread path. A default only: an explicit --io-threads wins, and it
+        applies only where I/O threads serve (-w 1, no --kvcache, no explicit
+        --iouring or --xdp). True when it applied."""
+        if self.io_threads > 1 or self.workers != 1 or kvcache or self.use_xdp or self.use_iouring:
+            return False
+        var p = external_call["getenv", Pointer[UInt8, MutUntrackedOrigin]](
+            "PION_IO_THREADS\0".unsafe_ptr())
+        if is_not_null(p):
+            var n = 0
+            var i = 0
+            while i < 3 and p[unsafe_offset=i] >= 48 and p[unsafe_offset=i] <= 57:
+                n = n * 10 + Int(p[unsafe_offset=i]) - 48
+                i += 1
+            if n > 1 and n <= 64:
+                self.io_threads = n
+                return True
+        return False
 
     def __init__(out self):
         self.port = 1974
@@ -154,6 +182,7 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         self.enable_debug_command = 0
         self.bind_addr = ""
         self.maxmemory = 0
+        self.io_threads = 1
 
 @fieldwise_init
 struct AIConfig(Copyable, Movable, ImplicitlyCopyable):
@@ -405,6 +434,9 @@ struct PionConfig(Copyable, Movable, ImplicitlyCopyable):
             print("WAL:        disabled (--no-wal benchmark mode)")
         if self.server.use_epoll:
             print("EPOLL:      forced (--epoll)")
+        if self.server.io_threads > 1:
+            print("IO_THREADS: " + String(self.server.io_threads) + " (1 executor + " +
+                  String(self.server.io_threads - 1) + " I/O threads, one keyspace)")
         elif self.server.use_iouring:
             print("IO_URING:   forced (--iouring)")
         if self.server.use_sqpoll:

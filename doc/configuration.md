@@ -24,6 +24,7 @@ There is no config file. Only `maxmemory` can be changed at runtime with `CONFIG
 | `strict_affinity` | `false` | Pin each worker to a dedicated P-core |
 | `enable_sharding` | `false` | HNSW worker sharding (Linux only; macOS kqueue cost too high) |
 | `independent_workers` | `false` | `--independent-workers`: acknowledges that N workers are N keyspaces, and lets `-w N > 1` start |
+| `io_threads` | `1` | `--io-threads N`: one keyspace served by 1 executor and N − 1 I/O threads that own the sockets (needs `-w 1`; epoll on Linux, kqueue on macOS). `PION_IO_THREADS=N` sets it as a default. See [Networking](networking.md) |
 | `wal_size_mb` | `256` | WAL segment size; a full segment is sealed and a new one opened |
 | `wal_max_segments` | `32` | Past this, writes are refused (`-MISCONF`), never silently dropped |
 | `blob_threshold` | `1048576` | Values at or above this size go to the mmap'd blob tier |

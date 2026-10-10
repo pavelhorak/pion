@@ -4,6 +4,8 @@ from std.collections import List
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
+from src.network.io_threads import IOHub, io_thread_main
+from src.network.io_ring import IO_THREAD_BASE
 from src.common.ptr import is_not_null
 
 from src.common.config import PionConfig
@@ -216,7 +218,7 @@ def _known_flags() -> List[String]:
         "--gpu", "--sqpoll", "--polarquant", "--turboquant", "--nanoquant", "--xdp",
         "--xdp-interface", "--xdp-iface", "--kvcache", "--no-wal", "--wal-size",
         "--wal-max-segments", "--wal-full-policy", "--blob-threshold", "--no-blob-tier",
-        "--iouring", "--epoll", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
+        "--iouring", "--epoll", "--io-threads", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
         "--tenant", "--moe-cache", "--moe-cache-mib", "--dim", "--max-elements", "--crash-log",
         "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory",
         "--lua-time-limit", "--lua-memory-limit", "--enable-debug-command",
@@ -235,7 +237,7 @@ def _value_flags() -> List[String]:
         "--requirepass", "--requirepass-file", "--bind", "--tenant", "--moe-cache",
         "--moe-cache-mib", "--dim", "--max-elements", "--crash-log", "--status-file",
         "--rss-warn-pct", "--maxmemory", "--lua-time-limit", "--lua-memory-limit",
-        "--enable-debug-command",
+        "--enable-debug-command", "--io-threads",
     ]
 
 
@@ -305,6 +307,9 @@ def _print_help():
     print("                            write acked on one connection is invisible to a read on")
     print("                            another. Safe only when every client pins one connection")
     print("                            (or shards keys itself). Pooled clients will read stale nils.")
+    print("      --io-threads N        ONE keyspace from N threads (default 1): the worker executes")
+    print("                            every command, N-1 I/O threads own the sockets (as Redis's")
+    print("                            io-threads). Needs -w 1; epoll on Linux, kqueue on macOS.")
     print("      --profile PROF        kv | vector | ai | full — KV-only / +HNSW / +AI / everything")
     print("      --ns-prefix STR       multi-tenant namespace gate for KV.PREFIX.* / V.* (single-tenant if empty)")
     print("      --requirepass STR     require AUTH <password> before serving any command (no auth if empty)")
@@ -674,6 +679,15 @@ def main():
         elif args[i] == "--epoll":
             config.server.use_epoll = True
             i += 1
+        elif args[i] == "--io-threads" and i + 1 < len(args):
+            # gh #465: 1 executor + N-1 I/O threads over one keyspace
+            try:
+                config.server.io_threads = atol(args[i + 1])
+            except:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]))
+            if config.server.io_threads < 1 or config.server.io_threads > 64:
+                _refuse_arg(String(args[i + 1]), "--io-threads must be 1..64")
+            i += 2
         elif args[i] == "--ns-prefix" and i + 1 < len(args):
             # Multi-tenant isolation: KV.PREFIX.* must use this prefix.
             config.server.ns_prefix = args[i + 1]
@@ -1063,6 +1077,27 @@ def main():
     # from another. Measured at -w 4 with 16 concurrently-opened connections:
     # 41 of 90 GETs of a just-acked key returned nil. Serially-opened
     # connections all land on one worker and hide it completely.
+    if config.server.apply_env_io_threads(config.server.kvcache_enabled):
+        print("IO_THREADS: " + String(config.server.io_threads) + " from PION_IO_THREADS")
+    # gh #465: I/O threads serve one keyspace from one worker; their sockets are
+    # polled with epoll on Linux and kqueue on macOS. Refused, not ignored,
+    # anywhere else: a flag that silently does nothing is how a benchmark
+    # measures the wrong server. The I/O threads are not workers, so the macOS
+    # cap on -w does not count them.
+    if config.server.io_threads > 1:
+        var _why = String("")
+        if config.server.workers != 1:
+            _why = "serves one keyspace: it needs -w 1 (got -w " + String(config.server.workers) + ")"
+        elif config.server.use_xdp:
+            _why = "does not run on the XDP lane"
+        elif config.server.use_iouring:
+            _why = "polls its sockets with epoll: drop --iouring"
+        elif config.server.kvcache_enabled:
+            _why = "does not serve the binary lane (--kvcache) yet"
+        if _why.byte_length() > 0:
+            print("FATAL: --io-threads " + String(config.server.io_threads) + " " + _why)
+            external_call["exit", NoneType](Int32(1))
+
     if config.server.workers > 1 and not config.server.independent_workers:
         print("")
         print("FATAL: -w " + String(config.server.workers) +
@@ -1481,7 +1516,7 @@ def main():
     # Mojo 1.0: spawn workers via pthreads (see pion_worker_entry above the
     # heap import below). Blocks forever — workers never exit in normal
     # operation, same contract as the old parallelize[worker_task](n, n).
-    var _boot_ctx = alloc[Int64](8)
+    var _boot_ctx = alloc[Int64](9)
     _boot_ctx[unsafe_offset=0] = Int64(Int(shared_hnsw_ptr))
     _boot_ctx[unsafe_offset=1] = Int64(Int(cluster_ptr))
     _boot_ctx[unsafe_offset=2] = Int64(0)    # was the pub/sub ring (#42: per-worker inboxes in C)
@@ -1490,6 +1525,7 @@ def main():
     _boot_ctx[unsafe_offset=5] = Int64(Int(shared_listen_fd))
     _boot_ctx[unsafe_offset=6] = Int64(Int(binary_listen_fd))
     _boot_ctx[unsafe_offset=7] = Int64(n_workers)
+    _boot_ctx[unsafe_offset=8] = Int64(config.server.io_threads)   # gh #465
     _ = external_call["pion_spawn_workers", Int32](
         Int32(config.server.workers), _boot_ctx)
 
@@ -1521,9 +1557,15 @@ def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64
 # ctx layout (Int64 slots, packed in main(), outlives workers — main() blocks
 # in pion_spawn_workers): [0]=SharedHNSWView* [1]=ClusterState*
 # [2]=unused (was the pub/sub ring) [3]=secondary_listen_fds(Int32*) [4]=xdp_shared_fds
-# (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers.
+# (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers
+# [8]=io_threads (gh #465: main()'s final value).
 @export
 def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64):
+    # gh #465: an I/O thread of `--io-threads`, started by the executor (pion_spawn_detached).
+    if worker_idx >= IO_THREAD_BASE:
+        io_thread_main(Pointer[IOHub, MutUntrackedOrigin](unsafe_from_address=Int(ctx)),
+                       Int(worker_idx - IO_THREAD_BASE))
+        return
     # Re-derive the names the old closure captured; the body below is the old
     # worker_task body, unchanged.
     var shared_hnsw_ptr = Pointer[SharedHNSWView, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=0]))
@@ -1651,6 +1693,11 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                 worker_config.server.use_iouring = True
             elif args[j] == "--epoll":
                 worker_config.server.use_epoll = True
+            elif args[j] == "--io-threads" and j + 1 < len(args):
+                try:
+                    worker_config.server.io_threads = atol(args[j + 1])   # gh #465
+                except:
+                    pass
             elif args[j] == "--ns-prefix" and j + 1 < len(args):
                 worker_config.server.ns_prefix = args[j + 1]
             elif args[j] == "--requirepass" and j + 1 < len(args):
@@ -1811,6 +1858,12 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                             unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
                                 unsafe_ptr=_wenv, length=_wn)))
 
+        # gh #465: main()'s final --io-threads (flag or PION_IO_THREADS, after
+        # its fence) is the one that counts; this loop does not see every flag.
+        worker_config.server.io_threads = Int(ctx[unsafe_offset=8])
+        if worker_config.server.io_threads > 1:
+            worker_config.server.use_epoll = True
+            worker_config.server.use_iouring = False
         var worker_nodes = List[String]()
         worker_nodes.append("127.0.0.1:" + String(worker_config.server.port))
         

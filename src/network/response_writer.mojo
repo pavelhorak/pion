@@ -1,4 +1,5 @@
 from src.common.ptr import null_ptr, is_null, is_not_null
+from src.network.io_ring import ring_at, ring_push, is_sleeping, evfd_signal, IO_MSG_KICK
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
@@ -134,6 +135,20 @@ struct WriterCtx(Movable):
     # sends nothing — the reply cannot be rolled back after it has left. -1
     # otherwise. The slow path sets it per command; other writers never do.
     var suppress_from: Int
+    # gh #465: the engine runs I/O threads. Replies never reach a socket from this
+    # (the executor's) thread: a flush or a spill queues them in the
+    # connection's pending block, and the I/O thread that owns the connection
+    # sends them once the executor hands the batch back.
+    var io_mode: Bool
+    # gh #465: in io_mode, what the writer needs to queue bytes for a connection
+    # the executor is NOT serving right now (pub/sub, MONITOR, a woken client)
+    # and to tell its I/O thread: the per-fd output locks, which thread owns
+    # each fd, and that thread's ring, sleep flag and eventfd.
+    var io_locks: Pointer[UInt32, MutUntrackedOrigin]
+    var io_owner: Pointer[Int32, MutUntrackedOrigin]
+    var io_rings_out: Pointer[UInt64, MutUntrackedOrigin]
+    var io_sleep: Pointer[UInt64, MutUntrackedOrigin]
+    var io_evfd: Pointer[Int32, MutUntrackedOrigin]
 
     def __init__(out self, *, connections: Bool):
         """`connections` False makes a capture context (#36): no per-connection
@@ -166,6 +181,31 @@ struct WriterCtx(Movable):
         self.cap_len = 0
         self.cap_cap = 0
         self.suppress_from = -1
+        self.io_mode = False
+        self.io_locks = null_ptr[UInt32, MutUntrackedOrigin]()
+        self.io_owner = null_ptr[Int32, MutUntrackedOrigin]()
+        self.io_rings_out = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.io_sleep = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.io_evfd = null_ptr[Int32, MutUntrackedOrigin]()
+
+    def io_append(mut self, ci: Int, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+        """gh #465: queue n bytes for ci under its output lock."""
+        var lk = self.io_locks.unsafe_offset(ci)
+        external_call["pion_spin_lock", NoneType](lk)
+        self.out_append(ci, src, n)
+        external_call["pion_spin_unlock", NoneType](lk)
+
+    def io_tell(mut self, fd: Int32, kind: UInt64):
+        """gh #465: tell fd's I/O thread there is work for it (KICK, RESUME)."""
+        var t = Int(self.io_owner[unsafe_offset=Int(fd)])
+        if t < 0:
+            return                      # not (or no longer) served by an I/O thread
+        var r = ring_at(self.io_rings_out, t)
+        while not ring_push(r, kind, fd, 0):
+            evfd_signal(self.io_evfd[unsafe_offset=t])
+            _ = external_call["sched_yield", Int32]()
+        if is_sleeping(self.io_sleep.unsafe_offset(t * 8)):
+            evfd_signal(self.io_evfd[unsafe_offset=t])
 
     def _cap_push(mut self, src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
         """A capture writer's reply past its buffer, kept for the script."""
@@ -310,6 +350,10 @@ struct WriterCtx(Movable):
         now; the rest is queued, and `queued` makes the engine flush after
         the batch, which arms the write event or submits the SEND."""
         var ci = Int(fd)
+        if self.io_mode:                    # gh #465: the owning I/O thread sends it
+            self.io_append(ci, src, n)
+            self.queued = True
+            return
         if self.use_uring and self.ring[].fd_closing[unsafe_offset=ci] != 0:
             return
         var sent = 0
@@ -345,6 +389,16 @@ def _w_emit_overflow_error(ctx: _WCtx, buffer: _WBuf, offset: Int) -> Int:
     ctx[].overflow_emitted = True
     _write_overflow_error_bytes(buffer.unsafe_offset(offset))
     return offset + 30
+
+
+@no_inline
+def _w_io_queue(ctx: _WCtx, ci: Int, buffer: _WBuf, offset: Int) -> Int:
+    """gh #465: a batch's reply, queued for the I/O thread that owns the
+    connection. Out of line, so that `_flush_kqueue` stays the size it is
+    without I/O threads. Returns the new buffer offset (0)."""
+    if offset > 0:
+        ctx[].io_append(ci, buffer, offset)
+    return 0
 
 
 @no_inline
@@ -666,6 +720,19 @@ struct ResponseWriter(Movable):
         if length <= 0 or (kq == -1 and not self.ctx[].use_uring):
             return
         var ci = Int(fd)
+        if self.ctx[].io_mode:
+            # gh #465: another connection, served by an I/O thread: queue under its
+            # lock, then tell that thread. Same 32 MB rule as below.
+            var lk = self.ctx[].io_locks.unsafe_offset(ci)
+            external_call["pion_spin_lock", NoneType](lk)
+            if self.out_owed(ci) + length > OUT_DELIVER_LIMIT:
+                external_call["pion_spin_unlock", NoneType](lk)
+                _ = external_call["shutdown", Int32](fd, Int32(2))
+                return
+            self.out_append(ci, data, length)
+            external_call["pion_spin_unlock", NoneType](lk)
+            self.ctx[].io_tell(fd, IO_MSG_KICK)
+            return
         var p = data
         var left = length
         if self.ctx[].use_uring and self.ctx[].ring[].fd_closing[unsafe_offset=ci] != 0:
@@ -743,6 +810,10 @@ struct ResponseWriter(Movable):
     @no_inline
     def _flush_kqueue(mut self, fd: Int32, server: TCPServer, kq: Int32):
         var fd_idx = Int(fd)
+        if self.ctx[].io_mode:
+            # gh #465: queue for the I/O thread that owns fd; it sends after the batch.
+            self.offset = _w_io_queue(self.ctx, fd_idx, self.buffer, self.offset)
+            return
 
         # 1. Owed bytes already: queue this batch behind them, then send
         if self.owes(fd_idx):

@@ -1,0 +1,22 @@
+Json file ./raw/pion_io2_P10_r3.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 10%,   1 secs]  4 threads 50 conns:     2496040 ops, 2492465 (avg: 2492465) ops/sec, 208.49MB/sec (avg: 208.49MB/sec),  0.80 (avg:  0.80) msec latency[RUN #1 20%,   2 secs]  4 threads 50 conns:     5092000 ops, 2545295 (avg: 2519122) ops/sec, 318.50MB/sec (avg: 263.99MB/sec),  0.78 (avg:  0.79) msec latency[RUN #1 30%,   3 secs]  4 threads 50 conns:     7632420 ops, 2529283 (avg: 2522495) ops/sec, 400.80MB/sec (avg: 309.41MB/sec),  0.79 (avg:  0.79) msec latency[RUN #1 41%,   4 secs]  4 threads 50 conns:    10218592 ops, 2503767 (avg: 2517729) ops/sec, 462.17MB/sec (avg: 348.28MB/sec),  0.80 (avg:  0.79) msec latency[RUN #1 52%,   5 secs]  4 threads 50 conns:    13010610 ops, 2511634 (avg: 2516418) ops/sec, 518.10MB/sec (avg: 384.79MB/sec),  0.79 (avg:  0.79) msec latency[RUN #1 63%,   6 secs]  4 threads 50 conns:    15874100 ops, 2493110 (avg: 2512182) ops/sec, 558.21MB/sec (avg: 416.32MB/sec),  0.80 (avg:  0.79) msec latency[RUN #1 73%,   7 secs]  4 threads 50 conns:    18392430 ops, 2499141 (avg: 2510388) ops/sec, 592.66MB/sec (avg: 440.57MB/sec),  0.80 (avg:  0.80) msec latency[RUN #1 85%,   8 secs]  4 threads 50 conns:    21220740 ops, 2502282 (avg: 2509305) ops/sec, 619.12MB/sec (avg: 464.43MB/sec),  0.80 (avg:  0.80) msec latency[RUN #1 95%,   9 secs]  4 threads 50 conns:    23775800 ops, 2507013 (avg: 2509058) ops/sec, 640.20MB/sec (avg: 483.34MB/sec),  0.80 (avg:  0.80) msec latency[RUN #1 100%,  10 secs]  0 threads 50 conns:    25091500 ops, 2507013 (avg: 2508904) ops/sec, 640.20MB/sec (avg: 492.20MB/sec),  0.80 (avg:  0.80) msec latency
+
+warning: GET miss rate 39.34% above target 1.00% (8974212 misses / 22810400 ops)
+Saving JSON output file: ./raw/pion_io2_P10_r3.json
+Json file closed.
+4         Threads
+50        Connections per thread
+10        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets       228081.56          ---          ---         0.79677         0.77500         1.37500         2.11100     67464.20 
+Gets      2280755.59   1383446.28    897309.31         0.79602         0.77500         1.37500         2.06300    436531.74 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals    2508837.15   1383446.28    897309.31         0.79609         0.77500         1.37500         2.06300    503995.94 

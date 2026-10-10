@@ -1,0 +1,2 @@
+pion-server 0.9.8+58e5bcb (2026-10-10)
+vector: libpion_vector abi=1 (closed, dims=1536) isa=neon

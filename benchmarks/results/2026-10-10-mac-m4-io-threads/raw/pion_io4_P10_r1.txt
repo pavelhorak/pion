@@ -1,0 +1,30 @@
+Json file ./raw/pion_io4_P10_r1.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 11%,   1 secs]  4 threads 50 conns:     2277618 ops, 2127046 (avg: 2127046) ops/sec, 173.94MB/sec (avg: 173.94MB/sec),  0.94 (avg:  0.94) msec latency
+warning: high CPU on thread 0: 95.9% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 2: 96.2% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 3: 95.1% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 22%,   2 secs]  4 threads 50 conns:     4776750 ops, 2201496 (avg: 2165358) ops/sec, 266.81MB/sec (avg: 221.73MB/sec),  0.91 (avg:  0.92) msec latency
+warning: high CPU on thread 1: 97.4% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 33%,   3 secs]  4 threads 50 conns:     7144304 ops, 2174749 (avg: 2168461) ops/sec, 334.61MB/sec (avg: 259.03MB/sec),  0.92 (avg:  0.92) msec latency[RUN #1 43%,   4 secs]  4 threads 50 conns:     9327730 ops, 2174471 (avg: 2169865) ops/sec, 387.59MB/sec (avg: 289.06MB/sec),  0.92 (avg:  0.92) msec latency[RUN #1 53%,   5 secs]  4 threads 50 conns:    11590000 ops, 2183030 (avg: 2172422) ops/sec, 431.67MB/sec (avg: 316.76MB/sec),  0.91 (avg:  0.92) msec latency[RUN #1 63%,   6 secs]  4 threads 50 conns:    13788600 ops, 2187674 (avg: 2174840) ops/sec, 467.38MB/sec (avg: 340.63MB/sec),  0.91 (avg:  0.92) msec latency[RUN #1 73%,   7 secs]  4 threads 50 conns:    15966843 ops, 2177870 (avg: 2175253) ops/sec, 493.19MB/sec (avg: 361.42MB/sec),  0.92 (avg:  0.92) msec latency[RUN #1 83%,   8 secs]  4 threads 50 conns:    18187020 ops, 2200873 (avg: 2178348) ops/sec, 521.37MB/sec (avg: 380.75MB/sec),  0.91 (avg:  0.92) msec latency[RUN #1 95%,   9 secs]  4 threads 50 conns:    20636130 ops, 2208126 (avg: 2181840) ops/sec, 543.08MB/sec (avg: 399.78MB/sec),  0.90 (avg:  0.91) msec latency[RUN #1 100%,  10 secs]  0 threads 50 conns:    21822180 ops, 2208126 (avg: 2181945) ops/sec, 543.08MB/sec (avg: 407.95MB/sec),  0.90 (avg:  0.91) msec latency
+
+warning: GET miss rate 43.45% above target 1.00% (8618796 misses / 19838238 ops)
+Saving JSON output file: ./raw/pion_io4_P10_r1.json
+Json file closed.
+4         Threads
+50        Connections per thread
+10        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets       198381.76          ---          ---         0.91579         0.79100         2.00700         2.33500     58679.33 
+Gets      1983699.42   1121873.86    861825.56         0.91533         0.79100         2.00700         2.31900    359090.91 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals    2182081.18   1121873.86    861825.56         0.91537         0.79100         2.00700         2.31900    417770.24 

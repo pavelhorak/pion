@@ -1,0 +1,5 @@
+memtier_benchmark v=2.5.1 sha=00000000:0 bits=64 libevent=2.1.13-stable openssl=OpenSSL 3.6.3 9 Jun 2026 prometheus=yes
+Copyright (C) 2011-2026 Redis Ltd.
+This is free software.  You may redistribute copies of it under the terms of
+the GNU General Public License <http://www.gnu.org/licenses/gpl.html>.
+There is NO WARRANTY, to the extent permitted by law.

@@ -9,6 +9,10 @@ from std.collections import List
 from src.common.skip_list import SlabSkipList
 from src.network.server import KEvent, TCPServer, EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLET, EPOLLEXCLUSIVE, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
 from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
+from src.network.io_threads import IOHub
+from src.network.io_ring import ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping, sleep_fence
+from src.network.io_ring import evfd_signal, wake_wait, IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE
+from src.network.io_ring import IO_MSG_REPLY, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_SPIN, IO_EXEC_BUDGET
 from src.common.list import SlabList
 from src.memory.slab_allocator import SlabAllocator
 from src.common.hash_map import SlabHashMap, StripedHashMap
@@ -208,12 +212,16 @@ struct NetworkEngine:
         if CompilationTarget.is_linux():
             if self.config.server.use_xdp:
                 self.run_server_xdp(hnsw, db_size)
+            elif self.config.server.io_threads > 1:
+                self.run_server_io(hnsw, db_size)       # gh #465 (main() fenced it to -w 1)
             elif self.config.server.use_epoll:
                 self.run_server_epoll(hnsw, db_size)
             else:
                 # io_uring is default on Linux: better syscall batching at high concurrency.
                 # Use --epoll for low-concurrency benchmarks (P=1 per-command).
                 self.run_server_uring(hnsw, db_size)
+        elif self.config.server.io_threads > 1:
+            self.run_server_io(hnsw, db_size)           # gh #465 on kqueue
         else:
             self.run_server_kqueue(hnsw, db_size)
 
@@ -240,7 +248,12 @@ struct NetworkEngine:
         self.slow_path.parked_waits.remove_fd(fd)   # gh #390
         self.server.close_client(fd)
         self.client_buffer_lens[unsafe_offset=ci] = 0
-        if self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+        # gh #465: with I/O threads the input buffer belongs to the I/O thread,
+        # which freed it before reporting the close. Once close() above has
+        # released the fd number, another I/O thread may already be reading a
+        # NEW connection into client_buffers[ci]: never touch it from here.
+        if not self.writer.ctx[].io_mode and \
+           self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
             self.client_buffers[unsafe_offset=ci].unsafe_free()
             self.client_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
         if self.writer.ctx[].pending_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
@@ -463,6 +476,9 @@ struct NetworkEngine:
             else:
                 self.writer.append_int_response(Int64(acked))
             self.writer.flush_response(fd, self.server, kq)
+            if self.writer.ctx[].io_mode:      # gh #465: its I/O thread holds its bytes
+                self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
+                continue
             var stored = self.client_buffer_lens[unsafe_offset=ci]
             if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                 self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
@@ -513,6 +529,9 @@ struct NetworkEngine:
             reg[].remove_at(k)            # entry k is now a different one: no k += 1
             self.slow_path.parked_waits.unpark_fd(fd)
             self.writer.flush_response(fd, self.server, kq)
+            if self.writer.ctx[].io_mode:      # gh #465: its I/O thread holds its bytes
+                self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
+                continue
             var stored = self.client_buffer_lens[unsafe_offset=ci]
             if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                 self._dispatch_recv_buffer(fd, ci, stored, 0, kq, hnsw, db_size)
@@ -590,6 +609,9 @@ struct NetworkEngine:
                          uring_group: Int) raises:
         """A parked client was answered: run what it pipelined behind the
         command that parked it, and on io_uring arm its receive again."""
+        if self.writer.ctx[].io_mode:          # gh #465: its I/O thread holds its bytes
+            self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
+            return
         var ci = Int(fd)
         var stored = self.client_buffer_lens[unsafe_offset=ci]
         if stored > 0 and self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
@@ -1796,6 +1818,187 @@ struct NetworkEngine:
                 # main() can fall out of pthread_join and exit cleanly.
                 if self.shutting_down:
                     return
+
+    # ── gh #465: one executor, N-1 I/O threads (see src/network/io_threads.mojo) ──
+
+    def _dispatch_io_batch(mut self, fd: Int32, n: Int, kq: Int32,
+                           mut hnsw: HNSWGraph, mut db_size: Int) raises -> Int:
+        """`_dispatch_recv_buffer` for a batch an I/O thread handed over: the
+        same drain, but it walks an offset instead of moving leftovers to the
+        front (the I/O thread owns the buffer's layout and may be appending
+        behind the batch), and its flush queues the reply for that thread.
+        Returns how many bytes it consumed."""
+        var ci = Int(fd)
+        if n > 0:
+            self.slow_path.clients.touch(fd)
+        if self.slow_path.clients.close_after[unsafe_offset=ci] != 0:
+            return n                    # #47: dropped, as _dispatch_recv_buffer drops it
+        var _rcu_slot = self.rcu_slot
+        if is_not_null(_rcu_slot):
+            var _rcu_ep = UInt64(1)
+            if is_not_null(self.rcu_epoch_ptr):
+                _rcu_ep = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
+                    self.rcu_epoch_ptr, UInt64(0))
+            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.SEQUENTIAL](
+                _rcu_slot, (_rcu_ep << 1) | UInt64(1))
+        self._set_expiry_clock()
+        self.writer.proto = self.slow_path.tx_state.resp_proto[unsafe_offset=ci]
+        self.writer.ctx[].cur_fd = fd
+        var base = self.client_buffers[unsafe_offset=ci]
+        var off = 0
+        while off < n:
+            if self.slow_path.parked_waits.any() and self.slow_path.parked_waits.is_parked(ci):
+                break
+            var consumed = 0
+            if not self.slow_path.fast_path_off or self.slow_path.fast_path_ok(ci):
+                consumed = self.fast_path.process_data_plane(
+                    fd, base.unsafe_offset(off), n - off,
+                    self.writer, self.server, kq,
+                    hnsw, db_size,
+                )
+            if consumed == 0:
+                consumed = self.slow_path.process_slow_path(
+                    base.unsafe_offset(off), n - off, fd,
+                    self.writer, self.server, kq,
+                    hnsw, db_size,
+                    self.config,
+                )
+            if consumed == 0:
+                break
+            off += consumed
+        if self.writer.offset > 0 or self.writer.ctx[].queued:
+            self.writer.flush_response(fd, self.server, kq)
+        if len(self.fast_path.keyspace[].graveyard[]) > 0:
+            free_graveyard(self.fast_path.keyspace)
+        if is_not_null(self.slow_path.vec_tomb) and len(self.slow_path.vec_tomb[].pending) > 0:
+            log_dead_slots(self.slow_path.shared_hnsw, self.slow_path.vec_tomb, self.slow_path.dispatcher)
+        if is_not_null(_rcu_slot):
+            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](_rcu_slot, UInt64(0))
+        return off
+
+    def _io_accept(mut self, fd: Int32):
+        """The executor's half of an accept: what the epoll loop resets per new
+        fd, minus the socket options and the poller registration (the I/O
+        thread did those). The input buffer belongs to the I/O thread."""
+        var ci = Int(fd)
+        self.client_buffer_lens[unsafe_offset=ci] = 0
+        self.local_affinity[unsafe_offset=ci] = UInt8(1)
+        if self.writer.ctx[].pending_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
+            self.writer.ctx[].pending_buffers[unsafe_offset=ci].unsafe_free()
+            self.writer.ctx[].pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.writer.ctx[].pending_offsets[unsafe_offset=ci] = 0
+        self.writer.out_free(ci)
+        self.slow_path.clients.on_accept(fd)
+
+    def run_server_io(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
+        """gh #465 executor loop. Runs on the worker thread; owns all command state.
+        Spawns config.server.io_threads - 1 I/O threads, then serves the
+        batches they hand over, in arrival order per thread ring."""
+        if self.server.fd < 0 and not self.server.listen():
+            return
+        var n_io = self.config.server.io_threads - 1
+        # The overflow queue is allocated lazily by the executor; an I/O thread
+        # reads it. Allocate it before any thread starts, so its pointers never change.
+        if is_null(self.writer.ctx[].ovf_lens):
+            self.writer.ctx[]._ovf_init()
+        var hub = alloc[IOHub](1)
+        hub.unsafe_write(IOHub(n_io, self.server.fd, CLIENT_BUF_SIZE, self.client_buffers, self.writer.ctx))
+        hub[].listen_fd2 = self.secondary_listen_fd
+        self.writer.ctx[].io_locks = hub[].out_lock
+        self.writer.ctx[].io_owner = hub[].owner_t
+        self.writer.ctx[].io_rings_out = hub[].rings_out
+        self.writer.ctx[].io_sleep = hub[].io_sleep
+        self.writer.ctx[].io_evfd = hub[].io_evfd
+        self.writer.ctx[].io_mode = True
+        var rc = external_call["pion_spawn_detached", Int32](
+            Int32(n_io), Pointer[Int64, MutUntrackedOrigin](unsafe_from_address=Int(hub)), IO_THREAD_BASE)
+        if rc != 0:
+            print("FATAL: --io-threads: could not start the I/O threads")
+            external_call["exit", NoneType](Int32(1))
+        print("--- Pion IO-THREADS Engine Active --- worker=" + String(self.worker_id) +
+              " io_threads=" + String(n_io) + " (+1 executor)")
+        var kq = Int32(-3)       # not -1 (the XDP no-op flush): flushes go to _flush_kqueue's io_mode branch
+        var need_wake = alloc[UInt8](n_io)
+        var idle = 0
+        var last_tick = _get_now_ns()
+        while True:
+            var did = 0
+            for t in range(n_io):
+                var rin = ring_at(hub[].rings_in, t)
+                var rout = ring_at(hub[].rings_out, t)
+                need_wake[unsafe_offset=t] = 0
+                # At most IO_EXEC_BUDGET messages per ring per round: a busy
+                # thread refills its ring while the executor drains it, and
+                # draining to empty would keep the other threads' connections
+                # waiting behind it.
+                var budget = IO_EXEC_BUDGET
+                while budget > 0:
+                    var m = ring_pop(rin)
+                    if not m.ok:
+                        break
+                    budget -= 1
+                    did += 1
+                    if m.kind == IO_MSG_DATA:
+                        var consumed = self._dispatch_io_batch(m.fd, m.arg, kq, hnsw, db_size)
+                        if self.slow_path.clients.close_after[unsafe_offset=Int(m.fd)] != 0:
+                            consumed |= IO_CLOSE_FLAG     # QUIT, a protocol error, CLIENT KILL of itself
+                        while not ring_push(rout, IO_MSG_REPLY, m.fd, consumed):
+                            evfd_signal(hub[].io_evfd[unsafe_offset=t])
+                            _ = external_call["sched_yield", Int32]()
+                        need_wake[unsafe_offset=t] = 1
+                    elif m.kind == IO_MSG_ACCEPT:
+                        self._io_accept(m.fd)
+                    elif m.kind == IO_MSG_CLOSE:
+                        self._close_fd_common(m.fd, Int(m.fd))
+                if need_wake[unsafe_offset=t] != 0 and is_sleeping(hub[].io_sleep.unsafe_offset(t * 8)):
+                    evfd_signal(hub[].io_evfd[unsafe_offset=t])
+
+            # Ticks: what the epoll loop does per epoll_wait, at most every 100 us
+            # while busy (epoll_wait returned that often under load), every wake when idle.
+            var now = _get_now_ns()
+            if did == 0 or now - last_tick >= 100_000:
+                last_tick = now
+                self.ttl_sweep_counter += 1
+                if self.ttl_sweep_counter >= 100:
+                    self.ttl_sweep_counter = 0
+                    if self.slow_path.clients.pause_until_ms == 0:
+                        self.fast_path.sweep_expired_keys(20)
+                # Parked clients, as the epoll loop serves them each tick. A woken
+                # one gets its reply queued and its I/O thread told to resume it.
+                if self.slow_path.blocked_readers._count() > 0:
+                    self._service_blocked_readers(kq, hnsw, db_size)
+                if self.slow_path.blocked_clients._count() > 0:
+                    self._service_blocked_clients(kq, hnsw, db_size)
+                _ = self.slow_path.moe_tier.drain_warm_into_cache()
+                if self.slow_path.deferred_count > 0:
+                    self.slow_path.drain_deferred_shard_responses(hnsw, self.writer, self.server, kq)
+                if self.slow_path.parked_waits.count() > 0:
+                    self._service_parked_waits(kq, hnsw, db_size)
+                if self.slow_path.clients.pause_until_ms != 0 or self.slow_path.clients.pause_changed \
+                   or len(self.slow_path.clients.released) > 0:
+                    self._service_pause(kq, hnsw, db_size)
+                if self.ttl_sweep_counter & 0x3F == 0:
+                    self._housekeeping_64tick(hnsw)
+                    if self.shutting_down:
+                        hub[].stop[] = 1
+                        return
+
+            if did > 0:
+                idle = 0
+                continue
+            idle += 1
+            if idle < IO_SPIN:
+                continue
+            # Sleep until an I/O thread pushes, or 1 ms for the ticks.
+            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.SEQUENTIAL](hub[].exec_sleep, UInt64(1))
+            sleep_fence()
+            var any = False
+            for t in range(n_io):
+                if ring_nonempty(ring_at(hub[].rings_in, t)):
+                    any = True
+            if not any:
+                wake_wait(hub[].exec_evfd, 1)
+            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELAXED](hub[].exec_sleep, UInt64(0))
 
     def run_server_kqueue(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
         from src.network.replication import apply_wal_entries
