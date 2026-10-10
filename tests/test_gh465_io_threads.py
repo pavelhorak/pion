@@ -19,6 +19,11 @@ the control) and for 2 and 4:
      pipelined behind it.
   4. MULTI/EXEC, a reply larger than the 4 MB writer buffer, QUIT (the reply
      arrives, then the close), and a client that disconnects mid-pipeline.
+  5. The rest of step 2: MONITOR, CLIENT KILL of another client, CLIENT PAUSE,
+     CLIENT REPLY OFF, a protocol error (answered, then closed), WAIT, XREAD
+     BLOCK, a client that stops reading while 64 MB is owed to it (the others
+     keep being served), pub/sub fan-out in order, RESP3, connection churn, and
+     AUTH plus --maxmemory on a second server.
 
 Linux (epoll) and macOS (kqueue).
     python3 tests/test_gh465_io_threads.py [./pion-server]
@@ -27,7 +32,7 @@ import os, socket, subprocess, sys, threading, time, shutil
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from resp_strict import Conn, encode, wait_ready_pid, wait_port_free  # noqa: E402
+from resp_strict import Conn, RespError, encode, wait_ready_pid, wait_port_free  # noqa: E402
 
 BINARY = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PION_BIN", "./pion-server"))
 PORT = 1993
@@ -44,7 +49,7 @@ def check(name, cond, detail=""):
         failures.append((name, detail)); print(f"  FAIL  {name}   {detail}")
 
 
-def start(io_threads):
+def start(io_threads, extra=(), password=None):
     wd = f"/tmp/pion_gh465_{PORT}"
     shutil.rmtree(wd, ignore_errors=True); os.makedirs(wd)
     wait_port_free(PORT)
@@ -52,9 +57,14 @@ def start(io_threads):
             "--no-auto-embed", "--no-crash-log"]
     if io_threads > 1:
         args += ["--io-threads", str(io_threads)]
+    args += list(extra)
     log = open(os.path.join(wd, "server.log"), "w")
     p = subprocess.Popen(args, cwd=wd, stdout=log, stderr=subprocess.STDOUT)
-    wait_ready_pid(PORT, p)
+    try:
+        wait_ready_pid(PORT, p, password=password)
+    except Exception:
+        stop(p)
+        raise
     return p
 
 
@@ -175,9 +185,175 @@ def run_suite(io_threads):
         stop(p)
 
 
+def read_eof(sock, timeout=5.0):
+    """Bytes until the server closes the connection (None: it did not close)."""
+    sock.settimeout(timeout)
+    data = b""
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return data
+            data += chunk
+    except socket.timeout:
+        return None
+
+
+def run_step2(io_threads):
+    print(f"\n== --io-threads {io_threads}: step 2")
+    p = start(io_threads)
+    try:
+        # MONITOR sees another connection's command
+        mon = Conn(PORT, timeout=10)
+        r = mon.cmd("MONITOR")
+        c = Conn(PORT, timeout=10)
+        c.cmd("SET", "mon465", "v")
+        line = mon.read()
+        check(f"io{io_threads}: MONITOR shows another connection's command",
+              r == "OK" and isinstance(line, str) and '"SET" "mon465" "v"' in line, f"{r!r} {line!r}")
+        mon.close()
+
+        # CLIENT KILL of another client: it sees the end of the stream
+        victim = Conn(PORT, timeout=10)
+        vid = victim.cmd("CLIENT", "ID")
+        n = c.cmd("CLIENT", "KILL", "ID", str(vid))
+        tail = read_eof(victim.sock)
+        check(f"io{io_threads}: CLIENT KILL ID closes another connection",
+              n == 1 and tail == b"" and c.cmd("PING") == "PONG", f"kill={n!r} tail={tail!r}")
+        victim.close()
+
+        # CLIENT PAUSE WRITE holds another connection's write, then runs it
+        a = Conn(PORT, timeout=10)
+        r = a.cmd("CLIENT", "PAUSE", "300", "WRITE")
+        t0 = time.monotonic()
+        w = c.cmd("SET", "pause465", "1")
+        held = time.monotonic() - t0
+        check(f"io{io_threads}: CLIENT PAUSE WRITE holds a write from another connection",
+              r == "OK" and w == "OK" and held >= 0.2, f"{r!r} {w!r} held {held:.3f}s")
+        a.close()
+
+        # CLIENT REPLY OFF: no replies until ON
+        rep = Conn(PORT, timeout=10)
+        rep.sock.sendall(encode(["CLIENT", "REPLY", "OFF"]) + encode(["SET", "reply465", "1"]) +
+                         encode(["CLIENT", "REPLY", "ON"]) + encode(["GET", "reply465"]))
+        got = [rep.read(), rep.read()]
+        rep.assert_in_sync()
+        check(f"io{io_threads}: CLIENT REPLY OFF drops replies until ON", got == ["OK", b"1"], f"{got!r}")
+        rep.close()
+
+        # a protocol error is answered, then the connection is closed
+        pe = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+        pe.sendall(b"*2\r\n$3\r\nGET\r\n$xyz\r\n")
+        data = read_eof(pe)
+        check(f"io{io_threads}: a protocol error is answered, then closed",
+              data is not None and data.startswith(b"-ERR Protocol error"), f"{data!r}")
+        pe.close()
+
+        # WAIT with no replicas answers at once; the pipeline goes on
+        r = c.pipeline([["WAIT", "0", "0"], ["PING"]])
+        check(f"io{io_threads}: WAIT 0 0, then a pipelined PING", r == [0, "PONG"], f"{r!r}")
+
+        # XREAD BLOCK woken by another connection's XADD
+        rd = Conn(PORT, timeout=10)
+        rd.sock.sendall(encode(["XREAD", "BLOCK", "5000", "STREAMS", "s465", "$"]) + encode(["PING"]))
+        time.sleep(0.3)
+        xid = c.cmd("XADD", "s465", "*", "f", "v")
+        got = rd.read()
+        pong = rd.read()
+        ok = isinstance(got, list) and got and got[0][0] == b"s465" and got[0][1][0][0] == xid \
+            and got[0][1][0][1] == [b"f", b"v"] and pong == "PONG"
+        check(f"io{io_threads}: XREAD BLOCK woken by another connection", ok, f"{got!r} {pong!r}")
+        rd.close()
+
+        # a client that stops reading while 64 MB is owed; the others are served meanwhile
+        mb = "x" * (1 << 20)
+        c.cmd("SET", "big1m", mb)
+        slow = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+        slow.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64 * 1024)
+        slow.sendall(b"".join(encode(["GET", "big1m"]) for _ in range(64)) + encode(["PING"]))
+        time.sleep(0.3)
+        t0 = time.monotonic()
+        pings = [c.cmd("PING") for _ in range(200)]
+        dt = time.monotonic() - t0
+        sc = Conn.wrap(slow, timeout=30)
+        replies = [sc.read() for _ in range(65)]
+        good = sum(1 for x in replies[:64] if x == mb.encode())
+        check(f"io{io_threads}: 64 MB owed to a client that stops reading; others served meanwhile",
+              good == 64 and replies[64] == "PONG" and all(x == "PONG" for x in pings) and dt < 5,
+              f"{good}/64 whole, others took {dt:.2f}s")
+        slow.close()
+
+        # pub/sub fan-out: 20 subscribers, 500 messages each, in order
+        subs = [Conn(PORT, timeout=20) for _ in range(20)]
+        for sb in subs:
+            sb.cmd("SUBSCRIBE", "fan465")
+        counts = c.pipeline([["PUBLISH", "fan465", f"m{i}"] for i in range(500)])
+        bad = 0
+        for sb in subs:
+            for i in range(500):
+                m = sb.read()
+                if m != [b"message", b"fan465", f"m{i}".encode()]:
+                    bad += 1
+            sb.close()
+        check(f"io{io_threads}: pub/sub fan-out, 20 subscribers x 500 messages in order",
+              all(x == 20 for x in counts) and bad == 0, f"{bad} wrong, counts {set(counts)}")
+
+        # RESP3 on one connection, RESP2 on the others
+        r3 = Conn(PORT, timeout=10)
+        h = r3.cmd("HELLO", "3")
+        r3.cmd("HSET", "h465", "a", "1")
+        m3 = r3.cmd("HGETALL", "h465")
+        m2 = c.cmd("HGETALL", "h465")
+        check(f"io{io_threads}: RESP3 (HELLO 3) on one connection, RESP2 on another",
+              isinstance(h, dict) and m3 == {b"a": b"1"} and m2 == [b"a", b"1"], f"{m3!r} {m2!r}")
+        r3.close()
+
+        # churn: 2000 short connections from 32 threads, some leaving mid-command
+        def churn(i):
+            s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+            try:
+                if i % 3 == 0:
+                    s.sendall(b"*3\r\n$3\r\nSET\r\n$4\r\nchrn")      # leaves mid-command
+                    return True
+                s.sendall(encode(["SET", f"churn{i}", str(i)]) + encode(["GET", f"churn{i}"]))
+                cc = Conn.wrap(s, timeout=10)
+                return cc.read() == "OK" and cc.read() == str(i).encode()
+            finally:
+                s.close()
+        with ThreadPoolExecutor(32) as ex:
+            res = list(ex.map(churn, range(2000)))
+        check(f"io{io_threads}: 2000 short connections from 32 threads",
+              all(res) and c.cmd("PING") == "PONG" and p.poll() is None, f"{res.count(False)} failed")
+        c.close()
+    finally:
+        stop(p)
+
+
+def run_auth_oom(io_threads):
+    print(f"\n== --io-threads {io_threads}: AUTH and --maxmemory")
+    p = start(io_threads, ["--requirepass", "pw465", "--maxmemory", "1mb"], password="pw465")
+    try:
+        time.sleep(0.5)            # housekeeping samples RSS
+        c = Conn(PORT, timeout=10)
+        noauth = c.cmd("GET", "x")
+        ok = c.cmd("AUTH", "pw465")
+        oom = c.cmd("SET", "x", "1")
+        get = c.cmd("GET", "x")
+        dele = c.cmd("DEL", "x")
+        check(f"io{io_threads}: NOAUTH, AUTH, then -OOM for a write and reads still served",
+              isinstance(noauth, RespError) and "NOAUTH" in noauth and ok == "OK"
+              and isinstance(oom, RespError) and oom.startswith("OOM") and get is None and dele == 0,
+              f"{noauth!r} {ok!r} {oom!r} {get!r} {dele!r}")
+        c.close()
+    finally:
+        stop(p)
+
+
 def main():
     for io in (1, 2, 4):
         run_suite(io)
+        run_step2(io)
+        run_auth_oom(io)
     print(f"\n{len(passes)} passed, {len(failures)} failed")
     for n, d in failures:
         print(f"  FAILED: {n}: {d}")
