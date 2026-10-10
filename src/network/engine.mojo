@@ -12,7 +12,7 @@ from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
 from src.network.io_threads import IOHub
 from src.network.io_ring import ring_at, ring_push, ring_pop, ring_nonempty, is_sleeping, sleep_fence
 from src.network.io_ring import evfd_signal, wake_wait, IO_MSG_DATA, IO_MSG_ACCEPT, IO_MSG_CLOSE
-from src.network.io_ring import IO_MSG_REPLY, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_SPIN
+from src.network.io_ring import IO_MSG_REPLY, IO_MSG_RESUME, IO_CLOSE_FLAG, IO_THREAD_BASE, IO_SPIN, IO_EXEC_BUDGET
 from src.common.list import SlabList
 from src.memory.slab_allocator import SlabAllocator
 from src.common.hash_map import SlabHashMap, StripedHashMap
@@ -1927,10 +1927,16 @@ struct NetworkEngine:
                 var rin = ring_at(hub[].rings_in, t)
                 var rout = ring_at(hub[].rings_out, t)
                 need_wake[unsafe_offset=t] = 0
-                while True:
+                # At most IO_EXEC_BUDGET messages per ring per round: a busy
+                # thread refills its ring while the executor drains it, and
+                # draining to empty would keep the other threads' connections
+                # waiting behind it.
+                var budget = IO_EXEC_BUDGET
+                while budget > 0:
                     var m = ring_pop(rin)
                     if not m.ok:
                         break
+                    budget -= 1
                     did += 1
                     if m.kind == IO_MSG_DATA:
                         var consumed = self._dispatch_io_batch(m.fd, m.arg, kq, hnsw, db_size)

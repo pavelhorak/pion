@@ -32,6 +32,7 @@ comptime IO_RING_MASK = IO_RING_CAP - 1
 comptime IO_RING_WORDS = 16 + 2 * IO_RING_CAP   # [head, pad x7, tail, pad x7, slots...]
 comptime IO_MAX_FDS = 65536
 comptime IO_SPIN = 256                  # empty polls before a thread sleeps
+comptime IO_EXEC_BUDGET = 64           # messages the executor takes from one ring per round
 comptime EPOLLRDHUP = UInt32(0x2000)
 
 # macOS kqueue. A struct kevent is 32 bytes: ident u64, filter i16, flags u16,

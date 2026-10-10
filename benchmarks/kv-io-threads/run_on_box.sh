@@ -27,6 +27,7 @@ stamp() { echo "== $(date +%H:%M:%S) $*"; }
 fail() { echo "FAILED: $*"; echo "$*" > "$OUT/FAILED"; exit 1; }
 
 stop_all() {
+    "$RCLI" -p 6379 shutdown nosave >/dev/null 2>&1   # where pkill -x misses a retitled redis (macOS)
     pkill -x pion-server 2>/dev/null; pkill -x redis-server 2>/dev/null; sleep 2
     pkill -9 -x pion-server 2>/dev/null; pkill -9 -x redis-server 2>/dev/null; sleep 1
 }
