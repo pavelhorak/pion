@@ -680,7 +680,7 @@ def main():
             config.server.use_epoll = True
             i += 1
         elif args[i] == "--io-threads" and i + 1 < len(args):
-            # #465: 1 executor + N-1 I/O threads over one keyspace
+            # gh #465: 1 executor + N-1 I/O threads over one keyspace
             try:
                 config.server.io_threads = atol(args[i + 1])
             except:
@@ -1079,7 +1079,7 @@ def main():
     # connections all land on one worker and hide it completely.
     if config.server.apply_env_io_threads(config.server.kvcache_enabled):
         print("IO_THREADS: " + String(config.server.io_threads) + " from PION_IO_THREADS")
-    # #465: I/O threads serve one keyspace from one worker; their sockets are
+    # gh #465: I/O threads serve one keyspace from one worker; their sockets are
     # polled with epoll on Linux and kqueue on macOS. Refused, not ignored,
     # anywhere else: a flag that silently does nothing is how a benchmark
     # measures the wrong server. The I/O threads are not workers, so the macOS
@@ -1525,7 +1525,7 @@ def main():
     _boot_ctx[unsafe_offset=5] = Int64(Int(shared_listen_fd))
     _boot_ctx[unsafe_offset=6] = Int64(Int(binary_listen_fd))
     _boot_ctx[unsafe_offset=7] = Int64(n_workers)
-    _boot_ctx[unsafe_offset=8] = Int64(config.server.io_threads)   # #465
+    _boot_ctx[unsafe_offset=8] = Int64(config.server.io_threads)   # gh #465
     _ = external_call["pion_spawn_workers", Int32](
         Int32(config.server.workers), _boot_ctx)
 
@@ -1558,10 +1558,10 @@ def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64
 # in pion_spawn_workers): [0]=SharedHNSWView* [1]=ClusterState*
 # [2]=unused (was the pub/sub ring) [3]=secondary_listen_fds(Int32*) [4]=xdp_shared_fds
 # (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers
-# [8]=io_threads (#465: main()'s final value).
+# [8]=io_threads (gh #465: main()'s final value).
 @export
 def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64):
-    # #465: an I/O thread of `--io-threads`, started by the executor (pion_spawn_detached).
+    # gh #465: an I/O thread of `--io-threads`, started by the executor (pion_spawn_detached).
     if worker_idx >= IO_THREAD_BASE:
         io_thread_main(Pointer[IOHub, MutUntrackedOrigin](unsafe_from_address=Int(ctx)),
                        Int(worker_idx - IO_THREAD_BASE))
@@ -1695,7 +1695,7 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                 worker_config.server.use_epoll = True
             elif args[j] == "--io-threads" and j + 1 < len(args):
                 try:
-                    worker_config.server.io_threads = atol(args[j + 1])   # #465
+                    worker_config.server.io_threads = atol(args[j + 1])   # gh #465
                 except:
                     pass
             elif args[j] == "--ns-prefix" and j + 1 < len(args):
@@ -1858,7 +1858,7 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                             unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
                                 unsafe_ptr=_wenv, length=_wn)))
 
-        # #465: main()'s final --io-threads (flag or PION_IO_THREADS, after
+        # gh #465: main()'s final --io-threads (flag or PION_IO_THREADS, after
         # its fence) is the one that counts; this loop does not see every flag.
         worker_config.server.io_threads = Int(ctx[unsafe_offset=8])
         if worker_config.server.io_threads > 1:

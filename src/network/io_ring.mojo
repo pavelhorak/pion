@@ -1,4 +1,4 @@
-"""#465: the handoff primitives between the executor and its I/O threads.
+"""gh #465: the handoff primitives between the executor and its I/O threads.
 
 Single-producer / single-consumer rings of two-word messages, the sleep flags
 and the wake-ups. In their own module so the response writer (which queues

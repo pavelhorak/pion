@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#465: `--io-threads N` serves ONE keyspace correctly from many connections.
+"""gh #465: `--io-threads N` serves ONE keyspace correctly from many connections.
 
 The executor (the worker thread) runs every command; N-1 I/O threads own the
 sockets. What can go wrong is exactly what a single-threaded loop cannot get
@@ -11,7 +11,7 @@ the control) and for 2 and 4:
      reply against the request it answers.
   2. Cross-connection visibility of acknowledged writes. A write acked on one
      connection is read on others right away. All connections are opened
-     CONCURRENTLY (#253's measurement trap: connections opened one after another
+     CONCURRENTLY (gh #253's measurement trap: connections opened one after another
      can all land on one owner and hide a defect).
   3. Replies that do not answer a request on the same connection: pub/sub
      delivery to a subscriber that another connection's PUBLISH reaches, and a

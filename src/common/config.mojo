@@ -118,14 +118,14 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # with Redis's own -OOM error. 0 = unlimited. No eviction: refusal is the
     # whole policy (`maxmemory-policy noeviction`).
     var maxmemory: Int
-    # #465: threads serving ONE keyspace, as Redis's io-threads counts them: the
+    # gh #465: threads serving ONE keyspace, as Redis's io-threads counts them: the
     # worker thread executes every command, and io_threads - 1 I/O threads own
     # the client sockets (accept, recv, send). 1 = today's single-thread loop.
     # -w 1 only; epoll on Linux, kqueue on macOS.
     var io_threads: Int
 
     def apply_env_io_threads(mut self, kvcache: Bool) -> Bool:
-        """#465: PION_IO_THREADS=N, for running whole test tiers through the
+        """gh #465: PION_IO_THREADS=N, for running whole test tiers through the
         I/O-thread path. A default only: an explicit --io-threads wins, and it
         applies only where I/O threads serve (-w 1, no --kvcache, no explicit
         --iouring or --xdp). True when it applied."""

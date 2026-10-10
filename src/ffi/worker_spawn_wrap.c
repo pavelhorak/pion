@@ -101,7 +101,7 @@ int64_t pion_raise_nofile(int64_t want, int64_t* before) {
     return (int64_t)rl.rlim_cur;
 }
 
-/* #465: the I/O threads of `--io-threads`. Detached: they serve until the
+/* gh #465: the I/O threads of `--io-threads`. Detached: they serve until the
  * process exits. Each runs pion_worker_entry(ctx, base + i); the entry tells
  * an I/O thread from a worker by base (IO_THREAD_BASE in io_threads.mojo), so
  * no second exported symbol (and no new -u link flag) is needed. */
@@ -112,7 +112,7 @@ static void* _pion_io_trampoline(void* p) {
     return NULL;
 }
 
-/* #465: a connection's output queue is written by the executor and drained by
+/* gh #465: a connection's output queue is written by the executor and drained by
  * the I/O thread that owns the socket; this word guards it. Held for an append
  * or for one send loop, never across anything that can block for long. */
 void pion_spin_lock(uint32_t* w) {
@@ -131,7 +131,7 @@ void pion_spin_unlock(uint32_t* w) {
     __atomic_store_n(w, 0u, __ATOMIC_RELEASE);
 }
 
-/* #465: a full fence, for the sleeper's side of the wake-up handshake: store
+/* gh #465: a full fence, for the sleeper's side of the wake-up handshake: store
  * "I am sleeping", FENCE, then look at the ring once more. A sequentially
  * consistent store followed by an acquire load is not enough on ARM64, where
  * LLVM lowers the load to LDAPR (RCpc), which may be satisfied before the

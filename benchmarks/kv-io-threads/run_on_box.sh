@@ -1,5 +1,5 @@
 #!/bin/bash
-# #465 acceptance: one keyspace, Pion `--io-threads N` against Redis `io-threads N`,
+# gh #465 acceptance: one keyspace, Pion `--io-threads N` against Redis `io-threads N`,
 # by the method of benchmarks/results/2026-10-06-linux-epyc-8124p/run_on_box.sh
 # (same memtier settings, client threads, connections, run length and repetitions),
 # so the rows compare with the README's KV table. Adds:

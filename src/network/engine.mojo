@@ -213,7 +213,7 @@ struct NetworkEngine:
             if self.config.server.use_xdp:
                 self.run_server_xdp(hnsw, db_size)
             elif self.config.server.io_threads > 1:
-                self.run_server_io(hnsw, db_size)       # #465 (main() fenced it to -w 1)
+                self.run_server_io(hnsw, db_size)       # gh #465 (main() fenced it to -w 1)
             elif self.config.server.use_epoll:
                 self.run_server_epoll(hnsw, db_size)
             else:
@@ -221,7 +221,7 @@ struct NetworkEngine:
                 # Use --epoll for low-concurrency benchmarks (P=1 per-command).
                 self.run_server_uring(hnsw, db_size)
         elif self.config.server.io_threads > 1:
-            self.run_server_io(hnsw, db_size)           # #465 on kqueue
+            self.run_server_io(hnsw, db_size)           # gh #465 on kqueue
         else:
             self.run_server_kqueue(hnsw, db_size)
 
@@ -248,7 +248,7 @@ struct NetworkEngine:
         self.slow_path.parked_waits.remove_fd(fd)   # gh #390
         self.server.close_client(fd)
         self.client_buffer_lens[unsafe_offset=ci] = 0
-        # #465: with I/O threads the input buffer belongs to the I/O thread,
+        # gh #465: with I/O threads the input buffer belongs to the I/O thread,
         # which freed it before reporting the close. Once close() above has
         # released the fd number, another I/O thread may already be reading a
         # NEW connection into client_buffers[ci]: never touch it from here.
@@ -476,7 +476,7 @@ struct NetworkEngine:
             else:
                 self.writer.append_int_response(Int64(acked))
             self.writer.flush_response(fd, self.server, kq)
-            if self.writer.ctx[].io_mode:      # #465: its I/O thread holds its bytes
+            if self.writer.ctx[].io_mode:      # gh #465: its I/O thread holds its bytes
                 self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
                 continue
             var stored = self.client_buffer_lens[unsafe_offset=ci]
@@ -529,7 +529,7 @@ struct NetworkEngine:
             reg[].remove_at(k)            # entry k is now a different one: no k += 1
             self.slow_path.parked_waits.unpark_fd(fd)
             self.writer.flush_response(fd, self.server, kq)
-            if self.writer.ctx[].io_mode:      # #465: its I/O thread holds its bytes
+            if self.writer.ctx[].io_mode:      # gh #465: its I/O thread holds its bytes
                 self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
                 continue
             var stored = self.client_buffer_lens[unsafe_offset=ci]
@@ -609,7 +609,7 @@ struct NetworkEngine:
                          uring_group: Int) raises:
         """A parked client was answered: run what it pipelined behind the
         command that parked it, and on io_uring arm its receive again."""
-        if self.writer.ctx[].io_mode:          # #465: its I/O thread holds its bytes
+        if self.writer.ctx[].io_mode:          # gh #465: its I/O thread holds its bytes
             self.writer.ctx[].io_tell(fd, IO_MSG_RESUME)
             return
         var ci = Int(fd)
@@ -1819,7 +1819,7 @@ struct NetworkEngine:
                 if self.shutting_down:
                     return
 
-    # ── #465: one executor, N-1 I/O threads (see src/network/io_threads.mojo) ──
+    # ── gh #465: one executor, N-1 I/O threads (see src/network/io_threads.mojo) ──
 
     def _dispatch_io_batch(mut self, fd: Int32, n: Int, kq: Int32,
                            mut hnsw: HNSWGraph, mut db_size: Int) raises -> Int:
@@ -1891,7 +1891,7 @@ struct NetworkEngine:
         self.slow_path.clients.on_accept(fd)
 
     def run_server_io(mut self, mut hnsw: HNSWGraph, mut db_size: Int) raises:
-        """#465 executor loop. Runs on the worker thread; owns all command state.
+        """gh #465 executor loop. Runs on the worker thread; owns all command state.
         Spawns config.server.io_threads - 1 I/O threads, then serves the
         batches they hand over, in arrival order per thread ring."""
         if self.server.fd < 0 and not self.server.listen():

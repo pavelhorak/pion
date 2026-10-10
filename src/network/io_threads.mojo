@@ -1,4 +1,4 @@
-"""#465: I/O threads for ONE keyspace (-w 1; Linux epoll, macOS kqueue).
+"""gh #465: I/O threads for ONE keyspace (-w 1; Linux epoll, macOS kqueue).
 
 The worker thread stays the only thread that touches the keyspace, the WAL,
 transactions, ACL/tenant state, blocked clients and pub/sub: it is the
