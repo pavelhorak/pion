@@ -621,7 +621,6 @@ tier = "gate"
 file = "tests/test_gh465_io_threads.py"
 server = "self"
 tier = "gate"
-requires = ["linux"]
 
 [[test]]
 file = "tests/test_gh253_multiworker_fence.py"
