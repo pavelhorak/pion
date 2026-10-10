@@ -33,8 +33,13 @@ def check(name, ok, detail=""):
 
 import redis
 # RESP2: stats() reads PION.STATS as a flat array, and redis-py 8 defaults to
-# RESP3, where the reply is a map.
-def rc(): return redis.Redis(port=PORT, protocol=2)
+# RESP3, where the reply is a map. redis-py before 5 has no `protocol` argument
+# and speaks only RESP2 (the gate's pinned 4.6.0 raised TypeError here).
+def rc():
+    try:
+        return redis.Redis(port=PORT, protocol=2)
+    except TypeError:
+        return redis.Redis(port=PORT)
 
 def stats():
     r = rc().execute_command("PION.STATS")
