@@ -392,6 +392,16 @@ def _w_emit_overflow_error(ctx: _WCtx, buffer: _WBuf, offset: Int) -> Int:
 
 
 @no_inline
+def _w_io_queue(ctx: _WCtx, ci: Int, buffer: _WBuf, offset: Int) -> Int:
+    """#465: a batch's reply, queued for the I/O thread that owns the
+    connection. Out of line, so that `_flush_kqueue` stays the size it is
+    without I/O threads. Returns the new buffer offset (0)."""
+    if offset > 0:
+        ctx[].io_append(ci, buffer, offset)
+    return 0
+
+
+@no_inline
 def _w_spill(ctx: _WCtx, buffer: _WBuf, offset: Int) -> Int:
     """#49: the buffer is about to overflow. Hand what it holds to the
     connection it belongs to and start again at 0: the reply goes on, as
@@ -802,9 +812,7 @@ struct ResponseWriter(Movable):
         var fd_idx = Int(fd)
         if self.ctx[].io_mode:
             # #465: queue for the I/O thread that owns fd; it sends after the batch.
-            if self.offset > 0:
-                self.ctx[].io_append(fd_idx, self.buffer, self.offset)
-                self.offset = 0
+            self.offset = _w_io_queue(self.ctx, fd_idx, self.buffer, self.offset)
             return
 
         # 1. Owed bytes already: queue this batch behind them, then send
