@@ -13,6 +13,7 @@ Pion's networking layer provides five event loop configurations plus a zero-copy
 | **io_uring** | `--iouring` (default on Linux) | Batched enter(): 2 syscalls per batch regardless of K fds | Multi-connection production (memtier, P>=10) | Linux 5.4+ |
 | **epoll** | `--epoll` | epoll_wait + read + send per fd: 2K+1 syscalls per batch of K ready fds | Per-command P=1 benchmarks (w=1) | Linux 2.6+ |
 | **kqueue** | (default on macOS) | kevent per tick | macOS development | macOS |
+| **I/O threads** | `--io-threads N` (with `-w 1`) | 1 executor + N − 1 I/O threads (epoll or kqueue) over ONE keyspace | Many connections at shallow pipelines on one keyspace | Linux, macOS |
 
 **Backend selection by CLI flag:** `--xdp` → XDP, `--sqpoll` → SQPOLL, `--iouring` → io_uring (Linux default), `--epoll` → epoll, no flag on macOS → kqueue. This is NOT a fallback chain — each backend is explicitly selected.
 
@@ -116,6 +117,55 @@ Linux 5.4+, CAP_NET_ADMIN (or root), AF_XDP-capable NIC driver, `--security-opt 
 ./pion-server --xdp --xdp-iface eth0 -w 10 --independent-workers   # Multi-worker XDP (shared XSKMAP)
 ./pion-server --sqpoll -w 10 --independent-workers   # io_uring SQPOLL
 ```
+
+---
+
+## I/O threads for one keyspace (`--io-threads N`)
+
+`-w N` gives N independent keyspaces. `--io-threads N` serves **one** keyspace
+from N threads, counted as Redis counts `io-threads`: the worker thread is the
+**executor** and runs every command, and N − 1 **I/O threads** own the client
+sockets. An I/O thread accepts, receives into the connection's input buffer,
+hands the bytes to the executor, and sends the reply. The executor keeps sole
+ownership of the keyspace, the WAL, transactions, ACL and tenant state, blocked
+and parked clients, and pub/sub, so none of it takes a lock.
+
+```bash
+./pion-server -w 1 --io-threads 4          # 1 executor + 3 I/O threads, one keyspace
+```
+
+- **Default 1:** the single-thread loop of the platform (io_uring or epoll on
+  Linux, kqueue on macOS), unchanged.
+- **Pollers:** an I/O thread polls with epoll (edge-triggered) on Linux and
+  kqueue (`EV_CLEAR`) on macOS. `--io-threads` refuses `--iouring`, `--xdp`,
+  `-w N > 1` and `--kvcache` (the binary lane is not served by I/O threads).
+- **Order:** at most one batch per connection is with the executor at a time,
+  so replies leave in request order. Bytes that arrive meanwhile wait behind it
+  in the input buffer, which never moves while the executor reads it.
+- **Handoff:** two single-producer/single-consumer rings per I/O thread (data,
+  accept and close in; "reply queued" out). The reply bytes travel in the
+  connection's output queue, under a per-connection lock, because the executor
+  also queues replies that answer no request of the batch: pub/sub and MONITOR
+  delivery, and a blocked or parked client that was woken (then the I/O thread
+  is told with KICK or RESUME).
+- **Close:** the I/O thread stops serving the socket and frees its input buffer;
+  the executor closes it, so the fd number is never reused while either side
+  still holds it. CLIENT KILL of another client shuts the socket down, and its
+  I/O thread reads the end as from any client.
+- **Sleep:** a side with nothing to do spins briefly, then sleeps in its poller
+  (an I/O thread) or on a wake-up fd (the executor: an eventfd on Linux, a
+  kqueue `EVFILT_USER` on macOS). A sleeper announces itself, fences, and looks
+  at its ring once more; a waker signals only a sleeper.
+- **Tests:** `tests/test_gh465_io_threads.py` (order and visibility across 48
+  concurrent connections, pub/sub, MONITOR, blocking pops, XREAD BLOCK, WAIT,
+  MULTI, CLIENT KILL/PAUSE/REPLY, a 64 MB backlog to a client that stops
+  reading, churn, AUTH and `--maxmemory`). `PION_IO_THREADS=N` makes N the
+  default for every server a test tier starts, which runs the whole tier
+  through this path.
+
+Source: `src/network/io_threads.mojo` (the I/O thread and its poller layer),
+`src/network/io_ring.mojo` (rings and wake-ups), `run_server_io` in
+`engine.mojo` (the executor).
 
 ---
 
