@@ -2266,7 +2266,11 @@ def main():
 
     # Connect to Pion
     try:
-        _pion = redis.Redis(host=args.pion_host, port=args.pion_port, decode_responses=False)
+        # RESP2: the replies are parsed as RESP2 arrays (FT.SEARCH's flat list).
+        # redis-py 8 opens RESP3 by default, where FT.SEARCH is a map, as from
+        # RediSearch. redis-py < 5 has no protocol option and speaks RESP2.
+        _pion = redis.Redis(host=args.pion_host, port=args.pion_port, decode_responses=False,
+                            **({"protocol": 2} if int(redis.__version__.split(".")[0]) >= 5 else {}))
         _pion.ping()
         log.info(f"Connected to Pion at {args.pion_host}:{args.pion_port}")
     except Exception as e:

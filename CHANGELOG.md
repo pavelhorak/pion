@@ -20,6 +20,14 @@ enumerated — there were roughly 1,100 of them.
   `RETURN 1 id`; pion_glide decodes a non-UTF-8 field (the embedding)
   instead of dropping every result. The `BM25` and `HYBRID` forms of
   FT.SEARCH, and FT.HYBRID, are Pion's own syntax and keep `id` and `score`.
+- **On a RESP3 connection a raw `FT.SEARCH`, `FT.HYBRID` or `FT.INFO` reply
+  is a map, as from RediSearch.** redis-py 8 opens RESP3 by default, so code
+  that calls `execute_command("FT.SEARCH", …)` and indexes the reply as a
+  list (`hits[0]`, `hits[1]`) now gets a dict, as it would from Redis. Use
+  redis-py's `r.ft(index).search(…)`, which reads either protocol, or connect
+  with `protocol=2`. The README's quick start uses `r.ft().search()` now, and
+  Pion's integrations (pion-mcp, pion-autogen, pion-llamaindex, pion_context,
+  pion-serve) ask for RESP2, so they keep working on redis-py 8.
 
 ### Added
 

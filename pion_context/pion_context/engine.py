@@ -45,6 +45,10 @@ class ContextEngine:
             host=host, port=port,
             decode_responses=False,
             socket_keepalive=True,
+            # RESP2: the replies are parsed as RESP2 arrays (FT.SEARCH's flat list).
+            # redis-py 8 opens RESP3 by default, where FT.SEARCH is a map, as from
+            # RediSearch. redis-py < 5 has no protocol option and speaks RESP2.
+            **({"protocol": 2} if int(redis_lib.__version__.split(".")[0]) >= 5 else {}),
         )
 
     def search_codebase(self, query: str, k: int = 10, ef_runtime: int = 150) -> list[ContextResult]:
