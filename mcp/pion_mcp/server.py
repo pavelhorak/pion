@@ -71,6 +71,10 @@ def _conn() -> redis_lib.Redis:
             port=PION_PORT,
             decode_responses=False,
             socket_keepalive=True,
+            # RESP2: the replies are parsed as RESP2 arrays (FT.SEARCH's flat list).
+            # redis-py 8 opens RESP3 by default, where FT.SEARCH is a map, as from
+            # RediSearch. redis-py < 5 has no protocol option and speaks RESP2.
+            **({"protocol": 2} if int(redis_lib.__version__.split(".")[0]) >= 5 else {}),
         )
     return _pion
 
@@ -1431,7 +1435,7 @@ def agent_recall(
     # Use Redis KNN PARAMS format — Pion's native format never sets blob_set=True.
     raw = r.execute_command(
         "FT.SEARCH", _MEM_INDEX,
-        f"*=>[KNN {k_fetch} @embedding $vec EF_RUNTIME 64]",
+        f"*=>[KNN {k_fetch} @embedding $vec EF_RUNTIME 64 AS score]",
         "PARAMS", "2", "vec", vec,
     )
 

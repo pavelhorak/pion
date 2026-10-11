@@ -235,7 +235,8 @@ def _parse_ft_results(raw: Any) -> List[FTSearchResult]:
                     if isinstance(k_name, bytes):
                         k_name = k_name.decode("utf-8")
                     if isinstance(v, bytes):
-                        v = v.decode("utf-8")
+                        # without RETURN the hash's embedding comes back too
+                        v = v.decode("utf-8", errors="replace")
                     pairs[str(k_name)] = str(v)
                     j += 2
                 result.fields = pairs

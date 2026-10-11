@@ -6,6 +6,29 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Changed
+
+- **A KNN `FT.SEARCH` without `RETURN` sends what RediSearch sends: the
+  score, then every field of the hash, the embedding included.** It sent
+  `id` and `score` only. The score's field is named by the KNN clause's `AS`
+  alias, or `__<field>_score` without one, where Pion always called it
+  `score`: code that reads it by name and has no `AS score` gets
+  `__<field>_score` now. A caller that needs only the keys should pass
+  `RETURN 1 id` or `NOCONTENT`. Pion's own tools are updated: pion-mcp's
+  memory search, pion-autogen and pion-llamaindex name the score with
+  `AS score`; pion-serve and the pipelined and corpus benchmarks ask for
+  `RETURN 1 id`; pion_glide decodes a non-UTF-8 field (the embedding)
+  instead of dropping every result. The `BM25` and `HYBRID` forms of
+  FT.SEARCH, and FT.HYBRID, are Pion's own syntax and keep `id` and `score`.
+- **On a RESP3 connection a raw `FT.SEARCH`, `FT.HYBRID` or `FT.INFO` reply
+  is a map, as from RediSearch.** redis-py 8 opens RESP3 by default, so code
+  that calls `execute_command("FT.SEARCH", …)` and indexes the reply as a
+  list (`hits[0]`, `hits[1]`) now gets a dict, as it would from Redis. Use
+  redis-py's `r.ft(index).search(…)`, which reads either protocol, or connect
+  with `protocol=2`. The README's quick start uses `r.ft().search()` now, and
+  Pion's integrations (pion-mcp, pion-autogen, pion-llamaindex, pion_context,
+  pion-serve) ask for RESP2, so they keep working on redis-py 8.
+
 ### Added
 
 - **`--io-threads N`: one keyspace served by N threads.** `-w N` gives N
@@ -23,6 +46,28 @@ enumerated — there were roughly 1,100 of them.
 
 ### Fixed
 
+- **`FT.SEARCH`, `FT.HYBRID` and `FT.INFO` answer RESP3 connections in
+  RediSearch's RESP3 shape.** redis-py 8 negotiates RESP3 by default, and its
+  search module then reads these replies as maps. Pion sent its RESP2 arrays
+  on every connection, so with redis-py's default settings `ft().search()`
+  and `ft().info()` failed inside redis-py. A RESP3 `FT.SEARCH` reply is now
+  the map RediSearch sends (`attributes`, `format`, `results`,
+  `total_results`, `warning`, one map per document with its fields under
+  `extra_attributes`), and `FT.INFO` is a map with `num_docs` an integer.
+  RESP2 replies are unchanged. Pion's own tests pinned `protocol=2`, which
+  hid it; it turned up while writing a VectorDBBench client.
+- **`FT.SEARCH` honours `RETURN`, `NOCONTENT` and `WITHSCORES`, and answers
+  `KNN 0`.** It ignored all three and sent `id` and `score` for every
+  document. `RETURN body`, RAG's basic call for a document's text, came back
+  without the text; `NOCONTENT` made redis-py read each document as two;
+  `WITHSCORES` crashed redis-py's parser; `KNN 0` was an error where
+  RediSearch returns an empty result. Each now answers as RediSearch does, in
+  RESP2 and RESP3: `RETURN` sends the named fields, renamed by `AS`, the KNN
+  score first when named (its alias, or `__<field>_score`), a missing field
+  left out, and RediSearch's own errors for a bad count; `RETURN 0` is
+  `NOCONTENT`; `WITHSCORES` sends the query's text score, 0 for
+  `*=>[KNN …]`. A score between -1 and 0 also no longer breaks the reply's
+  framing: its bulk length was one byte short.
 - **`test_kv_prefix_workload` checks a cache hit against the cache it
   fetched.** Its 99% first-token check failed 49 of 50 on every macOS full
   tier since 0.9.7, whose entry put that down to the fp16-stored cache. That

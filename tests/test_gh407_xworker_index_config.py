@@ -61,7 +61,7 @@ def per_worker(port, fn):
 
 
 def knn(c, field, blob, k=3):
-    return c.cmd("FT.SEARCH", "idx", f"*=>[KNN {k} @{field} $q]", "PARAMS", "2", "q", blob)
+    return c.cmd("FT.SEARCH", "idx", f"*=>[KNN {k} @{field} $q AS score]", "PARAMS", "2", "q", blob)
 
 
 def top(r):

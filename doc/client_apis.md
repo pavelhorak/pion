@@ -46,8 +46,10 @@ for i in range(10):
     r.execute_command("HSET", f"doc:{i}", "embedding", vec, "title", f"doc {i}")
 r.execute_command("FT.OPTIMIZE", "my-index")           # builds the HNSW graph
 query = struct.pack("1536f", *[0.1] * 1536)
-r.execute_command("FT.SEARCH", "my-index", "*=>[KNN 10 @embedding $vec]",
-                  "PARAMS", "2", "vec", query)
+r.execute_command("FT.SEARCH", "my-index", "*=>[KNN 10 @embedding $vec AS score]",
+                  "PARAMS", "2", "vec", query,
+                  "RETURN", "2", "title", "score",   # without RETURN every field comes back,
+                  "DIALECT", "2")                     # the binary embedding too
 
 # AI Gateway (requires --flare or an embedding server running)
 r.execute_command("FT.ADDTEXT", "kb", "doc:1", "Pion is a low-latency KV + vector engine")
@@ -233,10 +235,17 @@ Test: `python3 tests/test_lmcache_compat.py --large`
   parser before reading the reply). If you are on an older Pion, pass
   `redis.Redis(protocol=2)`. On this build, redis-py ≥ 8 connects with defaults.
 
-  Known remainder: score-shaped replies (`ZSCORE`, `ZINCRBY`, `INCRBYFLOAT`,
-  `HINCRBYFLOAT`, `GEODIST`) still go out as bulk strings rather than the RESP3
-  double type (`,`). RESP3 clients parse these fine — it is a type-fidelity gap,
-  not a framing one — but a client relying on the protocol for float conversion
-  will hand you bytes where real Redis hands you a float.
+  `FT.SEARCH`, `FT.HYBRID` and `FT.INFO` answer RESP3 connections with
+  RediSearch's RESP3 maps (`FT.SEARCH`: `attributes`, `format`, `results`,
+  `total_results`, `warning`, one map per document). Through 0.9.8 they sent
+  their RESP2 arrays on every connection, and redis-py ≥ 8's search module,
+  which reads the maps, failed in `ft().search()` and `ft().info()`. With 0.9.8
+  or older, pass `redis.Redis(protocol=2)`. A raw
+  `execute_command("FT.SEARCH", …)` on a RESP3 connection returns the map
+  (a dict in redis-py), as from Redis: index it as a list only on RESP2.
+
+  `ZSCORE` and `ZINCRBY` reply with the RESP3 double type (`,`).
+  `INCRBYFLOAT`, `HINCRBYFLOAT` and `GEODIST` stay bulk strings under RESP3,
+  as they do in Redis 8.
 - **Pipelining**: fully supported; benchmark with `-P 10` or higher for throughput testing
 - **Cluster mode**: CLUSTER INFO/NODES/SLOTS/SHARDS fully implemented for GLIDE compatibility

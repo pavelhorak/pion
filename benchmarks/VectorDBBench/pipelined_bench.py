@@ -57,6 +57,7 @@ def build_query_args(query_blob: bytes, k: int, ef: int) -> tuple:
         f"*=>[KNN {k} @vector $vec EF_RUNTIME {ef} as score]",
         "PARAMS", "2", "vec", query_blob,
         "SORTBY", "score",
+        "RETURN", "1", "id",          # keys are all it reads; without RETURN every hit carries its embedding
         "LIMIT", "0", str(k),
         "DIALECT", "2",
     )

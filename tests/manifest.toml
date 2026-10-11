@@ -1108,6 +1108,11 @@ tier = "full"
 timeout = 180
 
 [[test]]
+file = "tests/test_ft_search_replies.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
 file = "tests/test_resp_malformed.py"
 server = "-w 1"
 tier = "gate"

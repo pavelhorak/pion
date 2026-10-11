@@ -116,6 +116,10 @@ class PionMemoryStore(Memory):
             host=host, port=port,
             socket_timeout=30,
             decode_responses=False,
+            # RESP2: the replies are parsed as RESP2 arrays (FT.SEARCH's flat list).
+            # redis-py 8 opens RESP3 by default, where FT.SEARCH is a map, as from
+            # RediSearch. redis-py < 5 has no protocol option and speaks RESP2.
+            **({"protocol": 2} if int(redis_lib.__version__.split(".")[0]) >= 5 else {}),
         )
         self._index = index_name
         self._dim = dimensions
@@ -271,7 +275,7 @@ class PionMemoryStore(Memory):
 
         raw = self._r.execute_command(
             "FT.SEARCH", self._index,
-            f"*=>[KNN {k} @embedding $vec EF_RUNTIME {ef}]",
+            f"*=>[KNN {k} @embedding $vec EF_RUNTIME {ef} AS score]",
             "PARAMS", "2", "vec", vec,
         )
         return self._parse_ft_search(raw, k)

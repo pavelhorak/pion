@@ -379,6 +379,7 @@ float32 either way; the example below uses the server's default 1536.
 pip install redis numpy       # or: pixi run python -m pip install redis numpy
 python3 - <<'PY'
 import numpy as np, redis
+from redis.commands.search.query import Query
 r = redis.Redis(port=1974)
 D = 1536                                        # blob is D*4 = 6144 bytes
 
@@ -392,10 +393,10 @@ for key, v in vecs.items():
 
 r.execute_command("FT.OPTIMIZE", "idx")         # build the graph, then query
 
-hits = r.execute_command("FT.SEARCH", "idx", "*=>[KNN 3 @vec $B]",
-                         "PARAMS", "2", "B", vecs["doc:7"].tobytes(),
-                         "DIALECT", "2")
-print(hits[0], "hits; nearest =", hits[1].decode())   # 3 hits; nearest = doc:7
+q = (Query("*=>[KNN 3 @vec $B AS score]")       # the 3 nearest, closest first
+     .sort_by("score").return_fields("title", "score").dialect(2))
+res = r.ft("idx").search(q, {"B": vecs["doc:7"].tobytes()})
+print(res.total, "hits; nearest =", res.docs[0].id)   # 3 hits; nearest = doc:7
 PY
 ```
 
