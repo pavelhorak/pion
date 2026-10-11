@@ -23,6 +23,16 @@ enumerated — there were roughly 1,100 of them.
 
 ### Fixed
 
+- **`FT.SEARCH`, `FT.HYBRID` and `FT.INFO` answer RESP3 connections in
+  RediSearch's RESP3 shape.** redis-py 8 negotiates RESP3 by default, and its
+  search module then reads these replies as maps. Pion sent its RESP2 arrays
+  on every connection, so with redis-py's default settings `ft().search()`
+  and `ft().info()` failed inside redis-py. A RESP3 `FT.SEARCH` reply is now
+  the map RediSearch sends (`attributes`, `format`, `results`,
+  `total_results`, `warning`, one map per document with its fields under
+  `extra_attributes`), and `FT.INFO` is a map with `num_docs` an integer.
+  RESP2 replies are unchanged. Pion's own tests pinned `protocol=2`, which
+  hid it; it turned up while writing a VectorDBBench client.
 - **`test_kv_prefix_workload` checks a cache hit against the cache it
   fetched.** Its 99% first-token check failed 49 of 50 on every macOS full
   tier since 0.9.7, whose entry put that down to the fp16-stored cache. That

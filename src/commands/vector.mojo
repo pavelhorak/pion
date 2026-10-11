@@ -204,11 +204,29 @@ def drop_dead(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], mu
         _ = scores.pop()
 
 
+# RESP3 FT.SEARCH, in RediSearch's shape (checked against RediSearch's own
+# replies): a map whose `results` entry holds one map per document, with the
+# returned fields under `extra_attributes`. redis-py 8 negotiates RESP3 by
+# default and its search module reads exactly these keys.
+comptime _FT_R3_HEAD = "%5\r\n+attributes\r\n*0\r\n+format\r\n+STRING\r\n+results\r\n"
+comptime _FT_R3_DOC = "%3\r\n+id\r\n"
+comptime _FT_R3_FIELDS = "+extra_attributes\r\n"
+comptime _FT_R3_DOC_END = "+values\r\n*0\r\n"
+comptime _FT_R3_TOTAL = "+total_results\r\n"
+comptime _FT_R3_TAIL = "+warning\r\n*0\r\n"
+
+
+@always_inline
+def _put_lit(mut writer: ResponseWriter, s: StaticString):
+    writer.append_to_response(s.unsafe_ptr(), s.byte_length())
+
+
 @always_inline
 def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], dist_scores: List[Float32],
                               keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin] = null_ptr[StripedHashMap, MutUntrackedOrigin](),
                               shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin]()):
-    """Write a single FT.SEARCH RESP2 response to writer (does not flush).
+    """Write a single FT.SEARCH response to writer (does not flush): RESP2's
+    flat array, or RediSearch's RESP3 map on a RESP3 connection.
 
     Each result is <key>, then its fields: [id, <id-value>, score, <dist>]
     when the doc hash has an "id" field on THIS worker, else [score, <dist>].
@@ -227,12 +245,17 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
     probed the keyspace twice per result and dumped every hash field —
     including the embedding blob — into the response."""
     var nr = len(results2)
-    writer.buffer[writer.offset] = 42; writer.offset += 1
-    writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(1 + nr * 2))
-    writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
-    writer.buffer[writer.offset] = 58; writer.offset += 1
-    writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(nr))
-    writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+    var resp3 = writer.proto == 3
+    if resp3:
+        _put_lit(writer, _FT_R3_HEAD)
+        writer.append_array_header(nr)
+    else:
+        writer.buffer[writer.offset] = 42; writer.offset += 1
+        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(1 + nr * 2))
+        writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+        writer.buffer[writer.offset] = 58; writer.offset += 1
+        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(nr))
+        writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
 
     for ri2 in range(nr):
         var did = results2[ri2]
@@ -279,6 +302,8 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
                         GenericValue.borrow(id_name_buf, 2))
 
         # Doc key
+        if resp3:
+            _put_lit(writer, _FT_R3_DOC)
         if key_len > 0:
             writer.append_bulk_string_response(key_ptr, key_len)
         elif not result_key.is_none():
@@ -292,9 +317,13 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
         # gh #357: emit "id" only with the doc's own field value; never
         # substitute the key or slot for a field this worker cannot see.
         var has_id = not id_field_val.is_none()
-        writer.buffer[writer.offset] = 42
-        writer.buffer[writer.offset+1] = 52 if has_id else 50 # *4 | *2
-        writer.buffer[writer.offset+2] = 13; writer.buffer[writer.offset+3] = 10; writer.offset += 4
+        if resp3:
+            _put_lit(writer, _FT_R3_FIELDS)
+            writer.append_map_header(2 if has_id else 1)
+        else:
+            writer.buffer[writer.offset] = 42
+            writer.buffer[writer.offset+1] = 52 if has_id else 50 # *4 | *2
+            writer.buffer[writer.offset+2] = 13; writer.buffer[writer.offset+3] = 10; writer.offset += 4
         if has_id:
             writer.buffer[writer.offset]=36; writer.buffer[writer.offset+1]=50 # $2
             writer.buffer[writer.offset+2]=13; writer.buffer[writer.offset+3]=10
@@ -311,6 +340,13 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
         writer.append_bulk_string_response_header(score_len)
         writer.offset = format_float_to_buf(writer.buffer, writer.offset, dist, 4)
         writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+        if resp3:
+            _put_lit(writer, _FT_R3_DOC_END)
+
+    if resp3:
+        _put_lit(writer, _FT_R3_TOTAL)
+        writer.append_int_response(Int64(nr))
+        _put_lit(writer, _FT_R3_TAIL)
 
 
 # ── gh #367 / #361: FT.SEARCH metadata filters ───────────────────────────────
@@ -1309,6 +1345,14 @@ def handle_ft_info(
         num_docs = hnsw.num_nodes
     elif ready > 0 and is_not_null(shared_hnsw):
         num_docs = shared_hnsw[].num_nodes
+    if writer.proto == 3:
+        # RediSearch answers FT.INFO with a map on RESP3, and redis-py 8 parses
+        # it as one. Same two fields as RESP2; num_docs is an integer there.
+        _put_lit(writer, "%2\r\n+index_name\r\n")
+        writer.append_bulk_string_response(np, nlen if nlen < 64 else 64)
+        _put_lit(writer, "+num_docs\r\n")
+        writer.append_int_response(Int64(num_docs))
+        return i + 1
     var hdr1 = String("*4\r\n$10\r\nindex_name\r\n")
     writer.append_to_response(hdr1.unsafe_ptr(), hdr1.byte_length())
     writer.append_bulk_string_response(np, nlen if nlen < 64 else 64)

@@ -5161,6 +5161,11 @@ struct SlowPathHandler:
         # Check completion and send deferred responses.
         var i = 0
         while i < self.deferred_count:
+            # The reply below is this fd's, in this fd's protocol: writer.proto
+            # still holds whichever connection was dispatched last, and
+            # write_ft_search_response picks the RESP3 map or the RESP2 array
+            # from it (as pubsub_drain reads resp_proto per recipient).
+            writer.proto = self.tx_state.resp_proto[Int(self.deferred_fds[i])]
             writer.ctx[].cur_fd = self.deferred_fds[i]   # #49: what is written here is that fd's
             var active = self.deferred_active[i]
             var done   = self.deferred_done[i]
