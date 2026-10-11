@@ -6,6 +6,21 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Changed
+
+- **A KNN `FT.SEARCH` without `RETURN` sends what RediSearch sends: the
+  score, then every field of the hash, the embedding included.** It sent
+  `id` and `score` only. The score's field is named by the KNN clause's `AS`
+  alias, or `__<field>_score` without one, where Pion always called it
+  `score`: code that reads it by name and has no `AS score` gets
+  `__<field>_score` now. A caller that needs only the keys should pass
+  `RETURN 1 id` or `NOCONTENT`. Pion's own tools are updated: pion-mcp's
+  memory search, pion-autogen and pion-llamaindex name the score with
+  `AS score`; pion-serve and the pipelined and corpus benchmarks ask for
+  `RETURN 1 id`; pion_glide decodes a non-UTF-8 field (the embedding)
+  instead of dropping every result. The `BM25` and `HYBRID` forms of
+  FT.SEARCH, and FT.HYBRID, are Pion's own syntax and keep `id` and `score`.
+
 ### Added
 
 - **`--io-threads N`: one keyspace served by N threads.** `-w N` gives N
@@ -43,9 +58,8 @@ enumerated — there were roughly 1,100 of them.
   score first when named (its alias, or `__<field>_score`), a missing field
   left out, and RediSearch's own errors for a bad count; `RETURN 0` is
   `NOCONTENT`; `WITHSCORES` sends the query's text score, 0 for
-  `*=>[KNN …]`. Without `RETURN` Pion still sends `id` and `score`, where
-  RediSearch sends every field of the hash. A score between -1 and 0 also
-  no longer breaks the reply's framing: its bulk length was one byte short.
+  `*=>[KNN …]`. A score between -1 and 0 also no longer breaks the reply's
+  framing: its bulk length was one byte short.
 - **`test_kv_prefix_workload` checks a cache hit against the cache it
   fetched.** Its 99% first-token check failed 49 of 50 on every macOS full
   tier since 0.9.7, whose entry put that down to the fp16-stored cache. That

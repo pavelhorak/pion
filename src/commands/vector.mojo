@@ -223,19 +223,18 @@ comptime _FT_R2_TEXT_SCORE = "$1\r\n0\r\n"
 comptime _FT_R3_TEXT_SCORE = "+score\r\n,0\r\n"
 
 # What an FT.SEARCH reply carries for each document (FtReplyOpts.mode).
-comptime FT_REPLY_DEFAULT = UInt8(0)    # no RETURN: the doc's `id` field (when its hash has one) and `score`
+comptime FT_REPLY_DEFAULT = UInt8(0)    # Pion's own forms: the doc's `id` field (when its hash has one) and `score`
 comptime FT_REPLY_RETURN = UInt8(1)     # the fields RETURN names, as RediSearch answers it
 comptime FT_REPLY_NOCONTENT = UInt8(2)  # keys only (NOCONTENT, or RETURN 0)
+comptime FT_REPLY_ALL = UInt8(3)        # KNN without RETURN: the score, then every field of the hash
 
 
 struct FtReplyOpts(ImplicitlyCopyable, Movable):
     """FT.SEARCH's RETURN, NOCONTENT and WITHSCORES, as the reply writer needs
-    them. The default is Pion's reply without RETURN; FT.HYBRID and the BM25
-    and HYBRID forms of FT.SEARCH always use it.
-
-    RediSearch without RETURN sends every field of the hash, the embedding
-    included. Pion sends `id` and `score` instead, which its own tools read
-    by those names."""
+    them. The KNN form starts at FT_REPLY_ALL: without RETURN, RediSearch
+    sends the score and then every field of the hash, the embedding included.
+    The default, `id` and `score`, is the reply of Pion's own forms (BM25,
+    HYBRID, FT.HYBRID), which have no RediSearch equivalent."""
     var mode: UInt8
     var with_scores: Bool
     var tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin]
@@ -283,6 +282,19 @@ def _put_lit(mut writer: ResponseWriter, s: StaticString):
 
 
 @always_inline
+def _put_score_name(mut writer: ResponseWriter, opts: FtReplyOpts):
+    """The KNN score's field name: the clause's AS alias, else RediSearch's
+    default `__<field>_score`."""
+    if opts.alias_l > 0:
+        writer.append_bulk_string_response(opts.alias_p, opts.alias_l)
+    else:
+        writer.append_bulk_string_response_header(opts.field_l + 8)
+        _put_lit(writer, "__")
+        writer.append_to_response(opts.field_p, opts.field_l)
+        _put_lit(writer, "_score\r\n")
+
+
+@always_inline
 def _put_score_bulk(mut writer: ResponseWriter, dist: Float32):
     """`dist` as a bulk string with 4 decimals. The length is counted the way
     format_float_to_buf writes: a score in (-1, 0) prints `-0.xxxx`, one byte
@@ -305,9 +317,10 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
     Each result is <key>, then (WITHSCORES) the text score, then its fields
     unless NOCONTENT. With RETURN the fields are the ones it names, renamed by
     `AS`, the KNN score first when named (RediSearch's order), each one the
-    hash lacks left out. Without RETURN they are [id, <id-value>, score,
-    <dist>] when the doc hash has an "id" field on THIS worker, else
-    [score, <dist>].
+    hash lacks left out. A KNN query without RETURN gets the score and then
+    every field of the hash, as from RediSearch. Pion's own forms get
+    [id, <id-value>, score, <dist>] when the doc hash has an "id" field on THIS
+    worker, else [score, <dist>].
     Key resolution order: shared slot→key map (one direct load — the
     fast-path HSET writes it on every vector ingest), then the keyspace
     __hk__<slot> probe (covers original keys >31B that don't fit the shared
@@ -447,6 +460,22 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
                 writer.append_bulk_string_response(
                     opts.tokens[ret_out[e]].ptr, opts.tokens[ret_out[e]].length)
                 writer.append_bulk_value_response(ret_vals[e])
+        elif opts.mode == FT_REPLY_ALL:
+            # hash_get_live purged expired fields, so size counts the live ones
+            var nf = doc_hash[].size if is_not_null(doc_hash) else 0
+            if resp3:
+                _put_lit(writer, _FT_R3_FIELDS)
+                writer.append_map_header(1 + nf)
+            else:
+                writer.append_array_header(2 * (1 + nf))
+            _put_score_name(writer, opts)
+            _put_score_bulk(writer, dist)
+            if nf > 0:
+                for slot in range(doc_hash[].capacity):
+                    var mt = doc_hash[].metadata[unsafe_offset=slot]
+                    if mt != SlabHashMap.EMPTY and mt != SlabHashMap.DELETED:
+                        writer.append_bulk_value_response(doc_hash[].keys[unsafe_offset=slot])
+                        writer.append_bulk_value_response(doc_hash[].values[unsafe_offset=slot])
         elif content:
             # gh #357: emit "id" only with the doc's own field value; never
             # substitute the key or slot for a field this worker cannot see.
@@ -2921,6 +2950,7 @@ def handle_ft_search(
         var k = 10
         var opts = FtReplyOpts()
         opts.tokens = tokens
+        opts.mode = FT_REPLY_ALL     # no RETURN: every field, as RediSearch sends
         var ef_query = hnsw.ef_runtime
         var ef_param_p = null_ptr[UInt8, MutUntrackedOrigin]()
         var ef_param_l = 0
@@ -2993,8 +3023,7 @@ def handle_ft_search(
                             else: ev = ev * 10 + (ec - 48)
                         if ok and ev > 0: ef_query = ev
                 elif w_len == 2 and arg_eq(qp + w0, 2, "as"):
-                    # The score's name for RETURN; without RETURN the reply
-                    # names it "score" whatever the alias.
+                    # The score's field name (else __<field>_score)
                     opts.alias_p = qp + a0
                     opts.alias_l = a_len
                 else:
@@ -3201,9 +3230,11 @@ def handle_ft_search(
             # overwrite each other's slots → lost results. Serialize: only
             # one deferred sharded query at a time; concurrent queries fall
             # through to the single-shard CPU path (lower recall but correct).
-            # A deferred reply is written later by drain_deferred_shard_responses,
-            # which keeps no RETURN / NOCONTENT / WITHSCORES: a query with them
-            # takes the synchronous path. (Sharding is off: num_shards is 1.)
+            # A deferred reply is written later by drain_deferred_shard_responses
+            # with the default fields, which no KNN query asks for: it keeps no
+            # FtReplyOpts, so every KNN query takes the synchronous path. Carry
+            # the options through deferred_* before re-enabling sharding.
+            # (Sharding is off: num_shards is 1.)
             var use_sharding = (n_shards2 > 1 and hnsw.index_ready and filters.count == 0
                                 and is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].shard_bus)
                                 and deferred_count[] == 0

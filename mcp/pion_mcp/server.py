@@ -1431,7 +1431,7 @@ def agent_recall(
     # Use Redis KNN PARAMS format — Pion's native format never sets blob_set=True.
     raw = r.execute_command(
         "FT.SEARCH", _MEM_INDEX,
-        f"*=>[KNN {k_fetch} @embedding $vec EF_RUNTIME 64]",
+        f"*=>[KNN {k_fetch} @embedding $vec EF_RUNTIME 64 AS score]",
         "PARAMS", "2", "vec", vec,
     )
 

@@ -131,7 +131,7 @@ def load(c, metric, vs):
 
 
 def query(c, v, k=5):
-    r = c.cmd("FT.SEARCH", "sx", f"*=>[KNN {k} @vec $q]", "PARAMS", "2", "q",
+    r = c.cmd("FT.SEARCH", "sx", f"*=>[KNN {k} @vec $q AS score]", "PARAMS", "2", "q",
               struct.pack(f"<{DIM}f", *v), "DIALECT", "2")
     if not isinstance(r, list):
         return None

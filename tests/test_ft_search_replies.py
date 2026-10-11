@@ -22,8 +22,8 @@ data and queries:
   WITHSCORES the query's text score, 0 for `*=>[KNN ...]`
   KNN 0      an empty result
   FT.INFO    RESP3 a map; num_docs an integer
-Without RETURN, Pion sends the doc's `id` field and `score`, where RediSearch
-sends every field of the hash. That difference is deliberate and checked here.
+  no RETURN  the KNN score (its AS alias, or __<field>_score), then every field
+             of the hash, the embedding included
 
 Checks: every case in RESP2 and RESP3 with a strict parser; RETURN's two
 errors, word for word; a field named like an option inside RETURN; the BM25
@@ -32,8 +32,8 @@ a RESP3 FT.SEARCH; with redis-py >= 6 installed, its default connection.
 
     python3 tests/test_ft_search_replies.py [--port 1974]
     python3 tests/test_ft_search_replies.py --oracle --port <RediSearch port>
-        runs the option cases against RediSearch itself (redis-stack-server),
-        all but Pion's no-RETURN default: the expected replies must be its own.
+        runs the option cases against RediSearch itself (redis-stack-server):
+        the expected replies must be its own.
         Keep it off any running Pion's port + 2 + worker: Pion listens there
         too (its affinity ports), and the "oracle" is then Pion.
 """
@@ -220,7 +220,7 @@ def norm2(reply, ws: bool, content: bool):
         if content:
             arr = items[i][1]
             i += 1
-            fields = [(arr[j][1].decode(), arr[j + 1][1].decode()) for j in range(0, len(arr), 2)]
+            fields = [(arr[j][1].decode(), arr[j + 1][1].decode("latin-1")) for j in range(0, len(arr), 2)]
         docs.append((key, ts, fields))
     return mask(total, docs)
 
@@ -237,7 +237,7 @@ def norm3(reply, ws: bool, content: bool):
         s = map_get(d, "score")
         ea = map_get(d, "extra_attributes")
         docs.append((map_get(d, "id")[1].decode(), s[1] if s else None,
-                     [(k[1].decode(), v[1].decode()) for k, v in ea[1]] if ea else None))
+                     [(k[1].decode(), v[1].decode("latin-1")) for k, v in ea[1]] if ea else None))
     return mask(map_get(reply, "total_results")[1], docs)
 
 
@@ -252,6 +252,19 @@ def mask(total, docs):
 
 
 D0, D3 = "r3doc:0", "r3doc:3"   # the two nearest to QUERY; r3doc:3 has no id field
+
+
+def _blob(key: str) -> str:
+    return struct.pack("4f", *DOCS[key][0]).decode("latin-1")
+
+
+def hash_order_free(n):
+    """Without RETURN the hash's fields follow the score in the hash's own
+    order, which differs between the two servers' hash tables: compare them
+    as a set."""
+    if not (isinstance(n, tuple) and len(n) == 2 and isinstance(n[1], list)):
+        return n
+    return (n[0], [(k, ts, f if f is None else f[:1] + sorted(f[1:])) for k, ts, f in n[1]])
 KNN2 = "*=>[KNN 2 @vector $vec AS score]"
 P = ["PARAMS", 2, "vec", QUERY]
 OPTION_CASES = [
@@ -298,9 +311,14 @@ OPTION_CASES = [
     ("RETURN x id: not a number",
      [KNN2, *P, "RETURN", "x", "id", "DIALECT", 2], False, True,
      ("-", "Bad arguments for RETURN: Could not convert argument to expected type")),
-    ("no RETURN: Pion's id and score (RediSearch sends every field)",
+    ("no RETURN: the score, then every field of the hash",
      [KNN2, *P, "SORTBY", "score", "DIALECT", 2], False, True,
-     (2, [(D0, None, [("id", "0"), ("score", "<f>")]), (D3, None, [("score", "<f>")])])),
+     (2, [(D0, None, [("score", "<f>"), ("body", "alpha bravo"), ("id", "0"), ("vector", _blob("r3doc:0"))]),
+          (D3, None, [("score", "<f>"), ("body", "alpha foxtrot"), ("vector", _blob("r3doc:3"))])])),
+    ("no RETURN, no AS: the score is __vector_score",
+     ["*=>[KNN 2 @vector $vec]", *P, "DIALECT", 2], False, True,
+     (2, [(D0, None, [("__vector_score", "<f>"), ("body", "alpha bravo"), ("id", "0"), ("vector", _blob("r3doc:0"))]),
+          (D3, None, [("__vector_score", "<f>"), ("body", "alpha foxtrot"), ("vector", _blob("r3doc:3"))])])),
 ]
 
 
@@ -339,10 +357,10 @@ def main() -> int:
             time.sleep(0.1)
         for proto, conn, norm in ((2, c2, norm2), (3, c3, norm3)):
             for name, args, ws, content, want in OPTION_CASES:
-                if name.startswith("no RETURN"):
-                    continue
                 got = norm(conn.cmd("FT.SEARCH", "idx", *args), ws, content)
-                check(f"oracle RESP{proto} {name}", got == want, f"got {got!r}")
+                if name.startswith("no RETURN"):
+                    got, want = hash_order_free(got), hash_order_free(want)
+                check(f"oracle RESP{proto} {name}", got == want, f"got {got!r}"[:300])
         c3.cmd("FT.DROPINDEX", "idx")
         c3.cmd("DEL", *DOCS)
         print(f"\n{'FAIL' if FAILS else 'PASS'}: {len(FAILS)} failure(s)")
@@ -406,6 +424,8 @@ def main() -> int:
                 got = norm(reply, ws, content)
             except (AttributeError, IndexError, TypeError, ValueError):
                 got = ("not this shape", reply)   # e.g. fields where NOCONTENT wants none
+            if name.startswith("no RETURN"):
+                got, want = hash_order_free(got), hash_order_free(want)
             check(f"RESP{proto} {name}", got == want, f"got {got!r}"[:300])
 
     print("RESP2 unchanged")

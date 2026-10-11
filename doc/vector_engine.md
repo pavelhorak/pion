@@ -177,10 +177,10 @@ FT.SEARCH <index> "*=>[KNN <k> @<field> $blob EF_RUNTIME <ef> AS score]"
 `W` is 1 with `WITHSCORES`, `C` is 0 with `NOCONTENT` (or `RETURN 0`). The fields are:
 
 - **`RETURN n field [AS name] ...`**: the named hash fields, renamed by `AS`. The KNN score is the field named by the clause's `AS` alias, or `__<vector field>_score` without one, and comes first when named, as in RediSearch. A field the hash lacks is left out. `n` counts every token after it; a bad or short count answers RediSearch's own error (`Bad arguments for RETURN: ...`).
-- **No RETURN**: `id` (the doc hash's own `id` field, when it has one) and `score` (the distance, named `score` whatever the alias). RediSearch sends every field of the hash here, the embedding included; Pion's tools read `id` and `score` by name.
+- **No RETURN**: the KNN score (under the clause's `AS` alias, or `__<vector field>_score`), then every field of the hash, the embedding included, as RediSearch sends. A caller that needs only the keys should pass `RETURN 1 id` or `NOCONTENT`, and one that reads the score by name should name it with `AS`.
 - **`WITHSCORES`** reports the query's text score, not the distance, as RediSearch does: `0` for `*=>[KNN …]`. RediSearch reports a text score for a filter prefix too; Pion computes none and reports `0`.
 
-On a RESP3 connection (`HELLO 3`, and redis-py 8 by default) the reply is RediSearch's map: `attributes` `*0`, `format` `+STRING`, `results` (one map per document: `id`, `score` with WITHSCORES as a double, `extra_attributes` with the fields above unless NOCONTENT, `values` `*0`), `total_results`, `warning` `*0`. The BM25 and HYBRID forms of FT.SEARCH, and FT.HYBRID, ignore RETURN, NOCONTENT and WITHSCORES and send the no-RETURN fields.
+On a RESP3 connection (`HELLO 3`, and redis-py 8 by default) the reply is RediSearch's map: `attributes` `*0`, `format` `+STRING`, `results` (one map per document: `id`, `score` with WITHSCORES as a double, `extra_attributes` with the fields above unless NOCONTENT, `values` `*0`), `total_results`, `warning` `*0`. The BM25 and HYBRID forms of FT.SEARCH, and FT.HYBRID, are Pion's own syntax: they ignore RETURN, NOCONTENT and WITHSCORES and send `id` (the doc hash's own `id` field, when it has one) and `score`.
 
 This shape is emitted at every worker count. Doc-key resolution order:
 shared `hk_keys_buf` slot→key map (one direct load; written by the fast-path

@@ -94,7 +94,7 @@ def vec(seed):
 
 
 def knn(c, q, k=3, extra=()):
-    return c.cmd("FT.SEARCH", "idx", f"*=>[KNN {k} @embedding $v]", *extra, "PARAMS", "2", "v", q, "DIALECT", "2")
+    return c.cmd("FT.SEARCH", "idx", f"*=>[KNN {k} @embedding $v AS score]", *extra, "PARAMS", "2", "v", q, "DIALECT", "2")
 
 
 def well_formed(reply):

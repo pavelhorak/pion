@@ -166,6 +166,7 @@ def vsim_topk(r, q_emb: np.ndarray, k: int) -> List[int]:
         "FT.SEARCH", INDEX_NAME,
         f"*=>[KNN {k} @vector $vec EF_RUNTIME 150 as score]",
         "SORTBY", "score",
+        "RETURN", "1", "id",          # keys are all it reads; without RETURN every hit carries its embedding
         "PARAMS", "2", "vec", blob,
         "DIALECT", "2",
     )

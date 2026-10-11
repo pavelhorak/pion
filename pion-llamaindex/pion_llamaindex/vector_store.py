@@ -163,7 +163,7 @@ class PionVectorStore(BasePydanticVectorStore):
 
         raw = self._client.execute_command(
             "FT.SEARCH", self.index_name,
-            f"*=>[KNN {k} @embedding $vec EF_RUNTIME {ef}]",
+            f"*=>[KNN {k} @embedding $vec EF_RUNTIME {ef} AS score]",
             "PARAMS", "2", "vec", vec_bytes,
         )
         return self._parse_results(raw, k)

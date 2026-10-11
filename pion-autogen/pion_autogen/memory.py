@@ -271,7 +271,7 @@ class PionMemoryStore(Memory):
 
         raw = self._r.execute_command(
             "FT.SEARCH", self._index,
-            f"*=>[KNN {k} @embedding $vec EF_RUNTIME {ef}]",
+            f"*=>[KNN {k} @embedding $vec EF_RUNTIME {ef} AS score]",
             "PARAMS", "2", "vec", vec,
         )
         return self._parse_ft_search(raw, k)
