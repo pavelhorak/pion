@@ -33,6 +33,19 @@ enumerated — there were roughly 1,100 of them.
   `extra_attributes`), and `FT.INFO` is a map with `num_docs` an integer.
   RESP2 replies are unchanged. Pion's own tests pinned `protocol=2`, which
   hid it; it turned up while writing a VectorDBBench client.
+- **`FT.SEARCH` honours `RETURN`, `NOCONTENT` and `WITHSCORES`, and answers
+  `KNN 0`.** It ignored all three and sent `id` and `score` for every
+  document. `RETURN body`, RAG's basic call for a document's text, came back
+  without the text; `NOCONTENT` made redis-py read each document as two;
+  `WITHSCORES` crashed redis-py's parser; `KNN 0` was an error where
+  RediSearch returns an empty result. Each now answers as RediSearch does, in
+  RESP2 and RESP3: `RETURN` sends the named fields, renamed by `AS`, the KNN
+  score first when named (its alias, or `__<field>_score`), a missing field
+  left out, and RediSearch's own errors for a bad count; `RETURN 0` is
+  `NOCONTENT`; `WITHSCORES` sends the query's text score, 0 for
+  `*=>[KNN …]`. Without `RETURN` Pion still sends `id` and `score`, where
+  RediSearch sends every field of the hash. A score between -1 and 0 also
+  no longer breaks the reply's framing: its bulk length was one byte short.
 - **`test_kv_prefix_workload` checks a cache hit against the cache it
   fetched.** Its 99% first-token check failed 49 of 50 on every macOS full
   tier since 0.9.7, whose entry put that down to the fp16-stored cache. That

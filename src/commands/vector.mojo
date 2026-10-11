@@ -13,6 +13,7 @@ from src.network.response_writer import ResponseWriter
 from src.network.server import TCPServer
 from src.network.dispatcher import CommandDispatcher
 from src.common.hash_map import SlabHashMap, StripedHashMap
+from src.common.container_free import hash_get_live
 from src.common.value import GenericValue, ValueType
 from src.common.config import PionConfig
 from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_len, parse_filter_float, is_valid_float_arg, parse_float64, arg_eq
@@ -205,15 +206,75 @@ def drop_dead(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], mu
 
 
 # RESP3 FT.SEARCH, in RediSearch's shape (checked against RediSearch's own
-# replies): a map whose `results` entry holds one map per document, with the
-# returned fields under `extra_attributes`. redis-py 8 negotiates RESP3 by
-# default and its search module reads exactly these keys.
+# replies): a map whose `results` entry holds one map per document (id, then
+# score with WITHSCORES, then extra_attributes unless NOCONTENT, then values).
+# redis-py 8 negotiates RESP3 by default and its search module reads exactly
+# these keys.
 comptime _FT_R3_HEAD = "%5\r\n+attributes\r\n*0\r\n+format\r\n+STRING\r\n+results\r\n"
-comptime _FT_R3_DOC = "%3\r\n+id\r\n"
+comptime _FT_R3_ID = "+id\r\n"
 comptime _FT_R3_FIELDS = "+extra_attributes\r\n"
 comptime _FT_R3_DOC_END = "+values\r\n*0\r\n"
 comptime _FT_R3_TOTAL = "+total_results\r\n"
 comptime _FT_R3_TAIL = "+warning\r\n*0\r\n"
+# WITHSCORES reports the query's text score, as RediSearch does, not the
+# vector distance: 0 for `*=>[KNN …]`. Pion computes no text score for a
+# filter prefix, where RediSearch reports one, and reports 0 there too.
+comptime _FT_R2_TEXT_SCORE = "$1\r\n0\r\n"
+comptime _FT_R3_TEXT_SCORE = "+score\r\n,0\r\n"
+
+# What an FT.SEARCH reply carries for each document (FtReplyOpts.mode).
+comptime FT_REPLY_DEFAULT = UInt8(0)    # no RETURN: the doc's `id` field (when its hash has one) and `score`
+comptime FT_REPLY_RETURN = UInt8(1)     # the fields RETURN names, as RediSearch answers it
+comptime FT_REPLY_NOCONTENT = UInt8(2)  # keys only (NOCONTENT, or RETURN 0)
+
+
+struct FtReplyOpts(ImplicitlyCopyable, Movable):
+    """FT.SEARCH's RETURN, NOCONTENT and WITHSCORES, as the reply writer needs
+    them. The default is Pion's reply without RETURN; FT.HYBRID and the BM25
+    and HYBRID forms of FT.SEARCH always use it.
+
+    RediSearch without RETURN sends every field of the hash, the embedding
+    included. Pion sends `id` and `score` instead, which its own tools read
+    by those names."""
+    var mode: UInt8
+    var with_scores: Bool
+    var tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin]
+    var ret_at: Int      # RETURN's first field token
+    var ret_n: Int       # RETURN's count: field names, plus each `AS <name>`
+    var alias_p: UnsafePointer[UInt8, MutUntrackedOrigin]   # the KNN clause's AS alias
+    var alias_l: Int
+    var field_p: UnsafePointer[UInt8, MutUntrackedOrigin]   # the KNN @field, for __<field>_score
+    var field_l: Int
+
+    def __init__(out self):
+        self.mode = FT_REPLY_DEFAULT
+        self.with_scores = False
+        self.tokens = null_ptr[RESP3Token, MutUntrackedOrigin]()
+        self.ret_at = 0
+        self.ret_n = 0
+        self.alias_p = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.alias_l = 0
+        self.field_p = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.field_l = 0
+
+    def is_score_name(self, p: UnsafePointer[UInt8, MutUntrackedOrigin], l: Int) -> Bool:
+        """Whether a RETURN name is the KNN score: the clause's AS alias, else
+        RediSearch's default name `__<field>_score`."""
+        if self.alias_l > 0:
+            if l != self.alias_l:
+                return False
+            for b in range(l):
+                if p[b] != self.alias_p[b]:
+                    return False
+            return True
+        var fl = self.field_l
+        if fl == 0 or l != fl + 8 or p[0] != 95 or p[1] != 95:     # "__"
+            return False
+        for b in range(fl):
+            if p[2 + b] != self.field_p[b]:
+                return False
+        var s = p + 2 + fl                                           # "_score"
+        return s[0] == 95 and s[1] == 115 and s[2] == 99 and s[3] == 111 and s[4] == 114 and s[5] == 101
 
 
 @always_inline
@@ -222,14 +283,31 @@ def _put_lit(mut writer: ResponseWriter, s: StaticString):
 
 
 @always_inline
+def _put_score_bulk(mut writer: ResponseWriter, dist: Float32):
+    """`dist` as a bulk string with 4 decimals. The length is counted the way
+    format_float_to_buf writes: a score in (-1, 0) prints `-0.xxxx`, one byte
+    more than `int_string_len(Int64(dist))` counts, which broke the frame."""
+    var mag = -dist if dist < 0 else dist
+    var score_len = (1 if dist < 0 else 0) + int_string_len(Int64(mag)) + 5
+    writer.append_bulk_string_response_header(score_len)
+    writer.offset = format_float_to_buf(writer.buffer, writer.offset, dist, 4)
+    writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+
+
+@always_inline
 def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], dist_scores: List[Float32],
                               keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin] = null_ptr[StripedHashMap, MutUntrackedOrigin](),
-                              shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin]()):
+                              shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin](),
+                              opts: FtReplyOpts = FtReplyOpts()):
     """Write a single FT.SEARCH response to writer (does not flush): RESP2's
     flat array, or RediSearch's RESP3 map on a RESP3 connection.
 
-    Each result is <key>, then its fields: [id, <id-value>, score, <dist>]
-    when the doc hash has an "id" field on THIS worker, else [score, <dist>].
+    Each result is <key>, then (WITHSCORES) the text score, then its fields
+    unless NOCONTENT. With RETURN the fields are the ones it names, renamed by
+    `AS`, the KNN score first when named (RediSearch's order), each one the
+    hash lacks left out. Without RETURN they are [id, <id-value>, score,
+    <dist>] when the doc hash has an "id" field on THIS worker, else
+    [score, <dist>].
     Key resolution order: shared slot→key map (one direct load — the
     fast-path HSET writes it on every vector ingest), then the keyspace
     __hk__<slot> probe (covers original keys >31B that don't fit the shared
@@ -239,23 +317,47 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
     fall back to the key name, so under `-w N` a query answered by a worker
     that did not ingest the doc returned id="doc:17" where the stored field
     is "17" — a plausible wrong value (the keyspace is per worker, gh #253).
-    Redis omits a RETURN field the doc does not have; clients read fields by
-    name (redis-py drops "id" and uses the key as doc.id). Callers must pass
-    `keyspace`, or every result loses its id. The old single-worker path
-    probed the keyspace twice per result and dumped every hash field —
-    including the embedding blob — into the response."""
+    The same holds for every RETURN field: a worker that does not hold the
+    hash returns none of them, as Redis omits a field the doc does not have.
+    Clients read fields by name (redis-py drops "id" and uses the key as
+    doc.id). Callers must pass `keyspace`, or every result loses its fields."""
     var nr = len(results2)
     var resp3 = writer.proto == 3
+    var content = opts.mode != FT_REPLY_NOCONTENT
+    var per_doc = 1 + (1 if opts.with_scores else 0) + (1 if content else 0)
     if resp3:
         _put_lit(writer, _FT_R3_HEAD)
         writer.append_array_header(nr)
     else:
         writer.buffer[writer.offset] = 42; writer.offset += 1
-        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(1 + nr * 2))
+        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(1 + nr * per_doc))
         writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
         writer.buffer[writer.offset] = 58; writer.offset += 1
         writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(nr))
         writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+
+    # RETURN's entries, resolved once: the token naming the hash field, the
+    # token naming it in the reply (its AS alias, or itself), and a value slot
+    # reused for every document.
+    var ret_name = List[Int]()
+    var ret_out = List[Int]()
+    var ret_vals = List[GenericValue]()
+    var score_entry = -1
+    if opts.mode == FT_REPLY_RETURN:
+        var t = opts.ret_at
+        var t_end = opts.ret_at + opts.ret_n
+        while t < t_end:
+            var out_t = t
+            var step = 1
+            if t + 2 < t_end and opts.tokens[t + 1].length == 2 and arg_eq(opts.tokens[t + 1].ptr, 2, "as"):
+                out_t = t + 2
+                step = 3
+            if score_entry < 0 and opts.is_score_name(opts.tokens[t].ptr, opts.tokens[t].length):
+                score_entry = len(ret_name)
+            ret_name.append(t)
+            ret_out.append(out_t)
+            ret_vals.append(GenericValue())
+            t += step
 
     for ri2 in range(nr):
         var did = results2[ri2]
@@ -280,30 +382,27 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
             if not hk_val.is_none():
                 result_key = hk_val
 
-        # If the doc hash is on this worker, its "id" field is the id value.
-        # One keyspace probe with the already-resolved key — the old path did
-        # two probes (__hk__ + doc) before scanning the whole hash twice.
-        var id_field_val = GenericValue()
-        if is_not_null(keyspace):
+        # The doc's hash, when this worker holds it: one keyspace probe with
+        # the already-resolved key. NOCONTENT needs none.
+        var doc_hash = null_ptr[SlabHashMap, MutUntrackedOrigin]()
+        if content and is_not_null(keyspace):
             var key_gv = result_key
             var key_copied = False
             if key_len > 0:
                 key_gv = GenericValue.from_ptr(key_ptr, key_len)
                 key_copied = True
             if not key_gv.is_none():
-                var doc_val = keyspace[].get(key_gv)
+                var doc_val = hash_get_live(keyspace, key_gv)
                 # gh #394: a key over 23 B is a heap copy made only for this
                 # lookup — one leak per FT.SEARCH result before.
                 if key_copied: key_gv.free_str_payload()
                 if not doc_val.is_none() and doc_val.type.value == ValueType.HASH:
-                    var id_name_buf = stack_allocation[2, UInt8]()
-                    id_name_buf[0] = 105; id_name_buf[1] = 100  # "id"
-                    id_field_val = doc_val.as_hash().bitcast[SlabHashMap]()[].get(
-                        GenericValue.borrow(id_name_buf, 2))
+                    doc_hash = doc_val.as_hash().bitcast[SlabHashMap]()
 
         # Doc key
         if resp3:
-            _put_lit(writer, _FT_R3_DOC)
+            writer.append_map_header(per_doc + 1)    # id, [score], [extra_attributes], values
+            _put_lit(writer, _FT_R3_ID)
         if key_len > 0:
             writer.append_bulk_string_response(key_ptr, key_len)
         elif not result_key.is_none():
@@ -314,32 +413,69 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
             writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(did))
             writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
 
-        # gh #357: emit "id" only with the doc's own field value; never
-        # substitute the key or slot for a field this worker cannot see.
-        var has_id = not id_field_val.is_none()
-        if resp3:
-            _put_lit(writer, _FT_R3_FIELDS)
-            writer.append_map_header(2 if has_id else 1)
-        else:
-            writer.buffer[writer.offset] = 42
-            writer.buffer[writer.offset+1] = 52 if has_id else 50 # *4 | *2
-            writer.buffer[writer.offset+2] = 13; writer.buffer[writer.offset+3] = 10; writer.offset += 4
-        if has_id:
-            writer.buffer[writer.offset]=36; writer.buffer[writer.offset+1]=50 # $2
+        if opts.with_scores:
+            if resp3:
+                _put_lit(writer, _FT_R3_TEXT_SCORE)
+            else:
+                _put_lit(writer, _FT_R2_TEXT_SCORE)
+
+        if opts.mode == FT_REPLY_RETURN:
+            var m = 0
+            for e in range(len(ret_name)):
+                if e == score_entry:
+                    m += 1
+                    continue
+                var v = GenericValue()
+                if is_not_null(doc_hash):
+                    v = doc_hash[].get(GenericValue.borrow(
+                        opts.tokens[ret_name[e]].ptr, opts.tokens[ret_name[e]].length))
+                ret_vals[e] = v
+                if not v.is_none():
+                    m += 1
+            if resp3:
+                _put_lit(writer, _FT_R3_FIELDS)
+                writer.append_map_header(m)
+            else:
+                writer.append_array_header(2 * m)
+            if score_entry >= 0:
+                writer.append_bulk_string_response(
+                    opts.tokens[ret_out[score_entry]].ptr, opts.tokens[ret_out[score_entry]].length)
+                _put_score_bulk(writer, dist)
+            for e in range(len(ret_name)):
+                if e == score_entry or ret_vals[e].is_none():
+                    continue
+                writer.append_bulk_string_response(
+                    opts.tokens[ret_out[e]].ptr, opts.tokens[ret_out[e]].length)
+                writer.append_bulk_value_response(ret_vals[e])
+        elif content:
+            # gh #357: emit "id" only with the doc's own field value; never
+            # substitute the key or slot for a field this worker cannot see.
+            var id_field_val = GenericValue()
+            if is_not_null(doc_hash):
+                var id_name_buf = stack_allocation[2, UInt8]()
+                id_name_buf[0] = 105; id_name_buf[1] = 100  # "id"
+                id_field_val = doc_hash[].get(GenericValue.borrow(id_name_buf, 2))
+            var has_id = not id_field_val.is_none()
+            if resp3:
+                _put_lit(writer, _FT_R3_FIELDS)
+                writer.append_map_header(2 if has_id else 1)
+            else:
+                writer.buffer[writer.offset] = 42
+                writer.buffer[writer.offset+1] = 52 if has_id else 50 # *4 | *2
+                writer.buffer[writer.offset+2] = 13; writer.buffer[writer.offset+3] = 10; writer.offset += 4
+            if has_id:
+                writer.buffer[writer.offset]=36; writer.buffer[writer.offset+1]=50 # $2
+                writer.buffer[writer.offset+2]=13; writer.buffer[writer.offset+3]=10
+                writer.buffer[writer.offset+4]=105; writer.buffer[writer.offset+5]=100 # id
+                writer.buffer[writer.offset+6]=13; writer.buffer[writer.offset+7]=10; writer.offset += 8
+                writer.append_bulk_value_response(id_field_val)
+            writer.buffer[writer.offset]=36; writer.buffer[writer.offset+1]=53 # $5
             writer.buffer[writer.offset+2]=13; writer.buffer[writer.offset+3]=10
-            writer.buffer[writer.offset+4]=105; writer.buffer[writer.offset+5]=100 # id
-            writer.buffer[writer.offset+6]=13; writer.buffer[writer.offset+7]=10; writer.offset += 8
-            writer.append_bulk_value_response(id_field_val)
-        writer.buffer[writer.offset]=36; writer.buffer[writer.offset+1]=53 # $5
-        writer.buffer[writer.offset+2]=13; writer.buffer[writer.offset+3]=10
-        writer.buffer[writer.offset+4]=115; writer.buffer[writer.offset+5]=99 # sc
-        writer.buffer[writer.offset+6]=111; writer.buffer[writer.offset+7]=114 # or
-        writer.buffer[writer.offset+8]=101; writer.buffer[writer.offset+9]=13 # e
-        writer.buffer[writer.offset+10]=10; writer.offset += 11
-        var score_len = int_string_len(Int64(dist)) + 5
-        writer.append_bulk_string_response_header(score_len)
-        writer.offset = format_float_to_buf(writer.buffer, writer.offset, dist, 4)
-        writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+            writer.buffer[writer.offset+4]=115; writer.buffer[writer.offset+5]=99 # sc
+            writer.buffer[writer.offset+6]=111; writer.buffer[writer.offset+7]=114 # or
+            writer.buffer[writer.offset+8]=101; writer.buffer[writer.offset+9]=13 # e
+            writer.buffer[writer.offset+10]=10; writer.offset += 11
+            _put_score_bulk(writer, dist)
         if resp3:
             _put_lit(writer, _FT_R3_DOC_END)
 
@@ -2532,7 +2668,9 @@ def handle_ft_search(
     kq: Int32,
     consumed_bytes: Int,
 ) raises -> Int:
-    """FT.SEARCH <index> <query> [PARAMS ...] [FILTER ...] [LIMIT ...] — vector/BM25/hybrid search.
+    """FT.SEARCH <index> <query> [PARAMS ...] [FILTER ...] [LIMIT ...] [RETURN ...] [NOCONTENT]
+    [WITHSCORES] — vector/BM25/hybrid search. RETURN, NOCONTENT and WITHSCORES
+    apply to the KNN form; the BM25 and HYBRID forms reply as without them.
 
     `num_tokens` is this command's token BOUND — the dispatch site passes
     `cmd_end_tok`, not the batch-wide token count. The optional-arg scan below
@@ -2781,6 +2919,8 @@ def handle_ft_search(
         var filters = FtFilters()
         var q_err = String("")
         var k = 10
+        var opts = FtReplyOpts()
+        opts.tokens = tokens
         var ef_query = hnsw.ef_runtime
         var ef_param_p = null_ptr[UInt8, MutUntrackedOrigin]()
         var ef_param_l = 0
@@ -2811,7 +2951,7 @@ def handle_ft_search(
             var kd = 0
             while ok and p < ql and qp[p] >= 48 and qp[p] <= 57 and kd < 7:
                 kv = kv * 10 + Int(qp[p] - 48); p += 1; kd += 1
-            ok = ok and kd > 0 and kv > 0
+            ok = ok and kd > 0          # KNN 0 is valid: an empty result, as in RediSearch
             k = kv
             while p < ql and qp[p] == 32: p += 1
             ok = ok and p < ql and qp[p] == 64       # '@'
@@ -2819,6 +2959,8 @@ def handle_ft_search(
             p = f0
             while p < ql and qp[p] != 32 and qp[p] != 93: p += 1
             var f_len = p - f0
+            opts.field_p = qp + f0
+            opts.field_l = f_len
             while p < ql and qp[p] == 32: p += 1
             ok = ok and p < ql and qp[p] == 36       # '$'
             var v0 = p + 1
@@ -2851,7 +2993,10 @@ def handle_ft_search(
                             else: ev = ev * 10 + (ec - 48)
                         if ok and ev > 0: ef_query = ev
                 elif w_len == 2 and arg_eq(qp + w0, 2, "as"):
-                    pass   # score alias: the reply always names it "score"
+                    # The score's name for RETURN; without RETURN the reply
+                    # names it "score" whatever the alias.
+                    opts.alias_p = qp + a0
+                    opts.alias_l = a_len
                 else:
                     ok = False
             ok = ok and p < ql and qp[p] == 93
@@ -2886,7 +3031,10 @@ def handle_ft_search(
             var scaled_ef = Int(150.0 * sqrt(sqrt(scale_ratio)))
             if scaled_ef > ef_query:
                 ef_query = scaled_ef
-        # Scan the remaining tokens: PARAMS, FILTER, LIMIT (others skipped).
+        # Scan the remaining tokens: PARAMS, FILTER, LIMIT, RETURN, NOCONTENT,
+        # WITHSCORES. SORTBY, DIALECT and TIMEOUT have their arguments skipped,
+        # so a field named like an option is never read as one; anything else
+        # is skipped a token at a time.
         var blob_ptr = null_ptr[Float32, MutUntrackedOrigin]()
         var blob_set = False
         var params_at = -1
@@ -2924,6 +3072,45 @@ def handle_ft_search(
                         if lc >= 48 and lc <= 57: lv = lv * 10 + (lc - 48)
                     limit_k = lv
                     j2 += 2
+            elif jl2 == 6 and arg_eq(jp2, 6, "return"):
+                # RETURN <n> <field> [AS <name>] ...: n counts every token after
+                # it, AS and the name included. RETURN 0 is NOCONTENT. The
+                # errors are RediSearch's, word for word.
+                var rn = 0
+                var rn_ok = j2 + 1 < num_tokens and tokens[j2 + 1].length > 0
+                if rn_ok:
+                    for rdi in range(tokens[j2 + 1].length):
+                        var rdc = Int(tokens[j2 + 1].ptr[rdi])
+                        if rdc < 48 or rdc > 57: rn_ok = False
+                        else: rn = rn * 10 + (rdc - 48)
+                if not rn_ok:
+                    q_err = "Bad arguments for RETURN: Could not convert argument to expected type"
+                    break
+                if j2 + 1 + rn >= num_tokens:
+                    q_err = "Bad arguments for RETURN: Expected an argument, but none provided"
+                    break
+                if rn == 0:
+                    opts.mode = FT_REPLY_NOCONTENT
+                elif opts.mode != FT_REPLY_NOCONTENT:
+                    opts.mode = FT_REPLY_RETURN
+                    opts.ret_at = j2 + 2
+                    opts.ret_n = rn
+                j2 += 1 + rn
+            elif jl2 == 9 and arg_eq(jp2, 9, "nocontent"):
+                opts.mode = FT_REPLY_NOCONTENT
+            elif jl2 == 10 and arg_eq(jp2, 10, "withscores"):
+                opts.with_scores = True
+            elif jl2 == 6 and arg_eq(jp2, 6, "sortby"):
+                if j2 + 1 < num_tokens:
+                    j2 += 1
+                if j2 + 1 < num_tokens:
+                    var sl = tokens[j2 + 1].length
+                    if (sl == 3 and arg_eq(tokens[j2 + 1].ptr, 3, "asc")) \
+                       or (sl == 4 and arg_eq(tokens[j2 + 1].ptr, 4, "desc")):
+                        j2 += 1
+            elif jl2 == 7 and (arg_eq(jp2, 7, "dialect") or arg_eq(jp2, 7, "timeout")):
+                if j2 + 1 < num_tokens:
+                    j2 += 1
             j2 += 1
         ci = j2 - 1
         if filters.failed() and q_err.byte_length() == 0:
@@ -3002,10 +3189,10 @@ def handle_ft_search(
             writer.append_error_response(_wmsg)
         elif q_err.byte_length() > 0:
             writer.append_error_response(q_err)   # gh #361 / #367
-        elif not blob_set or not hnsw.index_ready or hnsw.entry_point_id == -1:
-            # A created-but-unbuilt index: a well-formed empty reply, `[0]` —
-            # `[]` is not an FT.SEARCH reply shape (gh #361).
-            write_ft_search_response(writer, List[Int](), List[Float32](), keyspace, shared_hnsw)
+        elif k == 0 or not blob_set or not hnsw.index_ready or hnsw.entry_point_id == -1:
+            # KNN 0, or a created-but-unbuilt index: a well-formed empty reply,
+            # `[0]` — `[]` is not an FT.SEARCH reply shape (gh #361).
+            write_ft_search_response(writer, List[Int](), List[Float32](), keyspace, shared_hnsw, opts)
         else:
             var n_shards2 = 1
             if is_not_null(shared_hnsw): n_shards2 = shared_hnsw[].num_shards
@@ -3014,9 +3201,13 @@ def handle_ft_search(
             # overwrite each other's slots → lost results. Serialize: only
             # one deferred sharded query at a time; concurrent queries fall
             # through to the single-shard CPU path (lower recall but correct).
+            # A deferred reply is written later by drain_deferred_shard_responses,
+            # which keeps no RETURN / NOCONTENT / WITHSCORES: a query with them
+            # takes the synchronous path. (Sharding is off: num_shards is 1.)
             var use_sharding = (n_shards2 > 1 and hnsw.index_ready and filters.count == 0
                                 and is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].shard_bus)
-                                and deferred_count[] == 0)
+                                and deferred_count[] == 0
+                                and opts.mode == FT_REPLY_DEFAULT and not opts.with_scores)
 
             if use_sharding:
                 var shard_bus = shared_hnsw[].shard_bus
@@ -3143,7 +3334,7 @@ def handle_ft_search(
                     merged_scores.append(all_res_scores[ii])
                 drop_dead(shared_hnsw, merged_results, merged_scores, final_k)   # #46
 
-                write_ft_search_response(writer, merged_results, merged_scores, keyspace, shared_hnsw)
+                write_ft_search_response(writer, merged_results, merged_scores, keyspace, shared_hnsw, opts)
             else:
                 # gh #87.1: IVF-PQ search branch removed.
                 # §7: Adaptive GPU/CPU routing — GPU brute-force when idle,
@@ -3221,7 +3412,7 @@ def handle_ft_search(
                         if sk > n_total: sk = n_total
                         if sk > FT_FILTER_MAX_CANDIDATES: sk = FT_FILTER_MAX_CANDIDATES
                     _rescore_knn(hnsw, blob_ptr, filtered_ids, filtered_scores)
-                    write_ft_search_response(writer, filtered_ids, filtered_scores, keyspace, shared_hnsw)
+                    write_ft_search_response(writer, filtered_ids, filtered_scores, keyspace, shared_hnsw, opts)
                 else:
                     if use_gpu_search:
                         # §7v2: Metal FFI path (async dispatch_semaphore, proven).
@@ -3237,7 +3428,7 @@ def handle_ft_search(
                             blob_ptr, k, scratch_dists, ef_query,
                             p3_batch_start_node)
                     _rescore_knn(hnsw, blob_ptr, results2, scratch_dists)
-                    write_ft_search_response(writer, results2, scratch_dists, keyspace, shared_hnsw)
+                    write_ft_search_response(writer, results2, scratch_dists, keyspace, shared_hnsw, opts)
     else:
         # gh #361: `FT.SEARCH <index>` with no query is an arity error, not `[]`.
         writer.append_error_response("ERR wrong number of arguments for 'FT.SEARCH' command")

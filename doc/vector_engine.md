@@ -161,33 +161,43 @@ FT.SEARCH <index> "*=>[KNN <k> @<field> $blob EF_RUNTIME <ef> AS score]"
 - Extracts `k` by scanning the query string for `KNN `.
 - Extracts `EF_RUNTIME <ef>` from the query string if present; falls back to `hnsw.ef_runtime` (default 150).
 - Extracts `LIMIT offset count` from the outer token stream; if `count < k`, uses `count` as the result cap.
-- Finds the query vector blob in the PARAMS section by matching its byte size to `hnsw.dim * 4` (size-based routing — no name coupling between PARAMS and schema).
-- Calls `hnsw.search_fp32_scored(blob_ptr, k, dist_scores, ef_query)` with the resolved ef.
-- Returns a RESP2 FT.SEARCH-format response:
+- Resolves the query's `$<param>` (and an `EF_RUNTIME $<param>`) against PARAMS by name; the vector must be `hnsw.dim * 4` bytes.
+- Calls `hnsw.search_fp32_scored(blob_ptr, k, dist_scores, ef_query)` with the resolved ef. `KNN 0` returns an empty result.
+- Returns RediSearch's reply. In RESP2:
 
 ```
-*(1 + 2*N)\r\n  :N\r\n
+*(1 + N*(1 + W + C))\r\n  :N\r\n
 [for each result:
-  $<id_len>\r\n<id_str>\r\n   ← doc key
-  *4\r\n
-  $2\r\nid\r\n  $<id_len>\r\n<id_str>\r\n
-  $5\r\nscore\r\n  $<len>\r\n<L2_distance>\r\n
+  $<len>\r\n<doc key>\r\n
+  (WITHSCORES)  $1\r\n0\r\n          ← the query's text score, as below
+  (unless NOCONTENT)  *2M\r\n <M field/value pairs>
 ]
 ```
+
+`W` is 1 with `WITHSCORES`, `C` is 0 with `NOCONTENT` (or `RETURN 0`). The fields are:
+
+- **`RETURN n field [AS name] ...`**: the named hash fields, renamed by `AS`. The KNN score is the field named by the clause's `AS` alias, or `__<vector field>_score` without one, and comes first when named, as in RediSearch. A field the hash lacks is left out. `n` counts every token after it; a bad or short count answers RediSearch's own error (`Bad arguments for RETURN: ...`).
+- **No RETURN**: `id` (the doc hash's own `id` field, when it has one) and `score` (the distance, named `score` whatever the alias). RediSearch sends every field of the hash here, the embedding included; Pion's tools read `id` and `score` by name.
+- **`WITHSCORES`** reports the query's text score, not the distance, as RediSearch does: `0` for `*=>[KNN …]`. RediSearch reports a text score for a filter prefix too; Pion computes none and reports `0`.
+
+On a RESP3 connection (`HELLO 3`, and redis-py 8 by default) the reply is RediSearch's map: `attributes` `*0`, `format` `+STRING`, `results` (one map per document: `id`, `score` with WITHSCORES as a double, `extra_attributes` with the fields above unless NOCONTENT, `values` `*0`), `total_results`, `warning` `*0`. The BM25 and HYBRID forms of FT.SEARCH, and FT.HYBRID, ignore RETURN, NOCONTENT and WITHSCORES and send the no-RETURN fields.
 
 This shape is emitted at every worker count. Doc-key resolution order:
 shared `hk_keys_buf` slot→key map (one direct load; written by the fast-path
 vector HSET), then the keyspace `__hk__<slot>` probe (keys >31B that don't fit
-the shared map's 32-byte slots), then the numeric slot id. The `id` **value**
-is the doc hash's own `id` field when the doc hash is resolvable (what
-`RETURN 1 id` consumers and `tests/test_multiworker_recall.py` parse), else
-the doc key, else the slot number.
+the shared map's 32-byte slots), then the numeric slot id. Field values come
+from the doc hash on the worker answering the query. Under `-w N` the keyspace
+is per worker, so a worker that does not hold a document's hash sends none of
+its fields, as Redis leaves out a field a document lacks: it never substitutes
+the key or slot for a field it cannot see.
+`tests/test_ft_search_replies.py` checks every case against RediSearch's
+replies (`--oracle` runs the cases against RediSearch itself).
 
 ### FT.INFO
 ```
 FT.INFO <index>
 ```
-Returns a 4-element array (`index_name`, `<actual_name>`, `num_docs`, `<count>`) when `index_ready`, where `<actual_name>` is the exact index name stored at FT.CREATE time and `<count>` is `hnsw.num_nodes`. Returns `-ERR Unknown index name` when no index has been created.
+Returns `index_name` and `num_docs` (`hnsw.num_nodes` once built, 0 before): a 4-element array of bulk strings in RESP2, a map with `num_docs` an integer in RESP3. Returns `-ERR Unknown index name` for a name the server does not hold. RediSearch's FT.INFO has more fields (`attributes`, sizes, statistics); Pion sends these two.
 
 ### FT.OPTIMIZE
 ```

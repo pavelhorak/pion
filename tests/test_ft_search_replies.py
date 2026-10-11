@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FT.SEARCH, FT.HYBRID and FT.INFO answer in RediSearch's RESP3 shape on a RESP3 connection.
+"""FT.SEARCH replies as RediSearch's: RESP3 maps, and RETURN / NOCONTENT / WITHSCORES / KNN 0.
 
 redis-py 8 negotiates RESP3 by default, and its search module then reads
 FT.SEARCH and FT.INFO replies as RESP3 maps. Pion sent its RESP2 arrays on
@@ -7,22 +7,35 @@ every connection, so with redis-py's default settings `r.ft().search()` and
 `r.ft().info()` failed inside redis-py (AttributeError). Pion's own tests pin
 protocol=2, which is how it went unnoticed.
 
-The expected shapes are RediSearch's own replies (redis-stack 7.4):
-  FT.SEARCH  %5 attributes *0 / format +STRING / results *N / total_results :N / warning *0,
-             each result %3 id $key / extra_attributes %M (field -> value) / values *0
-  FT.INFO    a map; num_docs is an integer
+FT.SEARCH also ignored RETURN, NOCONTENT and WITHSCORES and refused KNN 0, in
+both protocols. RETURN body (fetch the text: RAG's basic call) came back
+without the text, NOCONTENT turned each document into two "documents" in
+redis-py, WITHSCORES crashed redis-py's parser.
 
-Checks:
-  - RESP3 FT.SEARCH (KNN, BM25, an index not built yet) and FT.HYBRID: that map,
-    exactly, with one result map per document and its fields under
-    extra_attributes (a document without an `id` field carries only `score`);
-  - RESP3 FT.INFO: a map, num_docs an integer;
-  - RESP2 replies keep their array shape;
-  - a RESP3 FT.SEARCH with a PING pipelined behind it: exactly two replies;
-  - with redis-py >= 6 installed, its default connection: ft().search() and
-    ft().info() work.
+The expected replies are RediSearch's own (redis-stack 7.4), for the same
+data and queries:
+  FT.SEARCH  RESP3 %5 attributes *0 / format +STRING / results *N / total_results :N / warning *0,
+             each result a map: id, score (WITHSCORES), extra_attributes (unless NOCONTENT), values *0
+  RETURN     the named fields, renamed by AS, the KNN score first when named
+             (its AS alias, or __<field>_score), a field the hash lacks left out;
+             RETURN 0 is NOCONTENT; NOCONTENT wins over RETURN
+  WITHSCORES the query's text score, 0 for `*=>[KNN ...]`
+  KNN 0      an empty result
+  FT.INFO    RESP3 a map; num_docs an integer
+Without RETURN, Pion sends the doc's `id` field and `score`, where RediSearch
+sends every field of the hash. That difference is deliberate and checked here.
 
-    python3 tests/test_resp3_ft_replies.py [--port 1974]
+Checks: every case in RESP2 and RESP3 with a strict parser; RETURN's two
+errors, word for word; a field named like an option inside RETURN; the BM25
+form, FT.HYBRID and an index not built yet in RESP3; a pipelined PING behind
+a RESP3 FT.SEARCH; with redis-py >= 6 installed, its default connection.
+
+    python3 tests/test_ft_search_replies.py [--port 1974]
+    python3 tests/test_ft_search_replies.py --oracle --port <RediSearch port>
+        runs the option cases against RediSearch itself (redis-stack-server),
+        all but Pion's no-RETURN default: the expected replies must be its own.
+        Keep it off any running Pion's port + 2 + worker: Pion listens there
+        too (its affinity ports), and the "oracle" is then Pion.
 """
 from __future__ import annotations
 
@@ -30,6 +43,7 @@ import argparse
 import socket
 import struct
 import sys
+import time
 
 FAILS: list[str] = []
 DOCS = {  # key -> (vector, id field or None, body)
@@ -179,10 +193,124 @@ def doc_fields(d) -> tuple[str, dict]:
     return key, {k[1].decode(): v[1].decode() for k, v in attrs[1]} if attrs[0] == "%" else None
 
 
+
+def _is_num(v: str) -> bool:
+    try:
+        float(v)
+        return True
+    except ValueError:
+        return False
+
+
+def norm2(reply, ws: bool, content: bool):
+    """A RESP2 FT.SEARCH reply as (total, [(key, text_score, fields)]); the
+    KNN score's value is masked, since RediSearch prints more digits."""
+    if reply[0] == "-":
+        return reply
+    items = reply[1]
+    total, docs, i = items[0][1], [], 1
+    while i < len(items):
+        key = items[i][1].decode()
+        i += 1
+        ts = None
+        if ws:
+            ts = items[i][1].decode()
+            i += 1
+        fields = None
+        if content:
+            arr = items[i][1]
+            i += 1
+            fields = [(arr[j][1].decode(), arr[j + 1][1].decode()) for j in range(0, len(arr), 2)]
+        docs.append((key, ts, fields))
+    return mask(total, docs)
+
+
+def norm3(reply, ws: bool, content: bool):
+    """The same for a RESP3 reply; also checks each result map's key order."""
+    if reply[0] == "-":
+        return reply
+    docs = []
+    want_keys = ["id"] + (["score"] if ws else []) + (["extra_attributes"] if content else []) + ["values"]
+    for d in map_get(reply, "results")[1]:
+        if map_keys(d) != want_keys:
+            return ("keys", map_keys(d))
+        s = map_get(d, "score")
+        ea = map_get(d, "extra_attributes")
+        docs.append((map_get(d, "id")[1].decode(), s[1] if s else None,
+                     [(k[1].decode(), v[1].decode()) for k, v in ea[1]] if ea else None))
+    return mask(map_get(reply, "total_results")[1], docs)
+
+
+def mask(total, docs):
+    out = []
+    for key, ts, fields in docs:
+        if fields is not None:
+            fields = [(k, "<f>" if (k in ("score", "__vector_score") and _is_num(v)) else v)
+                      for k, v in fields]
+        out.append((key, ts, fields))
+    return (total, out)
+
+
+D0, D3 = "r3doc:0", "r3doc:3"   # the two nearest to QUERY; r3doc:3 has no id field
+KNN2 = "*=>[KNN 2 @vector $vec AS score]"
+P = ["PARAMS", 2, "vec", QUERY]
+OPTION_CASES = [
+    # (name, FT.SEARCH arguments after the index, WITHSCORES, content, expected)
+    ("RETURN 3 body id score: the score first, a missing id left out",
+     [KNN2, *P, "SORTBY", "score", "RETURN", 3, "body", "id", "score", "DIALECT", 2], False, True,
+     (2, [(D0, None, [("score", "<f>"), ("body", "alpha bravo"), ("id", "0")]),
+          (D3, None, [("score", "<f>"), ("body", "alpha foxtrot")])])),
+    ("RETURN 2 id body: requested order",
+     [KNN2, *P, "SORTBY", "score", "RETURN", 2, "id", "body", "DIALECT", 2], False, True,
+     (2, [(D0, None, [("id", "0"), ("body", "alpha bravo")]), (D3, None, [("body", "alpha foxtrot")])])),
+    ("RETURN 1 nosuch: no fields",
+     [KNN2, *P, "SORTBY", "score", "RETURN", 1, "nosuch", "DIALECT", 2], False, True,
+     (2, [(D0, None, []), (D3, None, [])])),
+    ("RETURN 0 is NOCONTENT",
+     [KNN2, *P, "SORTBY", "score", "RETURN", 0, "DIALECT", 2], False, False,
+     (2, [(D0, None, None), (D3, None, None)])),
+    ("RETURN 3 body AS text",
+     [KNN2, *P, "SORTBY", "score", "RETURN", 3, "body", "AS", "text", "DIALECT", 2], False, True,
+     (2, [(D0, None, [("text", "alpha bravo")]), (D3, None, [("text", "alpha foxtrot")])])),
+    ("NOCONTENT WITHSCORES",
+     [KNN2, *P, "SORTBY", "score", "NOCONTENT", "WITHSCORES", "DIALECT", 2], True, False,
+     (2, [(D0, "0", None), (D3, "0", None)])),
+    ("WITHSCORES RETURN 1 id, no SORTBY",
+     [KNN2, *P, "WITHSCORES", "RETURN", 1, "id", "DIALECT", 2], True, True,
+     (2, [(D0, "0", [("id", "0")]), (D3, "0", [])])),
+    ("no AS: the score is __vector_score",
+     ["*=>[KNN 2 @vector $vec]", *P, "RETURN", 2, "id", "__vector_score", "DIALECT", 2], False, True,
+     (2, [(D0, None, [("__vector_score", "<f>"), ("id", "0")]), (D3, None, [("__vector_score", "<f>")])])),
+    ("RETURN 1 withscores names a field, not the option",
+     [KNN2, *P, "SORTBY", "score", "RETURN", 1, "withscores", "DIALECT", 2], False, True,
+     (2, [(D0, None, []), (D3, None, [])])),
+    ("NOCONTENT before RETURN wins",
+     [KNN2, *P, "NOCONTENT", "RETURN", 1, "id", "DIALECT", 2], False, False,
+     (2, [(D0, None, None), (D3, None, None)])),
+    ("NOCONTENT after RETURN wins",
+     [KNN2, *P, "RETURN", 1, "id", "NOCONTENT", "DIALECT", 2], False, False,
+     (2, [(D0, None, None), (D3, None, None)])),
+    ("KNN 0 is an empty result",
+     ["*=>[KNN 0 @vector $vec AS score]", *P, "RETURN", 1, "id", "DIALECT", 2], False, True, (0, [])),
+    ("RETURN 5 id: too few arguments",
+     [KNN2, *P, "RETURN", 5, "id", "DIALECT", 2], False, True,
+     ("-", "Bad arguments for RETURN: Expected an argument, but none provided")),
+    ("RETURN x id: not a number",
+     [KNN2, *P, "RETURN", "x", "id", "DIALECT", 2], False, True,
+     ("-", "Bad arguments for RETURN: Could not convert argument to expected type")),
+    ("no RETURN: Pion's id and score (RediSearch sends every field)",
+     [KNN2, *P, "SORTBY", "score", "DIALECT", 2], False, True,
+     (2, [(D0, None, [("id", "0"), ("score", "<f>")]), (D3, None, [("score", "<f>")])])),
+]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=1974)
-    port = ap.parse_args().port
+    ap.add_argument("--oracle", action="store_true",
+                    help="the server is RediSearch: check only the option cases")
+    a = ap.parse_args()
+    port = a.port
 
     c3 = Conn(port, 3)
     c2 = Conn(port, 2)
@@ -201,6 +329,24 @@ def main() -> int:
     knn = ["FT.SEARCH", "idx", "*=>[KNN 6 @vector $vec EF_RUNTIME 10 AS score]",
            "PARAMS", 2, "vec", QUERY, "SORTBY", "score", "RETURN", 2, "id", "score",
            "LIMIT", 0, 6, "DIALECT", 2]
+
+    if a.oracle:
+        # A RediSearch that has just started can answer before it has indexed
+        # these hashes; wait until it reports all of them.
+        for _ in range(50):
+            if map_get(c3.cmd("FT.INFO", "idx"), "num_docs") == (":", len(DOCS)):
+                break
+            time.sleep(0.1)
+        for proto, conn, norm in ((2, c2, norm2), (3, c3, norm3)):
+            for name, args, ws, content, want in OPTION_CASES:
+                if name.startswith("no RETURN"):
+                    continue
+                got = norm(conn.cmd("FT.SEARCH", "idx", *args), ws, content)
+                check(f"oracle RESP{proto} {name}", got == want, f"got {got!r}")
+        c3.cmd("FT.DROPINDEX", "idx")
+        c3.cmd("DEL", *DOCS)
+        print(f"\n{'FAIL' if FAILS else 'PASS'}: {len(FAILS)} failure(s)")
+        return 1 if FAILS else 0
 
     print("RESP3, index created but not built")
     check_search_map("unbuilt FT.SEARCH", c3.cmd(*knn), expect_n=0)
@@ -251,6 +397,16 @@ def main() -> int:
     check("PING behind FT.SEARCH answers PONG", pong == ("+", "PONG"), repr(pong))
     extra = c3.pending()
     check("nothing after the two replies", extra == b"", repr(extra[:80]))
+
+    for proto, conn, norm in ((2, c2, norm2), (3, c3, norm3)):
+        print(f"RESP{proto} options, against RediSearch's replies")
+        for name, args, ws, content, want in OPTION_CASES:
+            reply = conn.cmd("FT.SEARCH", "idx", *args)
+            try:
+                got = norm(reply, ws, content)
+            except (AttributeError, IndexError, TypeError, ValueError):
+                got = ("not this shape", reply)   # e.g. fields where NOCONTENT wants none
+            check(f"RESP{proto} {name}", got == want, f"got {got!r}"[:300])
 
     print("RESP2 unchanged")
     r2 = c2.cmd(*knn)
