@@ -6,6 +6,34 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-10-11
+
+FT.SEARCH, FT.HYBRID and FT.INFO answer RESP3 connections with
+RediSearch's maps, so redis-py 8's `ft().search()` and `ft().info()` work
+against Pion with default settings. FT.SEARCH also honours `RETURN`,
+`NOCONTENT` and `WITHSCORES`, and a KNN query without `RETURN` sends the
+score and every field of the hash, as RediSearch does. Code that indexes a
+raw reply as a list, or reads the score by the name `score` without
+`AS score`, needs the change described under Changed. `--io-threads N`
+serves one keyspace from N threads. The full test tier passes on macOS as
+well as on Linux (x86-64 and arm64): the four macOS failures 0.9.8 shipped
+with were test bugs.
+
+### Added
+
+- **`--io-threads N`: one keyspace served by N threads.** `-w N` gives N
+  independent keyspaces; `--io-threads N` (with `-w 1`) keeps one, as Redis's
+  `io-threads` does: the worker thread executes every command, and N − 1 I/O
+  threads accept, receive and send. The executor still owns every piece of
+  command state, so nothing it runs takes a lock. The I/O threads poll with
+  epoll on Linux and kqueue on macOS. The default stays 1, the single-thread
+  loop, which measured the same as before on the Mac KV gate (geometric mean
+  1.0000 over 21 rows, paired). On a Mac with the client on the same machine
+  it lowers throughput, as Redis's `io-threads` does there
+  ([Mac results](benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)). It is
+  meant for a Linux server with cores to spare; those numbers are not in yet.
+  `PION_IO_THREADS=N` makes N the default for every server a test tier starts.
+
 ### Changed
 
 - **A KNN `FT.SEARCH` without `RETURN` sends what RediSearch sends: the
@@ -28,21 +56,6 @@ enumerated — there were roughly 1,100 of them.
   with `protocol=2`. The README's quick start uses `r.ft().search()` now, and
   Pion's integrations (pion-mcp, pion-autogen, pion-llamaindex, pion_context,
   pion-serve) ask for RESP2, so they keep working on redis-py 8.
-
-### Added
-
-- **`--io-threads N`: one keyspace served by N threads.** `-w N` gives N
-  independent keyspaces; `--io-threads N` (with `-w 1`) keeps one, as Redis's
-  `io-threads` does: the worker thread executes every command, and N − 1 I/O
-  threads accept, receive and send. The executor still owns every piece of
-  command state, so nothing it runs takes a lock. The I/O threads poll with
-  epoll on Linux and kqueue on macOS. The default stays 1, the single-thread
-  loop, which measured the same as before on the Mac KV gate (geometric mean
-  1.0000 over 21 rows, paired). On a Mac with the client on the same machine
-  it lowers throughput, as Redis's `io-threads` does there
-  ([Mac results](benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)). It is
-  meant for a Linux server with cores to spare; those numbers are not in yet.
-  `PION_IO_THREADS=N` makes N the default for every server a test tier starts.
 
 ### Fixed
 
