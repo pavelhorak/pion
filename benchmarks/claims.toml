@@ -1175,29 +1175,11 @@ expect = ["insert_duration=11.4326", "insert_duration=10.5776", "insert_duration
 
 [[claim]]
 file = "README.md"
-where = "| Peak KV throughput |"
-numbers = ["15.9M ops/sec", "15.9M", "14.8M", "12.4M", "11.6M", "2.97M", "1.66M"]
+where = "| KV throughput |"
+numbers = ["2.97M ops/sec", "2.97M", "1.66M", "7.18M", "6.10M"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md", "benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
-expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |", "| single_pion_io8_P10 | 3 | 2,972,713 |", "| single_redis_io8_P10 | 3 | 1,661,596 |"]
-
-[[claim]]
-file = "README.md"
-where = "**Across all cores:** sixteen Redis processes"
-numbers = ["15864842", "14780031", "12372245", "11640929"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md"]
-expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |"]
-note = "bare numbers the checker does not flag; recorded so their evidence is still checked"
-
-[[claim]]
-file = "README.md"
-where = "**A withdrawn headline:**"
-numbers = ["13750187"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md"]
-expect = ["| april_pion_w32_t16c50_d64 | 3 | 13,750,187 |"]
-note = "bare number the checker does not flag; recorded so its evidence is still checked"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| single_pion_io8_P10 | 3 | 2,972,713 |", "| single_redis_io8_P10 | 3 | 1,661,596 |", "| shard_redis_x16_P10 | 3 | 7,178,453 |", "| shard_pion_w16_P10 | 3 | 6,097,719 |"]
 
 [[claim]]
 file = "README.md"

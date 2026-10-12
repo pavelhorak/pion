@@ -130,7 +130,7 @@ def build(out_dir: Path) -> Path:
     glance = {r[0]: r[1] for r in table_rows(S.section(readme, "## At a Glance")) if len(r) == 2}
     def g(key):
         return inline(glance.get(key, ""))
-    tile_kv = g('Peak KV throughput')
+    tile_kv = g('KV throughput')
     tile_vec = f"QPS {g('Vector QPS')} · Recall@100 {g('Recall@100')}"
     tile_dur = g("Persistence")
 

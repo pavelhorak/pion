@@ -14,6 +14,13 @@ enumerated — there were roughly 1,100 of them.
   The README and the landing page no longer say that Redis's I/O threads win at
   shallow pipelines. Raw output:
   `benchmarks/results/2026-10-12-linux-epyc-8124p/`.
+- **The 32-keyspace KV figure (15.9M ops/sec) is no longer quoted.** In those runs
+  Pion's 800 connections landed on about half of its 32 workers, while each Redis
+  process got exactly its own client's. The idle workers left the shared machine's
+  CPU to the client, so the runs measured that asymmetry, not either server. The
+  2026-10-06 results page explains it from the GET hit rates. The KV tile now leads
+  with one keyspace (2.97M against Redis's 1.66M at P=10), next to the 16-keyspace
+  comparison, where Redis leads.
 
 ## [0.9.9] — 2026-10-11
 

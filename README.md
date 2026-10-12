@@ -215,15 +215,20 @@ client on the same machine, they lower throughput, for Redis too
 ([2026-10-10](benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)).
 
 **Across all cores:** sixteen Redis processes beat Pion's sixteen workers by
-13–18%. Using the second hardware thread of every core (32 keyspaces each side,
-32 client threads, P=50), Pion leads with 64-byte values (15,864,842 against
-14,780,031) and Redis with 256-byte values (12,372,245 against 11,640,929).
+13–18%, both sides as sixteen independent keyspaces.
+
+**Runs that are not a comparison:** the same day's 32-keyspace runs used every
+hardware thread on both sides, with the client on the same machine. In them,
+Pion's connections landed on about half of its 32 workers, while each Redis
+process got exactly its own client's connections. The GET hit rates show it, and
+the half-idle workers left the shared CPUs to the client. Those runs measure that
+asymmetry, not either server. Their raw output and the analysis are in the
+[2026-10-06 results](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
 
 **A withdrawn headline:** this README used to carry 14.0M ops/sec, 10.2× Redis.
-It had no surviving raw log, and it set Pion's 32 independent keyspaces against
-a single Redis instance. April's own configuration, re-run on this server,
-measured 13,750,187 with 64-byte values: the old number's ballpark, now with raw
-output. The like-for-like comparison is above.
+It had no surviving raw log, it set Pion's 32 independent keyspaces against a
+single Redis instance, and its configuration has the same asymmetry. It is
+withdrawn; the comparisons above are the like-for-like ones.
 
 > **Worker-count caveat.** Every number above `w > 1` is measured with
 > `--independent-workers`, and that flag changes the semantics: workers are
@@ -606,7 +611,7 @@ removed, and each carries an **Experimental** banner on its own page.
 | Headline | **Shared KV Cache** — at a 2K prefix on Llama-3.2-1B-4bit, first token in 69.0 ms from a separate process over the wire and 46.2 ms in the same process, against 1,193 ms cold and 37.0 ms from mlx-lm's own prompt-cache file; BLEU 1.000 cross-instance |
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |
-| Peak KV throughput | **15.9M ops/sec** across 32 keyspaces at P=50 with 64-byte values (32 Redis 8.10.2 processes: 14.8M; at 256 bytes Redis leads, 12.4M to 11.6M) · **2.97M** on one keyspace at P=10 with `--io-threads 8` (Redis with `io-threads 8`: 1.66M) — [2026-10-06](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md), [2026-10-12](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md) |
+| KV throughput | **2.97M ops/sec** on one keyspace at P=10 with `--io-threads 8` (Redis 8.10.2 with `io-threads 8`: 1.66M) · across all 16 cores, 16 independent keyspaces each side, Redis leads: 7.18M to 6.10M at P=10 — [2026-10-12](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md), [2026-10-06](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md) |
 | Vector QPS | 7,339 at 10 clients on Linux at recall 0.960, 8,544 at 0.939 (Redis 8.10.2 vector sets: 8,039 at 0.920); 8,729 on an M4 Mac mini |
 | Recall@100 | 0.960 at that QPS (Redis vector sets: 0.920); INT8, ef=150 |
 | P99 latency | 1.4 ms on Linux, 0.6 ms on an M4 Mac mini (vector search, one client) |
