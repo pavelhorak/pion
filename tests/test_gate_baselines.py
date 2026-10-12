@@ -197,6 +197,62 @@ lowered = [m for m in range(100_000, 3_000_000, 50_000)
            if propose(1_979_166, m)[0] < 1_979_166]
 check("no median value can lower a floor", not lowered, f"lowered at {lowered[:3]}")
 
+print("\n[placement] server and client in one L3 domain (gh #480)")
+import tempfile
+
+
+def fake_sysfs(root, l3, siblings):
+    """Write cpu<N>/cache/index3/shared_cpu_list and topology/thread_siblings_list.
+    l3/siblings map cpu -> list text, or None to leave the file out."""
+    for cpu in siblings:
+        d = os.path.join(root, f"cpu{cpu}")
+        os.makedirs(os.path.join(d, "topology"), exist_ok=True)
+        with open(os.path.join(d, "topology", "thread_siblings_list"), "w") as f:
+            f.write(siblings[cpu] + "\n")
+        if l3 and l3.get(cpu):
+            os.makedirs(os.path.join(d, "cache", "index3"), exist_ok=True)
+            with open(os.path.join(d, "cache", "index3", "shared_cpu_list"), "w") as f:
+                f.write(l3[cpu] + "\n")
+
+
+with tempfile.TemporaryDirectory() as root:
+    # EPYC 8124P as measured: 16 cores x 2 threads, cpu n's sibling is n+16,
+    # 4 L3 domains of 4 cores ({0-3,16-19}, {4-7,20-23}, ...).
+    l3, sib = {}, {}
+    for cpu in range(32):
+        core = cpu % 16
+        lo = core - core % 4
+        l3[cpu] = f"{lo}-{lo + 3},{lo + 16}-{lo + 19}"
+        sib[cpu] = f"{core},{core + 16}"
+    fake_sysfs(root, l3, sib)
+    p = vkbench.l3_placement(root, set(range(32)))
+    check("8124P: server on the domain's second core with its SMT sibling",
+          p and p[0] == {1, 17}, str(p))
+    check("8124P: client on the domain's other cores, never the server's sibling",
+          p and p[1] == {0, 2, 3, 16, 18, 19} and not (p[0] & p[1]), str(p))
+    check("8124P: both in the L3 domain of the lowest CPU", p and p[2] == set(range(4)) | set(range(16, 20)), str(p))
+    # A restricted affinity mask (e.g. a container on domain 1 only) picks that domain.
+    p = vkbench.l3_placement(root, set(range(4, 8)) | set(range(20, 24)))
+    check("8124P, allowed = domain 1 only: server 5,21, client 4,6,7,20,22,23",
+          p and p[0] == {5, 21} and p[1] == {4, 6, 7, 20, 22, 23}, str(p))
+
+with tempfile.TemporaryDirectory() as root:
+    # A 4-vCPU VM that reports no L3: one domain; cores {0,1} and {2,3}.
+    fake_sysfs(root, None, {0: "0-1", 1: "0-1", 2: "2-3", 3: "2-3"})
+    p = vkbench.l3_placement(root, {0, 1, 2, 3})
+    check("no L3 reported: the allowed CPUs are one domain, split by core",
+          p and p[0] == {2, 3} and p[1] == {0, 1}, str(p))
+
+with tempfile.TemporaryDirectory() as root:
+    # One physical core: nowhere to put the client apart from the server.
+    fake_sysfs(root, {0: "0-1", 1: "0-1"}, {0: "0-1", 1: "0-1"})
+    check("one physical core: no placement", vkbench.l3_placement(root, {0, 1}) is None)
+
+check("--pin off and macOS run unpinned: _pinned(None) adds no preexec_fn",
+      vkbench._pinned(None) is None and vkbench._pinned(set()) is None)
+check("cpu-list parsing", vkbench._cpu_list("0-3,16-19\n") == {0, 1, 2, 3, 16, 17, 18, 19}
+      and vkbench._fmt_cpus({17, 1}) == "1,17")
+
 print(f"\n{'='*60}")
 print(f"Gate baseline tests: {passed} passed, {failed} failed")
 print(f"{'='*60}")
