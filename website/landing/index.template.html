@@ -299,7 +299,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
           <h3>The Redis wire, clients unchanged</h3>
           <p>RESP2 and RESP3. redis-py, go-redis, ioredis, Valkey GLIDE, RedisVL, LangChain and LMCache's RedisConnector talk to Pion as they are.</p>
           <p class="fig">{{tile_kv_fig}}</p>
-          <p class="caveat">Numbers above one worker use <code>--independent-workers</code>: N independent keyspaces. Against Redis 8.10.2 on the same server Pion wins at deep pipelines and loses to Redis's I/O threads at shallow ones; the README has both.</p>
+          <p class="caveat">Numbers above one worker use <code>--independent-workers</code>: N independent keyspaces. On one keyspace on a Linux server, Pion with I/O threads leads Redis 8.10.2 with I/O threads at every pipeline depth. The README has every configuration, including the ones where Redis leads.</p>
         </div>
         <div class="tile">
           <h3>Vector search in the same process</h3>

@@ -1043,27 +1043,27 @@ expect = ["--test-time=30"]
 
 [[claim]]
 file = "README.md"
-where = "| P=1 | 107,896 |"
-numbers = ["107896", "388405", "112019"]
+where = "| P=1 | 110,044 |"
+numbers = ["110044", "386278", "114909", "515267"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_redis_io1_P1 | 3 | 107,896 |", "| single_redis_io8_P1 | 3 | 388,405 |", "| single_pion_w1_P1 | 3 | 112,019 |"]
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P1 | 3 | 110,044 |", "| single_redis_io8_P1 | 3 | 386,278 |", "| single_pion_io1_P1 | 3 | 114,909 |", "| single_pion_io8_P1 | 3 | 515,267 |"]
 
 [[claim]]
 file = "README.md"
-where = "| P=10 | 643,517 |"
-numbers = ["643517", "1655550", "877766"]
+where = "| P=10 | 640,985 |"
+numbers = ["640985", "1661596", "895149", "2972713"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_redis_io1_P10 | 3 | 643,517 |", "| single_redis_io8_P10 | 3 | 1,655,550 |", "| single_pion_w1_P10 | 3 | 877,766 |"]
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P10 | 3 | 640,985 |", "| single_redis_io8_P10 | 3 | 1,661,596 |", "| single_pion_io1_P10 | 3 | 895,149 |", "| single_pion_io8_P10 | 3 | 2,972,713 |"]
 
 [[claim]]
 file = "README.md"
-where = "| P=50 | 987,970 |"
-numbers = ["987970", "1376680", "1712725"]
+where = "| P=50 | 979,984 |"
+numbers = ["979984", "1368935", "1703363", "3909190"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_redis_io1_P50 | 3 | 987,970 |", "| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |"]
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P50 | 3 | 979,984 |", "| single_redis_io8_P50 | 3 | 1,368,935 |", "| single_pion_io1_P50 | 3 | 1,703,363 |", "| single_pion_io8_P50 | 3 | 3,909,190 |"]
 
 [[claim]]
 file = "README.md"
@@ -1083,16 +1083,43 @@ expect = ["| shard_redis_x16_P50 | 3 | 11,128,400 |", "| shard_pion_w16_P50 | 3 
 
 [[claim]]
 file = "README.md"
-where = "On one keyspace, Redis with I/O threads is faster"
-numbers = ["24%", "1,213,746 ops/sec", "43%", "18%"]
+where = "- **Ratios:** 1.33× at P=1"
+numbers = ["1.33×", "1.79×", "2.86×"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |", "| durable_redis_io4_aof_P10 | 3 | 1,213,746 |", "| durable_pion_w1_wal_P10 | 3 | 847,249 |", "| shard_redis_x16_P10 | 3 | 7,178,453 |", "| shard_pion_w16_P10 | 3 | 6,097,719 |"]
-note = "1,712,725/1,376,680 = 1.244; 1,213,746/847,249 = 1.433; 7,178,453/6,097,719 = 1.177"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_pion_io8_P1 | 3 | 515,267 |", "| single_redis_io8_P1 | 3 | 386,278 |", "| single_pion_io8_P10 | 3 | 2,972,713 |", "| single_redis_io8_P10 | 3 | 1,661,596 |", "| single_pion_io8_P50 | 3 | 3,909,190 |", "| single_redis_io8_P50 | 3 | 1,368,935 |"]
+note = "515,267/386,278 = 1.334; 2,972,713/1,661,596 = 1.789; 3,909,190/1,368,935 = 2.856"
 
 [[claim]]
 file = "README.md"
-where = "On one keyspace, Redis with I/O threads is faster"
+where = "**With durability on (P=10):**"
+numbers = ["2.1×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| durable_pion_io8_wal_P10 | 3 | 2,724,529 |", "| durable_redis_io8_aof_P10 | 3 | 1,297,102 |"]
+note = "2,724,529/1,297,102 = 2.100"
+
+[[claim]]
+file = "README.md"
+where = "**Across all cores:** sixteen Redis processes"
+numbers = ["18%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| shard_redis_x16_P10 | 3 | 7,178,453 |", "| shard_pion_w16_P10 | 3 | 6,097,719 |"]
+note = "7,178,453/6,097,719 = 1.177"
+
+[[claim]]
+file = "doc/networking.md"
+where = "- **Measured on a Linux server:**"
+numbers = ["1.33×", "1.79×", "2.86×", "2.1×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_pion_io8_P1 | 3 | 515,267 |", "| single_redis_io8_P1 | 3 | 386,278 |", "| single_pion_io8_P10 | 3 | 2,972,713 |", "| single_redis_io8_P10 | 3 | 1,661,596 |", "| single_pion_io8_P50 | 3 | 3,909,190 |", "| single_redis_io8_P50 | 3 | 1,368,935 |", "| durable_pion_io8_wal_P10 | 3 | 2,724,529 |", "| durable_redis_io8_aof_P10 | 3 | 1,297,102 |"]
+note = "same ratios as the README's one-keyspace list"
+
+[[claim]]
+file = "README.md"
+where = "**A withdrawn headline:**"
 numbers = ["14.0M ops/sec", "10.2×", "14.0M"]
 kind = "arithmetic"
 note = "the withdrawn headline, quoted to say it is withdrawn"
@@ -1149,19 +1176,28 @@ expect = ["insert_duration=11.4326", "insert_duration=10.5776", "insert_duration
 [[claim]]
 file = "README.md"
 where = "| Peak KV throughput |"
-numbers = ["15.9M ops/sec", "15.9M", "14.8M", "12.4M", "11.6M", "1.71M", "1.38M"]
+numbers = ["15.9M ops/sec", "15.9M", "14.8M", "12.4M", "11.6M", "2.97M", "1.66M"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |", "| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |"]
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md", "benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |", "| single_pion_io8_P10 | 3 | 2,972,713 |", "| single_redis_io8_P10 | 3 | 1,661,596 |"]
 
 [[claim]]
 file = "README.md"
-where = "On one keyspace, Redis with I/O threads is faster"
-numbers = ["15864842", "14780031", "12372245", "11640929", "13750187"]
+where = "**Across all cores:** sixteen Redis processes"
+numbers = ["15864842", "14780031", "12372245", "11640929"]
 kind = "result"
 evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md"]
-expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |", "| april_pion_w32_t16c50_d64 | 3 | 13,750,187 |"]
+expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |"]
 note = "bare numbers the checker does not flag; recorded so their evidence is still checked"
+
+[[claim]]
+file = "README.md"
+where = "**A withdrawn headline:**"
+numbers = ["13750187"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md"]
+expect = ["| april_pion_w32_t16c50_d64 | 3 | 13,750,187 |"]
+note = "bare number the checker does not flag; recorded so its evidence is still checked"
 
 [[claim]]
 file = "README.md"

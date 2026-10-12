@@ -6,6 +6,15 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Changed
+
+- **The README's one-keyspace KV table is re-measured with `--io-threads`.** On
+  an AMD EPYC 8124P (2026-10-12), Pion 0.9.9 at `--io-threads 8` led Redis 8.10.2
+  at `io-threads 8` at every pipeline depth, and with both persisting at P=10.
+  The README and the landing page no longer say that Redis's I/O threads win at
+  shallow pipelines. Raw output:
+  `benchmarks/results/2026-10-12-linux-epyc-8124p/`.
+
 ## [0.9.9] — 2026-10-11
 
 FT.SEARCH, FT.HYBRID and FT.INFO answer RESP3 connections with

@@ -173,40 +173,57 @@ RESP2 or RESP3. Reference:
 [`doc/command_matrix.md`](doc/command_matrix.md),
 [`doc/persistence.md`](doc/persistence.md).
 
-Against Redis 8.10.2, Pion wins some configurations and loses others. The KV
-and vector numbers below are one Linux server, both engines measured the same
-day with the same client settings: an AMD EPYC 8124P (16 cores), Redis 8.10.2
-built from source, Pion 0.9.5 built as the release builds it. Raw output,
-scripts and method:
-[`benchmarks/results/2026-10-06-linux-epyc-8124p/`](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
+Against Redis 8.10.2, Pion wins some configurations and loses others. Every
+number below comes from one Linux server, an AMD EPYC 8124P (16 cores). Both
+engines were measured the same day with the same client settings: Redis 8.10.2
+built from source, Pion built as the release builds it. The one-keyspace numbers
+are from 2026-10-12 (Pion 0.9.9). The all-cores and vector numbers are from
+2026-10-06 (Pion 0.9.5). Raw output, scripts and method:
+[`2026-10-12`](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md),
+[`2026-10-06`](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
 
 **KV throughput** (memtier, 256-byte values, 1:10 SET:GET over 1M keys, 30 s a
 run, median of 3, ops/sec):
 
-| One keyspace, ops/sec | Redis, 1 thread | Redis, `io-threads 8` | **Pion `-w 1`** |
-|---|---:|---:|---:|
-| P=1 | 107,896 | **388,405** | 112,019 |
-| P=10 | 643,517 | **1,655,550** | 877,766 |
-| P=50 | 987,970 | 1,376,680 | **1,712,725** |
+| One keyspace, ops/sec | Redis, 1 thread | Redis, `io-threads 8` | Pion, 1 thread | **Pion, `--io-threads 8`** |
+|---|---:|---:|---:|---:|
+| P=1 | 110,044 | 386,278 | 114,909 | **515,267** |
+| P=10 | 640,985 | 1,661,596 | 895,149 | **2,972,713** |
+| P=50 | 979,984 | 1,368,935 | 1,703,363 | **3,909,190** |
 
 | All 16 cores, 16 independent keyspaces, ops/sec | 16 Redis processes | **Pion `-w 16`** |
 |---|---:|---:|
 | P=10 | **7,178,453** | 6,097,719 |
 | P=50 | **11,128,400** | 9,848,658 |
 
-On one keyspace, Redis with I/O threads is faster than Pion's single worker
-except at a deep pipeline (P=50), where Pion leads by 24%; against
-single-threaded Redis, Pion leads at every depth. With durability on (P=10),
-Redis's AOF (`everysec`, `io-threads 4`) measured 1,213,746 ops/sec and Pion's WAL
-847,249, Redis ahead by 43%. Across all cores, sixteen Redis processes
-beat Pion's sixteen workers by 13–18%. Using the second hardware thread of every
-core — 32 keyspaces each side, 32 client threads, P=50 — Pion leads with 64-byte
-values (15,864,842 against 14,780,031) and Redis with 256-byte values (12,372,245
-against 11,640,929). The results directory also has Redis at `io-threads 4`. The headline this README used to carry — 14.0M ops/sec, 10.2×
-Redis — had no surviving raw log and set Pion's 32 independent keyspaces against
-a single Redis instance; it is withdrawn. April's own configuration, re-run on this
-server, measured 13,750,187 with 64-byte values — the old number's ballpark, now
-with raw output — and the like-for-like comparison is above.
+**One keyspace, with I/O threads:** Pion's `--io-threads 8` leads Redis's
+`io-threads 8` at every pipeline depth.
+- **Ratios:** 1.33× at P=1, 1.79× at P=10 and 2.86× at P=50.
+- **Like for like:** both count threads the same way, one thread that runs
+  commands plus seven I/O threads, and the client runs on the same machine.
+- **P=50:** `--io-threads 4` is faster still, at 4,431,024. One thread executes
+  every command, and at that depth it is the limit.
+
+**Without I/O threads:** Pion's single thread trails Redis's I/O threads at P=1
+and P=10, and leads single-threaded Redis at every depth.
+
+**With durability on (P=10):** Redis's AOF (`everysec`) against Pion's WAL, both
+at 8 I/O threads. Pion leads, 2,724,529 to 1,297,102 (2.1×).
+
+**Where I/O threads pay:** on a server with cores to spare. On a Mac with the
+client on the same machine, they lower throughput, for Redis too
+([2026-10-10](benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)).
+
+**Across all cores:** sixteen Redis processes beat Pion's sixteen workers by
+13–18%. Using the second hardware thread of every core (32 keyspaces each side,
+32 client threads, P=50), Pion leads with 64-byte values (15,864,842 against
+14,780,031) and Redis with 256-byte values (12,372,245 against 11,640,929).
+
+**A withdrawn headline:** this README used to carry 14.0M ops/sec, 10.2× Redis.
+It had no surviving raw log, and it set Pion's 32 independent keyspaces against
+a single Redis instance. April's own configuration, re-run on this server,
+measured 13,750,187 with 64-byte values: the old number's ballpark, now with raw
+output. The like-for-like comparison is above.
 
 > **Worker-count caveat.** Every number above `w > 1` is measured with
 > `--independent-workers`, and that flag changes the semantics: workers are
@@ -589,7 +606,7 @@ removed, and each carries an **Experimental** banner on its own page.
 | Headline | **Shared KV Cache** — at a 2K prefix on Llama-3.2-1B-4bit, first token in 69.0 ms from a separate process over the wire and 46.2 ms in the same process, against 1,193 ms cold and 37.0 ms from mlx-lm's own prompt-cache file; BLEU 1.000 cross-instance |
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |
-| Peak KV throughput | **15.9M ops/sec** across 32 keyspaces at P=50 with 64-byte values (32 Redis 8.10.2 processes: 14.8M; at 256 bytes Redis leads, 12.4M to 11.6M) · **1.71M** on one keyspace (Redis with I/O threads: 1.38M) — [same server](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md) |
+| Peak KV throughput | **15.9M ops/sec** across 32 keyspaces at P=50 with 64-byte values (32 Redis 8.10.2 processes: 14.8M; at 256 bytes Redis leads, 12.4M to 11.6M) · **2.97M** on one keyspace at P=10 with `--io-threads 8` (Redis with `io-threads 8`: 1.66M) — [2026-10-06](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md), [2026-10-12](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md) |
 | Vector QPS | 7,339 at 10 clients on Linux at recall 0.960, 8,544 at 0.939 (Redis 8.10.2 vector sets: 8,039 at 0.920); 8,729 on an M4 Mac mini |
 | Recall@100 | 0.960 at that QPS (Redis vector sets: 0.920); INT8, ef=150 |
 | P99 latency | 1.4 ms on Linux, 0.6 ms on an M4 Mac mini (vector search, one client) |

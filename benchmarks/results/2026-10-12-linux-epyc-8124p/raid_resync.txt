@@ -1,0 +1,15 @@
+The machine was freshly installed, and its software RAID1 (/dev/md1, 2 x NVMe) was
+resyncing at ~200 MB/s when the measurements began. At 11:20:16 UTC
+/proc/sys/dev/raid/speed_limit_max was set from 200000 to 1000 KB/s, so the resync
+could not vary from run to run. Disk traffic then measured ~10 kB/s.
+
+The first run (single_redis_io1_P1_r1, 104,115 ops/sec) started at 11:19:52 UTC
+and overlapped the full-speed resync for ~24 s. Its two repetitions measured
+110,044 and 110,253, and the median of 3 (110,044) is unaffected.
+
+/proc/mdstat at 11:20:16 UTC (the speed shown is a moving average):
+
+md1 : active raid1 nvme0n1p4[0] nvme1n1p3[1]
+      902550528 blocks super 1.2 [2/2] [UU]
+      [=======>.............]  resync = 38.8% (350293376/902550528) finish=51.3min speed=179260K/sec
+      bitmap: 6/7 pages [24KB], 65536KB chunk

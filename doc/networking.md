@@ -163,6 +163,11 @@ and parked clients, and pub/sub, so none of it takes a lock.
   ([2026-10-10 Mac results](../benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)).
   The case for I/O threads is a Linux server with cores to spare; its numbers
   come from `benchmarks/kv-io-threads/run_on_box.sh`.
+- **Measured on a Linux server:** on an EPYC 8124P (2026-10-12), `--io-threads 8`
+  led Redis's `io-threads 8` 1.33× at P=1, 1.79× at P=10 and 2.86× at P=50, and
+  2.1× at P=10 with both persisting (WAL against AOF `everysec`). At P=50 the
+  executor is the limit, and `--io-threads 4` is faster than 8
+  ([2026-10-12 Linux results](../benchmarks/results/2026-10-12-linux-epyc-8124p/README.md)).
 - **Tests:** `tests/test_gh465_io_threads.py` (order and visibility across 48
   concurrent connections, pub/sub, MONITOR, blocking pops, XREAD BLOCK, WAIT,
   MULTI, CLIENT KILL/PAUSE/REPLY, a backlog many times the writer buffer to a client that stops

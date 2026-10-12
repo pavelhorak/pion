@@ -80,7 +80,7 @@ or read a standalone `-t mset` against the floor.
   concurrency (P>=10). Which one wins at P=1 depends on the CPU generation, so
   measure both on a new machine.
 
-**P=1:** a single-threaded server is bound by a syscall per request. On the published Linux run, `pion-server -w 1` measured 112,019 ops/sec and single-threaded Redis 107,896, while Redis with `io-threads 8` reached 388,405 ([raw output](../benchmarks/results/2026-10-06-linux-epyc-8124p/README.md)).
+**P=1:** a single-threaded server is bound by a syscall per request. On the published Linux run, `pion-server -w 1` measured 112,019 ops/sec and single-threaded Redis 107,896, while Redis with `io-threads 8` reached 388,405 ([raw output](../benchmarks/results/2026-10-06-linux-epyc-8124p/README.md)). I/O threads take the syscalls off the thread that runs commands. On 2026-10-12, Pion with `--io-threads 8` measured 515,267 against Redis's `io-threads 8` at 386,278 ([raw output](../benchmarks/results/2026-10-12-linux-epyc-8124p/README.md)).
 
 ---
 
