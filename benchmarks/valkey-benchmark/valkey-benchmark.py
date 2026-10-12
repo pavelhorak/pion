@@ -498,6 +498,15 @@ def main():
     else:
         placement_str = "unpinned (no CPU affinity API or no two-core L3 domain here)"
     print(f"CPU placement: {placement_str}")
+    # The client decides the LRANGE rows: the server is far from saturated there,
+    # and redis-benchmark 7.0.15 measured 1.2-1.5x what 8.10.2 does against the
+    # same server. A floor table therefore belongs to a client version too.
+    try:
+        v = subprocess.run([BENCHMARK_BIN, "--version"], capture_output=True, text=True, timeout=10)
+        client_str = f"{BENCHMARK_BIN} ({(v.stdout or v.stderr).strip()})"
+    except Exception:
+        client_str = f"{BENCHMARK_BIN} (version unknown)"
+    print(f"Client: {client_str}")
 
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     pion_bin = os.path.join(project_root, "pion-server")
@@ -610,6 +619,7 @@ def main():
     if args.tests: params.append(f"Tests: {args.tests}")
     if args.workers: params.append(f"Pion workers: {args.workers}")
     params.append(f"CPU placement: {placement_str}")
+    params.append(f"Client: {client_str}")
     if n_runs > 1:
         # The recorded numbers are an aggregate, not a single run. Say so in the
         # artifact itself — a bare table reads as one run to everyone later.
