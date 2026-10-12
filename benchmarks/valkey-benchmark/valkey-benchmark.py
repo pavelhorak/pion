@@ -46,6 +46,79 @@ def _find_benchmark_bin():
 
 BENCHMARK_BIN = _find_benchmark_bin()
 
+
+def _cpu_list(text):
+    """'0-3,16-19' -> {0, 1, 2, 3, 16, 17, 18, 19}"""
+    cpus = set()
+    for part in text.strip().split(","):
+        if part:
+            lo, _, hi = part.partition("-")
+            cpus.update(range(int(lo), int(hi or lo) + 1))
+    return cpus
+
+
+def _fmt_cpus(cpus):
+    return ",".join(str(c) for c in sorted(cpus))
+
+
+def l3_placement(sysfs="/sys/devices/system/cpu", allowed=None):
+    """Server and client CPUs on separate physical cores of ONE L3 domain (Linux).
+
+    gh #480: on an EPYC 8124P (4 L3 domains of 4 cores) the single-worker floor
+    runs were bimodal, ~740K or ~590K ops/sec per row, and the mode was where the
+    scheduler put the client. With the client in the server's L3 domain every
+    run measured the high mode; in another domain, or on the server's SMT
+    sibling, every run measured the low one. The Linux floors were taken from the
+    high mode, so the harness pins that placement instead of leaving it to chance.
+
+    Returns (server_cpus, client_cpus, domain_cpus), or None where there is no
+    affinity API (macOS) or no domain with two physical cores. The domain is the
+    one holding the lowest allowed CPU. The server gets that domain's second core
+    with its SMT siblings (the first core takes most interrupts), and the client
+    gets the domain's other cores. `sysfs` and `allowed` exist for the test.
+    """
+    if allowed is None:
+        if not hasattr(os, "sched_getaffinity"):
+            return None
+        allowed = os.sched_getaffinity(0)
+    base = sysfs + "/cpu{}/{}"
+
+    def read(cpu, leaf):
+        try:
+            with open(base.format(cpu, leaf)) as f:
+                return _cpu_list(f.read()) & allowed
+        except OSError:
+            return None
+
+    domains = {}
+    for cpu in sorted(allowed):
+        # A machine (or VM) that reports no L3 is treated as one domain.
+        dom = read(cpu, "cache/index3/shared_cpu_list") or set(allowed)
+        domains.setdefault(frozenset(dom), None)
+    for dom in sorted(domains, key=min):
+        cores = {}
+        for cpu in sorted(dom):
+            core = frozenset(read(cpu, "topology/thread_siblings_list") or {cpu})
+            cores.setdefault(core, None)
+        cores = sorted(cores, key=min)
+        if len(cores) < 2:
+            continue
+        server = set(cores[1])
+        client = set(dom) - server
+        return server, client, set(dom)
+    return None
+
+
+def _pinned(cpus):
+    """preexec_fn that moves the child (and everything it starts) onto cpus."""
+    if not cpus:
+        return None
+    return lambda: os.sched_setaffinity(0, cpus)
+
+
+# Set by main() from --pin: (server_cpus, client_cpus, domain_cpus) or None.
+PLACEMENT = None
+
 GATE_BASELINES_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gate_baselines.json")
 
@@ -160,6 +233,11 @@ def parse_args():
                         help="Which CPU-class baseline table to use. mac=Apple Silicon (default), "
                              "linux-epyc-8124p=EPYC 8124P @ 2.45 GHz Zen 4c Siena (gh #56). "
                              "Mac and Linux gates are NOT interchangeable.")
+    parser.add_argument("--pin", choices=["auto", "off"], default="auto",
+                        help="auto (default): on Linux, pin every server and the client to "
+                             "separate physical cores of one L3 domain (gh #480); no effect on "
+                             "macOS. off: leave placement to the scheduler, which made the "
+                             "Linux floor runs bimodal.")
     return parser.parse_args()
 
 def wait_for_port(port, timeout=30):
@@ -179,7 +257,8 @@ def start_server(cmd, port, timeout=30):
         process = subprocess.Popen(
             shlex.split(cmd),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
+            preexec_fn=_pinned(PLACEMENT and PLACEMENT[0]),
         )
         if not wait_for_port(port, timeout=timeout):
             print(f"Warning: server on port {port} did not become ready in {timeout}s.")
@@ -253,7 +332,8 @@ def run_benchmark_group(port, name, args, tests):
 
     print(f"  [{name}] group '{tests}': {cmd}")
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True,
+                                preexec_fn=_pinned(PLACEMENT and PLACEMENT[1]))
         return parse_quiet_output(result.stdout)
     except subprocess.CalledProcessError as e:
         print(f"  Error in group '{tests}' for {name}: {e.stderr[:200]}")
@@ -272,7 +352,8 @@ def run_benchmark(port, name, args):
         cmd += f" -t {args.tests}"
         print(f"Running benchmark for {name}: {cmd}")
         try:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True,
+                                    preexec_fn=_pinned(PLACEMENT and PLACEMENT[1]))
             return parse_quiet_output(result.stdout)
         except subprocess.CalledProcessError as e:
             print(f"Error running benchmark for {name}: {e.stderr}")
@@ -407,6 +488,17 @@ def main():
         if not preflight(wait=180):
             sys.exit(1)
     
+    global PLACEMENT
+    PLACEMENT = l3_placement() if args.pin == "auto" else None
+    if PLACEMENT:
+        placement_str = (f"server cpus {_fmt_cpus(PLACEMENT[0])}, client cpus "
+                         f"{_fmt_cpus(PLACEMENT[1])} (one L3 domain: {_fmt_cpus(PLACEMENT[2])})")
+    elif args.pin == "off":
+        placement_str = "unpinned (--pin off)"
+    else:
+        placement_str = "unpinned (no CPU affinity API or no two-core L3 domain here)"
+    print(f"CPU placement: {placement_str}")
+
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     pion_bin = os.path.join(project_root, "pion-server")
     
@@ -517,6 +609,7 @@ def main():
     if args.pipeline: params.append(f"Pipeline: {args.pipeline}")
     if args.tests: params.append(f"Tests: {args.tests}")
     if args.workers: params.append(f"Pion workers: {args.workers}")
+    params.append(f"CPU placement: {placement_str}")
     if n_runs > 1:
         # The recorded numbers are an aggregate, not a single run. Say so in the
         # artifact itself — a bare table reads as one run to everyone later.

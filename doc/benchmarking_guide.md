@@ -71,6 +71,15 @@ percent can flip them. `MSET` in particular depends on its position in the run
 (it is measured warm, eighth of the command groups); do not reorder the groups
 or read a standalone `-t mset` against the floor.
 
+**On Linux the script pins the server and the client** to separate physical cores
+of one L3 domain, and prints the placement it chose (`--pin off` leaves placement
+to the scheduler). Unpinned, the single-worker rows on an AMD EPYC 8124P came out
+in one of two modes, about 25% apart, depending only on where the scheduler put
+the client. With the client in the server's L3 domain, every run measured the
+higher mode, which is the one the Linux floors were taken from. In another
+domain, or on the server's SMT sibling, every run measured the lower mode. On
+macOS the flag has no effect.
+
 ### Linux backend selection
 
 - **`--epoll`** runs at parity with Redis at P=1 (91-96K RPS on Linux
