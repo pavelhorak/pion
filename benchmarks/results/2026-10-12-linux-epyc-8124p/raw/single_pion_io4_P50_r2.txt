@@ -1,0 +1,38 @@
+Json file /opt/session/out/io465/raw/single_pion_io4_P50_r2.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 3%,   1 secs]  8 threads 50 conns:     5104017 ops, 5102195 (avg: 5102195) ops/sec, 535.49MB/sec (avg: 535.49MB/sec),  3.89 (avg:  3.89) msec latency[RUN #1 7%,   2 secs]  8 threads 50 conns:    10064666 ops, 4959676 (avg: 5030941) ops/sec, 847.72MB/sec (avg: 691.59MB/sec),  4.02 (avg:  3.96) msec latency
+warning: high CPU on thread 4: 96.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 5: 95.7% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 10%,   3 secs]  8 threads 50 conns:    14802925 ops, 4737491 (avg: 4933132) ops/sec, 1001.72MB/sec (avg: 794.96MB/sec),  4.21 (avg:  4.04) msec latency[RUN #1 13%,   4 secs]  8 threads 50 conns:    19409345 ops, 4605554 (avg: 4851241) ops/sec, 1.07GB/sec (avg: 868.88MB/sec),  4.34 (avg:  4.11) msec latency[RUN #1 17%,   5 secs]  8 threads 50 conns:    23754683 ops, 4344482 (avg: 4749891) ops/sec, 1.07GB/sec (avg: 914.71MB/sec),  4.60 (avg:  4.20) msec latency[RUN #1 20%,   6 secs]  8 threads 50 conns:    27996593 ops, 4241074 (avg: 4665090) ops/sec, 1.09GB/sec (avg: 948.16MB/sec),  4.71 (avg:  4.28) msec latency[RUN #1 23%,   7 secs]  8 threads 50 conns:    32293363 ops, 4295867 (avg: 4612344) ops/sec, 1.13GB/sec (avg: 978.33MB/sec),  4.65 (avg:  4.33) msec latency[RUN #1 27%,   8 secs]  8 threads 50 conns:    36569876 ops, 4275709 (avg: 4570266) ops/sec, 1.15GB/sec (avg: 1002.78MB/sec),  4.67 (avg:  4.37) msec latency[RUN #1 30%,   9 secs]  8 threads 50 conns:    40854128 ops, 4283421 (avg: 4538394) ops/sec, 1.16GB/sec (avg: 1023.58MB/sec),  4.66 (avg:  4.40) msec latency[RUN #1 33%,  10 secs]  8 threads 50 conns:    45120633 ops, 4265694 (avg: 4511125) ops/sec, 1.17GB/sec (avg: 1.02GB/sec),  4.68 (avg:  4.42) msec latency[RUN #1 37%,  11 secs]  8 threads 50 conns:    49379847 ops, 4258421 (avg: 4488152) ops/sec, 1.17GB/sec (avg: 1.03GB/sec),  4.69 (avg:  4.45) msec latency[RUN #1 40%,  12 secs]  8 threads 50 conns:    53561902 ops, 4181235 (avg: 4462576) ops/sec, 1.15GB/sec (avg: 1.04GB/sec),  4.78 (avg:  4.47) msec latency[RUN #1 43%,  13 secs]  8 threads 50 conns:    57726996 ops, 4164102 (avg: 4439616) ops/sec, 1.15GB/sec (avg: 1.05GB/sec),  4.80 (avg:  4.50) msec latency[RUN #1 47%,  14 secs]  8 threads 50 conns:    61960405 ops, 4232515 (avg: 4424823) ops/sec, 1.17GB/sec (avg: 1.06GB/sec),  4.72 (avg:  4.51) msec latency[RUN #1 50%,  15 secs]  8 threads 50 conns:    66468550 ops, 4507338 (avg: 4430324) ops/sec, 1.25GB/sec (avg: 1.07GB/sec),  4.43 (avg:  4.51) msec latency[RUN #1 53%,  16 secs]  8 threads 50 conns:    71344395 ops, 4874748 (avg: 4458101) ops/sec, 1.35GB/sec (avg: 1.09GB/sec),  4.10 (avg:  4.48) msec latency
+warning: high CPU on thread 6: 97.8% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 7: 98.6% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 57%,  17 secs]  8 threads 50 conns:    75996531 ops, 4651103 (avg: 4469454) ops/sec, 1.29GB/sec (avg: 1.10GB/sec),  4.30 (avg:  4.47) msec latency[RUN #1 60%,  18 secs]  8 threads 50 conns:    80380277 ops, 4382860 (avg: 4464643) ops/sec, 1.22GB/sec (avg: 1.11GB/sec),  4.56 (avg:  4.47) msec latency[RUN #1 63%,  19 secs]  8 threads 50 conns:    84994051 ops, 4612832 (avg: 4472443) ops/sec, 1.28GB/sec (avg: 1.12GB/sec),  4.33 (avg:  4.46) msec latency[RUN #1 67%,  20 secs]  8 threads 50 conns:    89702666 ops, 4707701 (avg: 4484205) ops/sec, 1.31GB/sec (avg: 1.13GB/sec),  4.24 (avg:  4.45) msec latency[RUN #1 70%,  21 secs]  8 threads 50 conns:    94542172 ops, 4838547 (avg: 4501079) ops/sec, 1.34GB/sec (avg: 1.14GB/sec),  4.13 (avg:  4.44) msec latency
+warning: high CPU on thread 3: 95.3% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 73%,  22 secs]  8 threads 50 conns:    99346684 ops, 4803426 (avg: 4514822) ops/sec, 1.33GB/sec (avg: 1.14GB/sec),  4.16 (avg:  4.42) msec latency[RUN #1 77%,  23 secs]  8 threads 50 conns:   103478888 ops, 4131286 (avg: 4498146) ops/sec, 1.15GB/sec (avg: 1.14GB/sec),  4.84 (avg:  4.44) msec latency[RUN #1 80%,  24 secs]  8 threads 50 conns:   107563895 ops, 4083928 (avg: 4480886) ops/sec, 1.13GB/sec (avg: 1.14GB/sec),  4.89 (avg:  4.46) msec latency[RUN #1 83%,  25 secs]  8 threads 50 conns:   111682239 ops, 4117372 (avg: 4466345) ops/sec, 1.14GB/sec (avg: 1.14GB/sec),  4.85 (avg:  4.47) msec latency[RUN #1 87%,  26 secs]  8 threads 50 conns:   115823272 ops, 4139981 (avg: 4453792) ops/sec, 1.15GB/sec (avg: 1.14GB/sec),  4.83 (avg:  4.48) msec latency[RUN #1 90%,  27 secs]  8 threads 50 conns:   119906314 ops, 4082266 (avg: 4440032) ops/sec, 1.13GB/sec (avg: 1.14GB/sec),  4.90 (avg:  4.50) msec latency[RUN #1 93%,  28 secs]  8 threads 50 conns:   124173771 ops, 4266475 (avg: 4433834) ops/sec, 1.19GB/sec (avg: 1.15GB/sec),  4.68 (avg:  4.50) msec latency[RUN #1 97%,  29 secs]  8 threads 50 conns:   128668352 ops, 4493583 (avg: 4435894) ops/sec, 1.25GB/sec (avg: 1.15GB/sec),  4.45 (avg:  4.50) msec latency[RUN #1 100%,  30 secs]  8 threads 50 conns:   132949674 ops, 4295040 (avg: 4431215) ops/sec, 1.19GB/sec (avg: 1.15GB/sec),  4.66 (avg:  4.51) msec latency[RUN #1 100%,  30 secs]  0 threads 50 conns:   132957569 ops, 4295040 (avg: 4431476) ops/sec, 1.19GB/sec (avg: 1.15GB/sec),  4.66 (avg:  4.51) msec latency
+
+warning: GET miss rate 8.28% above target 1.00% (10003519 misses / 120870336 ops)
+
+CPU Utilization Summary
+  Total CPU time:   196.559s  (user 95.767s, sys 100.792s)
+  Wall time:        30.010s
+  Cores used:       6.550   (avg 81.9% across 8 worker threads)
+  Peak utilization: 732.3%
+Saving JSON output file: /opt/session/out/io465/raw/single_pion_io4_P50_r2.json
+Json file closed.
+8         Threads
+50        Connections per thread
+30        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets       402827.00          ---          ---         4.50829         4.06300         7.93500        13.05500    119152.18 
+Gets      4028196.90   3694779.76    333417.14         4.50848         4.06300         7.93500        12.86300   1087499.95 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals    4431023.90   3694779.76    333417.14         4.50846         4.06300         7.93500        12.86300   1206652.13 

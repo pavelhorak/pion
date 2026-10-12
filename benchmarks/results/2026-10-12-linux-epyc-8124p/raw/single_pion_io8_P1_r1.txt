@@ -1,0 +1,52 @@
+Json file /opt/session/out/io465/raw/single_pion_io8_P1_r1.json created...
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 3%,   0 secs]  8 threads 50 conns:      404470 ops,  404582 (avg:  404582) ops/sec, 25.98MB/sec (avg: 25.98MB/sec),  0.99 (avg:  0.99) msec latency[RUN #1 7%,   1 secs]  8 threads 50 conns:      928493 ops,  523898 (avg:  464256) ops/sec, 38.34MB/sec (avg: 32.16MB/sec),  0.76 (avg:  0.86) msec latency
+warning: high CPU on thread 0: 99.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 1: 98.5% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 2: 99.5% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 3: 99.1% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 4: 98.9% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 5: 99.0% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 6: 97.9% of a core (threshold 95.0%) - results may be unreliable
+
+warning: high CPU on thread 7: 98.6% of a core (threshold 95.0%) - results may be unreliable
+[RUN #1 10%,   3 secs]  8 threads 50 conns:     1438092 ops,  509491 (avg:  479336) ops/sec, 42.27MB/sec (avg: 35.53MB/sec),  0.78 (avg:  0.83) msec latency[RUN #1 13%,   4 secs]  8 threads 50 conns:     2012931 ops,  574737 (avg:  503189) ops/sec, 53.27MB/sec (avg: 39.97MB/sec),  0.70 (avg:  0.79) msec latency[RUN #1 17%,   5 secs]  8 threads 50 conns:     2553244 ops,  540205 (avg:  510593) ops/sec, 55.10MB/sec (avg: 42.99MB/sec),  0.74 (avg:  0.78) msec latency[RUN #1 20%,   6 secs]  8 threads 50 conns:     3124858 ops,  571509 (avg:  520746) ops/sec, 63.49MB/sec (avg: 46.41MB/sec),  0.70 (avg:  0.77) msec latency[RUN #1 23%,   7 secs]  8 threads 50 conns:     3706309 ops,  581346 (avg:  529404) ops/sec, 69.79MB/sec (avg: 49.75MB/sec),  0.69 (avg:  0.75) msec latency[RUN #1 27%,   8 secs]  8 threads 50 conns:     4288944 ops,  582538 (avg:  536046) ops/sec, 74.84MB/sec (avg: 52.88MB/sec),  0.69 (avg:  0.75) msec latency[RUN #1 30%,   9 secs]  8 threads 50 conns:     4868756 ops,  579705 (avg:  540897) ops/sec, 79.27MB/sec (avg: 55.82MB/sec),  0.69 (avg:  0.74) msec latency[RUN #1 33%,  10 secs]  8 threads 50 conns:     5365457 ops,  496600 (avg:  536467) ops/sec, 71.33MB/sec (avg: 57.37MB/sec),  0.80 (avg:  0.74) msec latency[RUN #1 37%,  11 secs]  8 threads 50 conns:     5903507 ops,  537946 (avg:  536601) ops/sec, 80.76MB/sec (avg: 59.49MB/sec),  0.74 (avg:  0.74) msec latency[RUN #1 40%,  12 secs]  8 threads 50 conns:     6479060 ops,  575447 (avg:  539839) ops/sec, 90.15MB/sec (avg: 62.05MB/sec),  0.69 (avg:  0.74) msec latency[RUN #1 43%,  13 secs]  8 threads 50 conns:     7041072 ops,  561909 (avg:  541536) ops/sec, 91.47MB/sec (avg: 64.31MB/sec),  0.71 (avg:  0.74) msec latency[RUN #1 47%,  14 secs]  8 threads 50 conns:     7612543 ops,  571369 (avg:  543667) ops/sec, 96.66MB/sec (avg: 66.62MB/sec),  0.70 (avg:  0.74) msec latency[RUN #1 50%,  15 secs]  8 threads 50 conns:     8178489 ops,  565770 (avg:  545141) ops/sec, 98.95MB/sec (avg: 68.78MB/sec),  0.71 (avg:  0.73) msec latency[RUN #1 53%,  16 secs]  8 threads 50 conns:     8727948 ops,  549363 (avg:  545405) ops/sec, 99.08MB/sec (avg: 70.67MB/sec),  0.73 (avg:  0.73) msec latency[RUN #1 57%,  17 secs]  8 threads 50 conns:     9319027 ops,  590975 (avg:  548086) ops/sec, 109.84MB/sec (avg: 72.98MB/sec),  0.68 (avg:  0.73) msec latency[RUN #1 60%,  18 secs]  8 threads 50 conns:     9883486 ops,  564330 (avg:  548988) ops/sec, 107.73MB/sec (avg: 74.91MB/sec),  0.71 (avg:  0.73) msec latency[RUN #1 63%,  19 secs]  8 threads 50 conns:    10450704 ops,  567112 (avg:  549942) ops/sec, 110.82MB/sec (avg: 76.80MB/sec),  0.70 (avg:  0.73) msec latency[RUN #1 67%,  20 secs]  8 threads 50 conns:    11029627 ops,  578818 (avg:  551386) ops/sec, 115.89MB/sec (avg: 78.75MB/sec),  0.69 (avg:  0.72) msec latency[RUN #1 70%,  21 secs]  8 threads 50 conns:    11611709 ops,  581981 (avg:  552843) ops/sec, 118.96MB/sec (avg: 80.67MB/sec),  0.69 (avg:  0.72) msec latency[RUN #1 73%,  22 secs]  8 threads 50 conns:    12182981 ops,  571156 (avg:  553675) ops/sec, 119.12MB/sec (avg: 82.41MB/sec),  0.70 (avg:  0.72) msec latency[RUN #1 77%,  23 secs]  8 threads 50 conns:    12771286 ops,  588214 (avg:  555177) ops/sec, 124.86MB/sec (avg: 84.26MB/sec),  0.68 (avg:  0.72) msec latency[RUN #1 80%,  24 secs]  8 threads 50 conns:    13359311 ops,  587905 (avg:  556541) ops/sec, 127.22MB/sec (avg: 86.05MB/sec),  0.68 (avg:  0.72) msec latency[RUN #1 83%,  25 secs]  8 threads 50 conns:    13946374 ops,  586945 (avg:  557757) ops/sec, 129.02MB/sec (avg: 87.77MB/sec),  0.68 (avg:  0.72) msec latency[RUN #1 87%,  26 secs]  8 threads 50 conns:    14503130 ops,  556563 (avg:  557711) ops/sec, 123.89MB/sec (avg: 89.16MB/sec),  0.72 (avg:  0.72) msec latency[RUN #1 90%,  27 secs]  8 threads 50 conns:    15006458 ops,  503230 (avg:  555693) ops/sec, 113.64MB/sec (avg: 90.06MB/sec),  0.79 (avg:  0.72) msec latency[RUN #1 93%,  28 secs]  8 threads 50 conns:    15581064 ops,  574489 (avg:  556364) ops/sec, 131.43MB/sec (avg: 91.54MB/sec),  0.70 (avg:  0.72) msec latency[RUN #1 97%,  29 secs]  8 threads 50 conns:    16143154 ops,  561692 (avg:  556548) ops/sec, 130.20MB/sec (avg: 92.88MB/sec),  0.71 (avg:  0.72) msec latency[RUN #1 100%,  30 secs]  8 threads 50 conns:    16716728 ops,  575092 (avg:  557165) ops/sec, 134.63MB/sec (avg: 94.26MB/sec),  0.69 (avg:  0.72) msec latency[RUN #1 100%,  30 secs]  0 threads 50 conns:    16716788 ops,  575092 (avg:  557165) ops/sec, 134.63MB/sec (avg: 94.26MB/sec),  0.69 (avg:  0.72) msec latency
+
+warning: GET miss rate 51.37% above target 1.00% (7805925 misses / 15196895 ops)
+
+CPU Utilization Summary
+  Total CPU time:   236.276s  (user 49.110s, sys 187.166s)
+  Wall time:        30.010s
+  Cores used:       7.873   (avg 98.4% across 8 worker threads)
+  Peak utilization: 800.0%
+warning: thread 0 averaged 98.4% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 1 averaged 98.5% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 2 averaged 98.4% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 3 averaged 98.4% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 4 averaged 98.4% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 5 averaged 98.4% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 6 averaged 98.4% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+warning: thread 7 averaged 98.4% of a core over the run (threshold 95.0%) - memtier may be the bottleneck; results may be unreliable
+Saving JSON output file: /opt/session/out/io465/raw/single_pion_io8_P1_r1.json
+Json file closed.
+8         Threads
+50        Connections per thread
+30        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets        50657.93          ---          ---         0.75055         0.63100         1.37500         4.12700     14984.08 
+Gets       506511.52    246340.55    260170.97         0.71453         0.63100         1.36700         3.80700     81542.82 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals     557169.45    246340.55    260170.97         0.71781         0.63100         1.36700         3.83900     96526.91 

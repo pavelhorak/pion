@@ -114,7 +114,7 @@ the first four rows are one configuration run four times: median 8,544 QPS at
 recall 0.939. Redis vector sets at their defaults measured 8,039 QPS at 0.920 on
 this machine (table above).
 
-## KV: the peak, 32 keyspaces each side (P=50, ops/sec, median of 3)
+## KV: 32 keyspaces each side (P=50, ops/sec, median of 3). Not a comparison: read why below
 
 Run after everything above, on the same machine, by [`peak_on_box.sh`](peak_on_box.sh)
 and [`peak64_on_box.sh`](peak64_on_box.sh) (raw output in `peak/` and `peak64/`).
@@ -132,3 +132,31 @@ April's configuration for the old "14.0M ops/sec" headline — Pion `-w 32` unde
 `memtier -t 16 -c 50`, P=50, Pion only — measured 13,750,187 with 64-byte values
 and 9,529,047 with 256-byte values (`peak/`). memtier reported its own threads at
 100% CPU in these runs, so the client, not the server, may set the ceiling.
+
+### Why these runs do not compare the servers (found 2026-10-12)
+
+**Unequal connection spread.** Each Redis process served exactly its own client's 25
+connections. Pion's 800 connections went to whichever worker won `accept()`, and
+the GET hit rates show they landed unevenly:
+- **The model:** with random keys over 1M, a keyspace that receives S writes per
+  second over a 30 s run hits on average 1 − (1 − e^−x)/x of its GETs, where
+  x = 30·S/1M.
+- **Redis:** the model reproduces all four Redis hit rates exactly (43.2% and 38.2%
+  here, 42.3% and 55.2% for the 16-process runs).
+- **Pion:** its 64-byte run hit 67% of its GETs where an even spread over 32 workers
+  gives 45%, as if about 15 workers held the traffic. The 256-byte run behaves like
+  about 19 workers, and April's configuration like about 10.
+- **Where Pion spread evenly:** in the 16-worker runs Pion's spread was close to even
+  (14 to 15 of 16), and there Redis leads by 13–18%.
+
+**The shared CPUs went to the client.** Client and server share the machine's 32
+hardware threads, so what the server leaves idle goes to the client:
+- In the 64-byte run, the client used 21.6 of 32 threads against Pion and 16.4
+  against the 32 Redis processes (memtier's `Cores used`, in `raw/`).
+- The hits and misses per second are in each run's `Totals` line and in
+  `raw_json.tar.gz`.
+
+So the 64-byte row measures the uneven connection spread, not either server.
+
+**Also not one database.** A third of Pion's GETs (and more of Redis's) came back
+empty, because each keyspace only holds what its own connections wrote.
