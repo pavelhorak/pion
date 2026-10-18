@@ -1,0 +1,7 @@
+block /opt/out/K50_6_valkey_fp32
+run 1 load: insert 33.0 s, optimize/build 0.0 s, load_duration 33.0 s
+ef  150: recall 0.9629  peak QPS   1301.3  C=1 QPS   211.7  serial P99 5.00 ms  repeats [1280.3, 1310.8, 1301.3]
+ef  200: recall 0.9777  peak QPS   1207.2  C=1 QPS   193.9  serial P99 5.90 ms  repeats [1194.1, 1207.2, 1226.1]
+ef  300: recall 0.9894  peak QPS   1069.3  C=1 QPS   173.2  serial P99 6.90 ms  repeats [1033.2, 1069.3, 1076.7]
+ef  400: recall 0.9939  peak QPS    945.2  C=1 QPS   144.9  serial P99 8.40 ms  repeats [945.2, 985.8, 863.2]
+ef  600: recall 0.9973  peak QPS    712.1  C=1 QPS   118.1  serial P99 10.40 ms  repeats [712.1, 860.9, 644.2]

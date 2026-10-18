@@ -1,0 +1,2 @@
+FT.OPTIMIZE b'OK'
+results 5 [b'sm:4', [b'score', b'0.0612', b'id', b'4']]

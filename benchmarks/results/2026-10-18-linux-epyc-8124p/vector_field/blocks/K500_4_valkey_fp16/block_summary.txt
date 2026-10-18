@@ -1,0 +1,7 @@
+block /opt/out/K500_4_valkey_fp16
+run 1 load: insert 360.8 s, optimize/build 0.0 s, load_duration 360.8 s
+ef  150: recall 0.9441  peak QPS   1338.2  C=1 QPS   209.8  serial P99 5.90 ms  repeats [1384.0, 1283.2, 1338.2]
+ef  200: recall 0.9608  peak QPS   1230.1  C=1 QPS   191.4  serial P99 6.60 ms  repeats [1232.0, 1220.3, 1230.1]
+ef  300: recall 0.9764  peak QPS   1118.7  C=1 QPS   162.2  serial P99 7.60 ms  repeats [1172.4, 1118.7, 1115.5]
+ef  400: recall 0.9837  peak QPS   1059.5  C=1 QPS   147.5  serial P99 8.90 ms  repeats [1070.5, 1025.3, 1059.5]
+ef  600: recall 0.9903  peak QPS    723.1  C=1 QPS   112.4  serial P99 11.50 ms  repeats [857.5, 723.1, 720.5]

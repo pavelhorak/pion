@@ -1,0 +1,75 @@
+188334:M 18 Oct 2026 19:54:29.664 * oO0OoO0OoO0Oo Valkey is starting oO0OoO0OoO0Oo
+188334:M 18 Oct 2026 19:54:29.664 * Valkey version=9.1.2, bits=64, commit=7f1dffed, modified=0, pid=188334, just started
+188334:M 18 Oct 2026 19:54:29.664 * Configuration loaded
+188334:M 18 Oct 2026 19:54:29.664 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+188334:M 18 Oct 2026 19:54:29.694 * monotonic clock: X86 TSC @ 2446.73 ticks/us
+188334:M 18 Oct 2026 19:54:29.695 * Running mode=standalone, port=6381.
+188334:M 18 Oct 2026 19:54:29.701 * <search> [notice], tid: 134952123467456, /vmsdk/src/module.cc:98: Ran 367 deferred static initializers
+188334:M 18 Oct 2026 19:54:29.701 * <search> [notice], tid: 134952123467456, /vmsdk/src/module.cc:149: >>> Loaded Module: /opt/valkey-search/.build-release/libsearch.so Base: 0x7abcf90f0000
+188334:M 18 Oct 2026 19:54:29.704 # <search> [notice], tid: 134952123467456, /src/valkey_search.cc:1198: use_coordinator: false, IsCluster: false
+188334:M 18 Oct 2026 19:54:29.704 # <search> [notice], tid: 134952123467456, /src/valkey_search.cc:1202: Reader workers count: 16
+188334:M 18 Oct 2026 19:54:29.704 # <search> [notice], tid: 134952123467456, /src/valkey_search.cc:1204: Writer workers count: 16
+188334:M 18 Oct 2026 19:54:29.704 # <search> [notice], tid: 134952123467456, /src/valkey_search.cc:1206: Utility workers count: 1
+188334:M 18 Oct 2026 19:54:29.704 # <search> [notice], tid: 134952123467456, /src/valkey_search.cc:1280: Json not supported!
+188334:M 18 Oct 2026 19:54:29.704 # <search> [notice], tid: 134952123467456, /vmsdk/src/module.cc:162: search module was successfully loaded!
+188334:M 18 Oct 2026 19:54:29.704 * Module 'search' loaded from /opt/valkey-search/.build-release/libsearch.so
+188334:M 18 Oct 2026 19:54:29.705 * Static Module 'lua' successfully loaded
+188334:M 18 Oct 2026 19:54:29.705 * Server initialized
+188334:M 18 Oct 2026 19:54:29.705 * Ready to accept connections tcp
+188334:M 18 Oct 2026 19:54:31.244 # <search> [notice], tid: 134952123467456, /src/index_schema.cc:143: Starting backfill for index schema in DB 0: *redacted* (size: 0)
+188334:M 18 Oct 2026 19:54:31.331 # <search> [notice], tid: 134952123467456, /src/index_schema.cc:1184: Index schema *redacted* finished backfill. Scanned 0 keys in 86.488095ms
+188334:M 18 Oct 2026 19:54:38.225 # <module> [warning], tid: 134951116728000, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 10240, expand by: 10240, resize time took: 1.033779ms
+188334:M 18 Oct 2026 19:54:44.111 # <module> [warning], tid: 134951578105536, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 20480, expand by: 10240, resize time took: 1.549121ms
+188334:M 18 Oct 2026 19:54:50.466 # <module> [warning], tid: 134950718273216, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 30720, expand by: 10240, resize time took: 1.916582ms
+188334:M 18 Oct 2026 19:54:57.057 # <module> [warning], tid: 134950730856128, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 40960, expand by: 10240, resize time took: 2.171439ms
+188334:M 18 Oct 2026 19:55:03.912 # <module> [warning], tid: 134951282407104, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 51200, expand by: 10240, resize time took: 2.694904ms
+188334:M 18 Oct 2026 19:55:10.883 # <module> [warning], tid: 134950730856128, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 61440, expand by: 10240, resize time took: 2.93608ms
+188334:M 18 Oct 2026 19:55:17.902 # <module> [warning], tid: 134951104149184, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 71680, expand by: 10240, resize time took: 3.389549ms
+188334:M 18 Oct 2026 19:55:24.884 # <module> [warning], tid: 134951578105536, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 81920, expand by: 10240, resize time took: 4.429329ms
+188334:M 18 Oct 2026 19:55:32.100 # <module> [warning], tid: 134951152379584, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 92160, expand by: 10240, resize time took: 4.422669ms
+188334:M 18 Oct 2026 19:55:39.232 # <module> [warning], tid: 134950718273216, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 102400, expand by: 10240, resize time took: 4.894015ms
+188334:M 18 Oct 2026 19:55:46.424 # <module> [warning], tid: 134951104149184, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 112640, expand by: 10240, resize time took: 5.083382ms
+188334:M 18 Oct 2026 19:55:53.678 # <module> [warning], tid: 134951282407104, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 122880, expand by: 10240, resize time took: 5.821504ms
+188334:M 18 Oct 2026 19:56:00.879 # <module> [warning], tid: 134951244658368, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 133120, expand by: 10240, resize time took: 6.094077ms
+188334:M 18 Oct 2026 19:56:08.141 # <module> [warning], tid: 134951244658368, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 143360, expand by: 10240, resize time took: 6.467755ms
+188334:M 18 Oct 2026 19:56:15.548 # <module> [warning], tid: 134950730856128, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 153600, expand by: 10240, resize time took: 6.857818ms
+188334:M 18 Oct 2026 19:56:22.866 # <module> [warning], tid: 134951139800768, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 163840, expand by: 10240, resize time took: 7.977088ms
+188334:M 18 Oct 2026 19:56:30.212 # <module> [warning], tid: 134951294990016, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 174080, expand by: 10240, resize time took: 7.63596ms
+188334:M 18 Oct 2026 19:56:37.599 # <module> [warning], tid: 134951160772288, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 184320, expand by: 10240, resize time took: 9.187496ms
+188334:M 18 Oct 2026 19:56:45.120 # <module> [warning], tid: 134950730856128, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 194560, expand by: 10240, resize time took: 9.641876ms
+188334:M 18 Oct 2026 19:56:52.516 # <module> [warning], tid: 134951152379584, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 204800, expand by: 10240, resize time took: 10.365515ms
+188334:M 18 Oct 2026 19:56:59.950 # <module> [warning], tid: 134950705690304, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 215040, expand by: 10240, resize time took: 10.883512ms
+188334:M 18 Oct 2026 19:57:07.531 # <module> [warning], tid: 134951269824192, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 225280, expand by: 10240, resize time took: 11.513038ms
+188334:M 18 Oct 2026 19:57:15.288 # <module> [warning], tid: 134951139800768, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 235520, expand by: 10240, resize time took: 11.156597ms
+188334:M 18 Oct 2026 19:57:22.757 # <module> [warning], tid: 134951282407104, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 245760, expand by: 10240, resize time took: 12.163767ms
+188334:M 18 Oct 2026 19:57:30.191 # <module> [warning], tid: 134951152379584, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 256000, expand by: 10240, resize time took: 12.644026ms
+188334:M 18 Oct 2026 19:57:37.774 # <module> [warning], tid: 134950756021952, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 266240, expand by: 10240, resize time took: 13.49627ms
+188334:M 18 Oct 2026 19:57:45.263 # <module> [warning], tid: 134950730856128, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 276480, expand by: 10240, resize time took: 13.796045ms
+188334:M 18 Oct 2026 19:57:52.737 # <module> [warning], tid: 134951257241280, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 286720, expand by: 10240, resize time took: 14.381405ms
+188334:M 18 Oct 2026 19:58:00.283 # <module> [warning], tid: 134950756021952, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 296960, expand by: 10240, resize time took: 14.691045ms
+188334:M 18 Oct 2026 19:58:07.842 # <module> [warning], tid: 134950705690304, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 307200, expand by: 10240, resize time took: 15.182501ms
+188334:M 18 Oct 2026 19:58:15.485 # <module> [warning], tid: 134951282407104, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 317440, expand by: 10240, resize time took: 15.681459ms
+188334:M 18 Oct 2026 19:58:23.021 # <module> [warning], tid: 134951269824192, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 327680, expand by: 10240, resize time took: 17.093864ms
+188334:M 18 Oct 2026 19:58:30.720 # <module> [warning], tid: 134950730856128, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 337920, expand by: 10240, resize time took: 16.513663ms
+188334:M 18 Oct 2026 19:58:38.546 # <module> [warning], tid: 134950730856128, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 348160, expand by: 10240, resize time took: 16.804264ms
+188334:M 18 Oct 2026 19:58:46.154 # <module> [warning], tid: 134951257241280, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 358400, expand by: 10240, resize time took: 17.455472ms
+188334:M 18 Oct 2026 19:58:53.840 # <module> [warning], tid: 134951104149184, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 368640, expand by: 10240, resize time took: 17.788748ms
+188334:M 18 Oct 2026 19:59:01.489 # <module> [warning], tid: 134951139800768, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 378880, expand by: 10240, resize time took: 18.350541ms
+188334:M 18 Oct 2026 19:59:09.208 # <module> [warning], tid: 134951269824192, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 389120, expand by: 10240, resize time took: 18.950143ms
+188334:M 18 Oct 2026 19:59:16.834 # <module> [warning], tid: 134951294990016, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 399360, expand by: 10240, resize time took: 19.296919ms
+188334:M 18 Oct 2026 19:59:24.500 # <module> [warning], tid: 134951282407104, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 409600, expand by: 10240, resize time took: 19.902007ms
+188334:M 18 Oct 2026 19:59:32.054 # <module> [warning], tid: 134951257241280, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 419840, expand by: 10240, resize time took: 20.288314ms
+188334:M 18 Oct 2026 19:59:39.730 # <module> [warning], tid: 134950730856128, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 430080, expand by: 10240, resize time took: 21.013886ms
+188334:M 18 Oct 2026 19:59:47.455 # <module> [warning], tid: 134951294990016, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 440320, expand by: 10240, resize time took: 21.677643ms
+188334:M 18 Oct 2026 19:59:55.241 # <module> [warning], tid: 134951578105536, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 450560, expand by: 10240, resize time took: 21.611383ms
+188334:M 18 Oct 2026 20:00:03.167 # <module> [warning], tid: 134951269824192, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 460800, expand by: 10240, resize time took: 21.283715ms
+188334:M 18 Oct 2026 20:00:10.906 # <module> [warning], tid: 134951282407104, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 471040, expand by: 10240, resize time took: 21.6358ms
+188334:M 18 Oct 2026 20:00:18.792 # <module> [warning], tid: 134951104149184, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 481280, expand by: 10240, resize time took: 22.085513ms
+188334:M 18 Oct 2026 20:00:26.644 # <module> [warning], tid: 134951160772288, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 491520, expand by: 10240, resize time took: 22.831536ms
+188334:signal-handler (1792354320) Received SIGTERM scheduling shutdown...
+188334:M 18 Oct 2026 20:12:00.710 * User requested shutdown...
+188334:M 18 Oct 2026 20:12:00.741 # <search> [notice], tid: 134952123467456, /src/schema_manager.cc:923: Deleting all index schemas on SHUTDOWN event
+188334:M 18 Oct 2026 20:12:00.741 # <search> [notice], tid: 134952123467456, /src/index_schema.cc:380: Index schema *redacted* dropped from DB 0
+188334:M 18 Oct 2026 20:12:01.716 * Module lua unloaded
+188334:M 18 Oct 2026 20:12:01.716 # Failed to unload module search: the module exports one or more module-side data types, can't unload
+188334:M 18 Oct 2026 20:12:01.716 # Valkey is now ready to exit, bye bye...

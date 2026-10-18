@@ -1,0 +1,14 @@
+engine: redis_svs_lvq8 (Redis 8.10.2 + RediSearch, SVS-VAMANA LVQ8 (8-bit SQ on AMD))
+binary: /opt/redis-8.10.2-mods/src/redis-server
+args: --port 6379 --bind 127.0.0.1 --protected-mode no --save  --appendonly no --enable-debug-command local --loadmodule /opt/redis-8.10.2-mods/modules/redisearch/redisearch.so --search-workers 16
+server cpus: 0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23
+client cpus: 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31
+client env: VDBB_REDIS_ALGO=SVS-VAMANA VDBB_REDIS_COMPRESSION=LVQ8 VDBB_REDIS_SEARCH_PARAM=SEARCH_WINDOW_SIZE VDBB_REDIS_WAIT=redisearch
+install: competitor
+source: https://redis.io/docs/latest/develop/ai/search-and-query/vectors/#svs-vamana-index
+Redis server v=8.10.2 sha=498ecd0d:0 malloc=jemalloc-5.3.0 bits=64 build=dd66bb2d99d6905e
+name	search	ver	81001	path	/opt/redis-8.10.2-mods/modules/redisearch/redisearch.so	args	
+name	vectorset	ver	1	path		args	
+search-workers	16
+search-tiered-hnsw-buffer-limit	1024
+io-threads	1

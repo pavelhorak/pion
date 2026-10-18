@@ -1,0 +1,2 @@
+results 5 [b'sm:4', [b'score', b'0.0582799315453', b'id', b'4']]
+compression GlobalSQ8

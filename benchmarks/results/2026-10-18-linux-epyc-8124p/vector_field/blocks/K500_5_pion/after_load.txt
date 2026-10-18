@@ -1,0 +1,10 @@
+== 2026-10-18 20:18:00 after run 1
+used_memory:7628304384
+used_memory_human:7274M
+0
+index_name
+index
+num_docs
+500000
+    PID   RSS    VSZ     ELAPSED COMMAND
+ 199443 7449588 44412952   05:08 /opt/arms/portable/pion-server -p 6395 -w 16 --independent-workers --no-auto-detect --no-auto-embed

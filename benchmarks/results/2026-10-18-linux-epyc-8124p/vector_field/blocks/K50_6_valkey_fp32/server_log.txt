@@ -1,0 +1,31 @@
+135135:M 18 Oct 2026 18:25:56.831 * oO0OoO0OoO0Oo Valkey is starting oO0OoO0OoO0Oo
+135135:M 18 Oct 2026 18:25:56.831 * Valkey version=9.1.2, bits=64, commit=7f1dffed, modified=0, pid=135135, just started
+135135:M 18 Oct 2026 18:25:56.831 * Configuration loaded
+135135:M 18 Oct 2026 18:25:56.832 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+135135:M 18 Oct 2026 18:25:56.862 * monotonic clock: X86 TSC @ 2446.37 ticks/us
+135135:M 18 Oct 2026 18:25:56.862 * Running mode=standalone, port=6381.
+135135:M 18 Oct 2026 18:25:56.868 * <search> [notice], tid: 130692747003584, /vmsdk/src/module.cc:98: Ran 367 deferred static initializers
+135135:M 18 Oct 2026 18:25:56.868 * <search> [notice], tid: 130692747003584, /vmsdk/src/module.cc:149: >>> Loaded Module: /opt/valkey-search/.build-release/libsearch.so Base: 0x76dd426f0000
+135135:M 18 Oct 2026 18:25:56.871 # <search> [notice], tid: 130692747003584, /src/valkey_search.cc:1198: use_coordinator: false, IsCluster: false
+135135:M 18 Oct 2026 18:25:56.871 # <search> [notice], tid: 130692747003584, /src/valkey_search.cc:1202: Reader workers count: 16
+135135:M 18 Oct 2026 18:25:56.871 # <search> [notice], tid: 130692747003584, /src/valkey_search.cc:1204: Writer workers count: 16
+135135:M 18 Oct 2026 18:25:56.871 # <search> [notice], tid: 130692747003584, /src/valkey_search.cc:1206: Utility workers count: 1
+135135:M 18 Oct 2026 18:25:56.871 # <search> [notice], tid: 130692747003584, /src/valkey_search.cc:1280: Json not supported!
+135135:M 18 Oct 2026 18:25:56.871 # <search> [notice], tid: 130692747003584, /vmsdk/src/module.cc:162: search module was successfully loaded!
+135135:M 18 Oct 2026 18:25:56.871 * Module 'search' loaded from /opt/valkey-search/.build-release/libsearch.so
+135135:M 18 Oct 2026 18:25:56.872 * Static Module 'lua' successfully loaded
+135135:M 18 Oct 2026 18:25:56.872 * Server initialized
+135135:M 18 Oct 2026 18:25:56.872 * Ready to accept connections tcp
+135135:M 18 Oct 2026 18:25:58.419 # <search> [notice], tid: 130692747003584, /src/index_schema.cc:143: Starting backfill for index schema in DB 0: *redacted* (size: 0)
+135135:M 18 Oct 2026 18:25:58.499 # <search> [notice], tid: 130692747003584, /src/index_schema.cc:1184: Index schema *redacted* finished backfill. Scanned 0 keys in 83.481794ms
+135135:M 18 Oct 2026 18:26:05.333 # <module> [warning], tid: 130691859740352, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 10240, expand by: 10240, resize time took: 1.065447ms
+135135:M 18 Oct 2026 18:26:11.691 # <module> [warning], tid: 130692195284672, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 20480, expand by: 10240, resize time took: 1.623254ms
+135135:M 18 Oct 2026 18:26:18.690 # <module> [warning], tid: 130691717117632, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 30720, expand by: 10240, resize time took: 1.84371ms
+135135:M 18 Oct 2026 18:26:25.972 # <module> [warning], tid: 130691859740352, /src/indexes/vector_hnsw.cc:240: Resizing HNSW Index, current size: 40960, expand by: 10240, resize time took: 2.454126ms
+135135:signal-handler (1792348674) Received SIGTERM scheduling shutdown...
+135135:M 18 Oct 2026 18:37:54.474 * User requested shutdown...
+135135:M 18 Oct 2026 18:37:54.505 # <search> [notice], tid: 130692747003584, /src/schema_manager.cc:923: Deleting all index schemas on SHUTDOWN event
+135135:M 18 Oct 2026 18:37:54.505 # <search> [notice], tid: 130692747003584, /src/index_schema.cc:380: Index schema *redacted* dropped from DB 0
+135135:M 18 Oct 2026 18:37:54.670 * Module lua unloaded
+135135:M 18 Oct 2026 18:37:54.670 # Failed to unload module search: the module exports one or more module-side data types, can't unload
+135135:M 18 Oct 2026 18:37:54.670 # Valkey is now ready to exit, bye bye...

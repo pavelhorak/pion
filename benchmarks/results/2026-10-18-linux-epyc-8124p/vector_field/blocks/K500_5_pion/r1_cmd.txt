@@ -1,0 +1,3 @@
+install: pion (/opt/Pion/venv_zvec)
++ RESULTS_LOCAL_DIR=/opt/out/K500_5_pion/r1 taskset -c 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31 env /opt/Pion/venv_zvec/bin/vectordbbench redis --host 127.0.0.1 --port 6395 --no-ssl --cmd --case-type Performance1536D500K --k 100 --m 16 --ef-construction 128 --ef-runtime 267 --num-concurrency 1,5,10 --concurrency-duration 5 --db-label pion --task-label pion_500K_r1_ef267
+result: label=:) recall=0.9623 qps=3703.7 conc=[543, 2297, 3704] load=265.5592 insert=111.6047 optimize=153.9545 file=/opt/out/K500_5_pion/r1/Redis/result_20261018_pion_500K_r1_ef267_redis.json

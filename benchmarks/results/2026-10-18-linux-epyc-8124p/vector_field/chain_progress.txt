@@ -1,0 +1,74 @@
+2026-10-18 16:30:56 chain start pid 12443, cap 7 started hours, DRY=0, queue 16 blocks + conditional drift
+2026-10-18 16:30:56 start B_build (timeout 90 min, estimate 60 min, hours used 1, cap 7)
+2026-10-18 16:30:56   B: build window start, Pion 091f6be50d5965c69ec6a42e651cf37ff7d6f428, 32 threads
+2026-10-18 16:55:08   B: branches done: harness rc=0 datasets rc=0 redis rc=0 valkey rc=0 pion rc=0 
+2026-10-18 16:55:09   smoke pion: results 5 [b'sm:4', [b'score', b'0.0612', b'id', b'4']]
+2026-10-18 16:55:09   smoke redis_hnsw_fp32: results 5 [b'sm:4', [b'score', b'0.0582799315453', b'id', b'4']]
+2026-10-18 16:55:10   smoke redis_svs_lvq8: results 5 [b'sm:4', [b'score', b'0.0582799315453', b'id', b'4']]
+2026-10-18 16:55:10   smoke valkey_fp16: results 5 [b'sm:4', [b'id', b'4', b'score', b'0.0582860708237']]
+2026-10-18 16:55:10 end B_build rc=0 (25 min)
+2026-10-18 16:55:10 start SETUP (timeout 10 min, estimate 5 min, hours used 1, cap 7)
+2026-10-18 16:55:13   SETUP written (194 lines)
+2026-10-18 16:55:13 end SETUP rc=0 (1 min)
+2026-10-18 16:55:13 start K50_1_pion (timeout 40 min, estimate 20 min, hours used 1, cap 7)
+2026-10-18 16:55:13   K50_1_pion: Pion (INT8, build-once index) at 50K, grid 150 200 300 400 600
+2026-10-18 17:07:18   K50_1_pion done: 5 grid values
+2026-10-18 17:07:19 end K50_1_pion rc=0 (13 min)
+2026-10-18 17:07:19 start K50_2_redis_hnsw_fp32 (timeout 40 min, estimate 15 min, hours used 1, cap 7)
+2026-10-18 17:07:19   K50_2_redis_hnsw_fp32: Redis 8.10.2 + RediSearch, HNSW FLOAT32 at 50K, grid 150 200 300 400 600
+2026-10-18 17:20:19   K50_2_redis_hnsw_fp32 done: 5 grid values
+2026-10-18 17:20:19 end K50_2_redis_hnsw_fp32 rc=0 (13 min)
+2026-10-18 17:20:19 start K50_3_redis_svs_lvq8 (timeout 40 min, estimate 15 min, hours used 2, cap 7)
+2026-10-18 17:20:19   K50_3_redis_svs_lvq8: Redis 8.10.2 + RediSearch, SVS-VAMANA LVQ8 (8-bit SQ on AMD) at 50K, grid 150 200 300 400 600
+2026-10-18 17:52:06   K50_3: SVS wait fix applied (idle + frontend buffer steady 10 s); stuck r1 killed by hand so the block retries (Pavel, session 2026-10-18)
+2026-10-18 17:52:06   K50_3_redis_svs_lvq8 r1 (load) failed: result: none; fresh engine, one retry
+2026-10-18 18:00:22   stopped leftover engine pid 106043
+2026-10-18 18:00:22 end K50_3_redis_svs_lvq8: TIMEOUT at 40 min: did not finish
+2026-10-18 18:00:22 start K50_4_valkey_fp16 (timeout 40 min, estimate 25 min, hours used 2, cap 7)
+2026-10-18 18:00:22   K50_4_valkey_fp16: Valkey 9.1.2 + valkey-search 1.3.0-rc1, HNSW FLOAT16 at 50K, grid 150 200 300 400 600
+2026-10-18 18:13:10   K50_4_valkey_fp16 done: 5 grid values
+2026-10-18 18:13:10 end K50_4_valkey_fp16 rc=0 (13 min)
+2026-10-18 18:13:10 start K50_5_pion (timeout 40 min, estimate 22 min, hours used 2, cap 7)
+2026-10-18 18:13:10   K50_5_pion: Pion (INT8, build-once index) at 50K, grid 150 200 300 400 600
+2026-10-18 18:24:35   K50_5_pion done: 5 grid values
+2026-10-18 18:24:35 end K50_5_pion rc=0 (12 min)
+2026-10-18 18:24:36 start K50_6_valkey_fp32 (timeout 40 min, estimate 21 min, hours used 3, cap 7)
+2026-10-18 18:24:36   K50_6_valkey_fp32: Valkey 9.1.2 + valkey-search 1.3.0-rc1, HNSW FLOAT32 at 50K, grid 150 200 300 400 600
+2026-10-18 18:37:54   K50_6_valkey_fp32 done: 5 grid values
+2026-10-18 18:37:54 end K50_6_valkey_fp32 rc=0 (14 min)
+2026-10-18 18:37:54 start S50_1_pion (timeout 25 min, estimate 8 min, hours used 3, cap 7)
+2026-10-18 18:37:54   S50_1_pion: Pion (INT8, build-once index) streaming 50K
+2026-10-18 18:46:13   S50_1_pion done: result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.0, 0.0, 0.0, 0.96] maxqps=[61850, 61526, 62061, 7118] insert=250.0208357140009 optimize=11.841427
+2026-10-18 18:46:13 end S50_1_pion rc=0 (9 min)
+2026-10-18 18:46:13 start S50_2_redis_hnsw_fp32 (timeout 25 min, estimate 10 min, hours used 3, cap 7)
+2026-10-18 18:46:14   S50_2_redis_hnsw_fp32: Redis 8.10.2 + RediSearch, HNSW FLOAT32 streaming 50K
+2026-10-18 18:55:29   S50_2_redis_hnsw_fp32 done: result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.5106, 0.7974, 0.9628, 0.9628] maxqps=[1842, 1806, 1881, 1895] insert=250.03216155800146 optimize=
+2026-10-18 18:55:29 end S50_2_redis_hnsw_fp32 rc=0 (10 min)
+2026-10-18 18:55:29 start S50_3_valkey_fp16 (timeout 25 min, estimate 11 min, hours used 3, cap 7)
+2026-10-18 18:55:29   S50_3_valkey_fp16: Valkey 9.1.2 + valkey-search 1.3.0-rc1, HNSW FLOAT16 streaming 50K
+2026-10-18 19:04:24   S50_3_valkey_fp16 done: result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.5084, 0.7974, 0.9631, 0.9631] maxqps=[1388, 1379, 1548, 1542] insert=250.0341450399992 optimize=0
+2026-10-18 19:04:24 end S50_3_valkey_fp16 rc=0 (9 min)
+2026-10-18 19:04:24 start K500_1_pion (timeout 90 min, estimate 35 min, hours used 3, cap 7)
+2026-10-18 19:04:24   K500_1_pion: Pion (INT8, build-once index) at 500K, grid 267 300 400 600 800
+2026-10-18 19:20:33   K500_1_pion done: 5 grid values
+2026-10-18 19:20:34 end K500_1_pion rc=0 (17 min)
+2026-10-18 19:20:34 start K500_2_redis_hnsw_fp32 (timeout 90 min, estimate 19 min, hours used 4, cap 7)
+2026-10-18 19:20:34   K500_2_redis_hnsw_fp32: Redis 8.10.2 + RediSearch, HNSW FLOAT32 at 500K, grid 150 200 300 400 600
+2026-10-18 19:36:07   K500_2_redis_hnsw_fp32 done: 5 grid values
+2026-10-18 19:36:07 end K500_2_redis_hnsw_fp32 rc=0 (16 min)
+2026-10-18 19:36:07 start K500_3_redis_svs_lvq8 (timeout 90 min, estimate 19 min, hours used 4, cap 7)
+2026-10-18 19:36:07   K500_3_redis_svs_lvq8: Redis 8.10.2 + RediSearch, SVS-VAMANA LVQ8 (8-bit SQ on AMD) at 500K, grid 150 200 300 400 600
+2026-10-18 19:53:18   K500_3_redis_svs_lvq8 done: 5 grid values
+2026-10-18 19:53:18 end K500_3_redis_svs_lvq8 rc=0 (18 min)
+2026-10-18 19:53:18 start K500_4_valkey_fp16 (timeout 90 min, estimate 19 min, hours used 4, cap 7)
+2026-10-18 19:53:18   K500_4_valkey_fp16: Valkey 9.1.2 + valkey-search 1.3.0-rc1, HNSW FLOAT16 at 500K, grid 150 200 300 400 600
+2026-10-18 20:12:02   K500_4_valkey_fp16 done: 5 grid values
+2026-10-18 20:12:02 end K500_4_valkey_fp16 rc=0 (19 min)
+2026-10-18 20:12:02 start K500_5_pion (timeout 90 min, estimate 20 min, hours used 4, cap 7)
+2026-10-18 20:12:02   K500_5_pion: Pion (INT8, build-once index) at 500K, grid 267 300 400 600 800
+2026-10-18 20:27:50   K500_5_pion done: 5 grid values
+2026-10-18 20:27:51 end K500_5_pion rc=0 (16 min)
+2026-10-18 20:27:51 drift 50K: drift 50K: -0.9% (per ef: 150 -0.9%, 200 -3.9%, 300 -0.5%, 400 -4.9%, 600 +6.5%) (rc 0)
+2026-10-18 20:27:51 drift 500K: drift 500K: -0.3% (per ef: 267 -0.3%, 300 +0.8%, 400 -3.5%, 600 +6.4%, 800 -3.3%) (rc 0)
+2026-10-18 20:27:51 start A (analysis + capture)
+2026-10-18 20:27:51 ALL_DONE

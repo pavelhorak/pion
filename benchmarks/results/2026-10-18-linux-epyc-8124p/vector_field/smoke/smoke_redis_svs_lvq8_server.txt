@@ -1,0 +1,26 @@
+81749:C 18 Oct 2026 16:55:09.917 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+81749:C 18 Oct 2026 16:55:09.917 * Redis version=8.10.2, bits=64, commit=498ecd0d, modified=0, pid=81749, just started
+81749:C 18 Oct 2026 16:55:09.917 * Configuration loaded
+81749:M 18 Oct 2026 16:55:09.918 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+81749:M 18 Oct 2026 16:55:09.918 * monotonic clock: POSIX clock_gettime
+81749:M 18 Oct 2026 16:55:09.919 * Running mode=standalone, port=6379.
+81749:M 18 Oct 2026 16:55:09.922 * <search> search-workers default: 16 (min of MAX_WORKER_THREADS=16 and CPU cores)
+81749:M 18 Oct 2026 16:55:09.922 * <search> Redis version found by RedisSearch : 8.10.2 - oss
+81749:M 18 Oct 2026 16:55:09.922 * <search> RediSearch version 8.10.1 (Git=4c9333b)
+81749:M 18 Oct 2026 16:55:09.922 * <search> gc: ON, prefix min length: 2, min word length to stem: 4, prefix max expansions: 200, query timeout (ms): 500, timeout policy: return, oom policy: return, cursor read size: 1000, cursor max idle (ms): 300000, max doctable size: 1000000, max number of search results:  1000000, default scorer: BM25STD, 
+81749:M 18 Oct 2026 16:55:09.922 * <search> Initialized thread pools!
+81749:M 18 Oct 2026 16:55:09.922 * <search> Enabled workers threadpool of size 16
+81749:M 18 Oct 2026 16:55:09.922 * <search> Subscribe to config changes
+81749:M 18 Oct 2026 16:55:09.922 * <search> Subscribe to cluster slot migration events
+81749:M 18 Oct 2026 16:55:09.922 * <search> Subscribe to cluster topology change events
+81749:M 18 Oct 2026 16:55:09.922 * <search> Enabled role change notification
+81749:M 18 Oct 2026 16:55:09.923 * <search> Cluster configuration: AUTO partitions, type: 0, coordinator timeout: 0ms
+81749:M 18 Oct 2026 16:55:09.923 * Module 'search' loaded from /opt/redis-8.10.2-mods/modules/redisearch/redisearch.so
+81749:M 18 Oct 2026 16:55:09.923 * Server initialized
+81749:M 18 Oct 2026 16:55:09.923 * Ready to accept connections tcp
+81749:M 18 Oct 2026 16:55:09.923 # WARNING: Redis does not require authentication. Redis will accept connections from any IP address on the configured network interface.
+81749:M 18 Oct 2026 16:55:10.180 * <search> Creating vector index of type SVS-VAMANA. Required memory for a block of 1024 vectors: 143952B
+81749:M 18 Oct 2026 16:55:10.180 * <search> Successfully created index smoke
+81749:signal-handler (1792342510) Received SIGTERM scheduling shutdown...
+81749:M 18 Oct 2026 16:55:10.226 * User requested shutdown...
+81749:M 18 Oct 2026 16:55:10.226 # Redis is now ready to exit, bye bye...

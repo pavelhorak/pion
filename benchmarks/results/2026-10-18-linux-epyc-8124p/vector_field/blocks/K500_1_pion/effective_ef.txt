@@ -1,0 +1,1 @@
+FT.SEARCH ef auto-scale active: num_nodes=500000 effective_ef=266 (baseline 150)
