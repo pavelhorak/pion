@@ -299,7 +299,7 @@ def _publish(mut hnsw: HNSWGraph,
         hnsw._unborrow()
     elif hnsw.num_nodes > 0 or is_not_null(hnsw.compact_buffer):
         hnsw.reset_graph()
-    hnsw.borrow_from_shared(shared)
+    hnsw.borrow_stable(shared)
     # Filter metadata and BM25 for this worker (they are per worker)
     populate_hnsw_metadata(hnsw, shared, keyspace)
     var ms = (UInt64(perf_counter_ns()) - st.t0_ns) // 1_000_000

@@ -1356,7 +1356,7 @@ def refresh_index_view(
     if not hnsw.is_borrowed and Int(hnsw.nodes) == Int(shared[].nodes) and shared[].index_owner == worker_id:
         return hnsw.index_ready and hnsw.entry_point_id != -1
     if not hnsw.is_borrowed and shared[].num_shards <= 1:
-        hnsw.borrow_from_shared(shared)
+        hnsw.borrow_stable(shared)
     return hnsw.is_borrowed and hnsw.index_ready and hnsw.entry_point_id != -1
 
 

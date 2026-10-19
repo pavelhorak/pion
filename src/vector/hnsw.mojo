@@ -960,10 +960,18 @@ struct HNSWGraph(Movable):
         # Drop-in: `owner` is the publishing worker (its graph holds these
         # buffers), and publish_seq moves on, so a borrow of an earlier index
         # is seen to be stale (FT.SEARCH re-borrows).
+        #
+        # Phase B: a rebuild replaces an index that is SERVED (ready_atomic
+        # stays 1), so readers borrow while these fields change. publish_seq
+        # is a seqlock: odd while they change, even again after, and a borrow
+        # copies them only from an even, unchanged value (borrow_stable). It
+        # used to move on BEFORE the writes: a reader could take the new seq
+        # with a mix of old and new pointers, and keep that torn borrow.
+        if is_not_null(shared[].publish_seq):
+            _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE_RELEASE](shared[].publish_seq, UInt64(1))
+            external_call["pion_full_fence", NoneType]()
         if owner >= 0:
             shared[].index_owner = owner
-        if is_not_null(shared[].publish_seq):
-            _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELEASE](shared[].publish_seq, UInt64(1))
         shared[].nodes = self.nodes
         shared[].node_map = self.node_map
         shared[].neighbor_pool = self.neighbor_pool
@@ -1030,6 +1038,9 @@ struct HNSWGraph(Movable):
         if is_not_null(shared[].build_id):
             shared[].build_id[] = self.build_id   # #46
         shared[].ready = True  # legacy plain-Bool, kept for diagnostics
+        if is_not_null(shared[].publish_seq):                      # seqlock: even again
+            external_call["pion_full_fence", NoneType]()
+            _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELEASE](shared[].publish_seq, UInt64(1))
         # Real visibility barrier: atomic Release store after all field writes.
         # FT.SEARCH borrow check uses Atomic Acquire load to pair with this
         # — fixes recall≈0 race on weak memory (ARM) when other workers
@@ -1037,6 +1048,27 @@ struct HNSWGraph(Movable):
         if is_not_null(shared[].ready_atomic):
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                 shared[].ready_atomic, UInt64(1))
+
+    def borrow_stable(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
+        """borrow_from_shared under the publish seqlock (publish_to_shared):
+        copy only while publish_seq is even, and again if it moved during the
+        copy. Nothing borrowed is dereferenced until the copy is whole. A
+        publish holds the odd value for a few dozen stores, so a wait here is
+        short."""
+        var cell = shared[].publish_seq
+        if is_null(cell):
+            self.borrow_from_shared(shared)
+            return
+        while True:
+            var s1 = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](cell, UInt64(0))
+            if (s1 & 1) != 0:
+                continue
+            self.borrow_from_shared(shared)
+            external_call["pion_full_fence", NoneType]()
+            var s2 = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](cell, UInt64(0))
+            if s1 == s2:
+                self.borrow_seq = s1
+                return
 
     def borrow_from_shared(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
         # V2.6: lazy one-time init — borrow read-only pointers from the index-owning worker.
