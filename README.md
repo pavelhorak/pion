@@ -265,11 +265,23 @@ queries. Pion's load is its insert (≈10.7 s) plus the index build (≈15.5 s);
 Redis builds while it inserts.*
 
 **Against RediSearch, on the same `FT.*` API:** VectorDBBench's own clients on
-both sides, the same case, both servers pinned to the same 8 cores of an EPYC
-8124P, median of 3. Pion serves **6,673 QPS** at 10 clients and Redis 8.10.2
-with RediSearch at its defaults 1,887 (3.5×), at recall@100 0.960 against
-0.963; one client's P99 is 1.3 ms against 5.0 ms. Method and raw runs:
-[`benchmarks/results/2026-10-09-linux-epyc-8124p/vectordbbench_50k/`](benchmarks/results/2026-10-09-linux-epyc-8124p/vectordbbench_50k/README.md).
+both sides, one EPYC 8124P, both servers pinned to the same 8 cores, median of 3.
+At matched recall Pion serves about **2.4×** the queries per second of Redis
+8.10.2 + RediSearch HNSW FP32 at 500K vectors: **3,766 QPS** against 1,545 at
+recall@100 ≥ 0.95, and **3,250** against 1,363 at ≥ 0.97. At 50K it is 3.6× at
+0.95 (6,846 against 1,880) and 2.4× at 0.97.
+
+Pion searches INT8 codes in an index built once, by `FT.OPTIMIZE`. RediSearch
+searches FP32 and indexes every insert as it arrives. Pion loses where that
+difference shows:
+- It becomes searchable later: 265.6 s against 126.7 s at 500K.
+- In VectorDBBench's streaming case it returns nothing until `FT.OPTIMIZE`, while
+  RediSearch answers during the stream.
+- A stock Redis client never sends `FT.OPTIMIZE`.
+
+The same run covers RediSearch's 8-bit SVS-VAMANA index and valkey-search.
+Method and raw runs:
+[`benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/`](benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/README.md).
 
 At equal or better recall, Pion is the faster of the two. At ef=100 — the
 smallest search effort for 100 results, since Pion raises a smaller ef to k —
