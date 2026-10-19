@@ -143,6 +143,17 @@ int64_t pion_build_lanes(void) {
     return (int64_t)n;
 }
 
+/* An integer from the environment, or `dflt` when it is unset or not a
+ * number. The vector index's rebuild knobs (vector_auto.mojo) read it once. */
+int64_t pion_env_int(const char *name, int64_t dflt) {
+    const char *v = getenv(name);
+    if (!v || !*v) return dflt;
+    char *end;
+    long long x = strtoll(v, &end, 10);
+    if (end == v) return dflt;
+    return (int64_t)x;
+}
+
 /* gh #400: y = A·x for a row-major [m × n] FP32 matrix, the exact scan behind
  * VSIM. On macOS this is Accelerate's cblas_sgemv, found once with dlopen so
  * that no build line has to link the framework; measured ~5× the shipped

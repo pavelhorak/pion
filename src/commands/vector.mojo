@@ -7,6 +7,7 @@ from std.atomic import Atomic, Ordering
 from std.ffi import external_call
 from std.time import perf_counter_ns
 from std.sys.info import CompilationTarget
+from std.sys.intrinsics import prefetch
 from std.math import log, sqrt
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
@@ -20,6 +21,7 @@ from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_
 from src.common.lock_free import ShardQueryBus
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.vector.fp32_scan import scan_dot_f32, l2sq_f32_4chain, dot_f32_4chain
+from src.vector.q8_scan import q8_ok, q8_quantize, q8_dot, Q8_BLOCK
 # gh #87.1: src/vector/ivf_pq.mojo deleted (a measured dead end).
 from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_name
 from src.network.rerank_client import RerankClient
@@ -926,6 +928,93 @@ def passes_filters(
 comptime EXACT_BLOCK = 512    # rows per visibility check and per score block
 
 
+@always_inline
+def _kpush(hs: UnsafePointer[Float32, MutUntrackedOrigin], hid: UnsafePointer[Int, MutUntrackedOrigin],
+           mut hn: Int, cap: Int, sc: Float32, slot: Int):
+    """Keep the `cap` smallest scores: a max-heap, the worst kept on top. The
+    caller checked that `sc` beats the top when the heap is full."""
+    if hn < cap:
+        var c = hn                     # sift up
+        hn += 1
+        while c > 0:
+            var par = (c - 1) // 2
+            if hs[par] >= sc:
+                break
+            hs[c] = hs[par]
+            hid[c] = hid[par]
+            c = par
+        hs[c] = sc
+        hid[c] = slot
+    else:
+        var c = 0                      # replace the top, sift down
+        while True:
+            var l = 2 * c + 1
+            if l >= hn:
+                break
+            var m = l
+            if l + 1 < hn and hs[l + 1] > hs[l]:
+                m = l + 1
+            if hs[m] <= sc:
+                break
+            hs[c] = hs[m]
+            hid[c] = hid[m]
+            c = m
+        hs[c] = sc
+        hid[c] = slot
+
+
+def _kdrain(hs: UnsafePointer[Float32, MutUntrackedOrigin], hid: UnsafePointer[Int, MutUntrackedOrigin],
+            hn: Int, mut ids: List[Int], mut scores: List[Float32]):
+    """The heap's rows, ascending by score, into ids/scores (popped from the back)."""
+    for _ in range(hn):
+        ids.append(0)
+        scores.append(0.0)
+    var n = hn
+    while n > 0:
+        var top_s = hs[0]
+        var top_i = hid[0]
+        n -= 1
+        ids[n] = top_i
+        scores[n] = top_s
+        var sc = hs[n]
+        var si = hid[n]
+        var c = 0
+        while True:
+            var l = 2 * c + 1
+            if l >= n:
+                break
+            var m = l
+            if l + 1 < n and hs[l + 1] > hs[l]:
+                m = l + 1
+            if hs[m] <= sc:
+                break
+            hs[c] = hs[m]
+            hid[c] = hid[m]
+            c = m
+        if n > 0:
+            hs[c] = sc
+            hid[c] = si
+
+
+@always_inline
+def q8_want(k: Int) -> Int:
+    """Candidates a Q8 ranking keeps for an answer of k: the ranking is
+    approximate, so a few that rank just past k are scored exactly too."""
+    return k + k // 4 + 16
+
+
+@always_inline
+def _prefetch_row(row: UnsafePointer[Float32, MutUntrackedOrigin], dim: Int):
+    """Ask for a FP32 row's cache lines ahead of its dot product: the rows an
+    exact rescore reads are scattered over the ingest buffer, so each one
+    otherwise starts with a DRAM miss the hardware prefetcher cannot predict."""
+    var p = row.bitcast[UInt8]()
+    var off = 0
+    while off < dim * 4:
+        prefetch(p + off)
+        off += 64
+
+
 def exact_knn(
     shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     query: UnsafePointer[Float32, MutUntrackedOrigin],
@@ -933,6 +1022,7 @@ def exact_knn(
     mut ids: List[Int], mut scores: List[Float32],
     filters: FtFilters,
     keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    exact: Bool = True,
 ):
     """The k nearest of ingest slots [lo, hi), exactly, in the metric's units
     (`1 - cos` under COSINE, squared L2 under L2, as _rescore_knn reports),
@@ -940,9 +1030,14 @@ def exact_knn(
     (#46), and, with FILTER, documents that fail it: the filter is read only
     for a row that would enter the top k, so a filter costs what it rejects.
 
-    COSINE vectors were normalized at ingest, so the query is normalized and
-    one GEMV per block gives the dot products (Accelerate on macOS). L2 has no
-    stored norms, so it reads each row once with the four-chain kernel."""
+    Phase B: where the rows have a Q8 copy (q8_scan.mojo) and the range is
+    more than a few times the answer, the scan ranks by the Q8 dot product,
+    keeps 2k + 16 candidates, and scores those again from the FP32 rows: a
+    quarter of the bytes, the INT8 dot instruction, the same exact scores.
+    With `exact` False it returns the k best by the Q8 scores themselves, for
+    a caller that rescores a merged list once (merge_delta).
+    Otherwise COSINE vectors (normalized at ingest) take one GEMV per block
+    (Accelerate on macOS) and L2 reads each row with the four-chain kernel."""
     ids.clear()
     scores.clear()
     if is_null(shared) or k <= 0 or hi <= lo:
@@ -959,37 +1054,60 @@ def exact_knn(
     var inv = Float32(1.0) / sqrt(ss) if cosine and ss > 0.0 else Float32(1.0)
     for d in range(dim):
         q[d] = query[d] * inv
+    var q8 = shared[].ingest_q8
+    var q8s = shared[].ingest_q8s
+    var n2 = shared[].ingest_n2
+    var want = q8_want(k) if exact else k
+    var use_q8 = is_not_null(q8) and is_not_null(q8s) and is_not_null(n2) and q8_ok(dim) \
+        and hi - lo > 4 * want
+    if not use_q8 or not exact:
+        want = k
+    var nb = dim // Q8_BLOCK
+    var qc = alloc[Int8](dim if use_q8 else 1)
+    var qsc = alloc[Float32](nb if use_q8 and nb > 0 else 1)
+    var qn2 = Float32(0.0)
+    if use_q8:
+        q8_quantize(q, qc, qsc, dim)
+        for d in range(dim):
+            qn2 += q[d] * q[d]
     var blk = alloc[Float32](EXACT_BLOCK)
     var live = alloc[UInt8](EXACT_BLOCK)
-    var cap = k if k < hi - lo else hi - lo
+    var cap = want if want < hi - lo else hi - lo
     var hs = alloc[Float32](cap)      # max-heap on score: the worst kept row on top
-    var hi_ = alloc[Int](cap)
+    var hid = alloc[Int](cap)
     var hn = 0
     var any_dead = shared[].any_dead()
     var b0 = lo
     while b0 < hi:
-        var nb = EXACT_BLOCK if hi - b0 > EXACT_BLOCK else hi - b0
+        var nbk = EXACT_BLOCK if hi - b0 > EXACT_BLOCK else hi - b0
         var nlive = 0
-        for r in range(nb):
+        for r in range(nbk):
             var s = b0 + r
             var ok = shared[].row_visible(s) and not (any_dead and shared[].slot_dead(s))
             live[r] = 1 if ok else 0
             if ok: nlive += 1
         if nlive == 0:
-            b0 += nb
+            b0 += nbk
             continue
         # the ids above were read before the rows below (commit_ingest's pair)
         external_call["pion_full_fence", NoneType]()
-        var rows = fp + b0 * dim
-        if cosine:
-            scan_dot_f32(rows, nb, dim, q, blk)
-            for r in range(nb):
-                blk[r] = Float32(1.0) - blk[r]
-        else:
-            for r in range(nb):
+        if use_q8:
+            for r in range(nbk):
                 if live[r] != 0:
-                    blk[r] = l2sq_f32_4chain(q, rows + r * dim, dim)
-        for r in range(nb):
+                    var s = b0 + r
+                    var dot = q8_dot(qc, qsc, q8 + s * dim, q8s + s * nb, nb)
+                    blk[r] = Float32(1.0) - dot if cosine else qn2 + n2[s] - Float32(2.0) * dot
+        else:
+            var rows = fp + b0 * dim
+            if cosine:
+                scan_dot_f32(rows, nbk, dim, q, blk)
+                for r in range(nbk):
+                    blk[r] = Float32(1.0) - blk[r]
+            else:
+                for r in range(nbk):
+                    if live[r] != 0:
+                        blk[r] = l2sq_f32_4chain(q, rows + r * dim, dim)
+        for r in range(nbk):
             if live[r] == 0:
                 continue
             var sc = blk[r]
@@ -1001,69 +1119,37 @@ def exact_knn(
                     filters.field_names, filters.str_ptrs, filters.str_lens,
                     filters.lo, filters.hi):
                 continue
-            if hn < cap:
-                var c = hn                     # sift up
-                hn += 1
-                while c > 0:
-                    var par = (c - 1) // 2
-                    if hs[par] >= sc:
-                        break
-                    hs[c] = hs[par]
-                    hi_[c] = hi_[par]
-                    c = par
-                hs[c] = sc
-                hi_[c] = slot
-            else:
-                var c = 0                      # replace the top, sift down
-                while True:
-                    var l = 2 * c + 1
-                    if l >= hn:
-                        break
-                    var m = l
-                    if l + 1 < hn and hs[l + 1] > hs[l]:
-                        m = l + 1
-                    if hs[m] <= sc:
-                        break
-                    hs[c] = hs[m]
-                    hi_[c] = hi_[m]
-                    c = m
-                hs[c] = sc
-                hi_[c] = slot
-        b0 += nb
-    # pop the heap from the back: ascending order
-    for _ in range(hn):
-        ids.append(0)
-        scores.append(0.0)
-    var n = hn
-    while n > 0:
-        var top_s = hs[0]
-        var top_i = hi_[0]
-        n -= 1
-        ids[n] = top_i
-        scores[n] = top_s
-        var sc = hs[n]
-        var si = hi_[n]
-        var c = 0
-        while True:
-            var l = 2 * c + 1
-            if l >= n:
-                break
-            var m = l
-            if l + 1 < n and hs[l + 1] > hs[l]:
-                m = l + 1
-            if hs[m] <= sc:
-                break
-            hs[c] = hs[m]
-            hi_[c] = hi_[m]
-            c = m
-        if n > 0:
-            hs[c] = sc
-            hi_[c] = si
+            _kpush(hs, hid, hn, cap, sc, slot)
+        b0 += nbk
+    if use_q8 and exact:
+        # Score the candidates exactly, keep the k best of them
+        var kcap = k if k < hn else hn
+        var es = alloc[Float32](kcap if kcap > 0 else 1)
+        var eid = alloc[Int](kcap if kcap > 0 else 1)
+        var en = 0
+        if hn > 0:
+            _prefetch_row(fp + hid[0] * dim, dim)
+        for i in range(hn):
+            var slot = hid[i]
+            if i + 1 < hn:
+                _prefetch_row(fp + hid[i + 1] * dim, dim)
+            var row = fp + slot * dim
+            var sc = Float32(1.0) - dot_f32_4chain(q, row, dim) if cosine else l2sq_f32_4chain(q, row, dim)
+            if en == kcap and not (sc < es[0]):
+                continue
+            _kpush(es, eid, en, kcap, sc, slot)
+        _kdrain(es, eid, en, ids, scores)
+        es.free()
+        eid.free()
+    else:
+        _kdrain(hs, hid, hn, ids, scores)
     q.free()
+    qc.free()
+    qsc.free()
     blk.free()
     live.free()
     hs.free()
-    hi_.free()
+    hid.free()
 
 
 def merge_delta(
@@ -1076,35 +1162,118 @@ def merge_delta(
     mut ids: List[Int], mut scores: List[Float32],
 ):
     """Drop-in: the graph holds slots [0, built); slots written since (kept by
-    an automatic build) are scanned exactly and merged in, both lists sorted
-    ascending, k kept. Nothing to do after FT.OPTIMIZE, which frees the buffer."""
+    an automatic build) are scanned and merged in, both lists sorted
+    ascending, k kept, every score exact. Nothing to do after FT.OPTIMIZE,
+    which frees the buffer.
+
+    Phase B: with the Q8 copy, graph rows and delta rows are ranked together
+    by their Q8 scores, and only the q8_want(k) best are scored from FP32.
+    Rescoring the graph's k rows and the delta's candidates separately read
+    ~2.2x as many FP32 rows, each a DRAM miss: 0.12 ms of fixed cost a query
+    on the Mac, more than scanning 3,000 Q8 rows."""
     if is_null(shared) or is_null(shared[].ingest_fp32) or built <= 0:
         return
     var rows = shared[].ingested()
     if rows <= built:
         return
+    var dim = shared[].pre_dim
+    var q8_path = is_not_null(shared[].ingest_q8) and is_not_null(shared[].ingest_q8s) \
+        and is_not_null(shared[].ingest_n2) and q8_ok(dim)
     var d_ids = List[Int]()
     var d_scores = List[Float32]()
-    exact_knn(shared, query, k, built, rows, d_ids, d_scores, filters, keyspace)
+    if not q8_path:
+        exact_knn(shared, query, k, built, rows, d_ids, d_scores, filters, keyspace)
+        if len(d_ids) == 0:
+            return
+        _exact_rescore(shared, query, built, ids, scores)
+        var n_a = len(ids) if len(ids) < len(scores) else len(scores)
+        var out_ids = List[Int](capacity=k)
+        var out_scores = List[Float32](capacity=k)
+        var a = 0
+        var b = 0
+        while len(out_ids) < k and (a < n_a or b < len(d_ids)):
+            if b >= len(d_ids) or (a < n_a and scores[a] <= d_scores[b]):
+                out_ids.append(ids[a])
+                out_scores.append(scores[a])
+                a += 1
+            else:
+                out_ids.append(d_ids[b])
+                out_scores.append(d_scores[b])
+                b += 1
+        ids = out_ids^
+        scores = out_scores^
+        return
+    var want = q8_want(k)
+    # The delta's best by Q8 (exact scores when it is too small to rank)
+    exact_knn(shared, query, want, built, rows, d_ids, d_scores, filters, keyspace, False)
     if len(d_ids) == 0:
         return
-    _exact_rescore(shared, query, built, ids, scores)
+    _q8_scores(shared, query, built, ids, scores)
+    # Both lists into one heap of the `want` best, then one exact pass
     var n_a = len(ids) if len(ids) < len(scores) else len(scores)
-    var out_ids = List[Int](capacity=k)
-    var out_scores = List[Float32](capacity=k)
-    var a = 0
-    var b = 0
-    while len(out_ids) < k and (a < n_a or b < len(d_ids)):
-        if b >= len(d_ids) or (a < n_a and scores[a] <= d_scores[b]):
-            out_ids.append(ids[a])
-            out_scores.append(scores[a])
-            a += 1
-        else:
-            out_ids.append(d_ids[b])
-            out_scores.append(d_scores[b])
-            b += 1
-    ids = out_ids^
-    scores = out_scores^
+    var cap = want if want < n_a + len(d_ids) else n_a + len(d_ids)
+    var hs = alloc[Float32](cap)
+    var hid = alloc[Int](cap)
+    var hn = 0
+    for i in range(n_a):
+        if hn == cap and not (scores[i] < hs[0]):
+            continue
+        _kpush(hs, hid, hn, cap, scores[i], ids[i])
+    for i in range(len(d_ids)):
+        if hn == cap and not (d_scores[i] < hs[0]):
+            continue
+        _kpush(hs, hid, hn, cap, d_scores[i], d_ids[i])
+    var m_ids = List[Int](capacity=hn)
+    var m_scores = List[Float32](capacity=hn)
+    _kdrain(hs, hid, hn, m_ids, m_scores)
+    hs.free()
+    hid.free()
+    _exact_rescore(shared, query, rows, m_ids, m_scores)
+    while len(m_ids) > k:
+        _ = m_ids.pop()
+        _ = m_scores.pop()
+    ids = m_ids^
+    scores = m_scores^
+
+
+def _q8_scores(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    query: UnsafePointer[Float32, MutUntrackedOrigin],
+    bound: Int,
+    ids: List[Int], mut scores: List[Float32],
+):
+    """Q8 scores (q8_scan.mojo) for the rows in `ids`, in the metric's units,
+    so graph rows rank against a delta ranked the same way (merge_delta)."""
+    var n = len(ids) if len(ids) < len(scores) else len(scores)
+    var dim = shared[].pre_dim
+    if n == 0 or dim <= 0 or not q8_ok(dim):
+        return
+    var cosine = shared[].pre_distance_metric == 1
+    var q = alloc[Float32](dim)
+    var ss = Float32(0.0)
+    for d in range(dim):
+        ss += query[d] * query[d]
+    var inv = Float32(1.0) / sqrt(ss) if cosine and ss > 0.0 else Float32(1.0)
+    var qn2 = Float32(0.0)
+    for d in range(dim):
+        q[d] = query[d] * inv
+        qn2 += q[d] * q[d]
+    var nb = dim // Q8_BLOCK
+    var qc = alloc[Int8](dim)
+    var qsc = alloc[Float32](nb)
+    q8_quantize(q, qc, qsc, dim)
+    var q8 = shared[].ingest_q8
+    var q8s = shared[].ingest_q8s
+    var n2 = shared[].ingest_n2
+    for i in range(n):
+        var slot = ids[i]
+        if slot < 0 or slot >= bound or not shared[].row_visible(slot):
+            continue
+        var dot = q8_dot(qc, qsc, q8 + slot * dim, q8s + slot * nb, nb)
+        scores[i] = Float32(1.0) - dot if cosine else qn2 + n2[slot] - Float32(2.0) * dot
+    q.free()
+    qc.free()
+    qsc.free()
 
 
 def _exact_rescore(
@@ -1137,6 +1306,8 @@ def _exact_rescore(
         q[d] = query[d] * inv
     for i in range(n):
         var slot = ids[i]
+        if i + 1 < n and ids[i + 1] >= 0 and ids[i + 1] < built:
+            _prefetch_row(fp + ids[i + 1] * dim, dim)
         if slot < 0 or slot >= built or not shared[].row_visible(slot):
             continue
         var row = fp + slot * dim
@@ -1178,11 +1349,86 @@ def refresh_index_view(
         hnsw._unborrow()
     if ready == 0:
         return False
-    if shared[].index_owner == worker_id and not hnsw.is_borrowed:
+    # This graph's own arrays ARE the published index (FT.OPTIMIZE ran here,
+    # or a warm load): search them. An automatic build publishes one of the
+    # rebuild graphs instead (auto_graph), which every worker borrows, its
+    # builder too.
+    if not hnsw.is_borrowed and Int(hnsw.nodes) == Int(shared[].nodes) and shared[].index_owner == worker_id:
         return hnsw.index_ready and hnsw.entry_point_id != -1
     if not hnsw.is_borrowed and shared[].num_shards <= 1:
         hnsw.borrow_from_shared(shared)
     return hnsw.is_borrowed and hnsw.index_ready and hnsw.entry_point_id != -1
+
+
+# ---------------------------------------------------------------------------
+# Drop-in, phase B: the graphs automatic rebuilds alternate between. A rebuild
+# goes into the one that is not served, so the served index (and its exact
+# delta) keeps answering until the new one is published (vector_auto.mojo).
+# ---------------------------------------------------------------------------
+
+def auto_graph(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    i: Int,
+) -> UnsafePointer[HNSWGraph, MutUntrackedOrigin]:
+    """Rebuild graph `i` (0 or 1), or null when it was never made."""
+    if is_null(shared) or is_null(shared[].auto_graphs) or i < 0 or i > 1:
+        return null_ptr[HNSWGraph, MutUntrackedOrigin]()
+    var a = Int(shared[].auto_graphs[unsafe_offset=i])
+    if a == 0:
+        return null_ptr[HNSWGraph, MutUntrackedOrigin]()
+    return UnsafePointer[HNSWGraph, MutUntrackedOrigin](unsafe_from_address=a)
+
+
+def make_auto_graph(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    i: Int,
+    like: HNSWGraph,
+) -> UnsafePointer[HNSWGraph, MutUntrackedOrigin]:
+    """Rebuild graph `i`, made on first use with `like`'s constructor
+    arguments. Its arrays are mmap'd or untouched until a build fills them, so
+    one that is never used costs a few MB (node_map, locks, visited stamps)."""
+    var g = auto_graph(shared, i)
+    if is_not_null(g) or is_null(shared) or is_null(shared[].auto_graphs):
+        return g
+    g = alloc[HNSWGraph](1)
+    g.unsafe_write(HNSWGraph(
+        like.max_elements, like.ctor_dim, M=like.M, ef_construction=like.ef_construction,
+        use_int4=like.use_int4, use_bq=like.use_bq, has_gpu=like.has_gpu,
+        use_huge_pages=like.ctor_huge_pages, polarquant=like.polarquant,
+        turboquant=like.turboquant, nanoquant=like.nanoquant))
+    shared[].auto_graphs[unsafe_offset=i] = Int64(Int(g))
+    return g
+
+
+def served_auto_graph(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    ready: UInt64,
+) -> Int:
+    """Which rebuild graph holds the published index (-1: neither; nothing is
+    published, or a worker's own graph is, after FT.OPTIMIZE or a warm load)."""
+    if ready == 0 or is_null(shared):
+        return -1
+    for i in range(2):
+        var g = auto_graph(shared, i)
+        if is_not_null(g) and Int(g[].nodes) == Int(shared[].nodes) and g[].num_nodes > 0:
+            return i
+    return -1
+
+
+def retire_auto_graphs(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    keep: Int,
+):
+    """Free what the rebuild graphs hold, except graph `keep` (-1: none).
+    Only once no build runs (auto_state held or idle) and no reader can hold
+    their pointers: the caller unpublished them and ran wait_for_readers, or
+    published another index and waited."""
+    for i in range(2):
+        if i == keep:
+            continue
+        var g = auto_graph(shared, i)
+        if is_not_null(g) and (g[].num_nodes > 0 or is_not_null(g[].compact_buffer)):
+            g[].reset_graph()
 
 
 def populate_hnsw_metadata(
@@ -1927,6 +2173,7 @@ def retire_index(
                     shared_hnsw[].shard_ready + sri * 8, UInt64(0)
                 )
     wait_for_readers(shared_hnsw, worker_id)
+    retire_auto_graphs(shared_hnsw, -1)       # phase B: an automatic build's index
     hnsw.reset_index()
 
 
@@ -2028,11 +2275,23 @@ def _close_ingest(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
         return
     shared_hnsw[].ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
     shared_hnsw[].ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
+    var old_q8 = shared_hnsw[].ingest_q8          # phase B: the Q8 copy goes with it
+    var old_q8s = shared_hnsw[].ingest_q8s
+    var old_n2 = shared_hnsw[].ingest_n2
+    shared_hnsw[].ingest_q8 = null_ptr[Int8, MutUntrackedOrigin]()
+    shared_hnsw[].ingest_q8s = null_ptr[Float32, MutUntrackedOrigin]()
+    shared_hnsw[].ingest_n2 = null_ptr[Float32, MutUntrackedOrigin]()
     wait_for_readers(shared_hnsw, worker_id)
     if is_not_null(old_fp32):
         old_fp32.free()
     if is_not_null(old_ids):
         old_ids.free()
+    if is_not_null(old_q8):
+        old_q8.free()
+    if is_not_null(old_q8s):
+        old_q8s.free()
+    if is_not_null(old_n2):
+        old_n2.free()
     if is_not_null(shared_hnsw[].ingest_count):
         Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared_hnsw[].ingest_count, UInt64(0))
 
@@ -2105,6 +2364,8 @@ def handle_ft_optimize(
     var _covered = _served != 0 and is_not_null(shared_hnsw[].ingest_fp32) \
         and shared_hnsw[].num_nodes >= shared_hnsw[].ingested()
     if (_pending == 0 or _covered) and _served != 0:
+        # phase B: this worker's borrow may be of an index a rebuild replaced
+        _ = refresh_index_view(hnsw, shared_hnsw, worker_id, _served)
         populate_hnsw_metadata(hnsw, shared_hnsw, keyspace)
         if _covered:
             _close_ingest(shared_hnsw, worker_id)
@@ -2204,6 +2465,13 @@ def handle_ft_optimize(
         # buffer; INFO vector_unindexed_writes counts it). Nothing else indexes
         # it: the automatic build keeps the buffer instead (vector_auto.mojo).
         _close_ingest(shared_hnsw, worker_id)
+        # Phase B: an automatic build's index served until the publish above
+        # (this build did not unpublish it). Once no reader can hold it, free
+        # what the rebuild graphs hold: nothing builds into them again until
+        # a new FT.CREATE opens ingest.
+        if is_not_null(auto_graph(shared_hnsw, 0)) or is_not_null(auto_graph(shared_hnsw, 1)):
+            wait_for_readers(shared_hnsw, worker_id)
+            retire_auto_graphs(shared_hnsw, -1)
     # Phase 1: persist HNSW to disk so warm restarts skip FT.OPTIMIZE.
     # FT.OPTIMIZE accept-races to a random worker; with num_shards=1 (current default,
     # see commit 7b90d41) the worker that handled the request has the full index
@@ -2340,6 +2608,15 @@ def handle_ft_create(
             if is_not_null(shared_hnsw[].ingest_ids):
                 shared_hnsw[].ingest_ids.free()
                 shared_hnsw[].ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
+            if is_not_null(shared_hnsw[].ingest_q8):
+                shared_hnsw[].ingest_q8.free()
+                shared_hnsw[].ingest_q8 = null_ptr[Int8, MutUntrackedOrigin]()
+            if is_not_null(shared_hnsw[].ingest_q8s):
+                shared_hnsw[].ingest_q8s.free()
+                shared_hnsw[].ingest_q8s = null_ptr[Float32, MutUntrackedOrigin]()
+            if is_not_null(shared_hnsw[].ingest_n2):
+                shared_hnsw[].ingest_n2.free()
+                shared_hnsw[].ingest_n2 = null_ptr[Float32, MutUntrackedOrigin]()
     # Store index name (token immediately after FT.CREATE)
     if ci + 1 < num_tokens:
         var nm_ptr = tokens[ci+1].ptr
@@ -2472,6 +2749,7 @@ def handle_ft_create(
             var ids = alloc[Int32](id_cap)
             unsafe_memset(ids.bitcast[UInt8](), 0xFF, id_cap * 4)
             shared_hnsw[].ingest_ids = ids
+            shared_hnsw[].alloc_ingest_q8(cap, hnsw.dim)     # phase B, before the FP32 buffer
             shared_hnsw[].ingest_fp32 = alloc[Float32](cap * hnsw.dim)
 
     writer.append_ok_response()

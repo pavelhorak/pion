@@ -309,6 +309,11 @@ struct HNSWGraph(Movable):
     var own_neighbor_pool: UnsafePointer[UInt32, MutUntrackedOrigin]
     var own_deleted_bitset: UnsafePointer[UInt8, MutUntrackedOrigin]
     var borrow_seq: UInt64
+    # Drop-in (phase B): the constructor's dim and huge-page choice, so a
+    # rebuild graph (vector.mojo auto_graph) is made exactly like this one.
+    # dim itself changes with FT.CREATE DIM; the per-group arrays do not.
+    var ctor_dim: Int
+    var ctor_huge_pages: Bool
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
@@ -418,6 +423,8 @@ struct HNSWGraph(Movable):
         self.own_neighbor_pool = self.neighbor_pool
         self.own_deleted_bitset = self.deleted_bitset
         self.borrow_seq = 0
+        self.ctor_dim = dim
+        self.ctor_huge_pages = use_huge_pages
         self.residual_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.gpu_slot_ext_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.gpu_distances = null_ptr[Float32, MutUntrackedOrigin]()
@@ -1027,6 +1034,15 @@ struct HNSWGraph(Movable):
     def borrow_from_shared(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
         # V2.6: lazy one-time init — borrow read-only pointers from the index-owning worker.
         # All pointers are shared read-only after ready=True; visited_map stays per-worker private.
+        # Drop-in (phase B): filter metadata is this graph's own, built for the
+        # index it served before (populate_hnsw_metadata). Indexed by node, it
+        # does not fit another index: FT.SEARCH would read past its end.
+        if is_not_null(self.node_meta_tag_hashes): self.node_meta_tag_hashes.free()
+        if is_not_null(self.node_meta_numerics): self.node_meta_numerics.free()
+        if is_not_null(self.node_meta_field_set): self.node_meta_field_set.free()
+        self.node_meta_tag_hashes = null_ptr[UInt32, MutUntrackedOrigin]()
+        self.node_meta_numerics = null_ptr[Float32, MutUntrackedOrigin]()
+        self.node_meta_field_set = null_ptr[UInt8, MutUntrackedOrigin]()
         self.nodes = shared[].nodes
         self.node_map = shared[].node_map
         self.neighbor_pool = shared[].neighbor_pool

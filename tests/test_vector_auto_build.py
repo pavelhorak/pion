@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drop-in, phase A: a vector index answers without FT.OPTIMIZE.
+"""Drop-in, phases A and B: a vector index answers without FT.OPTIMIZE.
 
 A stock Redis client creates an index, HSETs documents and searches; it never
 sends FT.OPTIMIZE. Pion used to answer every such search with `[0]`. Now
@@ -10,6 +10,9 @@ sends FT.OPTIMIZE. Pion used to answer every such search with `[0]`. Now
     published, and searches use it;
   * vectors written after that build are scanned exactly and merged in, and a
     delta of 1/10 of the index triggers a rebuild;
+  * phase B: a rebuild goes into a second graph while the first keeps serving
+    (graph plus exact delta), so searches during a stream of writes never fall
+    back to exact-only, on one worker or four;
   * an explicit FT.OPTIMIZE keeps its meaning (build now, free the buffer;
     later HSETs are stored, not indexed, and counted).
 
@@ -28,6 +31,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -283,7 +287,8 @@ def phase_single(binary, port, workdir, metric):
               f"{a!r:.60} {b!r}")
 
         # The background build
-        check("auto-build finishes: vector_index graph", wait_info(c, "vector_index", "graph", 300))
+        check("auto-build finishes: vector_index graph", wait_info(c, "vector_index", "graph", 300)
+              and wait_info(c, "vector_build_running", "0", 300))
         inf = info(c)
         check("vector_auto_builds 1, vector_graph_rows n",
               inf.get("vector_auto_builds") == "1" and inf.get("vector_graph_rows") == str(n), inf.get("vector_graph_rows"))
@@ -323,11 +328,12 @@ def phase_single(binary, port, workdir, metric):
         ingest(c, more, start=n + 50)
         check("delta >= 1/10 of the index: rebuilt (vector_auto_builds 2)",
               wait_info(c, "vector_auto_builds", "2", 300))
-        check("... and vector_index is graph again", wait_info(c, "vector_index", "graph", 60))
+        check("... and vector_index is graph again", wait_info(c, "vector_index", "graph", 60)
+              and wait_info(c, "vector_build_running", "0", 60))
         hit = (parse(knn(c, more[7], 1)) or [("", 0)])[0][0]
         check("rebuilt graph holds the delta", hit == f"doc:{n + 50 + 7}", hit)
-        # the file the build thread saved (vector_index is graph only after the
-        # thread is joined, i.e. after its save)
+        # the file the build thread saved (vector_build_running is 0 only
+        # after the thread is joined, i.e. after its save)
         warm = os.path.join(d, "warm")
         os.makedirs(warm)
         shutil.copy(os.path.join(d, "pion.hnsw.0"), warm)
@@ -500,6 +506,120 @@ def phase_multi(binary, port, workdir):
         stop(proc)
 
 
+# ── phase B: rebuilds while a stream of writes is searched ──────────────────
+def phase_stream(binary, port, workdir, workers):
+    """A stream of HSETs with no pause long enough for the quiet trigger, and
+    searches on every worker all along. Phase A unpublished the graph for each
+    rebuild, so every search during one was exact. Now a rebuild goes into the
+    other graph while the served one keeps answering: vector_index never
+    leaves graph / graph+delta, each stored vector finds itself, and rebuilds
+    run (the delta cap needs no pause) while searches go on."""
+    print(f"\n[D] -w {workers}: rebuilds during a stream of writes keep the graph serving")
+    d = os.path.join(workdir, f"stream_{workers}")
+    os.makedirs(d)
+    rng = np.random.default_rng(4800 + workers)
+    dim, n0, n_stream, batch = 64, 20000, 12000, 300
+    total = n0 + n_stream
+    vecs = rng.standard_normal((total, dim)).astype(np.float32)
+    proc = serve(binary, port, workers, d, "server.log", dim=dim)
+    try:
+        if not check("server ready", wait_ready(port)):
+            return
+        ports = [port] if workers == 1 else [port + 2 + w for w in range(workers)]
+        c = Client(ports[0])
+        check("FT.CREATE", c.cmd("FT.CREATE", "idx", *schema(dim, "COSINE")) == b"OK")
+        ingest(c, vecs[:n0])
+        check("first auto-build finishes", wait_info(c, "vector_index", "graph", 300)
+              and wait_info(c, "vector_build_running", "0", 300))
+        builds0 = int(info(c).get("vector_auto_builds", "0"))
+        written = [n0]
+        done = threading.Event()
+        lock = threading.Lock()
+        st = {"q": 0, "miss": 0, "bad": 0, "states": set(), "running": 0, "max_ms": 0.0}
+
+        def writer():
+            wc = Client(ports[-1])
+            i = n0
+            while i < total:
+                ingest(wc, vecs[i:i + batch], start=i)
+                i += batch
+                written[0] = i
+                time.sleep(0.05)        # well under the 200 ms quiet trigger
+            wc.close()
+
+        def reader(p, seed):
+            rc = Client(p)
+            r = np.random.default_rng(seed)
+            while not done.is_set():
+                j = int(r.integers(0, written[0]))
+                t = time.time()
+                got = parse(knn(rc, vecs[j], 1))
+                ms = (time.time() - t) * 1000
+                with lock:
+                    st["q"] += 1
+                    st["max_ms"] = max(st["max_ms"], ms)
+                    if not got:
+                        st["bad"] += 1
+                    elif got[0][0] != f"doc:{j}":
+                        st["miss"] += 1
+            rc.close()
+
+        def monitor():
+            mc = Client(ports[0])
+            while not done.is_set():
+                inf = info(mc)
+                with lock:
+                    st["states"].add(inf.get("vector_index"))
+                    if inf.get("vector_build_running") == "1":
+                        st["running"] += 1
+                time.sleep(0.01)
+            mc.close()
+
+        ths = [threading.Thread(target=reader, args=(p, 90 + k)) for k, p in enumerate(ports)]
+        ths.append(threading.Thread(target=monitor))
+        for t in ths:
+            t.start()
+        wt = threading.Thread(target=writer)
+        wt.start()
+        wt.join()
+        time.sleep(0.5)
+        done.set()
+        for t in ths:
+            t.join()
+        builds = int(info(c).get("vector_auto_builds", "0")) - builds0
+        print(f"    ({st['q']} searches, {st['miss']} not self, max {st['max_ms']:.0f} ms; "
+              f"{builds} rebuilds; INFO saw a build running {st['running']}x; states {sorted(st['states'])})")
+        check("no empty or failed reply during the stream", st["bad"] == 0, st["bad"])
+        check(f"each stored vector finds itself ({st['q'] - st['miss']}/{st['q']})",
+              st["q"] > 100 and st["miss"] <= st["q"] // 50)
+        check("vector_index stayed graph / graph+delta (never exact-only)",
+              st["states"] <= {"graph", "graph+delta"}, sorted(st["states"]))
+        check(f"rebuilt during the stream with no pause ({builds} rebuilds)", builds >= 3, builds)
+        check("searches ran while a rebuild was in flight", st["running"] > 0, st["running"])
+        # what the stream left: folded in once ingest pauses (settle), or small
+        ok = False
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            inf = info(c)
+            if int(inf.get("vector_exact_rows", "-1")) <= total // 100 and inf.get("vector_build_running") == "0":
+                ok = True
+                break
+            time.sleep(0.2)
+        check("after the stream: the delta left is folded in or under 1% of the index", ok,
+              info(c).get("vector_exact_rows"))
+        hits = 0
+        for j in list(range(total - 50, total)) + list(range(0, 50)):
+            got = parse(knn(c, vecs[j], 1))
+            hits += 1 if got and got[0][0] == f"doc:{j}" else 0
+        check(f"after the stream: first and last 50 written find themselves ({hits}/100)", hits >= 98)
+        log = open(os.path.join(d, "server.log")).read()
+        check("server log: rebuilds say the current index kept serving",
+              "the current index keeps serving" in log)
+        c.close()
+    finally:
+        stop(proc)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default=os.path.join(REPO, "pion-server"))
@@ -512,6 +632,8 @@ def main():
         phase_single(a.binary, a.port, workdir, "L2")
         phase_delta_merge(a.binary, a.port, workdir)
         phase_multi(a.binary, a.port, workdir)
+        phase_stream(a.binary, a.port, workdir, 1)
+        phase_stream(a.binary, a.port, workdir, WORKERS)
     finally:
         if a.keep:
             print("scratch:", workdir)

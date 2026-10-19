@@ -1,4 +1,4 @@
-"""Drop-in, phase A: the vector index builds itself.
+"""Drop-in: the vector index builds itself, and rebuilds without a gap.
 
 A stock Redis client (RedisVL, LangChain, VectorDBBench's own) creates an
 index, HSETs its documents and searches. It never sends FT.OPTIMIZE, Pion's
@@ -7,44 +7,51 @@ Now:
 
   1. Until a graph is built, FT.SEARCH answers exactly from the shared ingest
      buffer (vector.mojo exact_knn): same reply, same score units.
-  2. Once ingest has been quiet for AUTO_QUIET_NS, one worker builds the graph
-     on a background pthread (build_index_from_shared, the same build
-     FT.OPTIMIZE runs), while every worker keeps answering exactly.
-  3. That worker publishes the graph from its own event loop (filter metadata
-     and BM25 read its keyspace), then the thread saves it to disk.
+  2. Once ingest has been quiet for AUTO_QUIET_NS (or AUTO_FIRST_ROWS vectors
+     wait without a pause), one worker builds the graph on a background
+     pthread (build_index_from_shared, the same build FT.OPTIMIZE runs),
+     while every worker keeps answering exactly.
+  3. The build goes into a REBUILD GRAPH (vector.mojo auto_graph), not into
+     a worker's own graph. That worker publishes it from its own event loop,
+     and every worker, the builder too, searches it through a borrow. Then
+     the thread saves it to disk.
   4. The ingest buffer is KEPT. Vectors written after the build's snapshot
      are the delta: FT.SEARCH merges an exact scan of them into the graph's
-     results, so a write after the build is searchable at once. When the delta
-     reaches 1/AUTO_REBUILD_DIVISOR of the index and ingest is quiet again,
-     the graph is rebuilt the same way; searches are exact while it builds.
+     results, so a write after the build is searchable at once.
+  5. Phase B: when the delta reaches 1/AUTO_REBUILD_DIVISOR of the index or
+     AUTO_DELTA_MAX rows (no pause needed), or ingest pauses for
+     AUTO_SETTLE_MS with a delta of 1/AUTO_SETTLE_DIVISOR, the index is
+     rebuilt into the OTHER rebuild graph. The served index, graph
+     plus exact delta, keeps answering all the while: the new one replaces it
+     at publish, then the builder waits out every reader of the old one
+     (wait_for_readers) and frees it. Searches are never exact-only again.
 
 An explicit FT.OPTIMIZE keeps its meaning: build now, from everything
-ingested, and free the buffer (later HSETs are stored, not indexed, and
-counted in INFO vector_unindexed_writes).
+ingested, into the worker's own graph, and free the buffer (later HSETs are
+stored, not indexed, and counted in INFO vector_unindexed_writes).
 
-Who builds. `index_owner` is the worker whose graph holds the published
-index; only it rebuilds, so a build never touches buffers another worker's
-graph owns. Before the first publish, the first worker to claim `auto_state`
-builds and becomes the owner.
+Who builds. `index_owner` is the worker that published the served index;
+only it rebuilds, so the per-worker state a publish makes (filter metadata,
+BM25: populate_hnsw_metadata) stays on one worker. Before the first publish,
+the first worker to claim `auto_state` builds and becomes the owner.
 
 The state machine, in SharedHNSWView.auto_state as `(worker << 8) | phase`:
 
-  IDLE -> BUILDING  the worker claims it (CAS), unpublishes a served index and
-                    waits out its readers, resets its graph, starts the thread
+  IDLE -> BUILDING  the worker claims it (CAS), resets the rebuild graph not
+                    served, starts the thread
   BUILDING -> BUILT the thread finished the build (or FAILED)
-  BUILT -> SAVING   the worker published the graph (vector_auto_tick, or a
-                    vector_auto_await on that worker)
+  BUILT -> SAVING   the worker published the graph and retired the one it
+                    replaced (vector_auto_tick, or a vector_auto_await there)
   SAVING -> DONE    the thread saved pion.hnsw.0
   DONE -> IDLE      the worker joined the thread
 
-Commands that would change the index, or the graph under the thread, wait for
-IDLE first: FT.CREATE, FT.DROPINDEX and FT.OPTIMIZE on any worker, which then
-hold the state (AUTO_HOLD) while they run so no build starts under them
-(vector_auto_hold / vector_auto_release), and RAG.QUERY on the building worker
-(vector_auto_await). Waiting workers count themselves in `auto_waiters` and
-no build starts while any wait. The building worker never waits for another
-worker during a build, so a wait cannot deadlock: it ends at the building
-worker's next housekeeping tick after the thread is done.
+Commands that would change the index, or the graphs under the thread, wait
+for IDLE first: FT.CREATE, FT.DROPINDEX and FT.OPTIMIZE on any worker, which
+then hold the state (AUTO_HOLD) while they run so no build starts under them
+(vector_auto_hold / vector_auto_release). Waiting workers count themselves in
+`auto_waiters` and no build starts while any wait. The building worker never
+waits for another worker during a build, so a wait cannot deadlock: it ends
+at the building worker's next housekeeping tick after the thread is done.
 """
 
 from std.memory import alloc
@@ -58,7 +65,8 @@ from src.common.vec_tomb import VecTomb
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.network.dispatcher import CommandDispatcher
 from src.network.vector_ingest import record_all_dead
-from src.commands.vector import populate_hnsw_metadata, adopt_index_config, wait_for_readers
+from src.commands.vector import populate_hnsw_metadata, adopt_index_config, wait_for_readers, \
+    auto_graph, make_auto_graph, served_auto_graph, retire_auto_graphs
 
 comptime AUTO_IDLE = 0
 comptime AUTO_BUILDING = 1
@@ -71,9 +79,22 @@ comptime AUTO_HOLD = 6       # FT.CREATE / FT.DROPINDEX / FT.OPTIMIZE running (v
 # Ingest counts as over once no vector has arrived for this long. Housekeeping
 # looks every ~64 ms, so a build starts 200-270 ms after the last vector.
 comptime AUTO_QUIET_NS = UInt64(200_000_000)
-# A built index is rebuilt once its delta is this fraction of it (1/10): the
-# exact delta scan then costs about a tenth of a full exact scan.
+# The first build starts without a pause once this many vectors wait: a
+# stream that never pauses is otherwise searched exactly forever (an exact
+# query over 16K rows is ~1.5 ms).
+comptime AUTO_FIRST_ROWS = 16384
+# A built index is rebuilt, pause or not, once its delta (the rows every query
+# scans exactly) reaches 1/AUTO_REBUILD_DIVISOR of it, but never more than
+# AUTO_DELTA_MAX rows (PION_VECTOR_DELTA_MAX): past that the scan costs a
+# query more than its graph search does, whatever the index's size.
 comptime AUTO_REBUILD_DIVISOR = 10
+comptime AUTO_DELTA_MIN = 256
+comptime AUTO_DELTA_MAX = 8192
+# Once ingest pauses for AUTO_SETTLE_MS (PION_VECTOR_SETTLE_MS; 0 = never),
+# a delta of 1/AUTO_SETTLE_DIVISOR of the index or more is folded in too, so
+# what a stream leaves behind does not cost every later query a scan.
+comptime AUTO_SETTLE_MS = 1000
+comptime AUTO_SETTLE_DIVISOR = 100
 
 
 struct VectorAuto(Movable):
@@ -83,8 +104,11 @@ struct VectorAuto(Movable):
     var job: UnsafePointer[NoneType, MutUntrackedOrigin]   # pion_bg_start_sym handle
     var ctx: UnsafePointer[Int64, MutUntrackedOrigin]      # the thread's arguments
     var snapshot: Int         # rows the running build covers
+    var target: Int           # the rebuild graph it builds into (auto_graph)
     var failed_at: Int        # ingest count a build failed at: not retried until it moves
     var t0_ns: UInt64
+    var delta_max: Int        # AUTO_DELTA_MAX, or PION_VECTOR_DELTA_MAX
+    var settle_ns: UInt64     # AUTO_SETTLE_MS, or PION_VECTOR_SETTLE_MS (0: never)
 
     def __init__(out self):
         self.seen = -1
@@ -92,8 +116,15 @@ struct VectorAuto(Movable):
         self.job = null_ptr[NoneType, MutUntrackedOrigin]()
         self.ctx = null_ptr[Int64, MutUntrackedOrigin]()
         self.snapshot = 0
+        self.target = 0
         self.failed_at = -1
         self.t0_ns = 0
+        var n1 = String("PION_VECTOR_DELTA_MAX") + "\0"
+        var dm = Int(external_call["pion_env_int", Int64](n1.unsafe_ptr(), Int64(AUTO_DELTA_MAX)))
+        self.delta_max = dm if dm >= 1 else AUTO_DELTA_MAX
+        var n2 = String("PION_VECTOR_SETTLE_MS") + "\0"
+        var sm = Int(external_call["pion_env_int", Int64](n2.unsafe_ptr(), Int64(AUTO_SETTLE_MS)))
+        self.settle_ns = UInt64(sm) * 1_000_000 if sm > 0 else UInt64(0)
 
 
 @always_inline
@@ -148,8 +179,8 @@ def vector_auto_tick(mut hnsw: HNSWGraph,
     if rows != st.seen:
         st.seen = rows
         st.since_ns = now
-        return
-    if now - st.since_ns < AUTO_QUIET_NS or rows == st.failed_at:
+    var quiet_ns = now - st.since_ns
+    if rows == st.failed_at:
         return
     var ready = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared[].ready_atomic, UInt64(0)) \
         if is_not_null(shared[].ready_atomic) else UInt64(0)
@@ -157,49 +188,62 @@ def vector_auto_tick(mut hnsw: HNSWGraph,
     var delta = rows - built
     if delta <= 0:
         return
-    if built > 0 and delta * AUTO_REBUILD_DIVISOR < built:
-        return              # small delta: the exact delta scan is cheap
+    var due: Bool
+    if built == 0:
+        due = quiet_ns >= AUTO_QUIET_NS or rows >= AUTO_FIRST_ROWS
+    else:
+        var cap = max(AUTO_DELTA_MIN, min(built // AUTO_REBUILD_DIVISOR, st.delta_max))
+        due = delta >= cap or (st.settle_ns > 0 and quiet_ns >= st.settle_ns
+                               and delta * AUTO_SETTLE_DIVISOR >= built)
+    if not due:
+        return
     if shared[].index_owner >= 0 and shared[].index_owner != worker_id:
-        return              # only the owner's graph is rebuilt
+        return              # only the owner rebuilds (per-worker publish state)
     if is_not_null(shared[].auto_waiters) and Atomic[Scalar[DType.uint64]].fetch_add[
             ordering=Ordering.ACQUIRE](shared[].auto_waiters, UInt64(0)) != 0:
+        return
+    # The snapshot is the committed prefix: every slot in it is written (an
+    # HSET mid-flight still holds the next one). Rows past it are the delta.
+    external_call["pion_full_fence", NoneType]()
+    var snap = built
+    while snap < rows and shared[].row_visible(snap):
+        snap += 1
+    if snap <= built:
         return
     var expected = UInt64(0)
     if not Atomic[Scalar[DType.uint64]].compare_exchange(
             shared[].auto_state, expected, (UInt64(worker_id) << 8) | UInt64(AUTO_BUILDING)):
         return
-    _start(hnsw, shared, worker_id, rows, ready, st)
+    _start(hnsw, shared, worker_id, snap, ready, st)
 
 
 def _start(mut hnsw: HNSWGraph,
            shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
            worker_id: Int, rows: Int, ready: UInt64, mut st: VectorAuto):
-    """On this worker's loop, holding auto_state = BUILDING."""
-    # Ingest was quiet, so every slot of the snapshot should be written; a
-    # slot that is not (a writer stalled mid-HSET) postpones the build.
-    external_call["pion_full_fence", NoneType]()
-    for s in range(rows):
-        if not shared[].row_visible(s):
-            _set(shared, worker_id, AUTO_IDLE)
-            return
-    # The served index is this graph (only the owner rebuilds): unpublish it
-    # and wait out its readers before the build rewrites and frees it.
-    # Every worker answers exactly from the ingest buffer meanwhile.
-    if ready != 0:
-        shared[].ready = False
-        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared[].ready_atomic, UInt64(0))
-        wait_for_readers(shared, worker_id)
-    hnsw.reset_graph()          # gives back a borrow; BM25 keeps serving
+    """On this worker's loop, holding auto_state = BUILDING: build slots
+    [0, rows) into the rebuild graph that is not served. The served index is
+    left alone; FT.SEARCH keeps answering from it (and its exact delta)."""
+    var t = 1 if served_auto_graph(shared, ready) == 0 else 0
+    var g = make_auto_graph(shared, t, hnsw)
+    if is_null(g):
+        _set(shared, worker_id, AUTO_IDLE)
+        return
+    g[].reset_graph()           # what it held was retired at the last publish
     if shared[].index_name_len > 0:
-        hnsw.index_name_len = shared[].index_name_len
+        g[].index_name_len = shared[].index_name_len
+        for b in range(g[].index_name_len):
+            g[].index_name[b] = shared[].index_name[b]
+    elif hnsw.index_name_len > 0:
+        g[].index_name_len = hnsw.index_name_len
         for b in range(hnsw.index_name_len):
-            hnsw.index_name[b] = shared[].index_name[b]
-    adopt_index_config(hnsw, shared)
+            g[].index_name[b] = hnsw.index_name[b]
+    adopt_index_config(g[], shared)
+    g[].ef_runtime = hnsw.ef_runtime
     # #46: a fresh id per build, as FT.OPTIMIZE gives one
     var bid = UInt64(perf_counter_ns()) ^ (UInt64(Int(external_call["random", Int64]())) << 20)
-    hnsw.build_id = bid if bid != 0 else UInt64(1)
+    g[].build_id = bid if bid != 0 else UInt64(1)
     var ctx = alloc[Int64](4)
-    ctx[0] = Int64(Int(UnsafePointer(to=hnsw)))
+    ctx[0] = Int64(Int(g))
     ctx[1] = Int64(Int(shared))
     ctx[2] = Int64(rows)
     ctx[3] = Int64(worker_id)
@@ -207,7 +251,7 @@ def _start(mut hnsw: HNSWGraph,
     var job = external_call["pion_bg_start_sym", UnsafePointer[NoneType, MutUntrackedOrigin]](
         sym.unsafe_ptr(), ctx)
     if is_null(job):
-        print("[vector] auto-build could not start a thread; FT.SEARCH stays exact (FT.OPTIMIZE builds)")
+        print("[vector] auto-build could not start a thread; FT.SEARCH stays as it is (FT.OPTIMIZE builds)")
         ctx.free()
         st.failed_at = rows
         _set(shared, worker_id, AUTO_IDLE)
@@ -215,9 +259,14 @@ def _start(mut hnsw: HNSWGraph,
     st.job = job
     st.ctx = ctx
     st.snapshot = rows
+    st.target = t
     st.t0_ns = UInt64(perf_counter_ns())
-    print("[vector] auto-build: indexing " + String(rows)
-          + " vectors in the background; FT.SEARCH answers exactly until it is done")
+    if ready != 0:
+        print("[vector] auto-build: re-indexing " + String(rows)
+              + " vectors in the background; the current index keeps serving")
+    else:
+        print("[vector] auto-build: indexing " + String(rows)
+              + " vectors in the background; FT.SEARCH answers exactly until it is done")
 
 
 def _publish(mut hnsw: HNSWGraph,
@@ -226,16 +275,31 @@ def _publish(mut hnsw: HNSWGraph,
              mut dispatcher: CommandDispatcher,
              tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
              worker_id: Int, st: VectorAuto):
-    """BUILT -> SAVING, on this worker's loop: what FT.OPTIMIZE does after its
-    build, minus freeing the ingest buffer (the delta lives there)."""
-    populate_hnsw_metadata(hnsw, shared, keyspace)
-    hnsw.index_ready = True
-    hnsw.publish_to_shared(shared, worker_id)
+    """BUILT -> SAVING, on this worker's loop: publish the new graph, retire
+    the index it replaces, and make this worker's own graph a borrower of it.
+    What FT.OPTIMIZE does after its build, minus freeing the ingest buffer
+    (the delta lives there)."""
+    var g = auto_graph(shared, st.target)
+    g[].index_ready = True
+    g[].publish_to_shared(shared, worker_id)
     record_all_dead(shared, tomb, dispatcher)
     if is_not_null(shared[].vec_stats):
         _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](shared[].vec_stats + 1, UInt64(1))
+    # Batches that started before the publish may still read the index it
+    # replaced; any later one re-borrows (publish_seq moved on). After the
+    # wait nothing reads the old one, so it can go: the other rebuild graph,
+    # or this worker's own graph (an FT.OPTIMIZE build here, or a warm load).
+    wait_for_readers(shared, worker_id)
+    retire_auto_graphs(shared, st.target)
+    if hnsw.is_borrowed:
+        hnsw._unborrow()
+    elif hnsw.num_nodes > 0 or is_not_null(hnsw.compact_buffer):
+        hnsw.reset_graph()
+    hnsw.borrow_from_shared(shared)
+    # Filter metadata and BM25 for this worker (they are per worker)
+    populate_hnsw_metadata(hnsw, shared, keyspace)
     var ms = (UInt64(perf_counter_ns()) - st.t0_ns) // 1_000_000
-    print("[vector] auto-build: " + String(hnsw.num_nodes) + " vectors indexed in "
+    print("[vector] auto-build: " + String(g[].num_nodes) + " vectors indexed in "
           + String(Int(ms)) + " ms; FT.SEARCH uses the graph now")
     _set(shared, worker_id, AUTO_SAVING)
 
@@ -263,9 +327,11 @@ def _advance(mut hnsw: HNSWGraph,
             st.ctx = null_ptr[Int64, MutUntrackedOrigin]()
             if ph == AUTO_FAILED:
                 print("[vector] auto-build of " + String(st.snapshot)
-                      + " vectors failed; FT.SEARCH stays exact (FT.OPTIMIZE builds)")
+                      + " vectors failed; FT.SEARCH serves what it served (FT.OPTIMIZE builds)")
                 st.failed_at = st.snapshot
-                hnsw.reset_graph()
+                var fg = auto_graph(shared, st.target)
+                if is_not_null(fg):
+                    fg[].reset_graph()      # the served index is untouched
             _set(shared, worker_id, AUTO_IDLE)
             return
         if ph != AUTO_BUILDING and ph != AUTO_SAVING:

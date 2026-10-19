@@ -5,6 +5,7 @@ from std.memory import alloc, unsafe_memset
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
 from src.common.lock_free import ShardQueryBus
+from src.vector.q8_scan import q8_ok, q8_quantize, Q8_BLOCK
 # gh #87.1: ivf_pq module deleted.
 from std.collections import Array
 
@@ -253,6 +254,21 @@ struct SharedHNSWView(Movable):
     var index_owner: Int
     var publish_seq: Pointer[UInt64, MutUntrackedOrigin]
     var vec_stats: Pointer[UInt64, MutUntrackedOrigin]
+    # Drop-in (phase B): the two graphs automatic rebuilds alternate between,
+    # as addresses of heap HNSWGraphs (0 = not made yet; vector.mojo
+    # auto_graph). A rebuild goes into the one not served, so the served index
+    # keeps answering while it builds. Process-wide, so the worker that drops
+    # or replaces the index can free them (retire_auto_graphs).
+    var auto_graphs: Pointer[Int64, MutUntrackedOrigin]
+    # Phase B: the Q8 copy of every ingest row (src/vector/q8_scan.mojo), which
+    # exact scans rank with before they rescore from FP32: codes (capacity x
+    # dim), one scale per 32-dim block, and each row's exact squared norm (L2
+    # distances from a dot product). Null for a dim that is not whole blocks.
+    # Allocated with ingest_fp32 and freed with it; set before it, so a writer
+    # that sees the FP32 buffer sees these too.
+    var ingest_q8: Pointer[Int8, MutUntrackedOrigin]
+    var ingest_q8s: Pointer[Float32, MutUntrackedOrigin]
+    var ingest_n2: Pointer[Float32, MutUntrackedOrigin]
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -298,6 +314,10 @@ struct SharedHNSWView(Movable):
         self.index_owner = -1
         self.publish_seq = null_ptr[UInt64, MutUntrackedOrigin]()
         self.vec_stats = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.auto_graphs = null_ptr[Int64, MutUntrackedOrigin]()
+        self.ingest_q8 = null_ptr[Int8, MutUntrackedOrigin]()
+        self.ingest_q8s = null_ptr[Float32, MutUntrackedOrigin]()
+        self.ingest_n2 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -426,6 +446,10 @@ struct SharedHNSWView(Movable):
         self.index_owner = take.index_owner
         self.publish_seq = take.publish_seq
         self.vec_stats = take.vec_stats
+        self.auto_graphs = take.auto_graphs
+        self.ingest_q8 = take.ingest_q8
+        self.ingest_q8s = take.ingest_q8s
+        self.ingest_n2 = take.ingest_n2
 
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:
@@ -458,6 +482,15 @@ struct SharedHNSWView(Movable):
         # Drop-in: no slot is written yet, so the exact scan sees none
         if Int(self.ingest_ids) != 0 and self.hk_max_elements > 0:
             unsafe_memset(self.ingest_ids.bitcast[UInt8](), 0xFF, self.hk_max_elements * 4)
+
+    def alloc_ingest_q8(mut self, cap: Int, dim: Int):
+        """Phase B: the Q8 copy for `cap` rows of `dim`, before ingest_fp32 is
+        set (nothing when dim is not whole blocks)."""
+        if not q8_ok(dim) or cap <= 0:
+            return
+        self.ingest_q8 = alloc[Int8](cap * dim)
+        self.ingest_q8s = alloc[Float32](cap * (dim // Q8_BLOCK))
+        self.ingest_n2 = alloc[Float32](cap)
 
     def commit_ingest(self, slot: Int):
         """Drop-in: slot `slot` is fully written (its vector and its key): the
@@ -532,6 +565,16 @@ struct SharedHNSWView(Movable):
                 var inv = Float32(1.0) / sqrt(norm_sq)
                 for i in range(dim):
                     self.ingest_fp32[unsafe_offset=off + i] = self.ingest_fp32[unsafe_offset=off + i] * inv
+        # Phase B: the row's Q8 copy and exact squared norm (after the COSINE
+        # normalization above: the scans read what the graph would store)
+        if Int(self.ingest_q8) != 0 and q8_ok(dim):
+            var nb = dim // Q8_BLOCK
+            q8_quantize(self.ingest_fp32 + off, self.ingest_q8 + off, self.ingest_q8s + slot * nb, dim)
+            var n2 = Float32(0.0)
+            for i in range(dim):
+                var v = self.ingest_fp32[unsafe_offset=off + i]
+                n2 += v * v
+            self.ingest_n2[unsafe_offset=slot] = n2
         # The slot is the HNSW node id (not key-parsed digits). The caller
         # writes it with commit_ingest once the slot's key is recorded too:
         # until then the exact scan skips the row.

@@ -1289,6 +1289,10 @@ def main():
     shared_hnsw_ptr[].auto_waiters = auto_cells + 1
     shared_hnsw_ptr[].publish_seq = auto_cells + 2
     shared_hnsw_ptr[].vec_stats = auto_cells + 4      # [0] unindexed writes, [1] auto builds
+    var auto_graph_cells = alloc[Int64](2)            # phase B: the rebuilds' two graphs
+    auto_graph_cells[unsafe_offset=0] = 0
+    auto_graph_cells[unsafe_offset=1] = 0
+    shared_hnsw_ptr[].auto_graphs = auto_graph_cells
 
     # #19: count the persisted indexes the workers are about to load. Each is
     # pion.hnsw.<worker that built it>, loaded by that worker alone; the others

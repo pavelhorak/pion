@@ -71,7 +71,7 @@ from src.commands.command_info import cmd_pause_write, cmd_is_container
 from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro, handle_pfselftest, handle_pfdebug
 from src.commands.monitor import MonitorRegistry, monitor_line
 from src.network.vector_ingest import ingest_hash_vector, record_all_dead, ingest_whole_hash, hash_addr, after_rename
-from src.network.vector_auto import VectorAuto, vector_auto_await, vector_auto_hold, vector_auto_release, auto_building_here, auto_worker_of
+from src.network.vector_auto import VectorAuto, vector_auto_hold, vector_auto_release, auto_worker_of
 from src.commands.replication_cmds import handle_role, handle_replicaof, handle_failover, handle_sync, handle_replconf
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
@@ -933,8 +933,10 @@ struct SlowPathHandler:
     def _vector_index_info(self) -> String:
         """Drop-in: what serves FT.SEARCH, process-wide. vector_index is none
         (no index defined), exact (vectors, no graph yet: answered by exact
-        scan), building (exact meanwhile), graph, or graph+delta (vectors
-        written after an automatic build, scanned exactly and merged).
+        scan), building (the first build; exact meanwhile), graph, or
+        graph+delta (vectors written after an automatic build, scanned exactly
+        and merged). A rebuild leaves the graph serving; vector_build_running
+        is 1 while any build, or its save to disk, is unfinished.
         vector_unindexed_writes counts vectors stored after an explicit
         FT.OPTIMIZE, which nothing indexes."""
         var sh = self.shared_hnsw
@@ -948,10 +950,10 @@ struct SlowPathHandler:
         var delta = rows - graph if is_not_null(sh[].ingest_fp32) and rows > graph else 0
         var building = auto_worker_of(sh) >= 0
         var state = String("none")
-        if building:
-            state = "building"
-        elif ready != 0:
+        if ready != 0:              # phase B: a rebuild does not stop the graph serving
             state = "graph+delta" if delta > 0 else "graph"
+        elif building:
+            state = "building"
         elif rows > 0:
             state = "exact"
         elif sh[].pre_index_ready:
@@ -962,6 +964,7 @@ struct SlowPathHandler:
         o += "vector_graph_rows:" + String(graph) + "\r\n"
         o += "vector_exact_rows:" + String(delta if ready != 0 else rows) + "\r\n"
         o += "vector_auto_builds:" + String(builds) + "\r\n"
+        o += "vector_build_running:" + ("1" if building else "0") + "\r\n"
         o += "vector_unindexed_writes:" + String(unindexed) + "\r\n"
         return o
 
@@ -3648,12 +3651,10 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── RAG.QUERY ── (9 bytes)
                     elif cmd_eq(tp, tl, "rag.query"):
-                        # It searches this worker's graph directly: not while a
-                        # background build owns it, and not through a borrow of
-                        # an index since dropped or replaced (drop-in).
-                        if auto_building_here(self.shared_hnsw, self.worker_id):
-                            vector_auto_await(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
-                                              self.vec_tomb, self.worker_id, self.vauto)
+                        # It searches this worker's graph directly: not through a
+                        # borrow of an index since dropped or replaced (drop-in).
+                        # A background build never touches this graph (it builds
+                        # into a rebuild graph, vector_auto.mojo), so no wait.
                         if is_not_null(self.shared_hnsw) and is_not_null(self.shared_hnsw[].ready_atomic):
                             _ = refresh_index_view(hnsw, self.shared_hnsw, self.worker_id,
                                 Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
