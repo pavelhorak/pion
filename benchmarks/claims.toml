@@ -1931,7 +1931,7 @@ note = "Pion = the lower of its two blocks per size (K50_5, K500_5). 2.4x = 3766
 
 [[claim]]
 file = "README.md"
-where = "It becomes searchable later:"
+where = "It became searchable later:"
 numbers = ["265.6 s", "126.7 s", "500K"]
 kind = "result"
 evidence = ["benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/summary.md"]
@@ -1945,3 +1945,18 @@ numbers = ["0.58×", "0.83×"]
 kind = "result"
 evidence = ["benchmarks/results/2026-10-10-mac-m4-io-threads/summary.md"]
 expect = ["| 0.58 |", "| 0.83 |"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Once inserts pause for 200 ms"
+numbers = ["200ms"]
+kind = "code"
+evidence = ["src/network/vector_auto.mojo"]
+expect = ["comptime AUTO_QUIET_NS = UInt64(200_000_000)"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "The kept buffer costs"
+numbers = ["6KB", "300MB", "50K"]
+kind = "arithmetic"
+note = "1536 x 4 bytes = 6 KB per vector; 50,000 x 6,144 bytes = 307 MB"

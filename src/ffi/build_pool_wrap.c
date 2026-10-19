@@ -22,6 +22,8 @@
  */
 #include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <dlfcn.h>
 
 typedef void (*pion_build_fn)(void *ctx, int64_t thread_idx);
@@ -77,6 +79,68 @@ int pion_build_pool_run_sym(const char *sym, void *ctx, int64_t n_threads) {
     pion_build_fn fn = (pion_build_fn)dlsym(RTLD_DEFAULT, sym);
     if (!fn) return -2;
     return pion_build_pool_run(fn, ctx, n_threads);
+}
+
+/* Vector drop-in (phase A): one background job, the index build that no
+ * client asked for. pion_bg_start_sym starts `sym(ctx, 0)` on its own pthread
+ * and returns a handle (NULL when the symbol is missing or the thread could
+ * not start: the caller then builds nothing and stays on the exact scan).
+ * pion_bg_join waits for it and frees the handle. The event loop that started
+ * the job keeps serving meanwhile; the job's own state machine (an atomic in
+ * the shared vector view) says when to join. */
+typedef struct {
+    pion_build_fn fn;
+    void *ctx;
+    pthread_t tid;
+} _pion_bg_job;
+
+static void *_pion_bg_trampoline(void *arg) {
+    _pion_bg_job *job = (_pion_bg_job *)arg;
+    job->fn(job->ctx, 0);
+    return NULL;
+}
+
+void *pion_bg_start_sym(const char *sym, void *ctx) {
+    pion_build_fn fn = (pion_build_fn)dlsym(RTLD_DEFAULT, sym);
+    if (!fn) return NULL;
+    _pion_bg_job *job = (_pion_bg_job *)malloc(sizeof(_pion_bg_job));
+    if (!job) return NULL;
+    job->fn = fn;
+    job->ctx = ctx;
+    /* the build's lane 0 runs on this thread: give it the stack a worker has */
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, (size_t)16 << 20);
+    int rc = pthread_create(&job->tid, &attr, _pion_bg_trampoline, job);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        free(job);
+        return NULL;
+    }
+    return job;
+}
+
+void pion_bg_join(void *handle) {
+    _pion_bg_job *job = (_pion_bg_job *)handle;
+    if (!job) return;
+    pthread_join(job->tid, NULL);
+    free(job);
+}
+
+/* Link lanes for an HNSW build: the online CPUs, at least 4 (what the build
+ * always used) and at most 16 (the most measured). PION_BUILD_LANES=N
+ * overrides it (1..64). sysconf is called with the platform's own constant:
+ * _SC_NPROCESSORS_ONLN is 58 on macOS and 84 on Linux. */
+int64_t pion_build_lanes(void) {
+    const char *env = getenv("PION_BUILD_LANES");
+    if (env && *env) {
+        long v = strtol(env, NULL, 10);
+        if (v >= 1 && v <= 64) return (int64_t)v;
+    }
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 4) n = 4;
+    if (n > 16) n = 16;
+    return (int64_t)n;
 }
 
 /* gh #400: y = A·x for a row-major [m × n] FP32 matrix, the exact scan behind

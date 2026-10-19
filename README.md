@@ -271,13 +271,20 @@ At matched recall Pion serves about **2.4×** the queries per second of Redis
 recall@100 ≥ 0.95, and **3,250** against 1,363 at ≥ 0.97. At 50K it is 3.6× at
 0.95 (6,846 against 1,880) and 2.4× at 0.97.
 
-Pion searches INT8 codes in an index built once, by `FT.OPTIMIZE`. RediSearch
-searches FP32 and indexes every insert as it arrives. Pion loses where that
-difference shows:
-- It becomes searchable later: 265.6 s against 126.7 s at 500K.
-- In VectorDBBench's streaming case it returns nothing until `FT.OPTIMIZE`, while
-  RediSearch answers during the stream.
-- A stock Redis client never sends `FT.OPTIMIZE`.
+In that run Pion searched INT8 codes in an index built once, by `FT.OPTIMIZE`.
+RediSearch searches FP32 and indexes every insert as it arrives. Pion lost where
+that difference shows:
+- It became searchable later: 265.6 s against 126.7 s at 500K.
+- In VectorDBBench's streaming case it returned nothing until `FT.OPTIMIZE`,
+  while RediSearch answered during the stream.
+- A stock Redis client never sends `FT.OPTIMIZE`, so it got nothing back.
+
+`FT.OPTIMIZE` is now optional. Until the graph exists, `FT.SEARCH` answers
+exactly from the inserted vectors. The graph then builds itself in the
+background once inserts pause, and a vector written after that is found at
+once ([how](doc/vector_engine.md#searching-without-ftoptimize)). A stock client
+gets results. The first two losses have not been re-measured: a search before
+the graph exists is exact, and slower.
 
 The same run covers RediSearch's 8-bit SVS-VAMANA index and valkey-search.
 Method and raw runs:
@@ -425,7 +432,7 @@ vecs = {f"doc:{i}": rng.random(D).astype(np.float32) for i in range(20)}
 for key, v in vecs.items():
     r.execute_command("HSET", key, "vec", v.tobytes(), "title", key)
 
-r.execute_command("FT.OPTIMIZE", "idx")         # build the graph, then query
+r.execute_command("FT.OPTIMIZE", "idx")         # optional: build the graph now
 
 q = (Query("*=>[KNN 3 @vec $B AS score]")       # the 3 nearest, closest first
      .sort_by("score").return_fields("title", "score").dialect(2))

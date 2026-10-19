@@ -6,6 +6,45 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Added
+
+- **A vector index answers without `FT.OPTIMIZE`.** A stock Redis client
+  (RedisVL, LangChain, VectorDBBench's own) creates an index, HSETs and
+  searches, and never sends `FT.OPTIMIZE`; it used to get `[0]` back. Now,
+  until the graph exists, `FT.SEARCH` answers exactly from the inserted vectors
+  (same reply, same score units, `FILTER` and deletes honoured). Once inserts
+  pause for 200 ms, the graph builds on a background thread while searches
+  stay exact, and is then published and saved. A vector written after that
+  build is scanned exactly and merged into every search, and a tenth of the
+  index written that way triggers a rebuild. `FT.INFO` counts the vectors
+  searchable before a build, and `INFO` reports `vector_index`,
+  `vector_graph_rows`, `vector_exact_rows`, `vector_auto_builds` and
+  `vector_unindexed_writes`. An explicit `FT.OPTIMIZE` keeps its meaning:
+  build now, and later HSETs are stored but not indexed (now counted).
+  `FT.HYBRID` and `FT.SEARCH … HYBRID` take the same exact path.
+  `doc/vector_engine.md`, "Searching without FT.OPTIMIZE".
+- **The graph build uses one link lane per CPU** (4 to 16; it was always 4).
+  `PION_BUILD_LANES=N` overrides it.
+
+### Fixed
+
+- **A worker that served another worker's index could build into that
+  worker's buffers.** Borrowing an index overwrote the borrower's own arrays,
+  and giving it back only cleared a flag. An `FT.OPTIMIZE` that then landed on
+  the borrower wrote into the owner's graph. Borrowers now keep their own
+  arrays and take them back. A borrow of an index that was since replaced is
+  noticed and renewed. A worker whose own graph is no longer the published
+  index stops searching it.
+- **`FT.OPTIMIZE` freed the ingest buffer while other workers could still
+  write to it or read it.** It now waits for them first, as `FT.DROPINDEX`
+  does.
+- **Writing the same vector again before a build listed the document twice.**
+  The identical rewrite now keeps its one slot, as it already did after a
+  build.
+- **`FT.OPTIMIZE` with nothing new to build republished the worker's own
+  graph**, which on a worker that had not built the index was an empty one. It
+  now keeps the served index.
+
 ### Changed
 
 - **The README's one-keyspace KV table is re-measured with `--io-threads`.** On

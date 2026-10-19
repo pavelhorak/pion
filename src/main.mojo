@@ -4,6 +4,7 @@ from std.collections import List
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
+from std.atomic import Atomic, Ordering
 from src.network.io_threads import IOHub, io_thread_main
 from src.network.io_ring import IO_THREAD_BASE
 from src.common.ptr import is_not_null
@@ -1280,6 +1281,14 @@ def main():
     var ready_atomic_buf = alloc[UInt64](1)
     ready_atomic_buf[unsafe_offset=0] = 0
     shared_hnsw_ptr[].ready_atomic = ready_atomic_buf
+    # Drop-in (src/network/vector_auto.mojo): the automatic build's state, the
+    # workers waiting for it, the publish counter, and the vector INFO counters.
+    var auto_cells = alloc[UInt64](8)
+    unsafe_memset(auto_cells.unsafe_bitcast[UInt8](), 0, 64)
+    shared_hnsw_ptr[].auto_state = auto_cells
+    shared_hnsw_ptr[].auto_waiters = auto_cells + 1
+    shared_hnsw_ptr[].publish_seq = auto_cells + 2
+    shared_hnsw_ptr[].vec_stats = auto_cells + 4      # [0] unindexed writes, [1] auto builds
 
     # #19: count the persisted indexes the workers are about to load. Each is
     # pion.hnsw.<worker that built it>, loaded by that worker alone; the others
@@ -1918,3 +1927,34 @@ def pion_gh199_build_lane(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: Int
         bi += n_threads
     visited.unsafe_free()
     epoch_cell.unsafe_free()
+
+
+# ── Drop-in (phase A): the automatic vector index build's thread ─────────────
+# Started by src/network/vector_auto.mojo through build_pool_wrap.c's
+# pion_bg_start_sym (dlsym, as pion_gh199_build_lane; -u in every link line).
+# ctx (Int64 slots): [0]=HNSWGraph* (the building worker's graph), [1]=the
+# SharedHNSWView*, [2]=rows to build (the snapshot), [3]=worker id. It builds,
+# reports BUILT (or FAILED), waits for the worker to publish (SAVING), saves
+# the index file off the event loop, then reports DONE for the worker to join.
+@export
+def pion_vector_auto_build(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: Int64):
+    _ = lane_idx
+    var g = Pointer[HNSWGraph, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=0]))
+    var sh = Pointer[SharedHNSWView, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=1]))
+    var rows = Int(ctx[unsafe_offset=2])
+    var w = UInt64(Int(ctx[unsafe_offset=3])) << 8
+    var ok = True
+    try:
+        g[].build_index_from_shared(sh, -1, 1, rows)
+    except:
+        ok = False
+    if ok and (g[].num_nodes == 0 or g[].entry_point_id == -1):
+        ok = False
+    if not ok:
+        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](sh[].auto_state, w | UInt64(5))   # FAILED
+        return
+    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](sh[].auto_state, w | UInt64(2))       # BUILT
+    while (Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](sh[].auto_state, UInt64(0)) & 0xFF) == 2:
+        _ = external_call["usleep", Int32](Int32(1000))
+    g[].save_to_disk("pion.hnsw.0", sh[].hk_keys_buf, sh[].hk_max_elements)
+    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](sh[].auto_state, w | UInt64(4))       # DONE

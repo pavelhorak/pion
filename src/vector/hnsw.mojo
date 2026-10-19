@@ -299,6 +299,16 @@ struct HNSWGraph(Movable):
     # for a file that predates it). Tombstones record it, so replay applies
     # them to the build they were made against. At END per the field rule.
     var build_id: UInt64
+    # Drop-in: the graph's OWN arrays, which borrow_from_shared overwrites
+    # with the publisher's. _unborrow puts them back, so a graph that served
+    # another worker's index never builds into, resets or frees that worker's
+    # buffers (it used to: is_borrowed was cleared and the pointers kept).
+    # `borrow_seq` is the shared publish_seq of the index borrowed. At END.
+    var own_nodes: UnsafePointer[HNSWNode, MutUntrackedOrigin]
+    var own_node_map: UnsafePointer[Int, MutUntrackedOrigin]
+    var own_neighbor_pool: UnsafePointer[UInt32, MutUntrackedOrigin]
+    var own_deleted_bitset: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var borrow_seq: UInt64
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
@@ -403,6 +413,11 @@ struct HNSWGraph(Movable):
         self.fp32_norm_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.residual_scratch_cap = 0
         self.build_id = 0
+        self.own_nodes = self.nodes
+        self.own_node_map = self.node_map
+        self.own_neighbor_pool = self.neighbor_pool
+        self.own_deleted_bitset = self.deleted_bitset
+        self.borrow_seq = 0
         self.residual_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.gpu_slot_ext_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.gpu_distances = null_ptr[Float32, MutUntrackedOrigin]()
@@ -791,11 +806,46 @@ struct HNSWGraph(Movable):
     def reset_index(mut self):
         # gh #139: BM25 state is per-worker and never published to / borrowed
         # from the shared view, so it is owned even on a borrowing graph and has
-        # to be cleared before the is_borrowed early-return. Leaving it behind
-        # made FT.DROPINDEX a no-op for lexical search — a dropped index kept
-        # answering `FT.SEARCH … BM25` from the stale postings. (A worker
-        # self-borrows its own published index at -w 1, so this is the common
-        # path, not an exotic multi-worker one.)
+        # to be cleared too. Leaving it behind made FT.DROPINDEX a no-op for
+        # lexical search — a dropped index kept answering `FT.SEARCH … BM25`
+        # from the stale postings. (A worker self-borrows its own published
+        # index at -w 1, so this is the common path, not an exotic multi-worker
+        # one.)
+        self._reset_bm25()
+        self.reset_graph()
+        self.index_name_len = 0
+
+    def _unborrow(mut self):
+        """Drop-in: stop serving the borrowed index and take back this graph's
+        own arrays. The borrowed buffers stay the publisher's: none is freed
+        here, and none may be written through this graph again."""
+        if not self.is_borrowed and self.nodes == self.own_nodes:
+            return
+        self.nodes = self.own_nodes
+        self.node_map = self.own_node_map
+        self.neighbor_pool = self.own_neighbor_pool
+        self.deleted_bitset = self.own_deleted_bitset
+        self.compact_buffer = null_ptr[Int8, MutUntrackedOrigin]()
+        self.node_norms = null_ptr[Float32, MutUntrackedOrigin]()
+        self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
+        self.l0_compact = null_ptr[UInt32, MutUntrackedOrigin]()
+        self.prefix_buffer = null_ptr[Int8, MutUntrackedOrigin]()
+        self.l0_slots = null_ptr[UInt32, MutUntrackedOrigin]()
+        self.gpu_rerank_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
+        self.gpu_rerank_registered = False
+        self.qjl_buffer = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.qjl_res_norms = null_ptr[Float32, MutUntrackedOrigin]()
+        # (own arrays may still hold this graph's own earlier build: zero the
+        # counts so nothing reads it before the next build or reset)
+        self.num_nodes = 0
+        self.entry_point_id = -1
+        self.max_level = -1
+        self.deleted_count = 0
+        self.index_ready = False
+        self.is_borrowed = False
+        self.borrow_seq = 0
+
+    def _reset_bm25(mut self):
         if is_not_null(self.bm25_term_hashes):    self.bm25_term_hashes.free()
         if is_not_null(self.bm25_term_idf):       self.bm25_term_idf.free()
         if is_not_null(self.bm25_postings_start): self.bm25_postings_start.free()
@@ -820,12 +870,11 @@ struct HNSWGraph(Movable):
         self.bm25_text_cap       = 0
         self.bm25_index_name_len = 0
 
-        if self.is_borrowed:
-            self.num_nodes = 0
-            self.entry_point_id = -1
-            self.index_ready = False
-            return
-
+    def reset_graph(mut self):
+        """The vector graph only (BM25 and the index name stay): what a rebuild
+        clears before it builds. A borrowing graph gives the borrowed buffers
+        back first (_unborrow), so everything freed below is this graph's own."""
+        self._unborrow()
         self.num_nodes = 0
         self.entry_point_id = -1
         self.max_level = -1
@@ -838,7 +887,6 @@ struct HNSWGraph(Movable):
         for i in range(self.max_elements):
             self.node_map[i] = -1
         self.index_ready = False
-        self.index_name_len = 0
         self.global_min = -0.20
         self.global_max = 0.20
 
@@ -893,8 +941,15 @@ struct HNSWGraph(Movable):
         self.bm25_text_ids[self.bm25_text_count] = Int32(ext_id)
         self.bm25_text_count += 1
 
-    def publish_to_shared(self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
-        # V2.6: after build_index()+compact_vectors(), publish read-only pointers for other workers
+    def publish_to_shared(self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], owner: Int = -1):
+        # V2.6: after build_index()+compact_vectors(), publish read-only pointers for other workers.
+        # Drop-in: `owner` is the publishing worker (its graph holds these
+        # buffers), and publish_seq moves on, so a borrow of an earlier index
+        # is seen to be stale (FT.SEARCH re-borrows).
+        if owner >= 0:
+            shared[].index_owner = owner
+        if is_not_null(shared[].publish_seq):
+            _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELEASE](shared[].publish_seq, UInt64(1))
         shared[].nodes = self.nodes
         shared[].node_map = self.node_map
         shared[].neighbor_pool = self.neighbor_pool
@@ -1015,6 +1070,8 @@ struct HNSWGraph(Movable):
             self.index_name[i] = shared[].index_name[i]
         self.stat_query_count = 0
         self.stat_total_evals = 0
+        if is_not_null(shared[].publish_seq):
+            self.borrow_seq = shared[].publish_seq[]
         self.is_borrowed = True # Phase 1.1: We are now a borrower
         self.index_ready = True
         # Projection: borrow matrix pointer so this worker can project queries
@@ -2187,10 +2244,17 @@ struct HNSWGraph(Movable):
         indeg.free()
         return linked_total
 
-    def build_index_from_shared(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], shard_id: Int = -1, num_shards: Int = 1) raises:
+    def build_index_from_shared(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], shard_id: Int = -1, num_shards: Int = 1,
+                                snapshot: Int = -1) raises:
         """V3.1: build graph from the shared ingest buffer (any worker can call this after distributed HSET).
-        V8.1 path: build graph in 1536-dim INT8, BFS-compact, search with INT8-INT8 batch-8."""
+        V8.1 path: build graph in 1536-dim INT8, BFS-compact, search with INT8-INT8 batch-8.
+
+        Drop-in: `snapshot` >= 0 builds slots [0, snapshot) and leaves the
+        ingest count alone, so writes that land meanwhile keep their slots past
+        it (the delta FT.SEARCH scans exactly). The automatic build passes it;
+        FT.OPTIMIZE builds everything and restarts the count, as before."""
         if is_null(shared[].ingest_count) or Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared[].ingest_count, UInt64(0)) == 0: return
+        if snapshot == 0: return
         self.num_nodes = 0
         self.entry_point_id = -1
         self.max_level = -1
@@ -2206,9 +2270,11 @@ struct HNSWGraph(Movable):
         # capacity if HSET multi-field overflows (see SharedHNSWView.add_ingest_vector
         # bounds check). Without this cap, iterating past the buffer reads garbage
         # → SIGSEGV in compact_vectors. Companion to the add_ingest_vector fix.
+        if snapshot > 0 and snapshot < n:
+            n = snapshot
         if n > self.max_elements:
             n = self.max_elements
-        if shard_id < 0:
+        if shard_id < 0 and snapshot < 0:
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                 shared[].ingest_count, UInt64(0)
             )
@@ -2249,7 +2315,12 @@ struct HNSWGraph(Movable):
         self.entry_point_id = bp_max_idx
         self.max_level = bp_max_lvl
         if n > 0:
-            var n_threads = 4 if n >= 4096 else 1
+            # Drop-in A3: one link lane per online CPU, 4..16 (PION_BUILD_LANES
+            # overrides; build_pool_wrap.c). Linking is ~80% of a build, and the
+            # build stopped at 4 lanes on 16-core boxes. 4 -> 8 left recall
+            # unchanged (0.960 / 0.960, Mac, 50K); the repair passes below
+            # absorb the extra contended drops.
+            var n_threads = Int(external_call["pion_build_lanes", Int64]()) if n >= 4096 else 1
             self.link_drops[0] = 0  # gh #212: per-build accounting
             var bctx = alloc[Int64](5)
             bctx[0] = Int64(Int(UnsafePointer(to=self)))

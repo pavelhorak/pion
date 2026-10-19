@@ -3,6 +3,7 @@ from std.memory.unsafe_pointer import Pointer
 from std.math import sqrt
 from std.memory import alloc, unsafe_memset
 from std.atomic import Atomic, Ordering
+from std.ffi import external_call
 from src.common.lock_free import ShardQueryBus
 # gh #87.1: ivf_pq module deleted.
 from std.collections import Array
@@ -236,6 +237,22 @@ struct SharedHNSWView(Movable):
     var vec_dead_count: Pointer[UInt64, MutUntrackedOrigin]
     var build_id: Pointer[UInt64, MutUntrackedOrigin]
     var vec_gen: Pointer[UInt64, MutUntrackedOrigin]     # see VecTomb.gen
+    # Drop-in (phase A, src/network/vector_auto.mojo): the index builds itself.
+    # `auto_state` is `(worker << 8) | phase` (AUTO_* in vector_auto.mojo): 0
+    # when no automatic build is running, else the worker whose graph is being
+    # built and how far it got. `auto_waiters` counts workers blocked until it
+    # ends (FT.CREATE / FT.DROPINDEX / FT.OPTIMIZE elsewhere); no new build
+    # starts while any wait. `index_owner` is the worker whose graph holds the
+    # buffers of the index last published (-1: none yet); only it rebuilds, so
+    # no graph is ever built into buffers another worker owns. `publish_seq`
+    # counts publishes, so a worker can tell its borrow is of an older index.
+    # `vec_stats`: [0] vector writes stored but not indexed (the ingest buffer
+    # was gone: after an explicit FT.OPTIMIZE), [1] automatic builds done.
+    var auto_state: Pointer[UInt64, MutUntrackedOrigin]
+    var auto_waiters: Pointer[UInt64, MutUntrackedOrigin]
+    var index_owner: Int
+    var publish_seq: Pointer[UInt64, MutUntrackedOrigin]
+    var vec_stats: Pointer[UInt64, MutUntrackedOrigin]
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -276,6 +293,11 @@ struct SharedHNSWView(Movable):
         self.vec_dead_count = null_ptr[UInt64, MutUntrackedOrigin]()
         self.build_id = null_ptr[UInt64, MutUntrackedOrigin]()
         self.vec_gen = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.auto_state = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.auto_waiters = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.index_owner = -1
+        self.publish_seq = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.vec_stats = null_ptr[UInt64, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -399,6 +421,11 @@ struct SharedHNSWView(Movable):
         self.vec_dead_count = take.vec_dead_count
         self.build_id = take.build_id
         self.vec_gen = take.vec_gen
+        self.auto_state = take.auto_state
+        self.auto_waiters = take.auto_waiters
+        self.index_owner = take.index_owner
+        self.publish_seq = take.publish_seq
+        self.vec_stats = take.vec_stats
 
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:
@@ -428,6 +455,36 @@ struct SharedHNSWView(Movable):
             self.build_id[] = 0
         if Int(self.vec_gen) != 0:
             _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELEASE](self.vec_gen, UInt64(1))
+        # Drop-in: no slot is written yet, so the exact scan sees none
+        if Int(self.ingest_ids) != 0 and self.hk_max_elements > 0:
+            unsafe_memset(self.ingest_ids.bitcast[UInt8](), 0xFF, self.hk_max_elements * 4)
+
+    def commit_ingest(self, slot: Int):
+        """Drop-in: slot `slot` is fully written (its vector and its key): the
+        exact scan may read it. The fence orders those writes before the id;
+        the scan reads ids, fences, then reads the vectors (row_visible)."""
+        if Int(self.ingest_ids) == 0 or slot < 0 or slot >= self.hk_max_elements:
+            return
+        external_call["pion_full_fence", NoneType]()
+        self.ingest_ids[unsafe_offset=slot] = Int32(slot)
+
+    @always_inline
+    def row_visible(self, slot: Int) -> Bool:
+        """Committed (commit_ingest). Read a block's ids, fence once, then its rows."""
+        return Int(self.ingest_ids[unsafe_offset=slot]) == slot
+
+    def ingested(self) -> Int:
+        """Slots handed out so far, capped at the buffer (0 when there is none).
+        A plain load: FT.SEARCH reads it per query, and an atomic RMW would take
+        the counter's cache line from the ingesting workers every time. Rows are
+        read only once committed (row_visible), so a stale count costs nothing
+        but the newest rows."""
+        if Int(self.ingest_count) == 0 or Int(self.ingest_fp32) == 0:
+            return 0
+        var n = Int(self.ingest_count.load[volatile=True]())
+        if self.hk_max_elements > 0 and n > self.hk_max_elements:
+            n = self.hk_max_elements
+        return n
 
     def add_ingest_vector(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) -> Int:
         """Buffer a FP32 vector during load phase. Called from any worker's HSET handler.
@@ -475,5 +532,7 @@ struct SharedHNSWView(Movable):
                 var inv = Float32(1.0) / sqrt(norm_sq)
                 for i in range(dim):
                     self.ingest_fp32[unsafe_offset=off + i] = self.ingest_fp32[unsafe_offset=off + i] * inv
-        self.ingest_ids[unsafe_offset=slot] = Int32(slot)  # Use slot as node ID (not key-parsed digits)
+        # The slot is the HNSW node id (not key-parsed digits). The caller
+        # writes it with commit_ingest once the slot's key is recorded too:
+        # until then the exact scan skips the row.
         return slot
