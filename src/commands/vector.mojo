@@ -19,7 +19,7 @@ from src.common.config import PionConfig
 from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_len, parse_filter_float, is_valid_float_arg, parse_float64, arg_eq
 from src.common.lock_free import ShardQueryBus
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
-from src.vector.fp32_scan import scan_dot_f32, l2sq_f32_4chain
+from src.vector.fp32_scan import scan_dot_f32, l2sq_f32_4chain, dot_f32_4chain
 # gh #87.1: src/vector/ivf_pq.mojo deleted (a measured dead end).
 from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_name
 from src.network.rerank_client import RerankClient
@@ -1088,6 +1088,7 @@ def merge_delta(
     exact_knn(shared, query, k, built, rows, d_ids, d_scores, filters, keyspace)
     if len(d_ids) == 0:
         return
+    _exact_rescore(shared, query, built, ids, scores)
     var n_a = len(ids) if len(ids) < len(scores) else len(scores)
     var out_ids = List[Int](capacity=k)
     var out_scores = List[Float32](capacity=k)
@@ -1104,6 +1105,52 @@ def merge_delta(
             b += 1
     ids = out_ids^
     scores = out_scores^
+
+
+def _exact_rescore(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    query: UnsafePointer[Float32, MutUntrackedOrigin],
+    built: Int,
+    mut ids: List[Int], mut scores: List[Float32],
+):
+    """The graph's results, scored exactly from the FP32 ingest rows, ascending.
+
+    _rescore_knn scores them from the INT8 codes, and the quantization noise
+    ADDS to every distance: on 1536-d OpenAI embeddings about +0.1 of `1 - cos`
+    (0.264 reported against 0.167 exact for the same document). Ranking among
+    graph rows survives that; a merge with exact delta rows does not: every
+    delta row within 0.1 of the true neighbours outranked all of them, and
+    in-stream recall@100 fell to 0.07-0.10. The delta merge needs both sides
+    exact, and in auto mode the FP32 rows are all still here."""
+    var n = len(ids) if len(ids) < len(scores) else len(scores)
+    var fp = shared[].ingest_fp32
+    var dim = shared[].pre_dim
+    if n == 0 or is_null(fp) or dim <= 0:
+        return
+    var cosine = shared[].pre_distance_metric == 1
+    var q = alloc[Float32](dim)
+    var ss = Float32(0.0)
+    for d in range(dim):
+        ss += query[d] * query[d]
+    var inv = Float32(1.0) / sqrt(ss) if cosine and ss > 0.0 else Float32(1.0)
+    for d in range(dim):
+        q[d] = query[d] * inv
+    for i in range(n):
+        var slot = ids[i]
+        if slot < 0 or slot >= built or not shared[].row_visible(slot):
+            continue
+        var row = fp + slot * dim
+        if cosine:
+            scores[i] = Float32(1.0) - dot_f32_4chain(q, row, dim)
+        else:
+            scores[i] = l2sq_f32_4chain(q, row, dim)
+    q.free()
+    for a in range(1, n):
+        var b = a
+        while b > 0 and scores[b] < scores[b - 1]:
+            var ts = scores[b]; scores[b] = scores[b - 1]; scores[b - 1] = ts
+            var ti = ids[b]; ids[b] = ids[b - 1]; ids[b - 1] = ti
+            b -= 1
 
 
 def refresh_index_view(

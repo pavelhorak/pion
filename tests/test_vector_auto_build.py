@@ -372,6 +372,65 @@ def phase_single(binary, port, workdir, metric):
         stop(proc)
 
 
+# ── the delta merge when graph scores are off ────────────────────────────────
+def phase_delta_merge(binary, port, workdir):
+    """The graph scores its results from INT8 codes, and the quantization noise
+    adds to every distance: on OpenAI-50K embeddings (COSINE) the reported
+    1 - cos is about 0.094 above the exact one. The delta is exact, so merged
+    by score as they were, delta rows outranked the true neighbours: in-stream
+    recall@100 fell to 0.07-0.10 (VectorDBBench S50, Mac). The merge now
+    rescores the graph's rows from the FP32 ingest buffer first.
+
+    Synthetic COSINE data does not show the inflation; L2 data with one large
+    constant component per 32-d quantization group does (each group's range
+    is wide, so its steps are coarse): about +24 on squared L2 here. Constant
+    components do not move L2 distances, so brute force is still the truth.
+    Checked: with a delta, every returned score is the exact one, and the
+    merge does not lose recall against the graph alone."""
+    print("\n[C] -w 1, 1536-d L2, coarse quantization: graph + delta merge on exact scores")
+    d = os.path.join(workdir, "delta_merge")
+    os.makedirs(d)
+    rng = np.random.default_rng(1536)
+    dim, n, nd = 1536, 4000, 300           # nd * 10 < n: no rebuild
+    centers = rng.standard_normal((40, dim)).astype(np.float32)
+
+    def draw(m):
+        v = (centers[rng.integers(0, 40, m)] + 0.35 * rng.standard_normal((m, dim))).astype(np.float32)
+        v[:, ::32] += 20.0
+        return v
+    vecs = draw(n)
+    qs = draw(30)
+    proc = serve(binary, port, 1, d, "server.log", dim=dim)
+    try:
+        if not check("server ready", wait_ready(port)):
+            return
+        c = Client(port)
+        check("FT.CREATE (L2, DIM 1536)", c.cmd("FT.CREATE", "idx", *schema(dim, "L2")) == b"OK")
+        ingest(c, vecs)
+        check("auto-build finishes", wait_info(c, "vector_index", "graph", 300))
+        keys = [f"doc:{i}" for i in range(n + nd)]
+        base = [recall(parse(knn(c, q, 10)), brute(vecs, keys[:n], q, 10, "L2")) for q in qs]
+        delta = draw(nd)
+        ingest(c, delta, start=n)
+        st = info(c)
+        check("graph + 300 delta rows", st.get("vector_index") == "graph+delta"
+              and st.get("vector_exact_rows") == str(nd), f"{st.get('vector_index')} {st.get('vector_exact_rows')}")
+        allv = np.vstack([vecs, delta])
+        rs, worst = [], 0.0
+        for q in qs:
+            got = parse(knn(c, q, 10))
+            rs.append(recall(got, brute(allv, keys, q, 10, "L2")))
+            exact = ((allv - q) ** 2).sum(axis=1)
+            for k2, sc in got or []:
+                worst = max(worst, abs(sc - exact[int(k2.split(":")[1])]) / max(1.0, exact[int(k2.split(":")[1])]))
+        check(f"graph + delta: every score is the exact one (worst relative error {worst:.5f})", worst <= 2e-3)
+        check(f"graph + delta: recall@10 {np.mean(rs):.3f} not below the graph's own {np.mean(base):.3f} - 0.05",
+              np.mean(rs) >= np.mean(base) - 0.05)
+        c.close()
+    finally:
+        stop(proc)
+
+
 # ── four workers ─────────────────────────────────────────────────────────────
 WORKERS = 4
 
@@ -451,6 +510,7 @@ def main():
     try:
         phase_single(a.binary, a.port, workdir, "COSINE")
         phase_single(a.binary, a.port, workdir, "L2")
+        phase_delta_merge(a.binary, a.port, workdir)
         phase_multi(a.binary, a.port, workdir)
     finally:
         if a.keep:
