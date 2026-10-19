@@ -1,0 +1,11 @@
+# build_repeat.py on 6ca3181, -w 10 --independent-workers (4 workers), --no-wal: 8 rounds of
+# FT.CREATE, HSET the 50K OpenAI vectors, wait for the automatic build, recall@100 over 300
+# test queries against the dataset's neighbours on worker 0 and worker 2, FT.DROPINDEX + FLUSHALL.
+build 0: w0 0.9586 w2 0.9586
+build 1: w0 0.9577 w2 0.9577
+build 2: w0 0.9583 w2 0.9583
+build 3: w0 0.9588 w2 0.9588
+build 4: w0 0.9593 w2 0.9593
+build 5: w0 0.9585 w2 0.9585
+build 6: w0 0.9589 w2 0.9589
+build 7: w0 0.9589 w2 0.9589

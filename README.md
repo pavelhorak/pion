@@ -279,12 +279,22 @@ that difference shows:
   while RediSearch answered during the stream.
 - A stock Redis client never sends `FT.OPTIMIZE`, so it got nothing back.
 
-`FT.OPTIMIZE` is now optional. Until the graph exists, `FT.SEARCH` answers
-exactly from the inserted vectors. The graph then builds itself in the
-background once inserts pause, and a vector written after that is found at
-once ([how](doc/vector_engine.md#searching-without-ftoptimize)). A stock client
-gets results. The first two losses have not been re-measured: a search before
-the graph exists is exact, and slower.
+**`FT.OPTIMIZE` is now optional.** Until the graph exists, `FT.SEARCH` answers
+exactly from the inserted vectors. Once inserts pause, the graph builds itself in
+the background, and a vector written after that is found at once
+([how](doc/vector_engine.md#searching-without-ftoptimize)). Measured on a Mac
+([`benchmarks/results/2026-10-19-mac-m4-drop-in/`](benchmarks/results/2026-10-19-mac-m4-drop-in/README.md)):
+- **The stock client.** VectorDBBench's stock client, which never sends
+  `FT.OPTIMIZE`, gets recall@100 of 0.959–0.960 at 50K. After the background
+  build its QPS is 0.998× that of today's path with `FT.OPTIMIZE`.
+- **The streaming case.** Searches during the stream answer at the ceiling:
+  0.50 and 0.79 at 50% and 80% inserted, against RediSearch's 0.51 and 0.80
+  above. In one run of seven, the end of the stream read 0.76; the cause is
+  not yet known.
+
+Neither loss has been re-measured on the box. A search before the graph
+exists is exact, and slower, and so is a search during the rebuild that a
+burst of new vectors triggers.
 
 The same run covers RediSearch's 8-bit SVS-VAMANA index and valkey-search.
 Method and raw runs:

@@ -1,0 +1,5 @@
+[vector] auto-build: indexing 50000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.21328424, 0.21188469] from 50000 vectors
+[HNSW] parallel link: 20 contended link drops, 24 under-linked nodes repaired
+[HNSW] level-0 reachability: 14 unreachable node(s) linked into the graph
+[vector] auto-build: 50000 vectors indexed in 3203 ms; FT.SEARCH uses the graph now

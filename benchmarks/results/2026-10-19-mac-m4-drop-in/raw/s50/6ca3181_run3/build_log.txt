@@ -1,0 +1,180 @@
+[vector] auto-build: indexing 200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20474434, 0.20334795] from 200 vectors
+[vector] auto-build: 200 vectors indexed in 45 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20474105, 0.20334367] from 400 vectors
+[vector] auto-build: 400 vectors indexed in 125 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 600 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20473707, 0.20333612] from 600 vectors
+[vector] auto-build: 600 vectors indexed in 125 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 800 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.2047329, 0.20333365] from 800 vectors
+[vector] auto-build: 800 vectors indexed in 126 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20472512, 0.20332655] from 1000 vectors
+[vector] auto-build: 1000 vectors indexed in 125 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20471801, 0.20331962] from 1200 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 1200 vectors indexed in 125 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20471217, 0.2033139] from 1400 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 1400 vectors indexed in 170 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1600 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20470838, 0.20331015] from 1600 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 1600 vectors indexed in 251 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1800 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.2047009, 0.20330216] from 1800 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 1800 vectors indexed in 251 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 2000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20468767, 0.2032891] from 2000 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 2000 vectors indexed in 251 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 2200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20467667, 0.20327772] from 2200 vectors
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 2200 vectors indexed in 250 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 2600 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20465872, 0.20325893] from 2600 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 2600 vectors indexed in 296 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 3000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20464492, 0.20324486] from 3000 vectors
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 3000 vectors indexed in 376 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 3400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20463303, 0.20323244] from 3400 vectors
+[HNSW] level-0 reachability: 4 unreachable node(s) linked into the graph
+[vector] auto-build: 3400 vectors indexed in 422 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 3800 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20459995, 0.20320001] from 3800 vectors
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 3800 vectors indexed in 502 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 4200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20456651, 0.2031667] from 4200 vectors
+[HNSW] parallel link: 5 contended link drops, 10 under-linked nodes repaired
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 4200 vectors indexed in 150 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 4800 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.2045227, 0.2031228] from 4800 vectors
+[HNSW] parallel link: 12 contended link drops, 6 under-linked nodes repaired
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 4800 vectors indexed in 146 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 5400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.2044881, 0.20308834] from 5400 vectors
+[HNSW] parallel link: 11 contended link drops, 16 under-linked nodes repaired
+[HNSW] level-0 reachability: 4 unreachable node(s) linked into the graph
+[vector] auto-build: 5400 vectors indexed in 200 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 6000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20446044, 0.20306104] from 6000 vectors
+[HNSW] parallel link: 15 contended link drops, 7 under-linked nodes repaired
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 6000 vectors indexed in 207 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 6600 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.204436, 0.20303676] from 6600 vectors
+[HNSW] parallel link: 13 contended link drops, 10 under-linked nodes repaired
+[HNSW] level-0 reachability: 4 unreachable node(s) linked into the graph
+[vector] auto-build: 6600 vectors indexed in 274 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 7400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20436287, 0.2029638] from 7400 vectors
+[HNSW] parallel link: 18 contended link drops, 7 under-linked nodes repaired
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 7400 vectors indexed in 272 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 8200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20426957, 0.20287068] from 8200 vectors
+[HNSW] parallel link: 17 contended link drops, 13 under-linked nodes repaired
+[HNSW] level-0 reachability: 3 unreachable node(s) linked into the graph
+[vector] auto-build: 8200 vectors indexed in 260 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 9200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20416665, 0.20276767] from 9200 vectors
+[HNSW] parallel link: 19 contended link drops, 16 under-linked nodes repaired
+[HNSW] level-0 reachability: 4 unreachable node(s) linked into the graph
+[vector] auto-build: 9200 vectors indexed in 300 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 10200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20407853, 0.20267978] from 10200 vectors
+[HNSW] parallel link: 20 contended link drops, 17 under-linked nodes repaired
+[HNSW] level-0 reachability: 4 unreachable node(s) linked into the graph
+[vector] auto-build: 10200 vectors indexed in 359 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 11400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20399337, 0.20259441] from 11400 vectors
+[HNSW] parallel link: 8 contended link drops, 12 under-linked nodes repaired
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 11400 vectors indexed in 359 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 12600 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20392412, 0.20252484] from 12600 vectors
+[HNSW] parallel link: 21 contended link drops, 17 under-linked nodes repaired
+[HNSW] level-0 reachability: 7 unreachable node(s) linked into the graph
+[vector] auto-build: 12600 vectors indexed in 467 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 14000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20384279, 0.20244342] from 14000 vectors
+[HNSW] parallel link: 23 contended link drops, 19 under-linked nodes repaired
+[HNSW] level-0 reachability: 6 unreachable node(s) linked into the graph
+[vector] auto-build: 14000 vectors indexed in 509 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 15400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20362149, 0.2022221] from 15400 vectors
+[HNSW] parallel link: 11 contended link drops, 15 under-linked nodes repaired
+[HNSW] level-0 reachability: 7 unreachable node(s) linked into the graph
+[vector] auto-build: 15400 vectors indexed in 579 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 17000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.203389, 0.20198952] from 17000 vectors
+[HNSW] parallel link: 24 contended link drops, 11 under-linked nodes repaired
+[HNSW] level-0 reachability: 4 unreachable node(s) linked into the graph
+[vector] auto-build: 17000 vectors indexed in 733 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 18800 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.2031496, 0.20175008] from 18800 vectors
+[HNSW] parallel link: 16 contended link drops, 17 under-linked nodes repaired
+[HNSW] level-0 reachability: 5 unreachable node(s) linked into the graph
+[vector] auto-build: 18800 vectors indexed in 755 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 20800 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20292826, 0.20152845] from 20800 vectors
+[HNSW] parallel link: 23 contended link drops, 18 under-linked nodes repaired
+[HNSW] level-0 reachability: 5 unreachable node(s) linked into the graph
+[vector] auto-build: 20800 vectors indexed in 925 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 23000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20272788, 0.20132798] from 23000 vectors
+[HNSW] parallel link: 22 contended link drops, 11 under-linked nodes repaired
+[HNSW] level-0 reachability: 6 unreachable node(s) linked into the graph
+[vector] auto-build: 23000 vectors indexed in 1086 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 25400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20254947, 0.20114969] from 25400 vectors
+[HNSW] parallel link: 22 contended link drops, 15 under-linked nodes repaired
+[HNSW] level-0 reachability: 9 unreachable node(s) linked into the graph
+[vector] auto-build: 25400 vectors indexed in 1470 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 28000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20235105, 0.2009513] from 28000 vectors
+[HNSW] parallel link: 37 contended link drops, 27 under-linked nodes repaired
+[HNSW] level-0 reachability: 11 unreachable node(s) linked into the graph
+[vector] auto-build: 28000 vectors indexed in 2060 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 30800 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.2019026, 0.20050266] from 30800 vectors
+[HNSW] parallel link: 37 contended link drops, 23 under-linked nodes repaired
+[HNSW] level-0 reachability: 13 unreachable node(s) linked into the graph
+[vector] auto-build: 30800 vectors indexed in 2249 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 34000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20136821, 0.19996822] from 34000 vectors
+[HNSW] parallel link: 25 contended link drops, 17 under-linked nodes repaired
+[HNSW] level-0 reachability: 14 unreachable node(s) linked into the graph
+[vector] auto-build: 34000 vectors indexed in 3464 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 37400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20083445, 0.19943452] from 37400 vectors
+[HNSW] parallel link: 12 contended link drops, 18 under-linked nodes repaired
+[HNSW] level-0 reachability: 8 unreachable node(s) linked into the graph
+[vector] auto-build: 37400 vectors indexed in 2721 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 41200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20032242, 0.19892257] from 41200 vectors
+[HNSW] parallel link: 15 contended link drops, 20 under-linked nodes repaired
+[HNSW] level-0 reachability: 16 unreachable node(s) linked into the graph
+[vector] auto-build: 41200 vectors indexed in 4462 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 45400 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20371032, 0.20231056] from 45400 vectors
+[HNSW] parallel link: 16 contended link drops, 26 under-linked nodes repaired
+[HNSW] level-0 reachability: 16 unreachable node(s) linked into the graph
+[vector] auto-build: 45400 vectors indexed in 2742 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 50000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.21328457, 0.21188499] from 50000 vectors
+[HNSW] parallel link: 10 contended link drops, 28 under-linked nodes repaired
+[HNSW] level-0 reachability: 21 unreachable node(s) linked into the graph
+[vector] auto-build: 50000 vectors indexed in 3987 ms; FT.SEARCH uses the graph now

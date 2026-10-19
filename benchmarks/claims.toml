@@ -1960,3 +1960,22 @@ where = "The kept buffer costs"
 numbers = ["6KB", "300MB", "50K"]
 kind = "arithmetic"
 note = "1536 x 4 bytes = 6 KB per vector; 50,000 x 6,144 bytes = 307 MB"
+
+[[claim]]
+file = "README.md"
+where = "VectorDBBench's stock client, which never sends"
+numbers = ["0.998×", "50K", "0.959", "0.960", "0.998"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-19-mac-m4-drop-in/summary_ab.md"]
+expect = ["| new_p1 | full | 1,229 / 7,018 / 8,657 | 8,657 | 0.9592 |", "| new_p3 | full | 1,139 / 6,866 / 8,902 | 8,902 | 0.9604 |", "new/old = 0.998"]
+note = "Stock client (no FT.OPTIMIZE) on the branch against 619aea2 with the patched client; recall from the 3 full runs (0.9592 / 0.9600 / 0.9604), QPS = median of 6 search-only runs per arm, 8,660 / 8,675"
+
+[[claim]]
+file = "README.md"
+where = "Searches during the stream answer at the ceiling"
+numbers = ["50%", "80%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-19-mac-m4-drop-in/summary_s50.md", "benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/summary.md"]
+expect = ["| 6ca3181_run2 | 0.5039 | 0.7948 |", "| 6ca3181_run1 | 0.5047 | 0.7947 | 0.8018 | 0.7622 |"]
+note = "0.50 / 0.79 = runs 2-7 at 50% and 80% inserted (0.4986-0.5049, 0.7900-0.7953); RediSearch 0.5106 / 0.7974 from the 2026-10-18 summary; 0.76 = run 1 after optimize()"
+
