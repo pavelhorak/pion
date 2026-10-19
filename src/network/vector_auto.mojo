@@ -8,7 +8,7 @@ Now:
   1. Until a graph is built, FT.SEARCH answers exactly from the shared ingest
      buffer (vector.mojo exact_knn): same reply, same score units.
   2. Once ingest has been quiet for AUTO_QUIET_NS (or AUTO_FIRST_ROWS vectors
-     wait without a pause), one worker builds the graph on a background
+     wait while searches run, pause or not), one worker builds the graph on a background
      pthread (build_index_from_shared, the same build FT.OPTIMIZE runs),
      while every worker keeps answering exactly.
   3. The build goes into a REBUILD GRAPH (vector.mojo auto_graph), not into
@@ -19,7 +19,7 @@ Now:
      are the delta: FT.SEARCH merges an exact scan of them into the graph's
      results, so a write after the build is searchable at once.
   5. Phase B: when the delta reaches 1/AUTO_REBUILD_DIVISOR of the index or
-     AUTO_DELTA_MAX rows (no pause needed), or ingest pauses for
+     AUTO_DELTA_MAX rows (no pause needed while searches run), or ingest pauses for
      AUTO_SETTLE_MS with a delta of 1/AUTO_SETTLE_DIVISOR, the index is
      rebuilt into the OTHER rebuild graph. The served index, graph
      plus exact delta, keeps answering all the while: the new one replaces it
@@ -80,14 +80,18 @@ comptime AUTO_HOLD = 6       # FT.CREATE / FT.DROPINDEX / FT.OPTIMIZE running (v
 # Ingest counts as over once no vector has arrived for this long. Housekeeping
 # looks every ~64 ms, so a build starts 200-270 ms after the last vector.
 comptime AUTO_QUIET_NS = UInt64(200_000_000)
-# The first build starts without a pause once this many vectors wait: a
-# stream that never pauses is otherwise searched exactly forever (an exact
-# query over 16K rows is ~1.5 ms).
+# The first build starts without a pause once this many vectors wait and
+# searches are running: a stream that never pauses is otherwise searched
+# exactly forever (an exact query over 16K rows is ~1.5 ms).
 comptime AUTO_FIRST_ROWS = 16384
-# A built index is rebuilt, pause or not, once its delta (the rows every query
-# scans exactly) reaches 1/AUTO_REBUILD_DIVISOR of it, but never more than
+# "While searches pay for exact scans": an exact scan ran this recently
+# (SharedHNSWView.exact_at). The no-pause triggers above and below need it.
+comptime AUTO_SEARCHED_NS = UInt64(1_000_000_000)
+# A built index is rebuilt once its delta (the rows every query scans
+# exactly) reaches 1/AUTO_REBUILD_DIVISOR of it, but never more than
 # AUTO_DELTA_MAX rows (PION_VECTOR_DELTA_MAX): past that the scan costs a
-# query more than its graph search does, whatever the index's size.
+# query more than its graph search does, whatever the index's size. After a
+# 200 ms pause in the inserts, or with none while searches are running.
 comptime AUTO_REBUILD_DIVISOR = 10
 comptime AUTO_DELTA_MIN = 256
 comptime AUTO_DELTA_MAX = 8192
@@ -191,13 +195,22 @@ def vector_auto_tick(mut hnsw: HNSWGraph,
     var delta = rows - built
     if delta <= 0:
         return
+    # Without a pause in the inserts, build only while searches are paying for
+    # exact scans: a bulk load nobody queries yet waits for its pause, as
+    # building at 16K, 23K and 35K rows of a 50K load slowed the load by 45%
+    # and made the last build later, not earlier (K50, Mac, 2026-10-19).
+    var searched = False
+    if is_not_null(shared[].exact_at):
+        var at = shared[].exact_at.load[volatile=True]()
+        searched = at != 0 and (at >= now or now - at < AUTO_SEARCHED_NS)
+    var quiet = quiet_ns >= AUTO_QUIET_NS
     var due: Bool
     if built == 0:
-        due = quiet_ns >= AUTO_QUIET_NS or rows >= AUTO_FIRST_ROWS
+        due = quiet or (rows >= AUTO_FIRST_ROWS and searched)
     else:
         var cap = max(AUTO_DELTA_MIN, min(built // AUTO_REBUILD_DIVISOR, st.delta_max))
-        due = delta >= cap or (st.settle_ns > 0 and quiet_ns >= st.settle_ns
-                               and delta * AUTO_SETTLE_DIVISOR >= built)
+        due = (delta >= cap and (quiet or searched)) or (st.settle_ns > 0 and quiet_ns >= st.settle_ns
+                                                         and delta * AUTO_SETTLE_DIVISOR >= built)
     if not due:
         return
     if shared[].index_owner >= 0 and shared[].index_owner != worker_id:

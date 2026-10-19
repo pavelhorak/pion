@@ -1046,6 +1046,14 @@ def exact_knn(
     var dim = shared[].pre_dim
     if is_null(fp) or dim <= 0:
         return
+    # Phase B: someone is paying for exact scans (vector_auto.mojo builds
+    # without a pause in the inserts only then). A read per query; a store at
+    # most every 100 ms, so workers do not trade the line on every search.
+    var at = shared[].exact_at
+    if is_not_null(at):
+        var now = UInt64(perf_counter_ns())
+        if now - at.load[volatile=True]() > 100_000_000:
+            at.store[volatile=True](now)
     var cosine = shared[].pre_distance_metric == 1
     var q = alloc[Float32](dim)
     var ss = Float32(0.0)

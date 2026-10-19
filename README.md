@@ -293,8 +293,9 @@ the background, and a vector written after that is found at once
   not yet known.
 
 Neither loss has been re-measured on the box. A search before the graph
-exists is exact, and slower, and so is a search during the rebuild that a
-burst of new vectors triggers.
+exists is exact, and slower. Later rebuilds go into a second graph while the
+first keeps serving, and an index built this way keeps indexing after a
+restart.
 
 The same run covers RediSearch's 8-bit SVS-VAMANA index and valkey-search.
 Method and raw runs:

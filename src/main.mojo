@@ -1291,6 +1291,7 @@ def main():
     shared_hnsw_ptr[].vec_stats = auto_cells + 4      # [0] unindexed writes, [1] auto builds
     auto_cells[unsafe_offset=6] = UInt64(n_workers)   # phase B restart: workers left to refill
     shared_hnsw_ptr[].auto_restore = auto_cells + 6   # [0] that count, [1] refilling
+    shared_hnsw_ptr[].exact_at = auto_cells + 3       # when an exact scan last ran
     var auto_graph_cells = alloc[Int64](2)            # phase B: the rebuilds' two graphs
     auto_graph_cells[unsafe_offset=0] = 0
     auto_graph_cells[unsafe_offset=1] = 0

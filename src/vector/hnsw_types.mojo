@@ -273,6 +273,10 @@ struct SharedHNSWView(Movable):
     # their hashes, [1] 1 while a warm-loaded automatic index is being refilled
     # (vector_auto.mojo reopen_after_load / vector_auto_restored).
     var auto_restore: Pointer[UInt64, MutUntrackedOrigin]
+    # Phase B: when an exact scan last ran (perf_counter_ns, stored at most
+    # every 100 ms, vector.mojo exact_knn). A build without a pause in the
+    # inserts is only worth its CPU while someone pays for exact scans.
+    var exact_at: Pointer[UInt64, MutUntrackedOrigin]
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -323,6 +327,7 @@ struct SharedHNSWView(Movable):
         self.ingest_q8s = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_n2 = null_ptr[Float32, MutUntrackedOrigin]()
         self.auto_restore = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.exact_at = null_ptr[UInt64, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -456,6 +461,7 @@ struct SharedHNSWView(Movable):
         self.ingest_q8s = take.ingest_q8s
         self.ingest_n2 = take.ingest_n2
         self.auto_restore = take.auto_restore
+        self.exact_at = take.exact_at
 
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:
