@@ -1,0 +1,6 @@
+train (50000, 1536), test (1000, 1536)
+ingested; waiting for the build: True ('graph', 50000, 0)
+graph only:         p50 0.435 ms  p90 0.493 ms
+after delta: ('graph+delta', 50000, 4900)
+graph + 4900 delta: p50 0.668 ms  p90 0.731 ms
+added: 0.233 ms at p50 = 0.048 ms per 1,000 rows; 54% of the graph-only p50 (client RTT included in it)

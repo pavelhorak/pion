@@ -1,0 +1,80 @@
+[vector] auto-build: indexing 200 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 200 vectors indexed in 45 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 400 vectors indexed in 126 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 600 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 600 vectors indexed in 126 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 800 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 800 vectors indexed in 126 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 1000 vectors indexed in 126 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1200 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 1200 vectors indexed in 171 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 1400 vectors indexed in 171 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1600 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 1600 vectors indexed in 251 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 1800 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 1800 vectors indexed in 251 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 2000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 2000 vectors indexed in 251 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 2200 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 2200 vectors indexed in 251 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 2600 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 2600 vectors indexed in 297 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 3000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 3000 vectors indexed in 377 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 3400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 3400 vectors indexed in 422 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 3800 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 3800 vectors indexed in 503 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 4200 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 4200 vectors indexed in 144 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 4800 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 4800 vectors indexed in 152 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 5400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 5400 vectors indexed in 201 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 6000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 6000 vectors indexed in 214 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 6600 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 6600 vectors indexed in 268 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 7400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 7400 vectors indexed in 294 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 8200 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 8200 vectors indexed in 297 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 9200 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 9200 vectors indexed in 329 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 10200 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 10200 vectors indexed in 324 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 11400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 11400 vectors indexed in 392 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 12600 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 12600 vectors indexed in 444 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 14000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 14000 vectors indexed in 563 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 15400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 15400 vectors indexed in 615 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 17000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 17000 vectors indexed in 719 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 18800 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 18800 vectors indexed in 807 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 20800 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 20800 vectors indexed in 961 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 23000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 23000 vectors indexed in 1023 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 25400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 25400 vectors indexed in 1412 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 28000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 28000 vectors indexed in 2292 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 30800 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 30800 vectors indexed in 2214 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 34000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 34000 vectors indexed in 3946 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 37400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 37400 vectors indexed in 2622 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 41200 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 41200 vectors indexed in 3118 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 45400 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 45400 vectors indexed in 2762 ms; FT.SEARCH uses the graph now
+[vector] auto-build: indexing 50000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 50000 vectors indexed in 4727 ms; FT.SEARCH uses the graph now

@@ -1,0 +1,5 @@
+GT agreement (numpy vs dataset neighbors): 1.0
+w0: recall@100 0.9567 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w1: recall@100 0.9567 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w2: recall@100 0.9567 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 50400, 'expires': 0, 'avg_ttl': 0}]
+w3: recall@100 0.9567 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 49600, 'expires': 0, 'avg_ttl': 0}]

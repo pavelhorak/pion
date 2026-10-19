@@ -1957,9 +1957,26 @@ expect = ["comptime AUTO_QUIET_NS = UInt64(200_000_000)"]
 [[claim]]
 file = "doc/vector_engine.md"
 where = "The kept buffer costs"
-numbers = ["6KB", "300MB", "50K"]
+numbers = ["7.8KB", "390MB", "50K"]
 kind = "arithmetic"
-note = "1536 x 4 bytes = 6 KB per vector; 50,000 x 6,144 bytes = 307 MB"
+note = "FP32 row 1536 x 4 = 6,144 bytes; INT8 copy (hnsw_types.mojo alloc_ingest_q8) 1536 codes + 1536/32 x 4 block scales + 4 norm = 1,732 bytes; 7,876 bytes per vector = 7.8 KB; 50,000 x 7,876 = 394 MB"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "The graph is rebuilt while it serves"
+numbers = ["3s", "1%"]
+kind = "code"
+evidence = ["src/network/vector_auto.mojo"]
+expect = ["comptime AUTO_SETTLE_MS = 3000", "comptime AUTO_SETTLE_DIVISOR = 100", "comptime AUTO_DELTA_MAX = 8192"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "The delta costs every query a scan"
+numbers = ["0.03ms", "0.085ms", "0.43ms", "50K"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-19-mac-m4-drop-in-b/raw/delta_cost/b3_q8merge_1000.txt", "benchmarks/results/2026-10-19-mac-m4-drop-in-b/raw/delta_cost/b3_q8merge_4900.txt"]
+expect = ["graph + 1000 delta: p50 0.554 ms", "graph + 4900 delta: p50 0.668 ms", "added: 0.115 ms at p50", "added: 0.233 ms at p50", "graph only:         p50 0.435 ms"]
+note = "Slope (0.233 - 0.115) / 3.9 = 0.030 ms per 1,000 delta rows; fixed part 0.115 - 0.030 = 0.085 ms; graph-only p50 0.435 / 0.439 ms; 50K OpenAI vectors, -w 1, one client"
 
 [[claim]]
 file = "README.md"
