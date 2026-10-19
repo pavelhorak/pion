@@ -1,0 +1,194 @@
+# Vector field session 2026-10-18, box setup
+## host
+pion-node-1
+6.8.0-146-generic
+Ubuntu 24.04.5 LTS
+32
+CPU(s):                                  32
+Model name:                              AMD EPYC 8124P 16-Core Processor
+BIOS Model name:                         AMD EPYC 8124P 16-Core Processor                 CPU @ 2.4GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      16
+CPU(s) scaling MHz:                      80%
+CPU max MHz:                             3003.9109
+L3 cache:                                64 MiB (4 instances)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-31
+flags: avx512_bf16 avx512_vnni avx512f 
+## lscpu -e=CPU,CORE,CACHE (last CACHE id = L3 domain)
+CPU CORE L1d:L1i:L2:L3
+  0    0 0:0:0:0
+  1    1 1:1:1:0
+  2    2 2:2:2:0
+  3    3 3:3:3:0
+  4    4 16:16:16:4
+  5    5 17:17:17:4
+  6    6 18:18:18:4
+  7    7 19:19:19:4
+  8    8 8:8:8:2
+  9    9 9:9:9:2
+ 10   10 10:10:10:2
+ 11   11 11:11:11:2
+ 12   12 24:24:24:6
+ 13   13 25:25:25:6
+ 14   14 26:26:26:6
+ 15   15 27:27:27:6
+ 16    0 0:0:0:0
+ 17    1 1:1:1:0
+ 18    2 2:2:2:0
+ 19    3 3:3:3:0
+ 20    4 16:16:16:4
+ 21    5 17:17:17:4
+ 22    6 18:18:18:4
+ 23    7 19:19:19:4
+ 24    8 8:8:8:2
+ 25    9 9:9:9:2
+ 26   10 10:10:10:2
+ 27   11 11:11:11:2
+ 28   12 24:24:24:6
+ 29   13 25:25:25:6
+ 30   14 26:26:26:6
+ 31   15 27:27:27:6
+## pinning (constant all session)
+server cpus: 0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23
+client cpus: 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31
+## memory, disk, RAID
+               total        used        free      shared  buff/cache   available
+Mem:             124           2         102           0          21         122
+Swap:              0           0           0
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/md1        847G   22G  782G   3% /
+/dev/md1        847G   22G  782G   3% /
+/dev/md1        847G   22G  782G   3% /
+Personalities : [raid1] [raid0] [raid6] [raid5] [raid4] [raid10] 
+md1 : active raid1 nvme0n1p4[0] nvme1n1p3[1]
+      902550528 blocks super 1.2 [2/2] [UU]
+      [=>...................]  resync =  6.4% (58206336/902550528) finish=12534.7min speed=1122K/sec
+      bitmap: 7/7 pages [28KB], 65536KB chunk
+
+md0 : active raid1 nvme0n1p3[0] nvme1n1p2[1]
+      523264 blocks super 1.2 [2/2] [UU]
+      
+unused devices: <none>
+speed_limit_max: 1000
+## kernel knobs
+THP: always [madvise] never defrag always defer defer+madvise [madvise] never
+governor: schedutil
+boost: 1
+## engines
+pion: pion-server 0.9.9+091f6be (2026-10-18) vector: libpion_vector abi=1 (closed, dims=1536) isa=vnni 
+pion source: 091f6be Merge pull request #88 from pavelhorak/bench/465-io-threads-linux (091f6be50d5965c69ec6a42e651cf37ff7d6f428)
+pion binary sha256: ae5003b4405e55d2509b725310a23d351c78e8a0b65905199ac865b661b303c0
+redis: Redis server v=8.10.2 sha=498ecd0d:0 malloc=jemalloc-5.3.0 bits=64 build=dd66bb2d99d6905e
+redisearch: 4c9333b [8.10] [MOD-17813] FT._LIST WITHCLUSTERSTATE: report per-index cross-shard consistency (#11451)
+valkey: Valkey server v=9.1.2 sha=7f1dffed:0 malloc=jemalloc-5.3.0 bits=64 build=bb00a6826ff7a2ae
+valkey-search: 1.3.0-rc1 e31273a 1.3 rc-1 release chore (#1531)
+## harness installs
+/opt/Pion/venv_zvec: Version: 1.0.22 Version: 4.6.0
+ff205719f8e7d288784d8e40587e66910be3bbe5db6626e1bc986f0215e2e7c7  /opt/Pion/venv_zvec/lib/python3.12/site-packages/vectordb_bench/backend/clients/redis/redis.py
+/opt/venv_vdbb_competitor: Version: 1.0.22 Version: 4.6.0
+2444f74435fcf507c80589c1f43b28de6f253ae5819719a83edbe9ee4b49de10  /opt/venv_vdbb_competitor/lib/python3.12/site-packages/vectordb_bench/backend/clients/redis/redis.py
+## engine configs
+--- pion.env
+# Pion, build-once INT8 index (PLAN §0.2 label on every row). Session regime: PLAN.md §3.
+# Binary: pixi run build-portable at the recorded SHA (x86-64-v2 + closed libpion_vector, VNNI
+# chosen at run time on this chip), i.e. what release.yml ships. Writes ./pion-server-dev.
+# Server flags as every Pion vector number since 2026-08: -w 16 --independent-workers.
+ENGINE=pion
+LABEL="Pion (INT8, build-once index)"
+PORT=6395
+INSTALL=pion            # /opt/Pion/venv_zvec: stock 1.0.22 + optimize() sends FT.OPTIMIZE
+SERVER_BIN=/opt/arms/portable/pion-server
+SERVER_ARGS=(-p 6395 -w 16 --independent-workers --no-auto-detect --no-auto-embed)
+CLIENT_ENV=""
+GRID_50K="150 200 300 400 600"
+GRID_500K="267 300 400 600 800"   # auto-scale floor 267 at 500K (src/commands/vector.mojo:3055)
+SOURCE_URL="https://github.com/pavelhorak/pion (src/commands/vector.mojo, doc/vector_engine.md)"
+--- redis_hnsw_fp32.env
+# Redis 8.10.2 + RediSearch (modules-update), FT.* HNSW FLOAT32: the vendor column.
+# Index: HNSW M 16 EF_CONSTRUCTION 128 (PLAN §3 matched params; vendor defaults are 16/200).
+# search-workers 16 = the 16 CPUs of the server mask; it is also what 8.10.2 chose by itself on
+# 10-09 under the same pinning (redis_config_1.txt), although the docs list the default as 0.
+#   https://redis.io/docs/latest/develop/ai/search-and-query/vectors/#hnsw-index
+#   https://redis.io/docs/latest/develop/ai/search-and-query/administration/configuration/#search-workers
+ENGINE=redis_hnsw_fp32
+LABEL="Redis 8.10.2 + RediSearch, HNSW FLOAT32"
+PORT=6379
+INSTALL=competitor      # /opt/venv_vdbb_competitor: stock 1.0.22 + client_patches/redis.py.competitor
+SERVER_BIN=/opt/redis-8.10.2-mods/src/redis-server
+SERVER_ARGS=(--port 6379 --bind 127.0.0.1 --protected-mode no --save "" --appendonly no --enable-debug-command local --loadmodule /opt/redis-8.10.2-mods/modules/redisearch/redisearch.so --search-workers 16)
+CLIENT_ENV="VDBB_REDIS_WAIT=redisearch"
+GRID_50K="150 200 300 400 600"
+GRID_500K="150 200 300 400 600"
+SOURCE_URL="https://redis.io/docs/latest/develop/ai/search-and-query/vectors/"
+--- redis_svs_lvq8.env
+# Redis 8.10.2 + RediSearch, SVS-VAMANA COMPRESSION LVQ8: the precision-matched column.
+# On non-Intel hardware and Redis Open Source, COMPRESSION falls back to global 8-bit scalar
+# quantization; FT.INFO then reports compression GlobalSQ8 (seen on the Mac 2026-10-14).
+# Index at the documented defaults (PLAN §3: another index type runs at vendor params):
+# GRAPH_MAX_DEGREE 32 (= HNSW M*2 per the docs), CONSTRUCTION_WINDOW_SIZE 200,
+# TRAINING_THRESHOLD 10240. Search knob: SEARCH_WINDOW_SIZE (SVS rejects EF_RUNTIME).
+#   https://redis.io/docs/latest/develop/ai/search-and-query/vectors/#svs-vamana-index
+ENGINE=redis_svs_lvq8
+LABEL="Redis 8.10.2 + RediSearch, SVS-VAMANA LVQ8 (8-bit SQ on AMD)"
+PORT=6379
+INSTALL=competitor
+SERVER_BIN=/opt/redis-8.10.2-mods/src/redis-server
+SERVER_ARGS=(--port 6379 --bind 127.0.0.1 --protected-mode no --save "" --appendonly no --enable-debug-command local --loadmodule /opt/redis-8.10.2-mods/modules/redisearch/redisearch.so --search-workers 16)
+CLIENT_ENV="VDBB_REDIS_ALGO=SVS-VAMANA VDBB_REDIS_COMPRESSION=LVQ8 VDBB_REDIS_SEARCH_PARAM=SEARCH_WINDOW_SIZE VDBB_REDIS_WAIT=redisearch"
+GRID_50K="150 200 300 400 600"
+GRID_500K="150 200 300 400 600"
+SOURCE_URL="https://redis.io/docs/latest/develop/ai/search-and-query/vectors/#svs-vamana-index"
+--- valkey_fp16.env
+# Valkey 9.1.2 + valkey-search 1.3.0-rc1 (BSD-3, prerelease 2026-10-07), HNSW FLOAT16: the
+# BSD-licensed column. FLOAT16 is its most compact vector type (no 8-bit type exists).
+# Inserted and query vectors are sent as float16 (a FLOAT16 index rejects FLOAT32 blobs).
+# Index: HNSW M 16 EF_CONSTRUCTION 128 (vendor defaults 16/200). Threads: search.reader-threads/writer-threads 16
+# = its own default on this box (physical core count, src/valkey_search_options.cc:106).
+#   https://github.com/valkey-io/valkey-search/blob/1.3.0-rc1/docs/commands/ft.create.md
+#   https://github.com/valkey-io/valkey-search/blob/1.3.0-rc1/docs/topics/search-configurables.md
+#   https://github.com/valkey-io/valkey-search/releases/tag/1.3.0-rc1
+ENGINE=valkey_fp16
+LABEL="Valkey 9.1.2 + valkey-search 1.3.0-rc1, HNSW FLOAT16"
+PORT=6381
+INSTALL=competitor
+SERVER_BIN=/opt/valkey-9.1.2/src/valkey-server
+SERVER_ARGS=(--port 6381 --bind 127.0.0.1 --protected-mode no --save "" --appendonly no --loadmodule /opt/valkey-search/.build-release/libsearch.so --search.reader-threads 16 --search.writer-threads 16)
+CLIENT_ENV="VDBB_REDIS_TYPE=FLOAT16 VDBB_REDIS_WAIT=valkey"
+GRID_50K="150 200 300 400 600"
+GRID_500K="150 200 300 400 600"
+SOURCE_URL="https://github.com/valkey-io/valkey-search/tree/1.3.0-rc1"
+--- valkey_fp32.env
+# Valkey 9.1.2 + valkey-search 1.3.0-rc1 (BSD-3, prerelease 2026-10-07), HNSW FLOAT16: the
+# Optional baseline row for the FLOAT16 column (SESSION_PLAN §2).
+# Inserted and query vectors are sent as float16 (a FLOAT16 index rejects FLOAT32 blobs).
+# Index: HNSW M 16 EF_CONSTRUCTION 128 (vendor defaults 16/200). Threads: search.reader-threads/writer-threads 16
+# = its own default on this box (physical core count, src/valkey_search_options.cc:106).
+#   https://github.com/valkey-io/valkey-search/blob/1.3.0-rc1/docs/commands/ft.create.md
+#   https://github.com/valkey-io/valkey-search/blob/1.3.0-rc1/docs/topics/search-configurables.md
+#   https://github.com/valkey-io/valkey-search/releases/tag/1.3.0-rc1
+ENGINE=valkey_fp32
+LABEL="Valkey 9.1.2 + valkey-search 1.3.0-rc1, HNSW FLOAT32"
+PORT=6381
+INSTALL=competitor
+SERVER_BIN=/opt/valkey-9.1.2/src/valkey-server
+SERVER_ARGS=(--port 6381 --bind 127.0.0.1 --protected-mode no --save "" --appendonly no --loadmodule /opt/valkey-search/.build-release/libsearch.so --search.reader-threads 16 --search.writer-threads 16)
+CLIENT_ENV="VDBB_REDIS_WAIT=valkey"
+GRID_50K="150 200 300 400 600"
+GRID_500K="150 200 300 400 600"
+SOURCE_URL="https://github.com/valkey-io/valkey-search/tree/1.3.0-rc1"
+## datasets
+52cac4b465cd263fa5f6472a8e785c1801a702749353a5bc69c048ab3b485c26  openai_small_50k/neighbors.parquet
+8b629317dc4a18df317834e402ef7a077c2fa1f04183fa204b06259379f67639  openai_small_50k/scalar_labels.parquet
+676b35e36866baee396d63680b0beaa42065230ff7dde89ddab06f9beb26cd25  openai_small_50k/shuffle_train.parquet
+0ae1eb01428a517cf398693250700982338c178e419e4dae2c7c0851dd860068  openai_small_50k/test.parquet
+16940d51dc1a4372894eb34647db783d7c011301a882621d42896ef62ec26526  openai_medium_500k/neighbors.parquet
+984fac578fa7f290591a0255b019153aa46cd0965c5dbf8e7eeb1915ca61e3bb  openai_medium_500k/scalar_labels.parquet
+f48f2e0454e3b7155eed34d5da043604d18683c18653b885f574eefd9bee710f  openai_medium_500k/shuffle_train.parquet
+0ae1eb01428a517cf398693250700982338c178e419e4dae2c7c0851dd860068  openai_medium_500k/test.parquet
+## build summary
+harness rc=0
+datasets rc=0
+redis rc=0
+valkey rc=0
+pion rc=0

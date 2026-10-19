@@ -1,0 +1,1 @@
+no auto-scale at N<=50000: effective ef = requested ef (ef < k=100 runs at k)

@@ -1,0 +1,12 @@
+--- redis.py (VectorDBBench 1.0.22, stock)
++++ redis.py (Pion client: stock + FT.OPTIMIZE)
+@@ -96,7 +96,8 @@
+         """Check if the database is ready to search."""
+ 
+     def optimize(self, data_size: int | None = None):
+-        pass
++        assert self.conn is not None
++        self.conn.execute_command("FT.OPTIMIZE", "index")
+ 
+     def insert_embeddings(
+         self,

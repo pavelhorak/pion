@@ -1,0 +1,42 @@
+177350:C 18 Oct 2026 19:37:28.262 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+177350:C 18 Oct 2026 19:37:28.262 * Redis version=8.10.2, bits=64, commit=498ecd0d, modified=0, pid=177350, just started
+177350:C 18 Oct 2026 19:37:28.262 * Configuration loaded
+177350:M 18 Oct 2026 19:37:28.263 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+177350:M 18 Oct 2026 19:37:28.263 * monotonic clock: POSIX clock_gettime
+177350:M 18 Oct 2026 19:37:28.264 * Running mode=standalone, port=6379.
+177350:M 18 Oct 2026 19:37:28.267 * <search> search-workers default: 16 (min of MAX_WORKER_THREADS=16 and CPU cores)
+177350:M 18 Oct 2026 19:37:28.267 * <search> Redis version found by RedisSearch : 8.10.2 - oss
+177350:M 18 Oct 2026 19:37:28.267 * <search> RediSearch version 8.10.1 (Git=4c9333b)
+177350:M 18 Oct 2026 19:37:28.267 * <search> gc: ON, prefix min length: 2, min word length to stem: 4, prefix max expansions: 200, query timeout (ms): 500, timeout policy: return, oom policy: return, cursor read size: 1000, cursor max idle (ms): 300000, max doctable size: 1000000, max number of search results:  1000000, default scorer: BM25STD, 
+177350:M 18 Oct 2026 19:37:28.267 * <search> Initialized thread pools!
+177350:M 18 Oct 2026 19:37:28.267 * <search> Enabled workers threadpool of size 16
+177350:M 18 Oct 2026 19:37:28.267 * <search> Subscribe to config changes
+177350:M 18 Oct 2026 19:37:28.267 * <search> Subscribe to cluster slot migration events
+177350:M 18 Oct 2026 19:37:28.267 * <search> Subscribe to cluster topology change events
+177350:M 18 Oct 2026 19:37:28.267 * <search> Enabled role change notification
+177350:M 18 Oct 2026 19:37:28.268 * <search> Cluster configuration: AUTO partitions, type: 0, coordinator timeout: 0ms
+177350:M 18 Oct 2026 19:37:28.268 * Module 'search' loaded from /opt/redis-8.10.2-mods/modules/redisearch/redisearch.so
+177350:M 18 Oct 2026 19:37:28.268 * Server initialized
+177350:M 18 Oct 2026 19:37:28.268 * Ready to accept connections tcp
+177350:M 18 Oct 2026 19:37:28.268 # WARNING: Redis does not require authentication. Redis will accept connections from any IP address on the configured network interface.
+177350:M 18 Oct 2026 19:37:29.852 * <search> Creating vector index of type SVS-VAMANA. Required memory for a block of 1024 vectors: 1708624B
+177350:M 18 Oct 2026 19:37:29.852 * <search> Successfully created index index
+177350:M 18 Oct 2026 19:37:32.510 * <search> DocTable capacity increase from 1000 to 1501
+177350:M 18 Oct 2026 19:37:32.675 * <search> DocTable capacity increase from 1501 to 2252
+177350:M 18 Oct 2026 19:37:32.823 * <search> DocTable capacity increase from 2252 to 3379
+177350:M 18 Oct 2026 19:37:33.008 * <search> DocTable capacity increase from 3379 to 5069
+177350:M 18 Oct 2026 19:37:33.372 * <search> DocTable capacity increase from 5069 to 7604
+177350:M 18 Oct 2026 19:37:33.906 * <search> DocTable capacity increase from 7604 to 11407
+177350:M 18 Oct 2026 19:37:34.727 * <search> DocTable capacity increase from 11407 to 17111
+177350:M 18 Oct 2026 19:37:35.984 * <search> DocTable capacity increase from 17111 to 25667
+177350:M 18 Oct 2026 19:37:40.456 * <search> DocTable capacity increase from 25667 to 38501
+177350:M 18 Oct 2026 19:37:45.888 * <search> DocTable capacity increase from 38501 to 57752
+177350:M 18 Oct 2026 19:37:54.630 * <search> DocTable capacity increase from 57752 to 86629
+177350:M 18 Oct 2026 19:38:07.271 * <search> DocTable capacity increase from 86629 to 129944
+177350:M 18 Oct 2026 19:38:27.683 * <search> DocTable capacity increase from 129944 to 194917
+177350:M 18 Oct 2026 19:38:58.478 * <search> DocTable capacity increase from 194917 to 292376
+177350:M 18 Oct 2026 19:39:46.787 * <search> DocTable capacity increase from 292376 to 438565
+177350:M 18 Oct 2026 19:41:00.114 * <search> DocTable capacity increase from 438565 to 657848
+177350:signal-handler (1792353198) Received SIGTERM scheduling shutdown...
+177350:M 18 Oct 2026 19:53:18.266 * User requested shutdown...
+177350:M 18 Oct 2026 19:53:18.266 # Redis is now ready to exit, bye bye...

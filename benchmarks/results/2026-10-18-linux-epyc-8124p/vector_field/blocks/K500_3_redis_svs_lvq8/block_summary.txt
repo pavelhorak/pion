@@ -1,0 +1,7 @@
+block /opt/out/K500_3_redis_svs_lvq8
+run 1 load: insert 240.0 s, optimize/build 10.0 s, load_duration 250.0 s
+ef  150: recall 0.9344  peak QPS   1708.9  C=1 QPS   201.4  serial P99 5.30 ms  repeats [1737.2, 1700.6, 1708.9]
+ef  200: recall 0.9426  peak QPS   1569.0  C=1 QPS   176.5  serial P99 6.00 ms  repeats [1530.5, 1622.6, 1569.0]
+ef  300: recall 0.9490  peak QPS   1365.4  C=1 QPS   153.3  serial P99 7.30 ms  repeats [1365.4, 1351.3, 1380.8]
+ef  400: recall 0.9521  peak QPS   1162.8  C=1 QPS   123.8  serial P99 8.70 ms  repeats [1135.0, 1169.6, 1162.8]
+ef  600: recall 0.9544  peak QPS    913.3  C=1 QPS    93.6  serial P99 11.40 ms  repeats [913.3, 900.9, 920.7]
