@@ -17,6 +17,9 @@ calibration. Checked here against exact values computed in Python:
   L2      raw N(0,1) vectors         same, self ≈ 0 (≤ 0.5% of a neighbour)
   -w 2    a worker that BORROWED the index answers the same (connections
           opened concurrently, so both workers serve)
+  COSINE  two near-constant outlier dimensions, as OpenAI embeddings have:
+          the calibration clips them, and the score used to count the clipped
+          part (+0.094 of 1 - cos on OpenAI-50K)
 
 The raw-scale suite is gh #376: the HSET-ingest build did not calibrate the
 quantizer, so every component outside ±0.2 was clipped at ingest and a vector
@@ -100,11 +103,18 @@ def stop(p, d):
     shutil.rmtree(d, ignore_errors=True)
 
 
-def vectors(metric, scale=0.04):
+def vectors(metric, scale=0.04, outliers=False):
     rnd = random.Random(365)
     out = []
     for _ in range(N):
         v = [rnd.gauss(0, 1) for _ in range(DIM)]
+        if outliers:
+            # OpenAI-embedding shape: two near-constant dimensions far outside
+            # the rest (the gate corpus has some reaching -0.69). The 8-sigma
+            # calibration clips them; they cancel between documents.
+            v = [x * 0.0197 for x in v]
+            v[7] = -0.45 + rnd.gauss(0, 0.005)
+            v[700] = -0.45 + rnd.gauss(0, 0.005)
         if metric == "COSINE":
             n = math.sqrt(sum(x * x for x in v))
             v = [x / n for x in v]
@@ -142,11 +152,12 @@ def query(c, v, k=5):
     return rows
 
 
-def suite(metric, workers, scale=0.04):
-    print(f"[{metric}, -w {workers}" + (f", scale {scale}]" if metric == "L2" else "]"))
+def suite(metric, workers, scale=0.04, outliers=False):
+    print(f"[{metric}, -w {workers}" + (f", scale {scale}" if metric == "L2" else "")
+          + (", near-constant outlier dims (clipped by the calibration)]" if outliers else "]"))
     p, d, c = start(workers)
     try:
-        vs = vectors(metric, scale)
+        vs = vectors(metric, scale, outliers)
         check("FT.OPTIMIZE", load(c, metric, vs) == b"OK")
         conns = [c]
         if workers > 1:
@@ -199,6 +210,9 @@ def main():
     suite("L2", 1)
     suite("L2", 1, scale=1.0)
     suite("COSINE", 2)
+    # Scores compared the unclipped query with clipped codes: +0.094 of
+    # 1 - cos on OpenAI-50K, about +0.026 on these vectors.
+    suite("COSINE", 1, outliers=True)
     print(f"\n{'FAILED' if FAIL else 'PASSED'}: {len(FAIL)} failure(s)")
     sys.exit(1 if FAIL else 0)
 

@@ -44,6 +44,14 @@ enumerated — there were roughly 1,100 of them.
 - **`FT.OPTIMIZE` with nothing new to build republished the worker's own
   graph**, which on a worker that had not built the index was an empty one. It
   now keeps the served index.
+- **FT.SEARCH scores from an INT8 index read high on real embeddings.** The
+  quantizer's calibration clips the few near-constant outlier dimensions that
+  OpenAI embeddings have (to mean ± 8 sigma); that costs search nothing, but the
+  score compared the unclipped query with the clipped codes and counted the
+  difference: on OpenAI-50K, `1 - cos` read 0.094 high on average. A client that
+  thresholds on the score was misled. The score now clamps the query to the
+  same range, and reads each code from the middle of its quantization step
+  (the quantizer truncates). On the same data the error is now under 0.002.
 
 ### Changed
 

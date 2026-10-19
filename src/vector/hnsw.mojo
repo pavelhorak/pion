@@ -4302,8 +4302,33 @@ struct HNSWGraph(Movable):
                 var inv = Float32(1.0) / self.group_scales[g]
                 ga[g] = inv
                 ga[dim // 32 + g] = 127.0 * inv + self.group_qmins[g]
+        # The codes are CLIPPED to the calibrated range: mean ± 8 sigma, which
+        # on OpenAI embeddings leaves a few near-constant outlier dimensions
+        # (down to -0.69) outside ±0.2 (_calibrate). Search does not care, the
+        # clipped part cancels between documents. A score does: it compared the
+        # unclipped FP32 query with the clipped codes, and every outlier
+        # dimension added to the distance: +0.094 of `1 - cos` on OpenAI-50K,
+        # so reported scores read ~0.1 high. Clamp the query the same way. And
+        # the global quantizer truncates (quantize: `Int(normalized * 254)`),
+        # so a code sits on the LOW edge of its step: dequantize at the middle
+        # (+0.5 step). On coarse steps (wide data) that was most of the error.
+        if not have_fp32:
+            var qc = self._norm_scratch()
+            if Int(query) != Int(qc):
+                for d in range(dim):
+                    qc[d] = query[d]
+            if grouped:
+                for g in range(dim // 32):
+                    var lo = self.group_qmins[g]
+                    var hi = lo + Float32(254.0) / self.group_scales[g]
+                    for j in range(g * 32, g * 32 + 32):
+                        qc[j] = min(max(qc[j], lo), hi)
+            else:
+                for d in range(dim):
+                    qc[d] = min(max(qc[d], self.global_min), self.global_max)
+            query = qc
         var a8 = SIMD[DType.float32, 8](g_inv)
-        var b8 = SIMD[DType.float32, 8](127.0 * g_inv + self.global_min)
+        var b8 = SIMD[DType.float32, 8](127.5 * g_inv + self.global_min)
         for r in range(n):
             var ext = ids[r]
             if ext < 0 or ext >= self.max_elements: continue
@@ -4361,7 +4386,7 @@ struct HNSWGraph(Movable):
                         c0 = fma_or_muladd(t, t, c0)
                         d += 8
                     while d < dim:
-                        var x1 = fma_or_muladd(Float32(Int(codes[d])), g_inv, 127.0 * g_inv + self.global_min)
+                        var x1 = fma_or_muladd(Float32(Int(codes[d])), g_inv, 127.5 * g_inv + self.global_min)
                         var t = query[d] - x1; tail += t * t; d += 1
             scores[r] = ((c0 + c1) + (c2 + c3)).reduce_add() + tail
             if self.distance_metric == 1:

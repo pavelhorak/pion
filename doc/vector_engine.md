@@ -224,7 +224,7 @@ A stock Redis client (RedisVL, LangChain, VectorDBBench's own) creates the index
 
 1. **Before a graph is built, `FT.SEARCH` is exact.** It scans the FP32 ingest buffer and returns the true nearest neighbours, in the same reply shape and score units as the graph (`1 - cos` under COSINE, squared L2 under L2). Deleted documents and `FILTER` are honoured; `EF_RUNTIME` does not apply. The scan reads every vector once per query, so it slows as the index grows.
 2. **Once inserts pause for 200 ms, the graph builds in the background.** One worker runs the same build `FT.OPTIMIZE` runs, on its own thread, while every worker keeps answering exactly. That worker then publishes the graph, and the thread saves it to `pion.hnsw.0`. The server log says `[vector] auto-build: indexing N vectors` and `N vectors indexed in M ms`.
-3. **Vectors written after that build are found at once.** The ingest buffer is kept. `FT.SEARCH` scans the vectors written since the build exactly and merges them with the graph's results. Both sides are scored from the FP32 rows for that merge: the graph's own scores come from INT8 codes, whose quantization error inflates them, and merged as they are they lose to every nearby new vector. When they reach a tenth of the index and inserts pause again, the graph is rebuilt the same way. During a rebuild, searches are exact again.
+3. **Vectors written after that build are found at once.** The ingest buffer is kept. `FT.SEARCH` scans the vectors written since the build exactly and merges them with the graph's results. Both sides are scored from the FP32 rows for that merge: the graph's own scores come from INT8 codes, which are close to the exact distance but not equal to it, and a merge needs both sides on the same footing. When they reach a tenth of the index and inserts pause again, the graph is rebuilt the same way. During a rebuild, searches are exact again.
 
 `INFO` reports the state process-wide: `vector_index` (`none`, `empty`, `exact`, `building`, `graph`, or `graph+delta`), `vector_graph_rows`, `vector_exact_rows`, `vector_auto_builds` and `vector_unindexed_writes`.
 
@@ -374,7 +374,7 @@ FT.SEARCH idx "*=>[KNN 10 @vec $v]"               FILTER price [10 50]    PARAMS
 
 The query itself must be `<prefilter>=>[KNN k @field $param [EF_RUNTIME n] [AS alias]]` with the vector in `PARAMS` by name; an unknown form, an unknown vector field, a missing `$param` or a blob of the wrong size is an error.
 
-**Scores** are the index metric's distance for each returned row — squared L2 under `L2`, `1 - cos` under `COSINE` — computed from the stored vectors (FP32 re-rank copy, or the INT8 codes dequantized), not the beam's internal quantized distance. Rows are sorted by that score.
+**Scores** are the index metric's distance for each returned row — squared L2 under `L2`, `1 - cos` under `COSINE` — computed from the stored vectors (FP32 re-rank copy, or the INT8 codes dequantized), not the beam's internal quantized distance. Rows are sorted by that score. From INT8 codes, the score compares them with the query clamped to the calibrated range, because the codes are clipped to it: the calibration (mean ± 8 sigma) leaves an embedding's few near-constant outlier dimensions outside, which cancel between documents but used to add their clipped part to every score.
 
 ---
 
