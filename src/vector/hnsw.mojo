@@ -314,6 +314,11 @@ struct HNSWGraph(Movable):
     # dim itself changes with FT.CREATE DIM; the per-group arrays do not.
     var ctor_dim: Int
     var ctor_huge_pages: Bool
+    # Phase B: this graph is an automatic build, whose ingest stays open: HSETs
+    # after it are indexed. Saved in the index file (word 25, bit 8), so a warm
+    # load of it reopens ingest (vector_auto.mojo reopen_after_load). An
+    # FT.OPTIMIZE build is False: ingest is over, as that command says.
+    var auto_built: Bool
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
@@ -425,6 +430,7 @@ struct HNSWGraph(Movable):
         self.borrow_seq = 0
         self.ctor_dim = dim
         self.ctor_huge_pages = use_huge_pages
+        self.auto_built = False
         self.residual_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.gpu_slot_ext_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.gpu_distances = null_ptr[Float32, MutUntrackedOrigin]()
@@ -882,6 +888,7 @@ struct HNSWGraph(Movable):
         clears before it builds. A borrowing graph gives the borrowed buffers
         back first (_unborrow), so everything freed below is this graph's own."""
         self._unborrow()
+        self.auto_built = False
         self.num_nodes = 0
         self.entry_point_id = -1
         self.max_level = -1
@@ -1222,6 +1229,9 @@ struct HNSWGraph(Movable):
         var _qsec: UInt64 = 0
         if _fmt != 0 and is_not_null(self.gpu_rerank_fp32): _qsec |= 1
         if self.compact_is_3bit and is_not_null(self.qjl_buffer) and is_not_null(self.qjl_res_norms): _qsec |= 2
+        # Phase B: bit 8 = an automatic build, whose ingest stays open after a
+        # warm load. A loader that predates it tests bits 0 and 1 only.
+        if self.auto_built: _qsec |= 256
         hdr[25] = _qsec
         # gh #407: the vector field name — word 26 = length, bytes 216-247 (words
         # 27-30) = up to 32 bytes. Same no-bump reasoning as words 24/25: an
@@ -1408,6 +1418,7 @@ struct HNSWGraph(Movable):
         var saved_groups    = Int(hdr[23])   # v3: calibration groups (0 = none)
         var saved_metric    = UInt8(hdr[24]) if hdr[24] <= 1 else UInt8(0)  # gh #271
         var saved_qsec      = hdr[25]        # gh #350: optional quant sections
+        self.auto_built = (saved_qsec & 256) != 0   # phase B
         var saved_vf_len    = Int(hdr[26])   # gh #407: 0 = file predates the field
         self.build_id = hdr[31]                  # #46: 0 = file predates it
 

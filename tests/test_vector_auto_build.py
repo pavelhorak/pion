@@ -12,7 +12,8 @@ sends FT.OPTIMIZE. Pion used to answer every such search with `[0]`. Now
     delta of 1/10 of the index triggers a rebuild;
   * phase B: a rebuild goes into a second graph while the first keeps serving
     (graph plus exact delta), so searches during a stream of writes never fall
-    back to exact-only, on one worker or four;
+    back to exact-only, on one worker or four; and after a restart the
+    automatically built index keeps indexing (rows refilled from the hashes);
   * an explicit FT.OPTIMIZE keeps its meaning (build now, free the buffer;
     later HSETs are stored, not indexed, and counted).
 
@@ -96,15 +97,19 @@ class Client:
             pass
 
 
-def serve(binary, port, workers, cwd, log_name, dim=32):
+def serve(binary, port, workers, cwd, log_name, dim=32, wal=False, env=None):
     # --dim: a saved index loads only at the server's own dim
     cmd = [binary, "--profile", "vector", "-w", str(workers), "-p", str(port), "--dim", str(dim),
-           "--no-auto-detect", "--no-auto-embed", "--no-wal"]
+           "--no-auto-detect", "--no-auto-embed"]
+    if not wal:
+        cmd.append("--no-wal")
     if workers > 1:
         cmd.append("--independent-workers")
-    log = open(os.path.join(cwd, log_name), "w")
+    log = open(os.path.join(cwd, log_name), "a")
+    e = dict(os.environ)
+    e.update(env or {})
     return subprocess.Popen(cmd, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
-                            preexec_fn=os.setsid)
+                            preexec_fn=os.setsid, env=e)
 
 
 def stop(p):
@@ -620,6 +625,149 @@ def phase_stream(binary, port, workdir, workers):
         stop(proc)
 
 
+# ── phase B: a restart keeps indexing ────────────────────────────────────────
+def phase_restart(binary, port, workdir, workers):
+    """An automatically built index keeps its ingest open across a restart.
+    The index file holds the graph but not the FP32 rows, so each worker puts
+    back the rows of its own hashes, adds the hashes no live slot holds (the
+    delta: written after the build, or overwritten since), and the index goes
+    on as before: new HSETs are searchable at once and rebuilds work. An
+    explicit FT.OPTIMIZE's index keeps its contract after a restart too (later
+    HSETs are stored, not indexed). Writes go through every worker, so the
+    refill is split across keyspaces."""
+    print(f"\n[E] -w {workers}: restart with the WAL; the automatic index keeps indexing")
+    d = os.path.join(workdir, f"restart_{workers}")
+    os.makedirs(d)
+    rng = np.random.default_rng(5200 + workers)
+    dim, n, nd = 32, 6000, 300
+    env = {"PION_VECTOR_SETTLE_MS": "0"}     # keep the delta where the test put it
+    ports = [port] if workers == 1 else [port + 2 + w for w in range(workers)]
+
+    def ingest_rr(vs, start):
+        """HSET doc:<start+i> through every worker in turn (blocks of 500)."""
+        out = []
+        for b in range(0, len(vs), 500):
+            c = Client(ports[(b // 500) % len(ports)])
+            out += ingest(c, vs[b:b + 500], start=start + b)
+            c.close()
+        return out
+
+    vecs = rng.standard_normal((n + nd, dim)).astype(np.float32)
+    live = {f"doc:{i}": vecs[i] for i in range(n)}
+    proc = serve(binary, port, workers, d, "server.log", wal=True, env=env)
+    try:
+        if not check("server ready", wait_ready(port)):
+            return
+        c = Client(ports[0])
+        check("FT.CREATE", c.cmd("FT.CREATE", "idx", *schema(dim, "COSINE")) == b"OK")
+        ingest_rr(vecs[:n], 0)
+        check("auto-build finishes", wait_info(c, "vector_index", "graph", 300)
+              and wait_info(c, "vector_build_running", "0", 300))
+        ingest_rr(vecs[n:], n)                              # the delta
+        for i in range(n, n + nd):
+            live[f"doc:{i}"] = vecs[i]
+        new0 = rng.standard_normal((20, dim)).astype(np.float32)
+        ingest_rr(new0, 0)                                  # overwrite doc:0..19
+        for i in range(20):
+            live[f"doc:{i}"] = new0[i]
+        for i in range(100, 110):                           # delete doc:100..109
+            Client(ports[(i // 500) % len(ports)]).cmd("DEL", f"doc:{i}")
+            del live[f"doc:{i}"]
+        inf = info(c)
+        check("before the restart: graph+delta, 320 exact rows",
+              inf.get("vector_index") == "graph+delta" and inf.get("vector_exact_rows") == str(nd + 20),
+              f"{inf.get('vector_index')} {inf.get('vector_exact_rows')}")
+        c.close()
+    finally:
+        stop(proc)
+
+    proc = serve(binary, port, workers, d, "server.log", wal=True, env=env)
+    try:
+        if not check("restart ready", wait_ready(port)):
+            return
+        c = Client(ports[0])
+        check("refill done (no build held)", wait_info(c, "vector_build_running", "0", 120))
+        inf = info(c)
+        check(f"after the restart: graph {n} + delta {nd + 20}",
+              inf.get("vector_index") == "graph+delta" and inf.get("vector_graph_rows") == str(n)
+              and inf.get("vector_exact_rows") == str(nd + 20),
+              f"{inf.get('vector_index')} {inf.get('vector_graph_rows')} {inf.get('vector_exact_rows')}")
+        log = open(os.path.join(d, "server.log")).read()
+        check("server log: ingest reopened and rows refilled",
+              "ingest reopened" in log and "rows of" in log and "refilled" in log)
+
+        def self_hits(keys, port_list):
+            h = 0
+            for j, k in enumerate(keys):
+                cc = Client(port_list[j % len(port_list)])
+                got = parse(knn(cc, live[k], 1))
+                cc.close()
+                h += 1 if got and got[0][0] == k else 0
+            return h
+        dkeys = [f"doc:{i}" for i in range(n, n + nd, 7)]
+        hits = self_hits(dkeys, ports)
+        check(f"delta written before the restart is searchable ({hits}/{len(dkeys)})", hits == len(dkeys))
+        okeys = [f"doc:{i}" for i in range(20)]
+        hits = self_hits(okeys, ports)
+        check(f"overwritten documents found by their new vectors ({hits}/20)", hits == 20)
+        old_hit = 0
+        for i in range(20):
+            got = parse(knn(c, vecs[i], 1))
+            old_hit += 1 if got and got[0][0] == f"doc:{i}" and got[0][1] < 1e-4 else 0
+        check(f"... and not by their old ones ({old_hit}/20 still exact)", old_hit == 0)
+        gone = 0
+        for i in range(100, 110):
+            got = parse(knn(c, vecs[i], 5))
+            gone += 1 if got is not None and f"doc:{i}" not in [k for k, _ in got] else 0
+        check(f"deleted documents stay gone ({gone}/10)", gone == 10)
+        keys = sorted(live)
+        mat = np.stack([live[k] for k in keys])
+        rs = [recall(parse(knn(c, mat[i], 10)), brute(mat, keys, mat[i], 10, "COSINE"))
+              for i in range(0, len(keys), len(keys) // 40)]
+        check(f"after the restart: recall@10 {np.mean(rs):.3f} >= 0.9", np.mean(rs) >= 0.9)
+        late = rng.standard_normal((50, dim)).astype(np.float32)
+        ingest_rr(late, 800000)
+        for j in range(50):
+            live[f"doc:{800000 + j}"] = late[j]
+        hits = self_hits([f"doc:{800000 + j}" for j in range(50)], ports)
+        check(f"HSET after the restart is indexed at once ({hits}/50)", hits == 50)
+        # a rebuild after the restart reads the refilled rows
+        more = rng.standard_normal((800, dim)).astype(np.float32)
+        ingest_rr(more, 810000)
+        for j in range(800):
+            live[f"doc:{810000 + j}"] = more[j]
+        check("rebuilt after the restart", wait_info(c, "vector_auto_builds", "1", 300)
+              and wait_info(c, "vector_build_running", "0", 120))
+        keys = sorted(live)
+        mat = np.stack([live[k] for k in keys])
+        rs = [recall(parse(knn(Client(ports[i % len(ports)]), mat[i], 10)), brute(mat, keys, mat[i], 10, "COSINE"))
+              for i in range(0, len(keys), len(keys) // 40)]
+        check(f"after the rebuild: recall@10 {np.mean(rs):.3f} >= 0.9 (rows refilled right)", np.mean(rs) >= 0.9)
+        hits = self_hits(okeys + dkeys[:10], ports)
+        check(f"after the rebuild: overwritten and delta documents found ({hits}/30)", hits == 30)
+        check("FT.OPTIMIZE idx", c.cmd("FT.OPTIMIZE", "idx") == b"OK")
+        c.close()
+    finally:
+        stop(proc)
+
+    # An FT.OPTIMIZE index: ingest stays closed after a restart
+    proc = serve(binary, port, workers, d, "server.log", wal=True, env=env)
+    try:
+        if not check("second restart ready", wait_ready(port)):
+            return
+        c = Client(ports[0])
+        ingest(c, rng.standard_normal((2, dim)).astype(np.float32), start=900000)
+        inf = info(c)
+        check("after FT.OPTIMIZE and a restart, a new HSET is not indexed (contract)",
+              inf.get("vector_unindexed_writes") == "2" or inf.get("vector_index") == "graph",
+              f"{inf.get('vector_index')} unindexed={inf.get('vector_unindexed_writes')}")
+        got = parse(knn(c, live["doc:5"], 1))
+        check("... and the FT.OPTIMIZE index serves", got is not None and got[0][0] == "doc:5", got)
+        c.close()
+    finally:
+        stop(proc)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default=os.path.join(REPO, "pion-server"))
@@ -634,6 +782,8 @@ def main():
         phase_multi(a.binary, a.port, workdir)
         phase_stream(a.binary, a.port, workdir, 1)
         phase_stream(a.binary, a.port, workdir, WORKERS)
+        phase_restart(a.binary, a.port, workdir, 1)
+        phase_restart(a.binary, a.port, workdir, WORKERS)
     finally:
         if a.keep:
             print("scratch:", workdir)

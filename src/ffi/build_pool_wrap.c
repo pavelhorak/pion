@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <dlfcn.h>
 
 typedef void (*pion_build_fn)(void *ctx, int64_t thread_idx);
@@ -152,6 +153,23 @@ int64_t pion_env_int(const char *name, int64_t dflt) {
     long long x = strtoll(v, &end, 10);
     if (end == v) return dflt;
     return (int64_t)x;
+}
+
+/* One 8-byte word of a file, rewritten in place: (w & and_mask) | or_mask at
+ * byte `offset`. 0 on success, -1 when the file cannot be read or written.
+ * The vector index file's header flags (vector.mojo, FT.OPTIMIZE ending an
+ * automatic index's ingest) are the one user. */
+int pion_file_patch_u64(const char *path, int64_t offset, uint64_t and_mask, uint64_t or_mask) {
+    int fd = open(path, O_RDWR);
+    if (fd < 0) return -1;
+    uint64_t w;
+    int rc = -1;
+    if (pread(fd, &w, 8, (off_t)offset) == 8) {
+        w = (w & and_mask) | or_mask;
+        if (pwrite(fd, &w, 8, (off_t)offset) == 8) rc = 0;
+    }
+    close(fd);
+    return rc;
 }
 
 /* gh #400: y = A·x for a row-major [m × n] FP32 matrix, the exact scan behind

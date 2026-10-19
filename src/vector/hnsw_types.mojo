@@ -269,6 +269,10 @@ struct SharedHNSWView(Movable):
     var ingest_q8: Pointer[Int8, MutUntrackedOrigin]
     var ingest_q8s: Pointer[Float32, MutUntrackedOrigin]
     var ingest_n2: Pointer[Float32, MutUntrackedOrigin]
+    # Phase B, restart: [0] workers that have not yet refilled their rows from
+    # their hashes, [1] 1 while a warm-loaded automatic index is being refilled
+    # (vector_auto.mojo reopen_after_load / vector_auto_restored).
+    var auto_restore: Pointer[UInt64, MutUntrackedOrigin]
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -318,6 +322,7 @@ struct SharedHNSWView(Movable):
         self.ingest_q8 = null_ptr[Int8, MutUntrackedOrigin]()
         self.ingest_q8s = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_n2 = null_ptr[Float32, MutUntrackedOrigin]()
+        self.auto_restore = null_ptr[UInt64, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -450,6 +455,7 @@ struct SharedHNSWView(Movable):
         self.ingest_q8 = take.ingest_q8
         self.ingest_q8s = take.ingest_q8s
         self.ingest_n2 = take.ingest_n2
+        self.auto_restore = take.auto_restore
 
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:
@@ -482,6 +488,61 @@ struct SharedHNSWView(Movable):
         # Drop-in: no slot is written yet, so the exact scan sees none
         if Int(self.ingest_ids) != 0 and self.hk_max_elements > 0:
             unsafe_memset(self.ingest_ids.bitcast[UInt8](), 0xFF, self.hk_max_elements * 4)
+
+    def open_ingest(mut self, cap: Int, dim: Int):
+        """The ingest buffer for `cap` rows of `dim`: commit marks (-1, nothing
+        written), the Q8 copy, then the FP32 rows, which add_ingest_vector
+        checks: a writer that sees them sees the rest."""
+        var id_cap = cap if cap > self.hk_max_elements else self.hk_max_elements
+        var ids = alloc[Int32](id_cap)
+        unsafe_memset(ids.bitcast[UInt8](), 0xFF, id_cap * 4)
+        self.ingest_ids = ids
+        self.alloc_ingest_q8(cap, dim)
+        self.ingest_fp32 = alloc[Float32](cap * dim)
+
+    def fill_ingest_row(self, slot: Int, vector: Pointer[Float32, MutUntrackedOrigin]):
+        """Row `slot` from a client's FP32 vector: copied, L2-normalized under
+        COSINE (gh #271), and its Q8 copy and squared norm written. Not
+        committed: the caller does that (commit_ingest) once the row's key is
+        recorded too."""
+        var dim = self.pre_dim
+        var off = slot * dim
+        for i in range(dim):
+            self.ingest_fp32[unsafe_offset=off + i] = vector[unsafe_offset=i]
+        # gh #271: under COSINE the index stores unit vectors. FT.OPTIMIZE both
+        # calibrates the quantizer and builds the graph straight out of this
+        # buffer, so normalizing at the moment the vector lands here is the one
+        # place that covers every consumer. A zero vector has no direction, so
+        # it is left alone rather than made NaN.
+        if self.pre_distance_metric == 1:
+            var norm_sq = Float32(0.0)
+            for i in range(dim):
+                var v = self.ingest_fp32[unsafe_offset=off + i]
+                norm_sq += v * v
+            if norm_sq > 0.0:
+                var inv = Float32(1.0) / sqrt(norm_sq)
+                for i in range(dim):
+                    self.ingest_fp32[unsafe_offset=off + i] = self.ingest_fp32[unsafe_offset=off + i] * inv
+        # Phase B: the row's Q8 copy and exact squared norm (after the
+        # normalization: the scans read what the graph would store)
+        if Int(self.ingest_q8) != 0 and q8_ok(dim):
+            var nb = dim // Q8_BLOCK
+            q8_quantize(self.ingest_fp32 + off, self.ingest_q8 + off, self.ingest_q8s + slot * nb, dim)
+            var n2 = Float32(0.0)
+            for i in range(dim):
+                var v = self.ingest_fp32[unsafe_offset=off + i]
+                n2 += v * v
+            self.ingest_n2[unsafe_offset=slot] = n2
+
+    def clear_ingest_row(self, slot: Int):
+        """Row `slot` as zeros (a slot no hash refilled after a restart)."""
+        var dim = self.pre_dim
+        unsafe_memset((self.ingest_fp32 + slot * dim).bitcast[UInt8](), 0, dim * 4)
+        if Int(self.ingest_q8) != 0 and q8_ok(dim):
+            var nb = dim // Q8_BLOCK
+            unsafe_memset((self.ingest_q8 + slot * dim).bitcast[UInt8](), 0, dim)
+            unsafe_memset((self.ingest_q8s + slot * nb).bitcast[UInt8](), 0, nb * 4)
+            self.ingest_n2[unsafe_offset=slot] = 0.0
 
     def alloc_ingest_q8(mut self, cap: Int, dim: Int):
         """Phase B: the Q8 copy for `cap` rows of `dim`, before ingest_fp32 is
@@ -547,34 +608,7 @@ struct SharedHNSWView(Movable):
                       + " vectors. Restart with --max-elements <N> to raise the cap.")
                 self.ingest_capacity_warned = True
             return -1
-        var off = slot * dim
-        for i in range(dim):
-            self.ingest_fp32[unsafe_offset=off + i] = vector[unsafe_offset=i]
-        # gh #271: under COSINE the index stores unit vectors. FT.OPTIMIZE both
-        # calibrates the quantizer and builds the graph straight out of this
-        # buffer, so normalizing at the moment the vector lands here is the one
-        # place that covers every consumer. Scalar and in place, matching the
-        # copy loop above — this is the ingest path, not a query path, and a
-        # zero vector has no direction so it is left alone rather than made NaN.
-        if self.pre_distance_metric == 1:
-            var norm_sq = Float32(0.0)
-            for i in range(dim):
-                var v = self.ingest_fp32[unsafe_offset=off + i]
-                norm_sq += v * v
-            if norm_sq > 0.0:
-                var inv = Float32(1.0) / sqrt(norm_sq)
-                for i in range(dim):
-                    self.ingest_fp32[unsafe_offset=off + i] = self.ingest_fp32[unsafe_offset=off + i] * inv
-        # Phase B: the row's Q8 copy and exact squared norm (after the COSINE
-        # normalization above: the scans read what the graph would store)
-        if Int(self.ingest_q8) != 0 and q8_ok(dim):
-            var nb = dim // Q8_BLOCK
-            q8_quantize(self.ingest_fp32 + off, self.ingest_q8 + off, self.ingest_q8s + slot * nb, dim)
-            var n2 = Float32(0.0)
-            for i in range(dim):
-                var v = self.ingest_fp32[unsafe_offset=off + i]
-                n2 += v * v
-            self.ingest_n2[unsafe_offset=slot] = n2
+        self.fill_ingest_row(slot, vector)
         # The slot is the HNSW node id (not key-parsed digits). The caller
         # writes it with commit_ingest once the slot's key is recorded too:
         # until then the exact scan skips the row.

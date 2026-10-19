@@ -275,6 +275,11 @@ def restore_index_state(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
     hk[5] = 95
     var kbuf = alloc[UInt8](24)
     var nodes = shared[].num_nodes
+    # Phase B: a warm-loaded automatic index reopened ingest
+    # (vector_auto.reopen_after_load): each relinked hash also puts its vector
+    # back in the slot's row, which the index file does not hold.
+    var refill = is_not_null(shared[].auto_restore) and shared[].auto_restore[1] != 0 \
+        and is_not_null(shared[].ingest_fp32)
     for s in range(min(nodes, n)):
         if shared[].vec_dead[s] != 0:
             continue
@@ -284,6 +289,73 @@ def restore_index_state(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
             continue
         var hv = keyspace[].get(GenericValue.borrow(kv.as_string_safe(kbuf), kv.string_len()))
         if hv.type.value == ValueType.HASH:
-            hv.as_hash().bitcast[SlabHashMap]()[].index_vector(s, field_h, tomb)
+            var hm = hv.as_hash().bitcast[SlabHashMap]()
+            hm[].index_vector(s, field_h, tomb)
+            if refill and _refill_row(shared, hm, s):
+                shared[].commit_ingest(s)
     hk.unsafe_free()
     kbuf.unsafe_free()
+
+
+def _refill_row(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                h: UnsafePointer[SlabHashMap, MutUntrackedOrigin], slot: Int) -> Bool:
+    """Phase B, restart: row `slot` from the vector field of hash `h`."""
+    var dim = shared[].pre_dim
+    var fbuf = alloc[UInt8](24)
+    var vbuf = alloc[UInt8](24)
+    var ok = False
+    for i in range(h[].capacity):
+        if (h[].metadata[i] & 0x80) != 0:
+            continue
+        var f = h[].keys[i]
+        if not _is_vector_field(shared, f.as_string_safe(fbuf), f.string_len()):
+            continue
+        var v = h[].values[i]
+        if v.is_string() and v.string_len() == dim * 4:
+            shared[].fill_ingest_row(slot, v.as_string_safe(vbuf).bitcast[Float32]())
+            ok = True
+        break
+    fbuf.unsafe_free()
+    vbuf.unsafe_free()
+    return ok
+
+
+def ingest_unlinked_hashes(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                           keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                           wal: UnsafePointer[WAL, MutUntrackedOrigin],
+                           tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]) -> Int:
+    """Phase B, restart: every hash of this worker whose vector no live slot of
+    the loaded graph holds (written after that build, or overwritten since)
+    goes in as a new row, the delta, as an HSET would put it. Keys are
+    collected first: an ingest writes `__hk__<slot>` into the keyspace, which
+    could rehash a shard under the walk. Returns how many went in."""
+    var kb = List[UInt8]()
+    var offs = List[Int]()
+    var kbuf = alloc[UInt8](24)
+    for sh in range(8):
+        var m = keyspace[].shards + sh
+        for i in range(m[].capacity):
+            if (m[].metadata[i] & 0x80) != 0:
+                continue
+            var v = m[].values[i]
+            if v.type.value != ValueType.HASH:
+                continue
+            if v.as_hash().bitcast[SlabHashMap]()[].vec_slot >= 0:
+                continue                    # relinked to a live slot
+            var k = m[].keys[i]
+            var kp = k.as_string_safe(kbuf)
+            offs.append(len(kb))
+            for j in range(k.string_len()):
+                kb.append(kp[j])
+    kbuf.unsafe_free()
+    offs.append(len(kb))
+    var keys = alloc[UInt8](len(kb) if len(kb) > 0 else 1)
+    for j in range(len(kb)):
+        keys[j] = kb[j]
+    var added = 0
+    for r in range(len(offs) - 1):
+        var a = offs[r]
+        if ingest_whole_hash(shared, keyspace, wal, tomb, keys + a, offs[r + 1] - a):
+            added += 1
+    keys.unsafe_free()
+    return added

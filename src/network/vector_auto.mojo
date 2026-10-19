@@ -64,9 +64,10 @@ from src.common.hash_map import StripedHashMap
 from src.common.vec_tomb import VecTomb
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.network.dispatcher import CommandDispatcher
-from src.network.vector_ingest import record_all_dead
+from src.network.vector_ingest import record_all_dead, ingest_unlinked_hashes
+from src.io.wal import WAL
 from src.commands.vector import populate_hnsw_metadata, adopt_index_config, wait_for_readers, \
-    auto_graph, make_auto_graph, served_auto_graph, retire_auto_graphs
+    auto_graph, make_auto_graph, served_auto_graph, retire_auto_graphs, _close_ingest
 
 comptime AUTO_IDLE = 0
 comptime AUTO_BUILDING = 1
@@ -92,8 +93,10 @@ comptime AUTO_DELTA_MIN = 256
 comptime AUTO_DELTA_MAX = 8192
 # Once ingest pauses for AUTO_SETTLE_MS (PION_VECTOR_SETTLE_MS; 0 = never),
 # a delta of 1/AUTO_SETTLE_DIVISOR of the index or more is folded in too, so
-# what a stream leaves behind does not cost every later query a scan.
-comptime AUTO_SETTLE_MS = 1000
+# what a stream leaves behind does not cost every later query a scan. 3 s, not
+# 1: VectorDBBench's stream sends one burst a second, and gaps just over 1 s
+# set off 13-14 extra rebuilds per 50K stream (S50, Mac, 2026-10-19).
+comptime AUTO_SETTLE_MS = 3000
 comptime AUTO_SETTLE_DIVISOR = 100
 
 
@@ -229,6 +232,7 @@ def _start(mut hnsw: HNSWGraph,
         _set(shared, worker_id, AUTO_IDLE)
         return
     g[].reset_graph()           # what it held was retired at the last publish
+    g[].auto_built = True       # its index file reopens ingest after a restart
     if shared[].index_name_len > 0:
         g[].index_name_len = shared[].index_name_len
         for b in range(g[].index_name_len):
@@ -393,6 +397,8 @@ def vector_auto_hold(mut hnsw: HNSWGraph,
         if Atomic[Scalar[DType.uint64]].compare_exchange(
                 shared[].auto_state, expected, (UInt64(worker_id) << 8) | UInt64(AUTO_HOLD)):
             return
+        # held elsewhere (another command, or a restart's refill: phase B)
+        _ = external_call["usleep", Int32](Int32(500))
 
 
 def vector_auto_release(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
@@ -400,3 +406,83 @@ def vector_auto_release(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
     var st = auto_load(shared)
     if auto_phase(st) == AUTO_HOLD and auto_worker(st) == worker_id:
         _set(shared, worker_id, AUTO_IDLE)
+
+
+def reopen_after_load(hnsw: HNSWGraph,
+                      shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                      worker_id: Int):
+    """Phase B, restart: `hnsw` was just warm-loaded from an automatic build's
+    file and published. Reopen ingest as that build left it: HSETs are indexed
+    again, the graph holds slots [0, N), later ones are the delta, and the
+    index rebuilds itself as before. Called by the loading worker before the
+    other workers stop waiting for the load (state.mojo phase 6).
+
+    The file holds the graph, not the FP32 rows a rebuild and the exact
+    rescore read. Every worker puts back the rows of its own hashes
+    (restore_index_state) and adds the hashes no live slot holds
+    (vector_auto_restored); the hold taken here keeps any build from starting
+    until the last of them is done."""
+    if is_null(shared) or not hnsw.auto_built or is_not_null(shared[].ingest_fp32) \
+            or is_null(shared[].auto_restore) or is_null(shared[].ingest_count) or is_null(shared[].auto_state):
+        return
+    shared[].pre_dim = hnsw.dim
+    shared[].pre_ef_construction = hnsw.ef_construction
+    shared[].pre_distance_metric = hnsw.distance_metric
+    shared[].open_ingest(hnsw.max_elements, hnsw.dim)
+    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared[].ingest_count, UInt64(hnsw.num_nodes))
+    _set(shared, worker_id, AUTO_HOLD)
+    shared[].auto_restore[1] = 1
+    external_call["pion_full_fence", NoneType]()
+    shared[].pre_index_ready = True
+    print("[vector] warm load of an automatic index (" + String(hnsw.num_nodes)
+          + " vectors): ingest reopened; refilling its rows from the hashes")
+
+
+def vector_auto_restored(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                         keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                         wal: UnsafePointer[WAL, MutUntrackedOrigin],
+                         tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+                         worker_id: Int):
+    """Phase B, restart, on every worker after restore_index_state: add this
+    worker's hashes no live slot holds as delta rows. The last worker to get
+    here clears the graph's rows nobody refilled (their documents are gone:
+    zeros, dead) and releases reopen_after_load's hold."""
+    if is_null(shared) or is_null(shared[].auto_restore) or shared[].auto_restore[1] == 0:
+        return
+    var added = ingest_unlinked_hashes(shared, keyspace, wal, tomb)
+    if added > 0:
+        print("[vector] restart: " + String(added) + " vectors no built graph held are the delta again")
+    var before = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE_RELEASE](
+        shared[].auto_restore, UInt64.MAX)
+    if before != 1:
+        return
+    external_call["pion_full_fence", NoneType]()
+    var n = shared[].num_nodes
+    var refilled = 0
+    for s in range(n):
+        if shared[].row_visible(s):
+            refilled += 1
+    if refilled == 0 and n > 0 and shared[].ingested() <= n:
+        # None of the index's vectors is in the keyspace (a server run with
+        # --no-wal, or the index file copied without its data): there is
+        # nothing to rebuild from. Serve the index as loaded, as a warm load
+        # always did, and close ingest as FT.OPTIMIZE does.
+        shared[].pre_index_ready = False
+        _close_ingest(shared, worker_id)
+        shared[].auto_restore[1] = 0
+        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared[].auto_state, UInt64(0))
+        print("[vector] restart: none of the index's " + String(n) + " vectors is in the keyspace;"
+              + " it serves as loaded, and later HSETs are stored but not indexed")
+        return
+    var cleared = 0
+    for s in range(n):
+        if shared[].row_visible(s):
+            continue
+        shared[].clear_ingest_row(s)
+        shared[].mark_dead(s)
+        shared[].commit_ingest(s)
+        cleared += 1
+    shared[].auto_restore[1] = 0
+    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared[].auto_state, UInt64(0))
+    print("[vector] restart: rows of " + String(refilled) + " indexed vectors refilled"
+          + (", " + String(cleared) + " gone" if cleared > 0 else String("")))

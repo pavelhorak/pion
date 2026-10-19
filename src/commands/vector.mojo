@@ -2369,6 +2369,15 @@ def handle_ft_optimize(
         populate_hnsw_metadata(hnsw, shared_hnsw, keyspace)
         if _covered:
             _close_ingest(shared_hnsw, worker_id)
+            # Phase B: the served index is an automatic build's, and its file
+            # says ingest stays open after a restart (word 25, bit 8). This
+            # command ends ingest, after a restart too: clear the bit in place.
+            var _sg = served_auto_graph(shared_hnsw, _served)
+            if _sg >= 0:
+                auto_graph(shared_hnsw, _sg)[].auto_built = False
+            var _ip = String("pion.hnsw.0") + "\0"
+            _ = external_call["pion_file_patch_u64", Int32](
+                _ip.unsafe_ptr(), Int64(25 * 8), ~UInt64(256), UInt64(0))
         writer.append_ok_response()
         return ci
     # Drop-in: build into this graph's OWN arrays. A graph that borrowed the
@@ -2457,6 +2466,7 @@ def handle_ft_optimize(
     # tombstones, so replay never applies one build's tombstones to another
     var _bid = UInt64(perf_counter_ns()) ^ (UInt64(Int(external_call["random", Int64]())) << 20)
     hnsw.build_id = _bid if _bid != 0 else UInt64(1)
+    hnsw.auto_built = False          # phase B: ingest ends here, after a restart too
     # Publish full index + PQ data to shared view (all workers borrow via borrow_from_shared)
     if is_not_null(shared_hnsw):
         hnsw.publish_to_shared(shared_hnsw, worker_id)
@@ -2745,12 +2755,7 @@ def handle_ft_create(
             # Drop-in: ids double as commit marks (-1 = not written yet, read
             # by the exact scan), so they are -1 before any HSET can see the
             # buffer; the FP32 buffer, which add_ingest_vector checks, last.
-            var id_cap = cap if cap > shared_hnsw[].hk_max_elements else shared_hnsw[].hk_max_elements
-            var ids = alloc[Int32](id_cap)
-            unsafe_memset(ids.bitcast[UInt8](), 0xFF, id_cap * 4)
-            shared_hnsw[].ingest_ids = ids
-            shared_hnsw[].alloc_ingest_q8(cap, hnsw.dim)     # phase B, before the FP32 buffer
-            shared_hnsw[].ingest_fp32 = alloc[Float32](cap * hnsw.dim)
+            shared_hnsw[].open_ingest(cap, hnsw.dim)
 
     writer.append_ok_response()
     return ci
