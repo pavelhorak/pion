@@ -422,7 +422,6 @@ class PionPromptCache:
 
         Stage 2 produces a measurable end-to-end win only when something
         downstream of get_or_prefill() actually calls attend_query():
-            - pion-exo's gpu_attention mode (Mac cluster inference)
             - a custom vLLM CacheEngine (Linux GPU)
             - monkey-patched mlx-lm attention layer (single-Mac, measurable)
 
@@ -472,7 +471,7 @@ class PionPromptCache:
                 )
         self.model = model
         self.vquant = vquant
-        # Wire-only Stage-2 consumers (e.g. pion-exo gpu_attention) construct
+        # Wire-only Stage-2 consumers (a custom CacheEngine, say) construct
         # without a model — layout-dependent paths raise via _require_layout.
         self.layout = _layout_from(model) if model is not None else None
         self.host = host
@@ -776,7 +775,7 @@ class PionPromptCache:
         K, V shape: (H, N, D) float32. Pion holds these resident in
         MLX-side memory until DROP_SESSION or LRU eviction. This is the
         wire-level Stage-2 push; layout-free and model-free, suitable for
-        consumers like pion-exo that compute K/V externally per layer.
+        consumers that compute K/V externally per layer.
 
         Requires `pion-server --kvcache --metal-attention -w 1`.
         """

@@ -4,7 +4,7 @@ Stage 2 of the shared KV cache: instead of shipping K/V back to the model,
 Pion computes the attention over the cached prefix itself — natively on Metal
 with `--metal-attention`, or through the MLX bridge — and the consumer
 attaches only the suffix. This is the path behind the same-process TTFT row,
-the sparse long-context selector and the `pion-exo` hook.
+and the sparse long-context selector.
 
 ## Wire forms
 

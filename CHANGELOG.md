@@ -4,6 +4,22 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Removed
+
+- **The Python packages that nobody used are gone from the tree**: `pion-serve`,
+  `vllm-pion`, the MCP server (`mcp/`) and `pion_context`, `pion-exo`,
+  `flare_gateway`, `pion_glide`, and the LMCache, LangGraph, AutoGen and
+  LlamaIndex packages, about 19,000 lines. Each was experimental, none was ever
+  on PyPI, and none had a user outside this project. The demos and benchmarks
+  that existed only for them went too: the CAG legal demo, the GLIDE demo and
+  pion-serve's cache-hit suite. `pion-vllm-mlx` is unchanged and is the one
+  Python package. No engine command changed: `ATTEND.*`, `KV.PREFIX.*`,
+  `AI.FLARE.*` and LMCache's RESP connector (`resp://`) work as before. The two
+  RESP clients that engine tests borrowed from these packages now live in
+  `tests/` (`pion_store.py`, `attention_client.py`).
+
 ## [0.9.10] — 2026-10-20
 
 A vector index answers without `FT.OPTIMIZE`, so a stock Redis client that

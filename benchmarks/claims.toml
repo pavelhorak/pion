@@ -193,71 +193,6 @@ evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_
 expect = ["\"speedup\": 14.03", "\"speedup\": 25.25", "\"speedup\": 29.04", "\"actual_prefix_tokens\": 2048", "\"actual_prefix_tokens\": 4096"]
 
 [[claim]]
-file = "pion-lmcache/README.md"
-where = "A request may be up to 256 MB"
-numbers = ["256 MB"]
-kind = "code"
-evidence = ["src/network/engine.mojo"]
-expect = ["comptime CLIENT_BUF_SIZE = 256 * 1024 * 1024"]
-
-[[claim]]
-file = "pion-lmcache/README.md"
-where = "A request may be up to 256 MB"
-numbers = ["8 MB"]
-kind = "test"
-evidence = ["tests/test_lmcache_compat.py"]
-expect = ["8 * 1024 * 1024"]
-
-[[claim]]
-file = "pion-lmcache/README.md"
-where = "for the 8 MB blob path"
-numbers = ["8 MB"]
-kind = "test"
-evidence = ["tests/test_lmcache_compat.py"]
-expect = ["8 * 1024 * 1024"]
-
-[[claim]]
-file = "pion_context/README.md"
-where = "Files over 512 KB are skipped"
-numbers = ["512 KB"]
-kind = "code"
-evidence = ["pion_context/pion_context/indexer.py"]
-expect = ["MAX_FILE_SIZE = 512 * 1024"]
-
-[[claim]]
-file = "examples/cag_legal_demo/README.md"
-where = "Pure CAG dominates pure RAG"
-numbers = ["17.7 pp", "16.7 pp"]
-kind = "result"
-evidence = ["examples/cag_legal_demo/calibration_state.json"]
-expect = ["\"f1\": 0.5290074740074739", "\"f1\": 0.7058914193696803", "\"found\": 0.7333333333333333", "\"found\": 0.9,"]
-note = "0.706 - 0.529 and 0.900 - 0.733"
-
-[[claim]]
-file = "examples/cag_legal_demo/README.md"
-where = "The streaming TTFT win is only"
-numbers = ["1.2×"]
-kind = "result"
-evidence = ["examples/cag_legal_demo/calibration_state.json"]
-expect = ["\"speedup_vs_rag\": 1.1975958775891216"]
-
-[[claim]]
-file = "examples/cag_legal_demo/README.md"
-where = "Cascade correctly picks pure CAG"
-numbers = ["0.54×"]
-kind = "result"
-evidence = ["examples/cag_legal_demo/calibration_state.json"]
-expect = ["\"speedup\": 0.536642989191833"]
-
-[[claim]]
-file = "examples/cag_legal_demo/README.md"
-where = "The whole onboarding flow takes"
-numbers = ["5 min"]
-kind = "result"
-evidence = ["examples/cag_legal_demo/calibration_state.json"]
-expect = ["\"wall_s\": 291.5"]
-
-[[claim]]
 file = "website/pages/reference/commands/rag-knn-pkm.md"
 where = "Product-key memory"
 numbers = ["0.075 ms", "5.13 ms"]
@@ -710,14 +645,6 @@ numbers = ["256 MB"]
 kind = "code"
 evidence = ["src/common/config.mojo"]
 expect = ["self.wal_size_mb = 256"]
-
-[[claim]]
-file = "doc/pion_serve.md"
-where = "Threshold 0.85 default"
-numbers = ["0.85"]
-kind = "code"
-evidence = ["pion-serve/serve.py"]
-expect = ["default=0.85"]
 
 [[claim]]
 file = "doc/configuration.md"

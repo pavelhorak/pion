@@ -23,9 +23,9 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "vllm-pion"))
+sys.path.insert(0, str(REPO / "tests"))
 
-from vllm_pion.attention_client import PionAttentionClient  # noqa: E402
+from attention_client import PionAttentionClient  # noqa: E402
 
 PORT = 11974   # avoid collision with a dev server on 1974
 SERVER_BIN = Path(os.environ["PION_BIN"]) if os.environ.get("PION_BIN") else REPO / "pion-server"

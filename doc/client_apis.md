@@ -83,61 +83,12 @@ await r.get('key');
 await r.call('FT.ADDTEXT', 'kb', 'doc:1', 'Pion is a Mojo-native vector database');
 ```
 
-## pion-glide (Recommended for Python)
-
-`pion-glide` is the official async Python client — a thin typed wrapper over [Valkey GLIDE](https://github.com/valkey-io/valkey-glide) that adds `FT.*` and `AI.*` helpers.
-
-```bash
-pip install -e pion_glide/   # not published to PyPI; install from a checkout
-```
-
-```python
-import asyncio
-from pion_glide import PionClient
-
-async def main():
-    # Standalone
-    client = await PionClient.connect("127.0.0.1", 1974)
-
-    # Standard KV
-    await client.set("key", "hello from GLIDE")
-    print(await client.get("key"))
-
-    # Vector search
-    await client.ft.create("products", dim=1536, metric="L2")
-    await client.ft.add_vector("products", "sku:1", my_vec)
-    await client.ft.optimize("products")
-    results = await client.ft.search("products", query_vec, k=10)
-
-    # Text search with server-side embedding (requires --flare)
-    await client.ft.add_text("kb", "doc:1", "Pion achieves 10K QPS on Linux")
-    hits = await client.ft.search_text("kb", "performance", k=5)
-
-    # AI gateway (requires --flare)
-    answer = await client.ai.complete("What is the capital of France?")
-
-    await client.close()
-
-asyncio.run(main())
-```
-
-See `pion_glide/README.md` for the full API reference and `examples/pion_glide_demo.py` for a runnable demo.
-
 ## Valkey GLIDE (Cluster Mode)
 
 For cluster-mode clients (GLIDE, redis-py cluster, Lettuce, Jedis), start Pion with `--cluster`:
 
 ```bash
 ./pion-server --cluster --cluster-host 127.0.0.1
-```
-
-**Via `pion-glide`** (recommended — auto-discovers topology):
-```python
-from pion_glide import PionClient
-
-# Provide one or more seed nodes; GLIDE discovers the rest via CLUSTER SHARDS
-client = await PionClient.connect_cluster([("127.0.0.1", 1974)])
-await client.set("{user:42}:session", "tok_xyz")  # hash-tagged key for slot affinity
 ```
 
 **Via `valkey-py` cluster client:**
@@ -174,37 +125,6 @@ from langchain_community.vectorstores.redis import Redis
 vs = Redis.from_texts(texts, embedding, redis_url="redis://localhost:1974")
 results = vs.similarity_search("query", k=3)
 ```
-
-### LangGraph — Agent State Persistence
-
-```python
-from pion_langgraph import PionSaver
-saver = PionSaver(host="127.0.0.1", port=1974)
-graph = workflow.compile(checkpointer=saver)
-```
-
-Install: `pip install -e pion-langgraph/`
-
-### AutoGen — Semantic Agent Memory
-
-```python
-from pion_autogen import PionMemoryStore
-memory = PionMemoryStore(host="127.0.0.1", port=1974)
-await memory.add("fact to remember")
-results = await memory.query("recall fact")
-```
-
-Install: `pip install -e pion-autogen/`
-
-### LlamaIndex — Vector Store for RAG
-
-```python
-from pion_llamaindex import PionVectorStore
-store = PionVectorStore(host="127.0.0.1", port=1974, dimensions=1536)
-index = VectorStoreIndex.from_documents(docs, vector_store=store)
-```
-
-Install: `pip install -e pion-llamaindex/`
 
 ### LMCache — Wire Compatible
 

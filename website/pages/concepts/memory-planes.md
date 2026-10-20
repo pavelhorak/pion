@@ -32,10 +32,8 @@ planes also have a binary lane on port+1 for large tensor transfers.
 - **Not a general vector database.** The vector engine exists so that recall
   does not need a second database. It is one HNSW index per server
   ([vector engine](/vector_engine.md)).
-- **Not an AI gateway.** [Pion Serve](/pion_serve.md) is an experimental
-  example proxy built on the planes above. It is not required to use them.
+- **Not an AI gateway.** The experimental `AI.COMPLETE` and `AI.CHAT`
+  commands are conveniences; nothing above needs them.
 
-The integrations are separate packages that talk to the server over the wire.
-`pion-vllm-mlx` (the prompt cache and `pion-vllm-mlx serve`) is supported; the
-MCP server, the LangGraph, AutoGen and LlamaIndex adapters and `pion-exo` are
-experimental.
+The one integration package is `pion-vllm-mlx` (the prompt cache and
+`pion-vllm-mlx serve`), which talks to the server over the wire.

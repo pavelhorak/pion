@@ -1,6 +1,6 @@
 # AI Gateway
 
-> **What is supported here.** `AI.SEMANTIC_CACHE`, `AI.EMBED`, `FT.ADDTEXT` and `FT.SEARCHTEXT` are part of Pion's supported surface. Everything else on this page — `AI.COMPLETE`, `AI.CHAT`, the FLARE gateway, the clustered-inference integrations, the MCP server, the semantic router (`AI.ROUTE.*`) and speculative RAG (`RAG.*`) — is **experimental**: wire-tested by `tests/test_ai_gateway.py` (gate tier, needs Ollama), with no published measurement of what it buys and no user outside this project ([README](../README.md#experimental)).
+> **What is supported here.** `AI.SEMANTIC_CACHE`, `AI.EMBED`, `FT.ADDTEXT` and `FT.SEARCHTEXT` are part of Pion's supported surface. Everything else on this page — `AI.COMPLETE`, `AI.CHAT`, `AI.FLARE.*`, the clustered-inference integrations, the semantic router (`AI.ROUTE.*`) and speculative RAG (`RAG.*`) — is **experimental**: wire-tested by `tests/test_ai_gateway.py` (gate tier, needs Ollama), with no published measurement of what it buys and no user outside this project ([README](../README.md#experimental)).
 
 Pion implements a native AI pipeline directly in the database engine, eliminating the need for
 external orchestration layers. All AI commands are handled in `src/network/slow_path.mojo` via
@@ -255,46 +255,6 @@ silent no-op there and the failures would all be about the missing backend.
 
 ---
 
-## FLARE AI Gateway (Python, `flare_gateway/`)
-
-> **Experimental.** The FLARE gateway proxy has no test of its own; `tests/test_ai_gateway.py` exercises the `AI.FLARE.*` commands it calls. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
-
-A separate Python HTTP proxy that adds **mid-generation retrieval** to any LLM backend.
-Unlike the in-Mojo `AI.CHAT` command (which retrieves once before generating), FLARE monitors
-token logprobs *during* generation and retrieves only when the model becomes uncertain.
-
-```
-Client → FLARE Gateway (:8080) → Ollama / vLLM / OpenAI (:11434)
-                               ↕
-                          Pion (:1974)  [1.28ms — faster than one token at 8B scale]
-```
-
-### How FLARE works
-
-1. Generate `N` tokens (chunk) from the upstream LLM with `logprobs=true`
-2. Compute `min_prob = min(exp(logprob) for logprob in chunk)`
-3. If `min_prob < τ` (uncertain): use `(context + uncertain_chunk)` as Pion query
-4. Retrieve top-k facts from Pion
-5. Prepend facts as context and regenerate the uncertain chunk
-6. Accept confident chunks without retrieval
-
-### Quickstart
-
-```bash
-pip install flask requests "redis>=4.6.0,<5.0" numpy
-
-# Load knowledge base
-curl -X POST http://localhost:8080/flare/load \
-  -H "Content-Type: application/json" \
-  -d '{"documents": [{"text": "The Eiffel Tower was built in 1889 in Paris."}]}'
-
-# Use as drop-in OpenAI replacement
-EMBED_PROVIDER=mock UPSTREAM_URL=http://localhost:11434 \
-  python flare_gateway/gateway.py
-```
-
-See `flare_gateway/README.md` for full configuration reference.
-
 ## Example Scripts
 
 See `examples/` for runnable demos:
@@ -305,7 +265,7 @@ See `examples/` for runnable demos:
 | `examples/step6_flare.py` | FLARE Python gateway: mid-generation retrieval |
 | `examples/step6b_flare_fewshot.py` | FLARE with few-shot prompting on an 8B model |
 | `examples/step13_flare_mojo.py` | FLARE Mojo gateway end-to-end test (`AI.FLARE` commands) |
-| `examples/agent_memory_demo.py` | Persistent agent memory via MCP tools |
+| `examples/agent_memory_demo.py` | Agent memory across a restart through `pion_memory` (`remember` / `recall`) |
 | `examples/session_affinity_demo.py` | Multi-turn session routing via HSET + EXPIRE; TTL expiry → least-loaded fallback |
 | `examples/coalescing_proxy.py` | FastAPI proxy using `SET NX` for dedup: 50 concurrent identical queries → 1 inference call |
 | `examples/prefix_routing_demo.py` | System-prompt hash → replica routing |
@@ -368,13 +328,10 @@ See `examples/prefix_routing_demo.py`.
 
 ### Architecture Patterns
 
-**Pattern A — Pion as AI Memory Layer (recommended first step)**
+**Pattern A — Pion as AI Memory Layer**
 
-Change one env var in `flare_gateway/gateway.py` (`UPSTREAM_URL`). No inference backend changes:
-```
-Client → flare_gateway/gateway.py → Pion:1974 (cache hit < 20ms)
-                                          └─ cache miss → exo | llama-server | vllm-mlx
-```
+Send requests through `AI.COMPLETE`: Pion answers a semantic-cache hit itself and passes a miss
+to exo, llama-server or vllm-mlx. No inference backend changes.
 
 **Pattern B — Pion as Cluster Coordinator**
 
@@ -389,7 +346,7 @@ published with it yet.
 
 ### Per-Tool Integration Notes
 
-**exo:** `FLARE_UPSTREAM_URL=http://exo-head:52415`. Session tracking via HSET. Queue depth via
+**exo:** Session tracking via HSET. Queue depth via
 INCR/DECR (exo doesn't expose queue depth natively). See `examples/exo_session_demo.py`.
 
 **llama.cpp:** Semantic cache via `AI.COMPLETE`. Session: `HSETNX session:{id} node "llama-server-3:8080"`.
@@ -400,17 +357,6 @@ to the same replica, which builds KV cache naturally. See `examples/prefix_routi
 is complementary to vLLM's PagedAttention (KV layer) — Pion saves full inference on similar
 prompts; vLLM saves KV recomputation on exact-prefix continuations.
 
-**Hypura** (Ollama-compatible API): `FLARE_UPSTREAM_URL=http://hypura-host:11434`, no other changes.
-
-## MCP server (pion-mcp, `mcp/`) — experimental
-
-`mcp/` holds an MCP server whose `agent_remember` / `agent_recall` / `agent_forget` tools
-store memories in a Pion FT index. It is experimental. Pion serves one FT index at a time,
-so these memories, the MCP semantic cache and codebase search replace one another on a
-server; give each its own server. pion-mcp also does not accept the `ollama` embedding
-provider that pion-context defaults to. See `mcp/README.md`.
-
----
 
 ## Externalized Attention
 
@@ -465,12 +411,10 @@ The test runs over RESP; the binary lane on port+1 is not measured here.
 ./pion-server --kvcache -w 1
 ```
 
-### Python client (vllm-pion/)
+### Python client
 
-The `vllm-pion/` package provides drop-in integration:
-- `PionKVClient` — KV.STORE / KV.FETCH for raw tensor blobs
-- `PionAttentionClient` — ATTEND.* commands with key normalization for INT8 HNSW quantization
-- `ExternalizedAttentionLayer` — drop-in replacement for standard attention in vLLM/MLX pipelines
+`tests/attention_client.py` holds `PionAttentionClient`, a minimal client for the `ATTEND.*`
+commands with key normalization for INT8 HNSW quantization. The ATTEND tests use it.
 
 ### Mojo modules
 

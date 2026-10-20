@@ -40,9 +40,9 @@ from typing import List
 import numpy as np
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "pion-lmcache"))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "tests"))
 
-from pion_lmcache.store import _RESPClient, _RESPError
+from pion_store import _RESPClient, _RESPError
 
 
 def parse_args():

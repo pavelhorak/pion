@@ -15,7 +15,7 @@ at native speed.
     text = generate(model, tok, prompt=suffix_ids, prompt_cache=cache)
 
 Stage 2 — Pion computes the attention over the prefix (sparse selectors,
-pion-exo, custom CacheEngines):
+custom CacheEngines):
 
     install_pion_attention_patch()
     pc = PionPromptCache(model, stage2=True, host="127.0.0.1", port=1974)

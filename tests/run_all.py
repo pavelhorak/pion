@@ -396,8 +396,8 @@ def _save_logs(roots, dest, max_bytes=8 << 20):
 
 def discover():
     """Every test file the repo holds: tests/ plus each package's own tests/
-    (pion-exo, pion-lmcache, pion-serve, pion-vllm-mlx, …)."""
-    pats = ["tests/*.py", "tests/*.mojo", "pion-*/tests/*.py", "pion_*/tests/*.py", "mcp/tests/*.py"]
+    (pion-vllm-mlx today)."""
+    pats = ["tests/*.py", "tests/*.mojo", "pion-*/tests/*.py", "pion_*/tests/*.py"]
     files = sorted({f for pat in pats for f in glob.glob(os.path.join(REPO, pat))})
     return [os.path.relpath(f, REPO) for f in files]
 
