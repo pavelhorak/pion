@@ -71,6 +71,11 @@ slower than doing nothing, and we shipped it that way for a while.
 - **The sparse selector is NIAH-class.** Factual QA over dense paragraphs needs
   a query-aware selector; the default block-mean selector is built for finding a
   needle, not for reading every paragraph.
+- **A large vector index that keeps taking writes.** Vectors written since the
+  last build are searched exactly, and during a rebuild every search is. At
+  500K vectors on an EPYC 8124P a query took 1.6 ms from the graph alone,
+  3.8 ms with 10,000 vectors written since, and 190 ms during the 84 s rebuild.
+  An index loaded once and then queried pays none of this.
 - **`-w N` is N independent keyspaces**, not one shared keyspace. The server
   refuses to start with `-w N > 1` unless you pass `--independent-workers`.
 - **No TLS.** Loopback by default; terminate TLS at a proxy.

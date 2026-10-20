@@ -1,0 +1,13 @@
+engine: pion_a (Pion phase A (index builds itself; stock client))
+binary: /opt/arms/A/pion-server
+args: -p 6395 -w 1 --no-auto-detect --no-auto-embed --no-wal
+server cpus: 0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23
+client cpus: 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31
+client env: 
+install: stock
+source: https://github.com/pavelhorak/pion/pull/91
+pion-server 0.9.9+4c735f8 (2026-10-20)
+vector: libpion_vector abi=1 (closed, dims=1536) isa=vnni
+redis_version:7.0.0
+pion_version:0.9.9+4c735f8
+pion_vector:libpion_vector abi=1 (closed, dims=1536) isa=vnni

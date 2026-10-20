@@ -1,0 +1,36 @@
+51269:C 20 Oct 2026 07:59:55.059 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+51269:C 20 Oct 2026 07:59:55.059 * Redis version=8.10.2, bits=64, commit=498ecd0d, modified=0, pid=51269, just started
+51269:C 20 Oct 2026 07:59:55.059 * Configuration loaded
+51269:M 20 Oct 2026 07:59:55.060 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+51269:M 20 Oct 2026 07:59:55.060 * monotonic clock: POSIX clock_gettime
+51269:M 20 Oct 2026 07:59:55.061 * Running mode=standalone, port=6379.
+51269:M 20 Oct 2026 07:59:55.064 * <search> search-workers default: 16 (min of MAX_WORKER_THREADS=16 and CPU cores)
+51269:M 20 Oct 2026 07:59:55.064 * <search> Redis version found by RedisSearch : 8.10.2 - oss
+51269:M 20 Oct 2026 07:59:55.064 * <search> RediSearch version 8.10.1 (Git=4c9333b)
+51269:M 20 Oct 2026 07:59:55.064 * <search> gc: ON, prefix min length: 2, min word length to stem: 4, prefix max expansions: 200, query timeout (ms): 500, timeout policy: return, oom policy: return, cursor read size: 1000, cursor max idle (ms): 300000, max doctable size: 1000000, max number of search results:  1000000, default scorer: BM25STD, 
+51269:M 20 Oct 2026 07:59:55.064 * <search> Initialized thread pools!
+51269:M 20 Oct 2026 07:59:55.064 * <search> Enabled workers threadpool of size 16
+51269:M 20 Oct 2026 07:59:55.064 * <search> Subscribe to config changes
+51269:M 20 Oct 2026 07:59:55.064 * <search> Subscribe to cluster slot migration events
+51269:M 20 Oct 2026 07:59:55.064 * <search> Subscribe to cluster topology change events
+51269:M 20 Oct 2026 07:59:55.064 * <search> Enabled role change notification
+51269:M 20 Oct 2026 07:59:55.065 * <search> Cluster configuration: AUTO partitions, type: 0, coordinator timeout: 0ms
+51269:M 20 Oct 2026 07:59:55.065 * Module 'search' loaded from /opt/redis-8.10.2-mods/modules/redisearch/redisearch.so
+51269:M 20 Oct 2026 07:59:55.065 * Server initialized
+51269:M 20 Oct 2026 07:59:55.065 * Ready to accept connections tcp
+51269:M 20 Oct 2026 07:59:55.065 # WARNING: Redis does not require authentication. Redis will accept connections from any IP address on the configured network interface.
+51269:M 20 Oct 2026 07:59:56.573 * <search> Creating vector index of type HNSW. Required memory for a block of 1024 vectors: 6476736B
+51269:M 20 Oct 2026 07:59:56.573 * <search> Successfully created index index
+51269:M 20 Oct 2026 08:00:03.734 * <search> DocTable capacity increase from 1000 to 1501
+51269:M 20 Oct 2026 08:00:06.722 * <search> DocTable capacity increase from 1501 to 2252
+51269:M 20 Oct 2026 08:00:10.708 * <search> DocTable capacity increase from 2252 to 3379
+51269:M 20 Oct 2026 08:00:15.726 * <search> DocTable capacity increase from 3379 to 5069
+51269:M 20 Oct 2026 08:00:24.709 * <search> DocTable capacity increase from 5069 to 7604
+51269:M 20 Oct 2026 08:00:37.698 * <search> DocTable capacity increase from 7604 to 11407
+51269:M 20 Oct 2026 08:00:56.699 * <search> DocTable capacity increase from 11407 to 17111
+51269:M 20 Oct 2026 08:01:24.723 * <search> DocTable capacity increase from 17111 to 25667
+51269:M 20 Oct 2026 08:02:07.702 * <search> DocTable capacity increase from 25667 to 38501
+51269:M 20 Oct 2026 08:03:11.718 * <search> DocTable capacity increase from 38501 to 57752
+51269:signal-handler (1792483619) Received SIGTERM scheduling shutdown...
+51269:M 20 Oct 2026 08:06:59.233 * User requested shutdown...
+51269:M 20 Oct 2026 08:06:59.233 # Redis is now ready to exit, bye bye...

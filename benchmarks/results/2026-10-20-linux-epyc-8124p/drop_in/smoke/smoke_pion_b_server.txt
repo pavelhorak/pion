@@ -1,0 +1,101 @@
+Binding to 127.0.0.1 [default (no password set)]
+--- Pion Configuration ---
+Profile:    cloud
+Port:       6395
+Workers:    16 (INDEPENDENT KEYSPACES)
+Huge Pages: False
+Affinity:   False
+Vector Dim: 1536
+INT4:       False
+PolarQuant: False
+TurboQuant: False
+NanoQuant:  False
+BQ:         False
+GPU:        False
+AI Gateway: False
+MAX Engine: False
+Embedding:  disabled
+LLM:        disabled
+Inference:  disabled
+KV Cache:   False (--kvcache enables ATTEND.*/M13 router/M9 RAG)
+Cluster:    False
+--------------------------
+
+=== INDEPENDENT WORKERS: 16 SEPARATE KEYSPACES ===
+  Each worker owns a private keyspace, hash map, WAL and HNSW graph.
+  Connections are assigned by accept() race — a write acked on one
+  connection is NOT readable from another. Cross-worker PUBLISH delivers
+  to zero subscribers, FLUSHALL clears one slice, and replication covers
+  worker 0 only.
+  Safe only if every client pins a single connection, or shards keys
+  across per-worker ports itself. Use -w 1 for shared-keyspace semantics.
+=======================================================
+
+--- Pion Master: Spawning 16 Persistent Mojo Workers ---
+Open-file limit raised from 1024 to 65536
+Shared listen socket: port=6395 fd=5
+Shared listen socket: port=6397 fd=6
+Shared listen socket: port=6398 fd=7
+Shared listen socket: port=6399 fd=8
+Shared listen socket: port=6400 fd=9
+Shared listen socket: port=6401 fd=10
+Shared listen socket: port=6402 fd=11
+Shared listen socket: port=6403 fd=12
+Shared listen socket: port=6404 fd=13
+Shared listen socket: port=6405 fd=14
+Shared listen socket: port=6406 fd=15
+Shared listen socket: port=6407 fd=16
+Shared listen socket: port=6408 fd=17
+Shared listen socket: port=6409 fd=18
+Shared listen socket: port=6410 fd=19
+Shared listen socket: port=6411 fd=20
+Shared listen socket: port=6412 fd=21
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=1 tid=133357375579840
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=0 tid=133357392361152
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=12 tid=133357190985408
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=2 tid=133357358798528
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=13 tid=133357174204096
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=15 tid=133357140641472
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=5 tid=133357308454592
+Multishot recv: 256 × 16384B provided buffers registered
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=14 tid=133357157422784
+--- Pion IO_URING Engine Active --- worker=6 tid=133357291673280
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=9 tid=133357241329344
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=11 tid=133357207766720
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=7 tid=133357274891968
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=10 tid=133357224548032
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=8 tid=133357258110656
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=3 tid=133357342017216
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=4 tid=133357325235904
+PION: shutdown requested, draining (WAL flush) — repeat the signal to force
+[pion] worker 12 stopped (shutdown)
+[pion] worker 1 stopped (shutdown)
+[pion] worker 0 stopped (shutdown)
+[pion] worker 2 stopped (shutdown)
+[pion] worker 13 stopped (shutdown)
+[pion] worker 15 stopped (shutdown)
+[pion] worker 5 stopped (shutdown)
+[pion] worker 10 stopped (shutdown)
+[pion] worker 3 stopped (shutdown)
+[pion] worker 6 stopped (shutdown)
+[pion] worker 11 stopped (shutdown)
+[pion] worker 7 stopped (shutdown)
+[pion] worker 8 stopped (shutdown)
+[pion] worker 14 stopped (shutdown)
+[pion] worker 9 stopped (shutdown)
+[pion] worker 4 stopped (shutdown)

@@ -1,0 +1,10 @@
+install: stock (/opt/venv_vdbb_stock)
+VDBB_STREAM_CONC=[5,10]
+VDBB_STREAM_DATASET=OpenAISmall
+VDBB_STREAM_OPTIMIZE=1
+VDBB_STREAM_RATE=200
+VDBB_STREAM_READ_DUR=30
+VDBB_STREAM_STAGES=[0.5,0.8]
++ RESULTS_LOCAL_DIR=/opt/out/S50_1_pion_a/r1 taskset -c 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31 env /opt/venv_vdbb_stock/bin/python /opt/session/box/vdbb_stream.py redis --host 127.0.0.1 --port 6395 --no-ssl --cmd --case-type StreamingPerformanceCase --k 100 --m 16 --ef-construction 128 --ef-runtime 150 --db-label pion_a --task-label pion_a_stream50k
+rc=0
+result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.5138, 0.7993, 0.9669, 0.9599] maxqps=[2155, 2928, 6709, 7077] insert=250.0324532049999 optimize=0.00046557199993912946 file=/opt/out/S50_1_pion_a/r1/Redis/result_20261020_pion_a_stream50k_redis.json

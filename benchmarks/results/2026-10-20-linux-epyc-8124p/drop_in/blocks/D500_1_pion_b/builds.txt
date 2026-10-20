@@ -1,0 +1,4 @@
+[vector] auto-build: indexing 500000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 500000 vectors indexed in 67323 ms; FT.SEARCH uses the graph now
+[vector] auto-build: re-indexing 550000 vectors in the background; the current index keeps serving
+[vector] auto-build: 550000 vectors indexed in 78794 ms; FT.SEARCH uses the graph now

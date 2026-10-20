@@ -292,9 +292,17 @@ the background, and a vector written after that is found at once
   above. In one run of seven, the end of the stream read 0.76; the cause is
   not yet known.
 
-Neither loss has been re-measured on the box. A search before the graph
-exists is exact, and slower, and so is a search during the rebuild that a
-burst of new vectors triggers.
+Re-measured on the EPYC box, with the same setup and the stock client
+([`benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/`](benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/README.md)):
+- **The streaming case.** During the stream Pion answers at RediSearch's
+  recall. At 50% and 80% inserted it serves 1.18× and 1.66× RediSearch's
+  queries per second (2,126 and 2,905 against 1,797 and 1,752), and about
+  3.6× once the stream ends.
+- **Where it is slow: a large index that keeps taking writes.** Vectors written
+  since the last build are searched exactly. At 500K vectors a query takes
+  1.6 ms from the graph alone, and 3.8 ms with 10,000 vectors written since.
+  During a rebuild every search is exact: 190 ms per query while that rebuild
+  ran, for 84 s. A load-once index pays none of this.
 
 The same run covers RediSearch's 8-bit SVS-VAMANA index and valkey-search.
 Method and raw runs:

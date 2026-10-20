@@ -1,0 +1,43 @@
+Binding to 127.0.0.1 [default (no password set)]
+--- Pion Configuration ---
+Profile:    cloud
+Port:       6395
+Workers:    1
+Huge Pages: False
+Affinity:   False
+Vector Dim: 1536
+INT4:       False
+PolarQuant: False
+TurboQuant: False
+NanoQuant:  False
+BQ:         False
+GPU:        False
+AI Gateway: False
+MAX Engine: False
+Embedding:  disabled
+LLM:        disabled
+WAL:        disabled (--no-wal benchmark mode)
+Inference:  disabled
+KV Cache:   False (--kvcache enables ATTEND.*/M13 router/M9 RAG)
+Cluster:    False
+--------------------------
+--- Pion Master: Spawning 1 Persistent Mojo Workers ---
+Open-file limit raised from 1024 to 65536
+Shared listen socket: port=6395 fd=5
+Shared listen socket: port=6397 fd=6
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=0 tid=129404797703872
+[vector] auto-build: indexing 500000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.24198785, 0.24058816] from 65536 vectors
+[HNSW] parallel link: 67 contended link drops, 88 under-linked nodes repaired
+[HNSW] level-0 reachability: 538 unreachable node(s) linked into the graph
+[vector] auto-build: 500000 vectors indexed in 66731 ms; FT.SEARCH uses the graph now
+HNSW saved: 500000 nodes → pion.hnsw.0
+[vector] auto-build: indexing 551000 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.24198785, 0.24058816] from 65536 vectors
+[HNSW] parallel link: 77 contended link drops, 71 under-linked nodes repaired
+[HNSW] level-0 reachability: 603 unreachable node(s) linked into the graph
+[vector] auto-build: 551000 vectors indexed in 84091 ms; FT.SEARCH uses the graph now
+HNSW saved: 551000 nodes → pion.hnsw.0
+PION: shutdown requested, draining (WAL flush) — repeat the signal to force
+[pion] worker 0 stopped (shutdown)

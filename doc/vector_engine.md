@@ -230,7 +230,7 @@ A stock Redis client (RedisVL, LangChain, VectorDBBench's own) creates the index
 
 Costs and limits:
 - The kept buffer costs `dim × 4` bytes per vector: 6 KB at 1536 dimensions, about 300 MB at 50K. An explicit `FT.OPTIMIZE` frees it.
-- An exact scan is bandwidth-bound, so an index searched before its graph exists, or during a rebuild, serves far fewer queries per second than the graph does.
+- An exact scan reads every vector it covers, so an index searched before its graph exists, or during a rebuild, serves far fewer queries per second than the graph does. Measured on an EPYC 8124P at 500K vectors of 1,536 dimensions, one worker and one client (`benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/`): a query takes 1.6 ms from the graph alone, 3.8 ms with 10,000 vectors written since the build (about 0.18 ms per 1,000), and 190 ms during the 84 s rebuild of 551,000.
 - Link lanes: the build uses one per online CPU, from 4 to 16. `PION_BUILD_LANES=N` overrides it.
 - After a restart, the graph loads from `pion.hnsw.0`. A vector written after the restart is not indexed until `FT.CREATE` runs again, as before.
 
