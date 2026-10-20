@@ -1,0 +1,16 @@
+[   22.0s] train (500000, 1536), test (1000, 1536), steps [10000, 25000, 45000]
+[   35.5s] ingested 500000 rows in 13.5 s; state (index, graph, exact, builds, running) ('exact', 0, 500000, 0, 0)
+[  103.6s] first build: settled 68.1 s after the ingest ended; state ('graph', 500000, 0, 1, 0)
+[  105.2s] RESULT delta 0: p50 1.616 ms  p90 1.851 ms (graph only)
+[  109.8s] RESULT delta 10000: p50 3.820 ms  p90 4.083 ms  added 2.204 ms = 136.4% of the delta-0 p50 (client RTT included in it)
+[  117.2s] RESULT delta 25000: p50 6.481 ms  p90 6.753 ms  added 4.865 ms = 301.0% of the delta-0 p50 (client RTT included in it)
+[  128.3s] RESULT delta 45000: p50 9.969 ms  p90 10.214 ms  added 8.353 ms = 516.9% of the delta-0 p50 (client RTT included in it)
+[  128.3s] RESULT fit over the 3 delta points: added = 0.457 ms fixed + 0.1756 ms per 1,000 delta rows
+[  128.3s] RESULT at a 34000-row delta the fit gives +6.429 ms = 397.8% of the delta-0 p50
+[  128.3s] RESULT at a 61000-row delta the fit gives +11.171 ms = 691.2% of the delta-0 p50
+[  128.4s] added 6000 rows (551000 in all): the delta is past 1/10 of the index, so a rebuild starts (during the ingest or after a 200 ms pause); state ('graph+delta', 500000, 51000, 1, 0)
+[  164.5s] before it starts: t+36.1 s delta 51000 p50 189.590 ms p90 305.189 ms
+[  205.3s] before it starts: t+76.9 s delta 551000 p50 194.537 ms p90 294.858 ms
+[  213.2s] before it starts: t+84.7 s delta 551000 p50 1.751 ms p90 99.657 ms
+[  213.2s] RESULT rebuild published 84.7 s after the last row was added (client clock; the server's 'indexed in' line is the build's own time); state ('building', 551000, 0, 2, 0)
+[  214.8s] RESULT after the rebuild: p50 1.631 ms  p90 1.880 ms; state ('building', 551000, 0, 2, 0)

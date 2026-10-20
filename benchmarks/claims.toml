@@ -193,71 +193,6 @@ evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_
 expect = ["\"speedup\": 14.03", "\"speedup\": 25.25", "\"speedup\": 29.04", "\"actual_prefix_tokens\": 2048", "\"actual_prefix_tokens\": 4096"]
 
 [[claim]]
-file = "pion-lmcache/README.md"
-where = "A request may be up to 256 MB"
-numbers = ["256 MB"]
-kind = "code"
-evidence = ["src/network/engine.mojo"]
-expect = ["comptime CLIENT_BUF_SIZE = 256 * 1024 * 1024"]
-
-[[claim]]
-file = "pion-lmcache/README.md"
-where = "A request may be up to 256 MB"
-numbers = ["8 MB"]
-kind = "test"
-evidence = ["tests/test_lmcache_compat.py"]
-expect = ["8 * 1024 * 1024"]
-
-[[claim]]
-file = "pion-lmcache/README.md"
-where = "for the 8 MB blob path"
-numbers = ["8 MB"]
-kind = "test"
-evidence = ["tests/test_lmcache_compat.py"]
-expect = ["8 * 1024 * 1024"]
-
-[[claim]]
-file = "pion_context/README.md"
-where = "Files over 512 KB are skipped"
-numbers = ["512 KB"]
-kind = "code"
-evidence = ["pion_context/pion_context/indexer.py"]
-expect = ["MAX_FILE_SIZE = 512 * 1024"]
-
-[[claim]]
-file = "examples/cag_legal_demo/README.md"
-where = "Pure CAG dominates pure RAG"
-numbers = ["17.7 pp", "16.7 pp"]
-kind = "result"
-evidence = ["examples/cag_legal_demo/calibration_state.json"]
-expect = ["\"f1\": 0.5290074740074739", "\"f1\": 0.7058914193696803", "\"found\": 0.7333333333333333", "\"found\": 0.9,"]
-note = "0.706 - 0.529 and 0.900 - 0.733"
-
-[[claim]]
-file = "examples/cag_legal_demo/README.md"
-where = "The streaming TTFT win is only"
-numbers = ["1.2×"]
-kind = "result"
-evidence = ["examples/cag_legal_demo/calibration_state.json"]
-expect = ["\"speedup_vs_rag\": 1.1975958775891216"]
-
-[[claim]]
-file = "examples/cag_legal_demo/README.md"
-where = "Cascade correctly picks pure CAG"
-numbers = ["0.54×"]
-kind = "result"
-evidence = ["examples/cag_legal_demo/calibration_state.json"]
-expect = ["\"speedup\": 0.536642989191833"]
-
-[[claim]]
-file = "examples/cag_legal_demo/README.md"
-where = "The whole onboarding flow takes"
-numbers = ["5 min"]
-kind = "result"
-evidence = ["examples/cag_legal_demo/calibration_state.json"]
-expect = ["\"wall_s\": 291.5"]
-
-[[claim]]
 file = "website/pages/reference/commands/rag-knn-pkm.md"
 where = "Product-key memory"
 numbers = ["0.075 ms", "5.13 ms"]
@@ -712,14 +647,6 @@ evidence = ["src/common/config.mojo"]
 expect = ["self.wal_size_mb = 256"]
 
 [[claim]]
-file = "doc/pion_serve.md"
-where = "Threshold 0.85 default"
-numbers = ["0.85"]
-kind = "code"
-evidence = ["pion-serve/serve.py"]
-expect = ["default=0.85"]
-
-[[claim]]
 file = "doc/configuration.md"
 where = "Semantic search, RAG knowledge base"
 numbers = ["600K"]
@@ -1043,27 +970,27 @@ expect = ["--test-time=30"]
 
 [[claim]]
 file = "README.md"
-where = "| P=1 | 107,896 |"
-numbers = ["107896", "388405", "112019"]
+where = "| P=1 | 110,044 |"
+numbers = ["110044", "386278", "114909", "515267"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_redis_io1_P1 | 3 | 107,896 |", "| single_redis_io8_P1 | 3 | 388,405 |", "| single_pion_w1_P1 | 3 | 112,019 |"]
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P1 | 3 | 110,044 |", "| single_redis_io8_P1 | 3 | 386,278 |", "| single_pion_io1_P1 | 3 | 114,909 |", "| single_pion_io8_P1 | 3 | 515,267 |"]
 
 [[claim]]
 file = "README.md"
-where = "| P=10 | 643,517 |"
-numbers = ["643517", "1655550", "877766"]
+where = "| P=10 | 640,985 |"
+numbers = ["640985", "1661596", "895149", "2972713"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_redis_io1_P10 | 3 | 643,517 |", "| single_redis_io8_P10 | 3 | 1,655,550 |", "| single_pion_w1_P10 | 3 | 877,766 |"]
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P10 | 3 | 640,985 |", "| single_redis_io8_P10 | 3 | 1,661,596 |", "| single_pion_io1_P10 | 3 | 895,149 |", "| single_pion_io8_P10 | 3 | 2,972,713 |"]
 
 [[claim]]
 file = "README.md"
-where = "| P=50 | 987,970 |"
-numbers = ["987970", "1376680", "1712725"]
+where = "| P=50 | 979,984 |"
+numbers = ["979984", "1368935", "1703363", "3909190"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_redis_io1_P50 | 3 | 987,970 |", "| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |"]
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_redis_io1_P50 | 3 | 979,984 |", "| single_redis_io8_P50 | 3 | 1,368,935 |", "| single_pion_io1_P50 | 3 | 1,703,363 |", "| single_pion_io8_P50 | 3 | 3,909,190 |"]
 
 [[claim]]
 file = "README.md"
@@ -1083,16 +1010,43 @@ expect = ["| shard_redis_x16_P50 | 3 | 11,128,400 |", "| shard_pion_w16_P50 | 3 
 
 [[claim]]
 file = "README.md"
-where = "On one keyspace, Redis with I/O threads is faster"
-numbers = ["24%", "1,213,746 ops/sec", "43%", "18%"]
+where = "- **Ratios:** 1.33× at P=1"
+numbers = ["1.33×", "1.79×", "2.86×"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |", "| durable_redis_io4_aof_P10 | 3 | 1,213,746 |", "| durable_pion_w1_wal_P10 | 3 | 847,249 |", "| shard_redis_x16_P10 | 3 | 7,178,453 |", "| shard_pion_w16_P10 | 3 | 6,097,719 |"]
-note = "1,712,725/1,376,680 = 1.244; 1,213,746/847,249 = 1.433; 7,178,453/6,097,719 = 1.177"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_pion_io8_P1 | 3 | 515,267 |", "| single_redis_io8_P1 | 3 | 386,278 |", "| single_pion_io8_P10 | 3 | 2,972,713 |", "| single_redis_io8_P10 | 3 | 1,661,596 |", "| single_pion_io8_P50 | 3 | 3,909,190 |", "| single_redis_io8_P50 | 3 | 1,368,935 |"]
+note = "515,267/386,278 = 1.334; 2,972,713/1,661,596 = 1.789; 3,909,190/1,368,935 = 2.856"
 
 [[claim]]
 file = "README.md"
-where = "On one keyspace, Redis with I/O threads is faster"
+where = "**With durability on (P=10):**"
+numbers = ["2.1×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| durable_pion_io8_wal_P10 | 3 | 2,724,529 |", "| durable_redis_io8_aof_P10 | 3 | 1,297,102 |"]
+note = "2,724,529/1,297,102 = 2.100"
+
+[[claim]]
+file = "README.md"
+where = "**Across all cores:** sixteen Redis processes"
+numbers = ["18%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| shard_redis_x16_P10 | 3 | 7,178,453 |", "| shard_pion_w16_P10 | 3 | 6,097,719 |"]
+note = "7,178,453/6,097,719 = 1.177"
+
+[[claim]]
+file = "doc/networking.md"
+where = "- **Measured on a Linux server:**"
+numbers = ["1.33×", "1.79×", "2.86×", "2.1×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md"]
+expect = ["| single_pion_io8_P1 | 3 | 515,267 |", "| single_redis_io8_P1 | 3 | 386,278 |", "| single_pion_io8_P10 | 3 | 2,972,713 |", "| single_redis_io8_P10 | 3 | 1,661,596 |", "| single_pion_io8_P50 | 3 | 3,909,190 |", "| single_redis_io8_P50 | 3 | 1,368,935 |", "| durable_pion_io8_wal_P10 | 3 | 2,724,529 |", "| durable_redis_io8_aof_P10 | 3 | 1,297,102 |"]
+note = "same ratios as the README's one-keyspace list"
+
+[[claim]]
+file = "README.md"
+where = "**A withdrawn headline:**"
 numbers = ["14.0M ops/sec", "10.2×", "14.0M"]
 kind = "arithmetic"
 note = "the withdrawn headline, quoted to say it is withdrawn"
@@ -1148,20 +1102,11 @@ expect = ["insert_duration=11.4326", "insert_duration=10.5776", "insert_duration
 
 [[claim]]
 file = "README.md"
-where = "| Peak KV throughput |"
-numbers = ["15.9M ops/sec", "15.9M", "14.8M", "12.4M", "11.6M", "1.71M", "1.38M"]
+where = "| KV throughput |"
+numbers = ["2.97M ops/sec", "2.97M", "1.66M", "7.18M", "6.10M"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
-expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |", "| single_pion_w1_P50 | 3 | 1,712,725 |", "| single_redis_io8_P50 | 3 | 1,376,680 |"]
-
-[[claim]]
-file = "README.md"
-where = "On one keyspace, Redis with I/O threads is faster"
-numbers = ["15864842", "14780031", "12372245", "11640929", "13750187"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-06-linux-epyc-8124p/peak64/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/peak/summary.md"]
-expect = ["| sym_pion_w32_t32c25_d64 | 3 | 15,864,842 |", "| sym_redis_x32_t1c25_d64 | 3 | 14,780,031 |", "| sym_pion_w32_t32c25_d256 | 3 | 11,640,929 |", "| sym_redis_x32_t1c25_d256 | 3 | 12,372,245 |", "| april_pion_w32_t16c50_d64 | 3 | 13,750,187 |"]
-note = "bare numbers the checker does not flag; recorded so their evidence is still checked"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/summary.md", "benchmarks/results/2026-10-06-linux-epyc-8124p/summary.md"]
+expect = ["| single_pion_io8_P10 | 3 | 2,972,713 |", "| single_redis_io8_P10 | 3 | 1,661,596 |", "| shard_redis_x16_P10 | 3 | 7,178,453 |", "| shard_pion_w16_P10 | 3 | 6,097,719 |"]
 
 [[claim]]
 file = "README.md"
@@ -1904,12 +1849,21 @@ expect = ["os.urandom(1 << 20)"]
 
 [[claim]]
 file = "README.md"
-where = "both servers pinned to the same 8 cores of an EPYC"
-numbers = ["8 cores", "6,673 QPS", "1,887", "3.5×", "0.960", "0.963", "1.3 ms", "5.0 ms"]
+where = "both servers pinned to the same 8 cores, median of 3"
+numbers = ["8 cores", "2.4×", "3,766 QPS", "1,545", "0.95", "3,250", "1,363", "0.97", "3.6×", "6,846", "1,880", "50K", "500K"]
 kind = "result"
-evidence = ["benchmarks/results/2026-10-09-linux-epyc-8124p/vectordbbench_50k/summary.md", "benchmarks/results/2026-10-09-linux-epyc-8124p/vectordbbench_50k/setup.txt"]
-expect = ["qps (peak) | 6673.0 | 7491.1 | 6445.9 | 6673.0", "qps (peak) | 1887.0 | 1878.7 | 1903.7 | 1887.0", "recall | 0.9601 | 0.9600 | 0.9598 | 0.9600", "recall | 0.9629 | 0.9627 | 0.9629 | 0.9629", "serial p99 (s) | 0.001300 | 0.001300 | 0.001300 | 0.001300", "serial p99 (s) | 0.005100 | 0.004900 | 0.005000 | 0.005000", "server cpus: 0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23"]
-note = "3.5x = 6673.0 / 1887.0; 0.960 and 0.963 round the recall medians 0.9600 and 0.9629; 8 cores = physical cores 0-7 plus their SMT siblings"
+evidence = ["benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/summary.md", "benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/setup.txt"]
+expect = ["| Pion (INT8, build-once index, no live inserts) | K500_5_pion | INT8 | 3766 (267) | 3250 (400) |", "| Redis 8.10.2 + RediSearch HNSW FLOAT32 | K500_2_redis_hnsw_fp32 | FP32 | 1545 (200) | 1363 (300) |", "| Pion (INT8, build-once index, no live inserts) | K50_5_pion | INT8 | 6846 (150) | 4099 (300) |", "| Redis 8.10.2 + RediSearch HNSW FLOAT32 | K50_2_redis_hnsw_fp32 | FP32 | 1880 (150) | 1725 (200) |", "| Redis 8.10.2 + RediSearch HNSW FLOAT32 | FP32 | 3.64x | 2.38x |", "| Redis 8.10.2 + RediSearch HNSW FLOAT32 | FP32 | 2.44x | 2.38x |", "server cpus: 0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23"]
+note = "Pion = the lower of its two blocks per size (K50_5, K500_5). 2.4x = 3766/1545 = 2.44 and 3250/1363 = 2.38 at 500K, 4099/1725 = 2.38 at 50K/0.97; 3.6x = 6846/1880 = 3.64 at 50K/0.95. 0.95 and 0.97 are the recall targets, 50K and 500K the dataset sizes. 8 cores = physical cores 0-7 plus their SMT siblings"
+
+[[claim]]
+file = "README.md"
+where = "It became searchable later:"
+numbers = ["265.6 s", "126.7 s", "500K"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/summary.md"]
+expect = ["load_duration (time until searchable) 265.6 s", "load_duration (time until searchable) 126.7 s"]
+note = "Pion's slower 500K block (K500_5) against K500_2_redis_hnsw_fp32; same default concurrent loader on both"
 
 [[claim]]
 file = "doc/networking.md"
@@ -1927,3 +1881,72 @@ kind = "result"
 evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/placement/arms/same_l3_r1_kv.txt", "benchmarks/results/2026-10-12-linux-epyc-8124p/placement/arms/other_l3_r1_kv.txt"]
 expect = ["| SET | 0 | 0 | 0 | **740,740** |", "| SET | 0 | 0 | 0 | **588,235** |"]
 note = "740,740/588,235 = 1.259; the other rows split the same way (placement/README.md)"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Once inserts pause for 200 ms"
+numbers = ["200ms"]
+kind = "code"
+evidence = ["src/network/vector_auto.mojo"]
+expect = ["comptime AUTO_QUIET_NS = UInt64(200_000_000)"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "The kept buffer costs"
+numbers = ["6KB", "300MB", "50K"]
+kind = "arithmetic"
+note = "1536 x 4 bytes = 6 KB per vector; 50,000 x 6,144 bytes = 307 MB"
+
+[[claim]]
+file = "README.md"
+where = "VectorDBBench's stock client, which never sends"
+numbers = ["0.998×", "50K", "0.959", "0.960", "0.998"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-19-mac-m4-drop-in/summary_ab.md"]
+expect = ["| new_p1 | full | 1,229 / 7,018 / 8,657 | 8,657 | 0.9592 |", "| new_p3 | full | 1,139 / 6,866 / 8,902 | 8,902 | 0.9604 |", "new/old = 0.998"]
+note = "Stock client (no FT.OPTIMIZE) on the branch against 619aea2 with the patched client; recall from the 3 full runs (0.9592 / 0.9600 / 0.9604), QPS = median of 6 search-only runs per arm, 8,660 / 8,675"
+
+[[claim]]
+file = "README.md"
+where = "Searches during the stream answer at the ceiling"
+numbers = ["50%", "80%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-19-mac-m4-drop-in/summary_s50.md", "benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/summary.md"]
+expect = ["| 6ca3181_run2 | 0.5039 | 0.7948 |", "| 6ca3181_run1 | 0.5047 | 0.7947 | 0.8018 | 0.7622 |"]
+note = "0.50 / 0.79 = runs 2-7 at 50% and 80% inserted (0.4986-0.5049, 0.7900-0.7953); RediSearch 0.5106 / 0.7974 from the 2026-10-18 summary; 0.76 = run 1 after optimize()"
+
+[[claim]]
+file = "README.md"
+where = "During the stream Pion answers at RediSearch's"
+numbers = ["50%", "80%", "1.18×", "1.66×", "3.6×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/summary.md"]
+expect = ["| S50_4_pion_a | 0.5132 | 0.8001 | 0.9671 | 0.9602 | 2,126 / 2,905 / 6,954 / 6,662 |", "| S50_2_redis_hnsw_fp32 | 0.5084 | 0.7974 | 0.9629 | 0.9629 | 1,797 / 1,752 / 1,852 / 1,836 |", "| S50_1_pion_a | 0.5138 | 0.7993 | 0.9669 | 0.9599 | 2,155 / 2,928 / 6,709 / 7,077 |"]
+note = "Pion A = the lower of its two runs per stage: 2,126 / 1,797 = 1.18, 2,905 / 1,752 = 1.66; after the stream the lowest Pion A max (6,662) over RediSearch's lowest (1,836) = 3.63. 50% / 80% are the case's stages (inputs)"
+
+[[claim]]
+file = "README.md"
+where = "Where it is slow: a large index that keeps taking writes"
+numbers = ["1.6 ms", "3.8 ms", "190 ms", "84 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/delta_steps.txt", "benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/builds.txt"]
+expect = ["RESULT delta 0: p50 1.616 ms", "RESULT delta 10000: p50 3.820 ms", "p50 189.590 ms", "p50 194.537 ms", "551000 vectors indexed in 84091 ms"]
+note = "Pion A, -w 1, one client, p50 incl. client RTT; 190 ms = the two batches of 200 queries timed during the rebuild (189.6 / 194.5)"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "An exact scan reads every vector it covers"
+numbers = ["1.6 ms", "3.8 ms", "0.18 ms", "190 ms", "84 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/delta_steps.txt", "benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/builds.txt"]
+expect = ["RESULT delta 0: p50 1.616 ms", "RESULT delta 10000: p50 3.820 ms", "0.1756 ms per 1,000 delta rows", "p50 189.590 ms", "551000 vectors indexed in 84091 ms"]
+note = "0.18 ms per 1,000 = the fit over the 10K / 25K / 45K delta points (plus 0.457 ms fixed)"
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "A large vector index that keeps taking writes"
+numbers = ["1.6 ms", "3.8 ms", "190 ms", "84 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/delta_steps.txt", "benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/builds.txt"]
+expect = ["RESULT delta 0: p50 1.616 ms", "RESULT delta 10000: p50 3.820 ms", "p50 189.590 ms", "p50 194.537 ms", "551000 vectors indexed in 84091 ms"]
+

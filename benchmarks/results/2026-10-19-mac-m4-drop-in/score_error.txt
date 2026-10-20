@@ -1,0 +1,6 @@
+# score_error.py: FT.SEARCH score minus exact 1 - cos, OpenAI-50K (first 20K rows), 20 queries x top 10,
+# -w 1, --no-wal. "optimize" = explicit FT.OPTIMIZE, "auto" = the automatic build.
+6ca3181 (before the score fix), optimize: score - exact: mean +0.0941 min +0.0759 max +0.1043
+1ba93b9 (the score fix), optimize:          score - exact: mean -0.0001 min -0.0017 max +0.0008
+1ba93b9 (the score fix), auto:              score - exact: mean -0.0001 min -0.0017 max +0.0008
+v0.9.9 code (619aea2), optimize:            score - exact: mean +0.0941 min +0.0759 max +0.1043

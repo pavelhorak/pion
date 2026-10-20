@@ -14,19 +14,11 @@ files disagree, the files win.
 | What | Licence | Where the text is |
 |---|---|---|
 | **The engine** — everything under `src/`, including the open reference vector kernels in `src/vector/reference/` | **Apache-2.0** | [`LICENSE`](../LICENSE) |
-| Everything else not listed below — `tests/`, `tools/`, `benchmarks/`, `scripts/`, `docker/`, `examples/`, `doc/`, `pion-serve/`, `flare_gateway/`, `vllm-pion/`, `pion_memory.py` | Apache-2.0 | [`LICENSE`](../LICENSE) |
+| Everything else not listed below — `tests/`, `tools/`, `benchmarks/`, `scripts/`, `docker/`, `examples/`, `doc/`, `pion_memory.py` | Apache-2.0 | [`LICENSE`](../LICENSE) |
 | **`libpion_vector`** — the object code under `vendor/pion-vector/`: tuned 1536-dim beam searches (INT8, PolarQuant, TurboQuant, NanoQuant) and product-key-memory kernels | **Pion Vector Binary Licence** — free, closed | [`vendor/pion-vector/LICENSE`](../vendor/pion-vector/LICENSE) |
 | **Release tarballs and the Docker image**, built with `pixi run build` (`build-portable` on Linux x86-64), which link `libpion_vector` on macOS arm64, Linux x86-64 and Linux arm64 | Apache-2.0 for Pion, plus the binary licence for the library inside it; both texts ship with the binary (`LICENSE`, `LICENSE-pion-vector`) | both of the above |
 | Any build made with `pixi run build-open`, and the Linux tarballs and images of v0.9.2 and earlier, which predate the Linux archives | Apache-2.0 only — no closed code is linked | [`LICENSE`](../LICENSE) |
 | **`pion-vllm-mlx`** — the mlx-lm prompt cache and attention patch (PyPI: `pion-vllm-mlx`) | Apache-2.0 | [`pion-vllm-mlx/LICENSE`](../pion-vllm-mlx/LICENSE) |
-| **`pion-mcp`** (`mcp/`) — the MCP agent-memory server | Apache-2.0 | [`mcp/LICENSE`](../mcp/LICENSE) |
-| **`pion-lmcache`** — the LMCache connector | Apache-2.0 | [`pion-lmcache/LICENSE`](../pion-lmcache/LICENSE) |
-| **`pion-context`** (`pion_context/`) — the semantic codebase search client | Apache-2.0 | [`pion_context/LICENSE`](../pion_context/LICENSE) |
-| **`pion-glide`** (`pion_glide/`) — typed wrappers over Valkey GLIDE | Apache-2.0 | [`pion_glide/LICENSE`](../pion_glide/LICENSE) |
-| **`pion-langgraph`** — LangGraph checkpoint saver | Apache-2.0 | [`pion-langgraph/LICENSE`](../pion-langgraph/LICENSE) |
-| **`pion-autogen`** — AutoGen memory store | Apache-2.0 | [`pion-autogen/LICENSE`](../pion-autogen/LICENSE) |
-| **`pion-llamaindex`** — LlamaIndex vector store | Apache-2.0 | [`pion-llamaindex/LICENSE`](../pion-llamaindex/LICENSE) |
-| **`pion-exo`** — exo attention hook | Apache-2.0 | [`pion-exo/LICENSE`](../pion-exo/LICENSE) |
 | Vendored third-party code under `src/ffi/lua/`: **Lua 5.1.5** (patched for read-only tables, as Redis does), the **lua-cjson** sources (`fpconv.c`, `strbuf.c`, `lua_cjson.c`), **lua-cmsgpack** (`lua_cmsgpack.c`), the Lua **struct** library (`lua_struct.c`) and **LuaBitOp** (`lua_bit.c`) | MIT, their own | headers in those files; [`NOTICE`](../NOTICE) |
 | `src/ffi/redis_ports.c`: **LCS** and **LOLWUT** (versions 5 and 6), ported from Valkey 9.0.3 (`t_string.c`, `lolwut*.c`) | BSD-3-Clause | header in that file; [`NOTICE`](../NOTICE) |
 
@@ -111,11 +103,8 @@ Nothing withheld is needed to build, run or test what is published.
   under a managed-service licence from the licensor.
 - *Can I fork Pion?* Yes — it is Apache-2.0. Your fork may link the library
   unmodified under its licence, or use the open reference.
-- *Can I vendor `pion-vllm-mlx` (or any other client package: `pion-mcp`,
-  `pion-lmcache`, `pion-context`, `pion-glide`, `pion-langgraph`,
-  `pion-autogen`, `pion-llamaindex`, `pion-exo`) into an Apache/MIT project?*
-  Yes — they are Apache-2.0 and self-contained, and none of them contains the
-  library.
+- *Can I vendor `pion-vllm-mlx` into an Apache/MIT project?* Yes — it is
+  Apache-2.0 and self-contained, and it does not contain the library.
 - *Is the Docker image under the same licence as the binary?* Yes, from
   v0.9.3 on: its binary links `libpion_vector` exactly as a release tarball
   does, and both licence texts are in the image at `/opt/pion/LICENSE` and

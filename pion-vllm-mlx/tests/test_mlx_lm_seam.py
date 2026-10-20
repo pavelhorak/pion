@@ -212,13 +212,7 @@ def main() -> int:
         except Exception:
             pass
 
-    print("\n§7 symbols the shipped demos and pion-serve import")
-    try:
-        from mlx_lm.models.cache import trim_prompt_cache  # noqa: F401
-        check("mlx_lm.models.cache.trim_prompt_cache (pion-serve CAG path)", True)
-    except ImportError as e:
-        check("mlx_lm.models.cache.trim_prompt_cache (pion-serve CAG path)", False, str(e))
-
+    print("\n§7 symbols the shipped demos import")
     where = []
     for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
         try:

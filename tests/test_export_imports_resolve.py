@@ -49,10 +49,10 @@ THIRD_PARTY = {
     "matplotlib", "pandas", "sklearn", "pytest", "setuptools", "build",
     "twine", "valkey", "glide", "psutil", "pyarrow", "flask", "mcp",
     "autogen_core", "langgraph", "llama_index", "ann_benchmarks",
+    "vectordb_bench",   # VectorDBBench, installed by `pixi run install-vdbbench`;
+                        # the drop-in results' vdbb_stream.py drives its CLI.
     "mkdocs", "mkdocs_gen_files", "markdown",   # the website tooling,
                     # pinned in website/requirements.txt (gh #303)
-    "benchmarks",   # benchmarks/cache_hit_validation/run.py imports the repo
-                    # root as a package; it is run from the root by design.
 }
 
 SKIP_DIRS = {".git", ".pixi", "localtemp", "memory", "experiments",

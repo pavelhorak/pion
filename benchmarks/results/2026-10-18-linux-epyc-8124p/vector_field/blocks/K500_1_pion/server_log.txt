@@ -1,0 +1,115 @@
+Binding to 127.0.0.1 [default (no password set)]
+--- Pion Configuration ---
+Profile:    cloud
+Port:       6395
+Workers:    16 (INDEPENDENT KEYSPACES)
+Huge Pages: False
+Affinity:   False
+Vector Dim: 1536
+INT4:       False
+PolarQuant: False
+TurboQuant: False
+NanoQuant:  False
+BQ:         False
+GPU:        False
+AI Gateway: False
+MAX Engine: False
+Embedding:  disabled
+LLM:        disabled
+Inference:  disabled
+KV Cache:   False (--kvcache enables ATTEND.*/M13 router/M9 RAG)
+Cluster:    False
+--------------------------
+
+=== INDEPENDENT WORKERS: 16 SEPARATE KEYSPACES ===
+  Each worker owns a private keyspace, hash map, WAL and HNSW graph.
+  Connections are assigned by accept() race — a write acked on one
+  connection is NOT readable from another. Cross-worker PUBLISH delivers
+  to zero subscribers, FLUSHALL clears one slice, and replication covers
+  worker 0 only.
+  Safe only if every client pins a single connection, or shards keys
+  across per-worker ports itself. Use -w 1 for shared-keyspace semantics.
+=======================================================
+
+--- Pion Master: Spawning 16 Persistent Mojo Workers ---
+Open-file limit raised from 1024 to 65536
+Shared listen socket: port=6395 fd=5
+Shared listen socket: port=6397 fd=6
+Shared listen socket: port=6398 fd=7
+Shared listen socket: port=6399 fd=8
+Shared listen socket: port=6400 fd=9
+Shared listen socket: port=6401 fd=10
+Shared listen socket: port=6402 fd=11
+Shared listen socket: port=6403 fd=12
+Shared listen socket: port=6404 fd=13
+Shared listen socket: port=6405 fd=14
+Shared listen socket: port=6406 fd=15
+Shared listen socket: port=6407 fd=16
+Shared listen socket: port=6408 fd=17
+Shared listen socket: port=6409 fd=18
+Shared listen socket: port=6410 fd=19
+Shared listen socket: port=6411 fd=20
+Shared listen socket: port=6412 fd=21
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=15 tid=139053575907008
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=0 tid=139054104430272
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=1 tid=139054087648960
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=3 tid=139053777282752
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=11 tid=139053643032256
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=14 tid=139053592688320
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=2 tid=139053794064064
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=13 tid=139053609469632
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=9 tid=139053676594880
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=7 tid=139053710157504
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=4 tid=139053760501440
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=12 tid=139053626250944
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=10 tid=139053659813568
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=6 tid=139053726938816
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=5 tid=139053743720128
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=8 tid=139053693376192
+WAL: sealed pion.wal.3.1 (1/32 segments)
+WAL: sealed pion.wal.2.1 (1/32 segments)
+WAL: sealed pion.wal.11.1 (1/32 segments)
+WAL: sealed pion.wal.14.1 (1/32 segments)
+WAL: sealed pion.wal.3.2 (2/32 segments)
+WAL: sealed pion.wal.2.2 (2/32 segments)
+WAL: sealed pion.wal.14.2 (2/32 segments)
+WAL: sealed pion.wal.11.2 (2/32 segments)
+[HNSW] calibrated [-0.2419879, 0.24058823] from 65536 vectors
+[HNSW] parallel link: 12 contended link drops, 18 under-linked nodes repaired
+[HNSW] level-0 reachability: 484 unreachable node(s) linked into the graph
+FT.OPTIMIZE: 500000 nodes built
+FT.SEARCH ef auto-scale active: num_nodes=500000 effective_ef=266 (baseline 150)
+HNSW saved: 500000 nodes → pion.hnsw.0
+PION: shutdown requested, draining (WAL flush) — repeat the signal to force
+[pion] worker 7 stopped (shutdown)
+[pion] worker 14 stopped (shutdown)
+[pion] worker 8 stopped (shutdown)
+[pion] worker 11 stopped (shutdown)
+[pion] worker 13 stopped (shutdown)
+[pion] worker 4 stopped (shutdown)
+[pion] worker 9 stopped (shutdown)
+[pion] worker 0 stopped (shutdown)
+[pion] worker 6 stopped (shutdown)
+[pion] worker 12 stopped (shutdown)
+[pion] worker 5 stopped (shutdown)
+[pion] worker 3 stopped (shutdown)
+[pion] worker 15 stopped (shutdown)
+[pion] worker 1 stopped (shutdown)
+[pion] worker 2 stopped (shutdown)
+[pion] worker 10 stopped (shutdown)

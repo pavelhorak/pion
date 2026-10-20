@@ -139,7 +139,7 @@ def main():
                 "doc/pion_one_pager.md", "doc/blog/2026-10-pion-memory-engine.md",
                 "publication/public/doc/index.md", "scripts/package_release.sh",
                 ".github/SUPPORT.md", ".github/workflows/cla.yml",
-                "vendor/pion-vector/README.md", "pion-serve/README.md"]
+                "vendor/pion-vector/README.md"]
     for name in sorted(os.listdir(ROOT)):
         if os.path.isfile(os.path.join(ROOT, name, "pyproject.toml")) and \
            os.path.isfile(os.path.join(ROOT, name, "README.md")):

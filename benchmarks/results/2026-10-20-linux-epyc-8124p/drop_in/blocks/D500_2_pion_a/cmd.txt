@@ -1,0 +1,3 @@
+env: PION_VECTOR_SETTLE_MS=30000 PION_VECTOR_DELTA_MAX=1000000
++ taskset -c 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31 /opt/venv_vdbb_stock/bin/python /opt/session/box/delta_steps.py 6395 /tmp/vectordb_bench/dataset/openai/openai_medium_500k 10000,25000,45000
+rc=0

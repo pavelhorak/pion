@@ -1,6 +1,7 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import free_graveyard
 from src.network.vector_ingest import log_dead_slots
+from src.network.vector_auto import vector_auto_tick
 from std.sys.info import CompilationTarget
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy, stack_allocation
@@ -806,6 +807,11 @@ struct NetworkEngine:
         # #46: and the vector slots the sweep's frees killed
         if is_not_null(self.slow_path.vec_tomb) and len(self.slow_path.vec_tomb[].pending) > 0:
             log_dead_slots(self.slow_path.shared_hnsw, self.slow_path.vec_tomb, self.slow_path.dispatcher)
+        # Drop-in: start the vector index build once ingest is quiet, and move
+        # this worker's background build along (src/network/vector_auto.mojo)
+        vector_auto_tick(hnsw, self.slow_path.shared_hnsw, self.slow_path.keyspace,
+                         self.slow_path.dispatcher, self.slow_path.vec_tomb,
+                         self.worker_id, self.slow_path.vauto)
         # #47: a SLOWLOG threshold set on another worker reaches this one
         if self.slow_path.slowlog_thr != external_call["pion_slowlog_get_slower_than", Int64]():
             self.slow_path.update_dispatch_gate()

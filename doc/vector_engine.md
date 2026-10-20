@@ -197,15 +197,17 @@ replies (`--oracle` runs the cases against RediSearch itself).
 ```
 FT.INFO <index>
 ```
-Returns `index_name` and `num_docs` (`hnsw.num_nodes` once built, 0 before): a 4-element array of bulk strings in RESP2, a map with `num_docs` an integer in RESP3. Returns `-ERR Unknown index name` for a name the server does not hold. RediSearch's FT.INFO has more fields (`attributes`, sizes, statistics); Pion sends these two.
+Returns `index_name` and `num_docs` (the vectors FT.SEARCH answers from: the built graph's, plus any it answers exactly, so before a build every vector ingested; 0 before any): a 4-element array of bulk strings in RESP2, a map with `num_docs` an integer in RESP3. Returns `-ERR Unknown index name` for a name the server does not hold. RediSearch's FT.INFO has more fields (`attributes`, sizes, statistics); Pion sends these two.
 
 ### FT.OPTIMIZE
 ```
 FT.OPTIMIZE <index>
 ```
-Triggers batch graph construction from the FP32 ingest buffer. Calls `hnsw.build_index_from_shared()` (if shared buffer has data) or `hnsw.build_index()` (local). After build: `compact_vectors()` reorders vectors in BFS order, `publish_to_shared()` makes the index available to other workers via `SharedHNSWView`. Returns `+OK`.
+Builds the graph now, from everything in the FP32 ingest buffer. Calls `hnsw.build_index_from_shared()` (if shared buffer has data) or `hnsw.build_index()` (local). After build: `compact_vectors()` reorders vectors in BFS order, `publish_to_shared()` makes the index available to other workers via `SharedHNSWView`. Returns `+OK`. With nothing ingested since the served index was built, it keeps that index and returns `+OK`.
 
-**Ingest → optimize → search is a one-way contract.** Every `HSET` must land *before* `FT.OPTIMIZE`; the FP32 ingest buffer is freed after the build, so an `HSET` issued *after* `FT.OPTIMIZE` is stored as a hash but **not indexed** (no error, and `FT.SEARCH` will not find it). For incremental inserts, `FT.DROPINDEX` → re-ingest everything → `FT.OPTIMIZE` again. Re-issuing `FT.CREATE` for the index being served changes nothing, and does not reopen ingest — unless that index is empty (built with no documents), which has nothing to protect: then ingest opens again. `FT.OPTIMIZE` with no index defined (no `FT.CREATE`, nothing ingested, no graph) answers `Unknown index name`; it used to build and serve an empty index named by its argument, under which the real index's `FT.CREATE` would not open ingest.
+`FT.OPTIMIZE` is optional: without it the index answers exactly and then builds itself (see "Searching without FT.OPTIMIZE" below). Send it to have the graph built at once, and to say that ingest is over.
+
+**After `FT.OPTIMIZE`, ingest is over.** The FP32 ingest buffer is freed after the build, so an `HSET` issued *after* `FT.OPTIMIZE` is stored as a hash but **not indexed**: `FT.SEARCH` will not find it, and `INFO` counts it as `vector_unindexed_writes`. For incremental inserts, leave `FT.OPTIMIZE` out (the automatic build keeps the buffer), or `FT.DROPINDEX` → re-ingest everything → `FT.OPTIMIZE` again. Re-issuing `FT.CREATE` for the index being served changes nothing, and does not reopen ingest — unless that index is empty (built with no documents), which has nothing to protect: then ingest opens again. `FT.OPTIMIZE` with no index defined (no `FT.CREATE`, nothing ingested, no graph) answers `Unknown index name`; it used to build and serve an empty index named by its argument, under which the real index's `FT.CREATE` would not open ingest.
 
 **Deletions do follow the keyspace (#46).** A document leaves the results when its hash leaves the keyspace, by DEL, UNLINK, expiry, FLUSHALL, or a write that replaces the key. It also leaves when the vector leaves the document: an `HSET` of a new vector, an `HDEL` of the field, or a field TTL. Writing the vector it already has (the same bytes: an ingest script run twice) keeps it indexed. A renamed document leaves too: its slot names the old key, and after the build the new name is not indexed. Before the build, a renamed, copied (`COPY`) or restored (`RESTORE`) hash is ingested under its new name, as an `HSET` would be.
 
@@ -215,6 +217,24 @@ Mechanics:
 - The graph is not changed. Dead nodes still route the beam, as HNSW soft deletes do, and `FT.SEARCH` filters them out of the results. The KNN path widens its candidates until it has k live documents.
 - Each worker records the slots it killed as members `<build id>:<slot>` of an internal set, `__hk_dead__`. The WAL, snapshots and replication carry it like any set.
 - A restart applies the members whose build id matches the loaded index. Each `FT.OPTIMIZE` draws a new build id, saved in index header word 31.
+
+### Searching without FT.OPTIMIZE
+
+A stock Redis client (RedisVL, LangChain, VectorDBBench's own) creates the index, `HSET`s documents and searches. It never sends `FT.OPTIMIZE`. The index answers it anyway (`src/network/vector_auto.mojo`):
+
+1. **Before a graph is built, `FT.SEARCH` is exact.** It scans the FP32 ingest buffer and returns the true nearest neighbours, in the same reply shape and score units as the graph (`1 - cos` under COSINE, squared L2 under L2). Deleted documents and `FILTER` are honoured; `EF_RUNTIME` does not apply. The scan reads every vector once per query, so it slows as the index grows.
+2. **Once inserts pause for 200 ms, the graph builds in the background.** One worker runs the same build `FT.OPTIMIZE` runs, on its own thread, while every worker keeps answering exactly. That worker then publishes the graph, and the thread saves it to `pion.hnsw.0`. The server log says `[vector] auto-build: indexing N vectors` and `N vectors indexed in M ms`.
+3. **Vectors written after that build are found at once.** The ingest buffer is kept. `FT.SEARCH` scans the vectors written since the build exactly and merges them with the graph's results. Both sides are scored from the FP32 rows for that merge: the graph's own scores come from INT8 codes, which are close to the exact distance but not equal to it, and a merge needs both sides on the same footing. When they reach a tenth of the index and inserts pause again, the graph is rebuilt the same way. During a rebuild, searches are exact again.
+
+`INFO` reports the state process-wide: `vector_index` (`none`, `empty`, `exact`, `building`, `graph`, or `graph+delta`), `vector_graph_rows`, `vector_exact_rows`, `vector_auto_builds` and `vector_unindexed_writes`.
+
+Costs and limits:
+- The kept buffer costs `dim × 4` bytes per vector: 6 KB at 1536 dimensions, about 300 MB at 50K. An explicit `FT.OPTIMIZE` frees it.
+- An exact scan reads every vector it covers, so an index searched before its graph exists, or during a rebuild, serves far fewer queries per second than the graph does. Measured on an EPYC 8124P at 500K vectors of 1,536 dimensions, one worker and one client (`benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/`): a query takes 1.6 ms from the graph alone, 3.8 ms with 10,000 vectors written since the build (about 0.18 ms per 1,000), and 190 ms during the 84 s rebuild of 551,000.
+- Link lanes: the build uses one per online CPU, from 4 to 16. `PION_BUILD_LANES=N` overrides it.
+- After a restart, the graph loads from `pion.hnsw.0`. A vector written after the restart is not indexed until `FT.CREATE` runs again, as before.
+
+Only the worker whose graph holds the published index rebuilds it. `FT.CREATE`, `FT.DROPINDEX` and `FT.OPTIMIZE` wait for a running build. A worker that borrowed another worker's index gives its buffers back before it builds or resets. It used to build straight into them.
 
 ### FT.DROPINDEX
 ```
@@ -354,7 +374,7 @@ FT.SEARCH idx "*=>[KNN 10 @vec $v]"               FILTER price [10 50]    PARAMS
 
 The query itself must be `<prefilter>=>[KNN k @field $param [EF_RUNTIME n] [AS alias]]` with the vector in `PARAMS` by name; an unknown form, an unknown vector field, a missing `$param` or a blob of the wrong size is an error.
 
-**Scores** are the index metric's distance for each returned row — squared L2 under `L2`, `1 - cos` under `COSINE` — computed from the stored vectors (FP32 re-rank copy, or the INT8 codes dequantized), not the beam's internal quantized distance. Rows are sorted by that score.
+**Scores** are the index metric's distance for each returned row — squared L2 under `L2`, `1 - cos` under `COSINE` — computed from the stored vectors (FP32 re-rank copy, or the INT8 codes dequantized), not the beam's internal quantized distance. Rows are sorted by that score. From INT8 codes, the score compares them with the query clamped to the calibrated range, because the codes are clipped to it: the calibration (mean ± 8 sigma) leaves an embedding's few near-constant outlier dimensions outside, which cancel between documents but used to add their clipped part to every score.
 
 ---
 

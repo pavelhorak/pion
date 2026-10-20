@@ -1,0 +1,3 @@
+install: competitor (/opt/venv_vdbb_competitor)
++ RESULTS_LOCAL_DIR=/opt/out/K50_2_redis_hnsw_fp32/r3 taskset -c 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31 env VDBB_REDIS_WAIT=redisearch /opt/venv_vdbb_competitor/bin/vectordbbench redis --host 127.0.0.1 --port 6379 --no-ssl --cmd --case-type Performance1536D50K --k 100 --m 16 --ef-construction 128 --ef-runtime 300 --num-concurrency 1,5,10 --concurrency-duration 5 --db-label redis_hnsw_fp32 --task-label redis_hnsw_fp32_50K_r3_ef300 --skip-drop-old --skip-load
+result: label=:) recall=0.9892 qps=1534.1 conc=[191, 806, 1534] load=0.0 insert=0.0 optimize=0.0 file=/opt/out/K50_2_redis_hnsw_fp32/r3/Redis/result_20261018_redis_hnsw_fp32_50K_r3_ef300_redis.json

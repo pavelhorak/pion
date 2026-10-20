@@ -1,0 +1,6 @@
+vector_queries:5600
+vector_index:building
+vector_graph_rows:551000
+vector_exact_rows:0
+vector_auto_builds:2
+vector_unindexed_writes:0

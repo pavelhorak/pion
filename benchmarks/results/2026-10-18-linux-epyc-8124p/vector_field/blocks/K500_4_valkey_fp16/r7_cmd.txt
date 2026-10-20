@@ -1,0 +1,3 @@
+install: competitor (/opt/venv_vdbb_competitor)
++ RESULTS_LOCAL_DIR=/opt/out/K500_4_valkey_fp16/r7 taskset -c 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31 env VDBB_REDIS_TYPE=FLOAT16 VDBB_REDIS_WAIT=valkey /opt/venv_vdbb_competitor/bin/vectordbbench redis --host 127.0.0.1 --port 6381 --no-ssl --cmd --case-type Performance1536D500K --k 100 --m 16 --ef-construction 128 --ef-runtime 200 --num-concurrency 1,5,10 --concurrency-duration 5 --db-label valkey_fp16 --task-label valkey_fp16_500K_r7_ef200 --skip-drop-old --skip-load
+result: label=:) recall=0.9608 qps=1220.3 conc=[191, 737, 1220] load=0.0 insert=0.0 optimize=0.0 file=/opt/out/K500_4_valkey_fp16/r7/Redis/result_20261018_valkey_fp16_500K_r7_ef200_redis.json

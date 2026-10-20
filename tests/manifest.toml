@@ -7,49 +7,6 @@
 # Generated 2026-09-26 from a trial run of every file, then hand-triaged.
 
 [[test]]
-file = "pion-exo/tests/test_exo_hook.py"
-server = "--kvcache --metal-attention -w 1"
-tier = "full"
-timeout = 600
-requires = ["macos"]
-
-[[test]]
-file = "pion-exo/tests/test_multi_host_routing.py"
-server = "none"
-tier = "full"
-timeout = 600
-
-[[test]]
-file = "pion-exo/tests/test_prefix_router.py"
-server = "none"
-tier = "full"
-timeout = 600
-
-[[test]]
-file = "pion-lmcache/tests/test_pion_lmcache.py"
-server = "none"
-tier = "full"
-timeout = 600
-
-[[test]]
-file = "pion-serve/tests/test_intent_router.py"
-server = "none"
-tier = "full"
-timeout = 600
-
-[[test]]
-file = "pion-serve/tests/test_max_backend.py"
-server = "none"
-tier = "full"
-timeout = 600
-
-[[test]]
-file = "pion-serve/tests/test_thread_safety.py"
-server = "none"
-tier = "full"
-timeout = 600
-
-[[test]]
 file = "pion-vllm-mlx/tests/test_boundary_protect.py"
 server = "--kvcache -w 1"
 tier = "full"
@@ -282,11 +239,6 @@ timeout = 240
 requires = ["py:sentence_transformers"]
 
 [[test]]
-file = "tests/test_cag_legal_demo.py"
-server = "-w 1"
-tier = "gate"
-
-[[test]]
 file = "tests/test_chunked_prefill_correctness.py"
 server = "-w 1"
 tier = "full"
@@ -369,12 +321,6 @@ file = "tests/test_float_arg_validator.mojo"
 server = "none"
 tier = "gate"
 timeout = 900
-
-[[test]]
-file = "tests/test_framework_integrations.py"
-server = "--kvcache -w 1"
-tier = "gate"
-requires = ["py:pion_autogen", "py:pion_llamaindex", "py:pion_langgraph"]
 
 [[test]]
 file = "tests/test_ft_create_redimension.py"
@@ -792,11 +738,6 @@ tier = "gate"
 timeout = 900
 
 [[test]]
-file = "tests/test_intent_router.py"
-server = "-w 1"
-tier = "full"
-
-[[test]]
 file = "tests/test_kv_cache.py"
 server = "-w 1"
 tier = "gate"
@@ -942,12 +883,6 @@ server = "--kvcache -w 1"
 tier = "full"
 
 [[test]]
-file = "tests/test_mcp_search.py"
-server = "self"
-tier = "gate"
-requires = ["py:redis", "py:requests"]   # no `mcp`: the tools run under a stub FastMCP when it is absent
-
-[[test]]
 file = "tests/test_metallib_current.py"
 # gh #398: the tracked metallib is built from the tracked shader source.
 server = "none"
@@ -1026,12 +961,6 @@ server = "-w 1"
 tier = "gate"
 
 [[test]]
-file = "tests/test_pion_context_index.py"
-server = "self"
-tier = "gate"
-requires = ["py:redis", "py:requests", "bin:git"]
-
-[[test]]
 file = "tests/test_parity.py"
 server = "-w 1"
 tier = "gate"
@@ -1041,12 +970,6 @@ file = "tests/test_phase5.mojo"
 server = "none"
 tier = "gate"
 timeout = 900
-
-[[test]]
-file = "tests/test_pion_serve_sie_embed.py"
-server = "-w 1"
-tier = "gate"
-requires = ["py:flask"]   # pion-serve/serve.py imports it at the top
 
 [[test]]
 file = "tests/test_prompt_bos.py"
@@ -1535,6 +1458,14 @@ server = "self"
 tier = "gate"
 timeout = 300
 
+# Drop-in phase A: answers without FT.OPTIMIZE (exact before the build, the
+# background build, the delta, the rebuild, -w 4 through the affinity ports)
+[[test]]
+file = "tests/test_vector_auto_build.py"
+server = "self"
+tier = "gate"
+timeout = 600
+
 # Every keyword argument of the differential's scripts, mangled: a parser that
 # matches a keyword by its first letters, or ignores an unknown one, shows up
 # as a divergence from Redis (#32).
@@ -1563,6 +1494,7 @@ files = [
   "pion-vllm-mlx/tests/bench_nemotron_h_ttft.py",
   "tests/_gemma4_text_filter_load.py",
   "tests/_prompt_ids.py",
+  "tests/attention_client.py",   # ATTEND.* client, from vllm-pion (removed)
   "tests/bench_amx_distance.mojo",
   "tests/bench_attend_cpu_only.mojo",
   "tests/bench_attend_fused.py",
@@ -1591,6 +1523,7 @@ files = [
   "tests/diag_fp16_fp32_drift.py",
   "tests/diag_pipeline_desync_sweep.py",
   "tests/fault_proxy.py",
+  "tests/pion_store.py",         # KV.PREFIX.* client, from pion-lmcache (removed)
   "tests/profile_layer_wall_time.py",
   "tests/repro_minimal_kernel.mojo",
   "tests/repro_official_pattern.mojo",

@@ -248,7 +248,7 @@ struct Pion:
             _hk_max = self.shared_hnsw[].hk_max_elements
         if self.hnsw.load_from_disk(hnsw_path, _hk_buf, _hk_max):
             if is_not_null(self.shared_hnsw):
-                self.hnsw.publish_to_shared(self.shared_hnsw)
+                self.hnsw.publish_to_shared(self.shared_hnsw, worker_id)
         # #19: this worker's share of the startup load is done (published, or
         # refused as stale). Then wait for every other loader: a worker that
         # loads nothing used to serve at once and answer FT.SEARCH with "no

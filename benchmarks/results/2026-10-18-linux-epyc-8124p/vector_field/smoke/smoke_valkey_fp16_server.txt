@@ -1,0 +1,26 @@
+81849:M 18 Oct 2026 16:55:10.343 * oO0OoO0OoO0Oo Valkey is starting oO0OoO0OoO0Oo
+81849:M 18 Oct 2026 16:55:10.343 * Valkey version=9.1.2, bits=64, commit=7f1dffed, modified=0, pid=81849, just started
+81849:M 18 Oct 2026 16:55:10.343 * Configuration loaded
+81849:M 18 Oct 2026 16:55:10.344 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+81849:M 18 Oct 2026 16:55:10.374 * monotonic clock: X86 TSC @ 2446.73 ticks/us
+81849:M 18 Oct 2026 16:55:10.374 * Running mode=standalone, port=6381.
+81849:M 18 Oct 2026 16:55:10.380 * <search> [notice], tid: 126238016501440, /vmsdk/src/module.cc:98: Ran 367 deferred static initializers
+81849:M 18 Oct 2026 16:55:10.381 * <search> [notice], tid: 126238016501440, /vmsdk/src/module.cc:149: >>> Loaded Module: /opt/valkey-search/.build-release/libsearch.so Base: 0x72d00fef0000
+81849:M 18 Oct 2026 16:55:10.383 # <search> [notice], tid: 126238016501440, /src/valkey_search.cc:1198: use_coordinator: false, IsCluster: false
+81849:M 18 Oct 2026 16:55:10.383 # <search> [notice], tid: 126238016501440, /src/valkey_search.cc:1202: Reader workers count: 16
+81849:M 18 Oct 2026 16:55:10.383 # <search> [notice], tid: 126238016501440, /src/valkey_search.cc:1204: Writer workers count: 16
+81849:M 18 Oct 2026 16:55:10.383 # <search> [notice], tid: 126238016501440, /src/valkey_search.cc:1206: Utility workers count: 1
+81849:M 18 Oct 2026 16:55:10.383 # <search> [notice], tid: 126238016501440, /src/valkey_search.cc:1280: Json not supported!
+81849:M 18 Oct 2026 16:55:10.383 # <search> [notice], tid: 126238016501440, /vmsdk/src/module.cc:162: search module was successfully loaded!
+81849:M 18 Oct 2026 16:55:10.383 * Module 'search' loaded from /opt/valkey-search/.build-release/libsearch.so
+81849:M 18 Oct 2026 16:55:10.384 * Static Module 'lua' successfully loaded
+81849:M 18 Oct 2026 16:55:10.384 * Server initialized
+81849:M 18 Oct 2026 16:55:10.385 * Ready to accept connections tcp
+81849:M 18 Oct 2026 16:55:10.603 # <search> [notice], tid: 126238016501440, /src/index_schema.cc:143: Starting backfill for index schema in DB 0: *redacted* (size: 0)
+81849:signal-handler (1792342510) Received SIGTERM scheduling shutdown...
+81849:M 18 Oct 2026 16:55:10.690 * User requested shutdown...
+81849:M 18 Oct 2026 16:55:10.721 # <search> [notice], tid: 126238016501440, /src/schema_manager.cc:923: Deleting all index schemas on SHUTDOWN event
+81849:M 18 Oct 2026 16:55:10.721 # <search> [notice], tid: 126238016501440, /src/index_schema.cc:380: Index schema *redacted* dropped from DB 0
+81849:M 18 Oct 2026 16:55:10.721 # Failed to unload module search: the module exports one or more module-side data types, can't unload
+81849:M 18 Oct 2026 16:55:10.722 * Module lua unloaded
+81849:M 18 Oct 2026 16:55:10.722 # Valkey is now ready to exit, bye bye...

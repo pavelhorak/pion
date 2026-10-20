@@ -173,40 +173,62 @@ RESP2 or RESP3. Reference:
 [`doc/command_matrix.md`](doc/command_matrix.md),
 [`doc/persistence.md`](doc/persistence.md).
 
-Against Redis 8.10.2, Pion wins some configurations and loses others. The KV
-and vector numbers below are one Linux server, both engines measured the same
-day with the same client settings: an AMD EPYC 8124P (16 cores), Redis 8.10.2
-built from source, Pion 0.9.5 built as the release builds it. Raw output,
-scripts and method:
-[`benchmarks/results/2026-10-06-linux-epyc-8124p/`](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
+Against Redis 8.10.2, Pion wins some configurations and loses others. Every
+number below comes from one Linux server, an AMD EPYC 8124P (16 cores). Both
+engines were measured the same day with the same client settings: Redis 8.10.2
+built from source, Pion built as the release builds it. The one-keyspace numbers
+are from 2026-10-12 (Pion 0.9.9). The all-cores and vector numbers are from
+2026-10-06 (Pion 0.9.5). Raw output, scripts and method:
+[`2026-10-12`](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md),
+[`2026-10-06`](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
 
 **KV throughput** (memtier, 256-byte values, 1:10 SET:GET over 1M keys, 30 s a
 run, median of 3, ops/sec):
 
-| One keyspace, ops/sec | Redis, 1 thread | Redis, `io-threads 8` | **Pion `-w 1`** |
-|---|---:|---:|---:|
-| P=1 | 107,896 | **388,405** | 112,019 |
-| P=10 | 643,517 | **1,655,550** | 877,766 |
-| P=50 | 987,970 | 1,376,680 | **1,712,725** |
+| One keyspace, ops/sec | Redis, 1 thread | Redis, `io-threads 8` | Pion, 1 thread | **Pion, `--io-threads 8`** |
+|---|---:|---:|---:|---:|
+| P=1 | 110,044 | 386,278 | 114,909 | **515,267** |
+| P=10 | 640,985 | 1,661,596 | 895,149 | **2,972,713** |
+| P=50 | 979,984 | 1,368,935 | 1,703,363 | **3,909,190** |
 
 | All 16 cores, 16 independent keyspaces, ops/sec | 16 Redis processes | **Pion `-w 16`** |
 |---|---:|---:|
 | P=10 | **7,178,453** | 6,097,719 |
 | P=50 | **11,128,400** | 9,848,658 |
 
-On one keyspace, Redis with I/O threads is faster than Pion's single worker
-except at a deep pipeline (P=50), where Pion leads by 24%; against
-single-threaded Redis, Pion leads at every depth. With durability on (P=10),
-Redis's AOF (`everysec`, `io-threads 4`) measured 1,213,746 ops/sec and Pion's WAL
-847,249, Redis ahead by 43%. Across all cores, sixteen Redis processes
-beat Pion's sixteen workers by 13–18%. Using the second hardware thread of every
-core — 32 keyspaces each side, 32 client threads, P=50 — Pion leads with 64-byte
-values (15,864,842 against 14,780,031) and Redis with 256-byte values (12,372,245
-against 11,640,929). The results directory also has Redis at `io-threads 4`. The headline this README used to carry — 14.0M ops/sec, 10.2×
-Redis — had no surviving raw log and set Pion's 32 independent keyspaces against
-a single Redis instance; it is withdrawn. April's own configuration, re-run on this
-server, measured 13,750,187 with 64-byte values — the old number's ballpark, now
-with raw output — and the like-for-like comparison is above.
+**One keyspace, with I/O threads:** Pion's `--io-threads 8` leads Redis's
+`io-threads 8` at every pipeline depth.
+- **Ratios:** 1.33× at P=1, 1.79× at P=10 and 2.86× at P=50.
+- **Like for like:** both count threads the same way, one thread that runs
+  commands plus seven I/O threads, and the client runs on the same machine.
+- **P=50:** `--io-threads 4` is faster still, at 4,431,024. One thread executes
+  every command, and at that depth it is the limit.
+
+**Without I/O threads:** Pion's single thread trails Redis's I/O threads at P=1
+and P=10, and leads single-threaded Redis at every depth.
+
+**With durability on (P=10):** Redis's AOF (`everysec`) against Pion's WAL, both
+at 8 I/O threads. Pion leads, 2,724,529 to 1,297,102 (2.1×).
+
+**Where I/O threads pay:** on a server with cores to spare. On a Mac with the
+client on the same machine, they lower throughput, for Redis too
+([2026-10-10](benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)).
+
+**Across all cores:** sixteen Redis processes beat Pion's sixteen workers by
+13–18%, both sides as sixteen independent keyspaces.
+
+**Runs that are not a comparison:** the same day's 32-keyspace runs used every
+hardware thread on both sides, with the client on the same machine. In them,
+Pion's connections landed on about half of its 32 workers, while each Redis
+process got exactly its own client's connections. The GET hit rates show it, and
+the half-idle workers left the shared CPUs to the client. Those runs measure that
+asymmetry, not either server. Their raw output and the analysis are in the
+[2026-10-06 results](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
+
+**A withdrawn headline:** this README used to carry 14.0M ops/sec, 10.2× Redis.
+It had no surviving raw log, it set Pion's 32 independent keyspaces against a
+single Redis instance, and its configuration has the same asymmetry. It is
+withdrawn; the comparisons above are the like-for-like ones.
 
 > **Worker-count caveat.** Every number above `w > 1` is measured with
 > `--independent-workers`, and that flag changes the semantics: workers are
@@ -243,11 +265,48 @@ queries. Pion's load is its insert (≈10.7 s) plus the index build (≈15.5 s);
 Redis builds while it inserts.*
 
 **Against RediSearch, on the same `FT.*` API:** VectorDBBench's own clients on
-both sides, the same case, both servers pinned to the same 8 cores of an EPYC
-8124P, median of 3. Pion serves **6,673 QPS** at 10 clients and Redis 8.10.2
-with RediSearch at its defaults 1,887 (3.5×), at recall@100 0.960 against
-0.963; one client's P99 is 1.3 ms against 5.0 ms. Method and raw runs:
-[`benchmarks/results/2026-10-09-linux-epyc-8124p/vectordbbench_50k/`](benchmarks/results/2026-10-09-linux-epyc-8124p/vectordbbench_50k/README.md).
+both sides, one EPYC 8124P, both servers pinned to the same 8 cores, median of 3.
+At matched recall Pion serves about **2.4×** the queries per second of Redis
+8.10.2 + RediSearch HNSW FP32 at 500K vectors: **3,766 QPS** against 1,545 at
+recall@100 ≥ 0.95, and **3,250** against 1,363 at ≥ 0.97. At 50K it is 3.6× at
+0.95 (6,846 against 1,880) and 2.4× at 0.97.
+
+In that run Pion searched INT8 codes in an index built once, by `FT.OPTIMIZE`.
+RediSearch searches FP32 and indexes every insert as it arrives. Pion lost where
+that difference shows:
+- It became searchable later: 265.6 s against 126.7 s at 500K.
+- In VectorDBBench's streaming case it returned nothing until `FT.OPTIMIZE`,
+  while RediSearch answered during the stream.
+- A stock Redis client never sends `FT.OPTIMIZE`, so it got nothing back.
+
+**`FT.OPTIMIZE` is now optional.** Until the graph exists, `FT.SEARCH` answers
+exactly from the inserted vectors. Once inserts pause, the graph builds itself in
+the background, and a vector written after that is found at once
+([how](doc/vector_engine.md#searching-without-ftoptimize)). Measured on a Mac
+([`benchmarks/results/2026-10-19-mac-m4-drop-in/`](benchmarks/results/2026-10-19-mac-m4-drop-in/README.md)):
+- **The stock client.** VectorDBBench's stock client, which never sends
+  `FT.OPTIMIZE`, gets recall@100 of 0.959–0.960 at 50K. After the background
+  build its QPS is 0.998× that of today's path with `FT.OPTIMIZE`.
+- **The streaming case.** Searches during the stream answer at the ceiling:
+  0.50 and 0.79 at 50% and 80% inserted, against RediSearch's 0.51 and 0.80
+  above. In one run of seven, the end of the stream read 0.76; the cause is
+  not yet known.
+
+Re-measured on the EPYC box, with the same setup and the stock client
+([`benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/`](benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/README.md)):
+- **The streaming case.** During the stream Pion answers at RediSearch's
+  recall. At 50% and 80% inserted it serves 1.18× and 1.66× RediSearch's
+  queries per second (2,126 and 2,905 against 1,797 and 1,752), and about
+  3.6× once the stream ends.
+- **Where it is slow: a large index that keeps taking writes.** Vectors written
+  since the last build are searched exactly. At 500K vectors a query takes
+  1.6 ms from the graph alone, and 3.8 ms with 10,000 vectors written since.
+  During a rebuild every search is exact: 190 ms per query while that rebuild
+  ran, for 84 s. A load-once index pays none of this.
+
+The same run covers RediSearch's 8-bit SVS-VAMANA index and valkey-search.
+Method and raw runs:
+[`benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/`](benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/README.md).
 
 At equal or better recall, Pion is the faster of the two. At ef=100 — the
 smallest search effort for 100 results, since Pion raises a smaller ef to k —
@@ -391,7 +450,7 @@ vecs = {f"doc:{i}": rng.random(D).astype(np.float32) for i in range(20)}
 for key, v in vecs.items():
     r.execute_command("HSET", key, "vec", v.tobytes(), "title", key)
 
-r.execute_command("FT.OPTIMIZE", "idx")         # build the graph, then query
+r.execute_command("FT.OPTIMIZE", "idx")         # optional: build the graph now
 
 q = (Query("*=>[KNN 3 @vec $B AS score]")       # the 3 nearest, closest first
      .sort_by("score").return_fields("title", "score").dialect(2))
@@ -564,19 +623,11 @@ removed, and each carries an **Experimental** banner on its own page.
 
 | Part | Its page | What is tested |
 |---|---|---|
-| `pion-serve`, the semantic-cache proxy (not `pion-vllm-mlx serve`) | [`doc/pion_serve.md`](doc/pion_serve.md) | its embedding path in the gate tier; router and backends in the full tier |
-| MCP server (`mcp/`) | [`mcp/README.md`](mcp/README.md) | its tools, called directly, in the gate tier; no test drives the MCP protocol |
 | Cluster: slots, gossip, Raft, replication, failover | [`doc/distributed_systems.md`](doc/distributed_systems.md) | gate and full tier; replication covers worker 0 only and its stream is unauthenticated |
 | Tenant binding (`--tenant`) | [`doc/multi_tenant.md`](doc/multi_tenant.md) | gate tier; isolation reviewed only by this project |
 | `AI.COMPLETE`, `AI.CHAT`, `AI.ROUTE.*`, `RAG.*`, `AI.FLARE.*` | [`doc/ai_gateway.md`](doc/ai_gateway.md) | wire-tested in the gate tier (needs Ollama) |
-| FLARE gateway proxy (`flare_gateway/`) | [`flare_gateway/README.md`](flare_gateway/README.md) | no test of its own |
 | `AI.KNN_LM.*`, `NEURON.PKM.*` | [the command reference](https://pion.pavelhorak.com/docs/reference/commands/rag-knn-pkm/) | full tier |
 | `MOE.EXPERT.*` expert paging | [the command reference](https://pion.pavelhorak.com/docs/reference/commands/moe-expert/) | wire-tested in the gate tier and the full tier; decode is research-grade |
-| `pion-exo` (exo attention hook) | [`pion-exo/README.md`](pion-exo/README.md) | full tier; exo has no upstream hook API |
-| `vllm-pion` (vLLM connector client) | [`vllm-pion/README.md`](vllm-pion/README.md) | no test of its own; the connector is not merged upstream |
-| LangGraph, AutoGen and LlamaIndex packages | [`pion-langgraph/`](pion-langgraph/README.md), [`pion-autogen/`](pion-autogen/README.md), [`pion-llamaindex/`](pion-llamaindex/README.md) | one gate-tier test of their basic calls |
-| LMCache backend (`pion-lmcache/`) | [`pion-lmcache/README.md`](pion-lmcache/README.md) | full tier; the CUDA connector test needs a CUDA box |
-| `pion-glide` (GLIDE client) | [`pion_glide/README.md`](pion_glide/README.md) | no test |
 | RedisVL and LangChain through their Redis clients | — | no test in the suite |
 
 ---
@@ -589,7 +640,7 @@ removed, and each carries an **Experimental** banner on its own page.
 | Headline | **Shared KV Cache** — at a 2K prefix on Llama-3.2-1B-4bit, first token in 69.0 ms from a separate process over the wire and 46.2 ms in the same process, against 1,193 ms cold and 37.0 ms from mlx-lm's own prompt-cache file; BLEU 1.000 cross-instance |
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |
-| Peak KV throughput | **15.9M ops/sec** across 32 keyspaces at P=50 with 64-byte values (32 Redis 8.10.2 processes: 14.8M; at 256 bytes Redis leads, 12.4M to 11.6M) · **1.71M** on one keyspace (Redis with I/O threads: 1.38M) — [same server](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md) |
+| KV throughput | **2.97M ops/sec** on one keyspace at P=10 with `--io-threads 8` (Redis 8.10.2 with `io-threads 8`: 1.66M) · across all 16 cores, 16 independent keyspaces each side, Redis leads: 7.18M to 6.10M at P=10 — [2026-10-12](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md), [2026-10-06](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md) |
 | Vector QPS | 7,339 at 10 clients on Linux at recall 0.960, 8,544 at 0.939 (Redis 8.10.2 vector sets: 8,039 at 0.920); 8,729 on an M4 Mac mini |
 | Recall@100 | 0.960 at that QPS (Redis vector sets: 0.920); INT8, ef=150 |
 | P99 latency | 1.4 ms on Linux, 0.6 ms on an M4 Mac mini (vector search, one client) |

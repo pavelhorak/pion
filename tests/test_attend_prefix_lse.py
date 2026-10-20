@@ -23,11 +23,11 @@ import time
 import numpy as np
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "pion-lmcache"))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "tests"))
 
 # Pion-lmcache's _RESPClient has no mlx dependency, so it imports cleanly even
 # on hosts without mlx installed (e.g. CI runners that just probe the wire).
-from pion_lmcache.store import _RESPClient
+from pion_store import _RESPClient
 
 
 def parse_args():

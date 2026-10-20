@@ -1,0 +1,276 @@
+--- redis.py (VectorDBBench 1.0.22, stock)
++++ redis.py (competitor client, as run)
+@@ -1,4 +1,6 @@
+ import logging
++import os
++import time
+ from contextlib import contextmanager
+ from typing import Any
+ 
+@@ -13,7 +15,54 @@
+ log = logging.getLogger(__name__)
+ INDEX_NAME = "index"  # Vector Index Name
+ 
++# ---------------------------------------------------------------------------
++# Pion vector field session (2026-10), competitor install. Every knob is an
++# environment variable, and with none set this file sends exactly what stock
++# VectorDBBench 1.0.22 sends: HNSW, FLOAT32, EF_RUNTIME, SORTBY score.
++# The diff against redis.py.stock-1.0.22 is the whole change.
++#
++#   VDBB_REDIS_ALGO          HNSW (default) | SVS-VAMANA
++#   VDBB_REDIS_TYPE          FLOAT32 (default) | FLOAT16. Inserted AND query
++#                            vectors are encoded in this type: a FLOAT16 index
++#                            rejects FLOAT32 blobs.
++#   VDBB_REDIS_COMPRESSION   "" (default) | LVQ8 | ... (SVS-VAMANA only)
++#   VDBB_REDIS_INDEX_EXTRA   extra index attributes, "NAME VALUE NAME VALUE"
++#   VDBB_REDIS_SEARCH_PARAM  EF_RUNTIME (default) | SEARCH_WINDOW_SIZE. The
++#                            harness's --ef-runtime value is sent under this
++#                            name (SVS-VAMANA rejects EF_RUNTIME).
++#   VDBB_REDIS_SORTBY        1 (default) | 0
++#   VDBB_REDIS_WAIT          "" (default: optimize() is a no-op, as stock) |
++#                            redisearch | valkey: optimize() polls until the
++#                            server reports the vector index fully built, so
++#                            searches never run against a backlog and the
++#                            build is counted in load_duration as Pion's
++#                            FT.OPTIMIZE is.
++#   VDBB_REDIS_WAIT_TIMEOUT  seconds, default 7200
++# ---------------------------------------------------------------------------
++ALGO = os.environ.get("VDBB_REDIS_ALGO", "HNSW").upper()
++VTYPE = os.environ.get("VDBB_REDIS_TYPE", "FLOAT32").upper()
++COMPRESSION = os.environ.get("VDBB_REDIS_COMPRESSION", "")
++INDEX_EXTRA = os.environ.get("VDBB_REDIS_INDEX_EXTRA", "").split()
++SEARCH_PARAM = os.environ.get("VDBB_REDIS_SEARCH_PARAM", "EF_RUNTIME").upper()
++SORTBY = os.environ.get("VDBB_REDIS_SORTBY", "1") == "1"
++WAIT = os.environ.get("VDBB_REDIS_WAIT", "").lower()
++WAIT_TIMEOUT = float(os.environ.get("VDBB_REDIS_WAIT_TIMEOUT", "7200"))
++STEADY_S = float(os.environ.get("VDBB_REDIS_WAIT_STEADY", "10"))
++NP_TYPE = {"FLOAT32": np.float32, "FLOAT16": np.float16, "FLOAT64": np.float64}[VTYPE]
++STOCK_INDEX = ALGO == "HNSW" and VTYPE == "FLOAT32" and not COMPRESSION and not INDEX_EXTRA
+ 
++
++def _info_dict(reply) -> dict:
++    out = {}
++    for k, v in zip(reply[::2], reply[1::2]):
++        out[k.decode() if isinstance(k, bytes) else str(k)] = v
++    return out
++
++
++def _s(v) -> str:
++    return v.decode() if isinstance(v, bytes) else str(v)
++
++
+ class Redis(VectorDB):
+     def __init__(
+         self,
+@@ -53,26 +102,44 @@
+             # check to see if index exists
+             conn.ft(INDEX_NAME).info()
+         except Exception:
+-            schema = (
+-                TagField("id"),
+-                NumericField("metadata"),
+-                VectorField(
+-                    "vector",  # Vector Field Name
+-                    "HNSW",  # Vector Index Type: FLAT or HNSW
+-                    {
+-                        "TYPE": "FLOAT32",  # FLOAT32 or FLOAT64
+-                        "DIM": vector_dimensions,  # Number of Vector Dimensions
+-                        "DISTANCE_METRIC": "COSINE",  # Vector Search Distance Metric
+-                        "M": self.case_config.index_param()["params"]["M"],
+-                        "EF_CONSTRUCTION": self.case_config.index_param()["params"]["efConstruction"],
+-                    },
+-                ),
+-            )
++            if STOCK_INDEX:
++                schema = (
++                    TagField("id"),
++                    NumericField("metadata"),
++                    VectorField(
++                        "vector",  # Vector Field Name
++                        "HNSW",  # Vector Index Type: FLAT or HNSW
++                        {
++                            "TYPE": "FLOAT32",  # FLOAT32 or FLOAT64
++                            "DIM": vector_dimensions,  # Number of Vector Dimensions
++                            "DISTANCE_METRIC": "COSINE",  # Vector Search Distance Metric
++                            "M": self.case_config.index_param()["params"]["M"],
++                            "EF_CONSTRUCTION": self.case_config.index_param()["params"]["efConstruction"],
++                        },
++                    ),
++                )
+ 
+-            definition = IndexDefinition(index_type=IndexType.HASH)
++                definition = IndexDefinition(index_type=IndexType.HASH)
+ 
+-            rs = conn.ft(INDEX_NAME)
+-            rs.create_index(schema, definition=definition)
++                rs = conn.ft(INDEX_NAME)
++                rs.create_index(schema, definition=definition)
++                return
++            # redis-py 4.6's VectorField accepts only FLAT and HNSW, so any other
++            # index is sent as a raw FT.CREATE with the same field layout.
++            attrs = ["TYPE", VTYPE, "DIM", vector_dimensions, "DISTANCE_METRIC", "COSINE"]
++            if ALGO == "HNSW":
++                attrs += [
++                    "M", self.case_config.index_param()["params"]["M"],
++                    "EF_CONSTRUCTION", self.case_config.index_param()["params"]["efConstruction"],
++                ]
++            if COMPRESSION:
++                attrs += ["COMPRESSION", COMPRESSION]
++            attrs += INDEX_EXTRA
++            cmd = ["FT.CREATE", INDEX_NAME, "ON", "HASH", "SCHEMA",
++                   "id", "TAG", "metadata", "NUMERIC",
++                   "vector", "VECTOR", ALGO, len(attrs), *attrs]
++            log.info(f"competitor index: {' '.join(str(c) for c in cmd)}")
++            conn.execute_command(*cmd)
+ 
+     @contextmanager
+     def init(self) -> None:
+@@ -95,8 +162,70 @@
+     def ready_to_search(self) -> bool:
+         """Check if the database is ready to search."""
+ 
++    def _backlog(self) -> tuple[bool, str]:
++        """(done, description) for the server's own report of the vector index build."""
++        info = _info_dict(self.conn.execute_command("FT.INFO", INDEX_NAME))
++        if WAIT == "redisearch":
++            s = self.conn.info("search")  # redis-py parses INFO into a dict
++            keys =("search_tiered_index_frontend_buffer_size", "search_workers_low_priority_pending_jobs",
++                    "search_workers_high_priority_pending_jobs", "search_active_worker_threads")
++            missing = [k for k in keys if k not in s]
++            if missing:  # a server without these fields can never report done: fail, never wait
++                msg = f"competitor optimize(): INFO search lacks {missing}"
++                raise RuntimeError(msg)
++            vals = {k: str(s[k]) for k in keys}
++            idle = (_s(info.get("indexing", "1")) == "0" and _s(info.get("percent_indexed", "0")) in ("1", "1.0")
++                    and all(vals[k] == "0" for k in keys[1:]))
++            fb = vals[keys[0]]
++            desc = f"indexing={_s(info.get('indexing'))} percent={_s(info.get('percent_indexed'))} {vals}"
++            if idle and fb != "0":
++                # SVS-VAMANA keeps vectors below its flush threshold in the flat frontend buffer,
++                # which searches scan; with no job pending and no worker active nothing moves
++                # them (box 2026-10-18: 562 of 50,000). Done once that has held STEADY_S.
++                now = time.perf_counter()
++                if getattr(self, "_steady_fb", None) != fb:
++                    self._steady_fb, self._steady_t = fb, now
++                held = now - self._steady_t
++                return held >= STEADY_S, desc + f" idle, frontend buffer steady {held:.1f}s"
++            self._steady_fb = None
++            return idle and fb == "0", desc
++        if WAIT == "valkey":
++            # valkey-search FT.INFO: state ready|backfill_*, backfill_in_progress, mutation_queue_size
++            # plus INFO search: search_writer_queue_size, search_background_indexing_status
++            s = self.conn.info("search")
++            missing = [k for k in ("state", "mutation_queue_size", "backfill_in_progress") if k not in info]
++            missing += [k for k in ("search_writer_queue_size", "search_background_indexing_status") if k not in s]
++            if missing:
++                msg = f"competitor optimize(): valkey-search reports no {missing}"
++                raise RuntimeError(msg)
++            state = _s(info["state"])
++            q = _s(info["mutation_queue_size"])
++            bip = _s(info["backfill_in_progress"])
++            wq = str(s["search_writer_queue_size"])
++            bg = str(s["search_background_indexing_status"])
++            done = state.lower() == "ready" and q == "0" and bip == "0" and wq == "0" and bg == "NO_ACTIVITY"
++            return done, (f"state={state} mutation_queue_size={q} backfill_in_progress={bip} "
++                          f"writer_queue={wq} background={bg} num_docs={_s(info.get('num_docs'))}")
++        return True, "no wait"
++
+     def optimize(self, data_size: int | None = None):
+-        pass
++        if not WAIT:
++            return
++        assert self.conn is not None
++        t0 = time.perf_counter()
++        last = 0.0
++        while True:
++            done, desc = self._backlog()
++            if done:
++                log.info(f"competitor optimize(): index built after {time.perf_counter() - t0:.1f}s wait ({desc})")
++                return
++            if time.perf_counter() - t0 > WAIT_TIMEOUT:
++                msg = f"competitor optimize(): index not built after {WAIT_TIMEOUT}s ({desc})"
++                raise TimeoutError(msg)
++            if time.perf_counter() - last > 30:
++                log.info(f"competitor optimize(): waiting ({desc})")
++                last = time.perf_counter()
++            time.sleep(0.5)
+ 
+     def insert_embeddings(
+         self,
+@@ -112,7 +241,7 @@
+         try:
+             with self.conn.pipeline(transaction=False) as pipe:
+                 for i, embedding in enumerate(embeddings):
+-                    ndarr_emb = np.array(embedding).astype(np.float32)
++                    ndarr_emb = np.array(embedding).astype(NP_TYPE)
+                     pipe.hset(
+                         metadata[i],
+                         mapping={
+@@ -132,6 +261,12 @@
+ 
+         return result_len, None
+ 
++    def _query(self, prefix: str, k: int, ef_runtime) -> Query:
++        q = Query(f"{prefix}=>[KNN {k} @vector $vec {SEARCH_PARAM} {ef_runtime} as score]")
++        if SORTBY:
++            q = q.sort_by("score")
++        return q.return_fields("id", "score").paging(0, k).dialect(2)
++
+     def search_embedding(
+         self,
+         query: list[float],
+@@ -142,15 +277,9 @@
+     ) -> list[int]:
+         assert self.conn is not None
+ 
+-        query_vector = np.array(query).astype(np.float32).tobytes()
++        query_vector = np.array(query).astype(NP_TYPE).tobytes()
+         ef_runtime = self.case_config.search_param()["params"]["ef"]
+-        query_obj = (
+-            Query(f"*=>[KNN {k} @vector $vec EF_RUNTIME {ef_runtime} as score]")
+-            .sort_by("score")
+-            .return_fields("id", "score")
+-            .paging(0, k)
+-            .dialect(2)
+-        )
++        query_obj = self._query("*", k, ef_runtime)
+         query_params = {"vec": query_vector}
+ 
+         if filters:
+@@ -159,33 +288,12 @@
+             id_value = filters.get("id")
+             metadata_value = filters.get("metadata")
+             if id_value and metadata_value:
+-                query_obj = (
+-                    Query(
+-                        f"(@metadata:[{metadata_value} +inf] @id:{ {id_value} })=>[KNN {k} ",
+-                        f"@vector $vec EF_RUNTIME {ef_runtime} as score]",
+-                    )
+-                    .sort_by("score")
+-                    .return_fields("id", "score")
+-                    .paging(0, k)
+-                    .dialect(2)
+-                )
++                query_obj = self._query(f"(@metadata:[{metadata_value} +inf] @id:{ {id_value} })", k, ef_runtime)
+             elif id_value:
+                 # gets exact match for id
+-                query_obj = (
+-                    Query(f"@id:{ {id_value} }=>[KNN {k} @vector $vec EF_RUNTIME {ef_runtime} as score]")
+-                    .sort_by("score")
+-                    .return_fields("id", "score")
+-                    .paging(0, k)
+-                    .dialect(2)
+-                )
++                query_obj = self._query(f"@id:{ {id_value} }", k, ef_runtime)
+             else:  # metadata only case, greater than or equal to metadata value
+-                query_obj = (
+-                    Query(f"@metadata:[{metadata_value} +inf]=>[KNN {k} @vector $vec EF_RUNTIME {ef_runtime} as score]")
+-                    .sort_by("score")
+-                    .return_fields("id", "score")
+-                    .paging(0, k)
+-                    .dialect(2)
+-                )
++                query_obj = self._query(f"@metadata:[{metadata_value} +inf]", k, ef_runtime)
+         res = self.conn.ft(INDEX_NAME).search(query_obj, query_params)
+         # doc in res of format {'id': '9831', 'payload': None, 'score': '1.19209289551e-07'}
+         return [int(doc["id"]) for doc in res.docs]

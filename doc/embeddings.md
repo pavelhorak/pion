@@ -12,11 +12,8 @@ FT.ADDTEXT and FT.SEARCHTEXT are implemented and working. Pion supports four emb
 
 1. **Apple NLEmbedding (`--nle-embed`, macOS only):** Apple's system `NaturalLanguage` framework. 512-dim sentence embeddings, **no Python sidecar, no model download**. Selected first when available; falls through if NLE doesn't recognize the input. See `src/ffi/nle_wrap.m` and `src/network/nle_embedding_engine.mojo`.
 2. **Auto-embed sidecar (cross-platform default):** Pion auto-launches a Python inference sidecar with **MiniLM-L6-v2** (384 dimensions, ~90 MB download on first run). Requires `torch` + `transformers` — install with `pixi run install-inference`. Disable with `--no-auto-embed` or `--profile kv`.
-3. **SIE (`superlinked/sie`, opt-in via pion-serve `--sie-url`):** OpenAI-compatible `/v1/embeddings` server with 85+ MTEB-verified models, autoscale-to-zero K8s deployment, Apache 2.0. Recommended when the deployment already runs SIE for production traffic. Explicit URL only — no auto-detect on port 8000 (collision with vLLM / FastAPI / generic web apps). When the URL is set, slots into the pion-serve cascade ahead of Ollama. Force-select via `--embed-backend sie --sie-url http://host:8000`; force-fail if unreachable (no cascade fall-through).
-4. **Ollama** (auto-detected): If Ollama is running on port 11434 with `nomic-embed-text` (768 dimensions), Pion uses it via HTTP. Detected automatically at startup unless `--no-auto-detect` is set.
-5. **HTTP embedding API**: Any OpenAI-compatible `/v1/embeddings` endpoint or MAX Serve.
-
-**pion-serve telemetry:** `/v1/stats` reports the active embed backend and per-backend call counts under `embedder.{backend, calls.{sie,ollama,pion}}`. This lets ops dashboards split SIE hits from Ollama hits without re-running the proxy.
+3. **Ollama** (auto-detected): If Ollama is running on port 11434 with `nomic-embed-text` (768 dimensions), Pion uses it via HTTP. Detected automatically at startup unless `--no-auto-detect` is set.
+4. **HTTP embedding API**: Any OpenAI-compatible `/v1/embeddings` endpoint or MAX Serve.
 
 The auto-embed sidecar uses the InferenceBridge (Unix socket IPC) for sub-millisecond embedding latency. The HTTP path is used as fallback when the sidecar is unavailable. NLE is in-process — no IPC at all.
 

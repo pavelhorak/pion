@@ -1,0 +1,4 @@
+[HNSW] calibrated [-0.21328437, 0.2118848] from 50000 vectors
+[HNSW] parallel link: 2 contended link drops, 16 under-linked nodes repaired
+[HNSW] level-0 reachability: 15 unreachable node(s) linked into the graph
+FT.OPTIMIZE: 50000 nodes built

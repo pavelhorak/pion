@@ -6,6 +6,96 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Removed
+
+- **The Python packages that nobody used are gone from the tree**: `pion-serve`,
+  `vllm-pion`, the MCP server (`mcp/`) and `pion_context`, `pion-exo`,
+  `flare_gateway`, `pion_glide`, and the LMCache, LangGraph, AutoGen and
+  LlamaIndex packages, about 19,000 lines. Each was experimental, none was ever
+  on PyPI, and none had a user outside this project. The demos and benchmarks
+  that existed only for them went too: the CAG legal demo, the GLIDE demo and
+  pion-serve's cache-hit suite. `pion-vllm-mlx` is unchanged and is the one
+  Python package. No engine command changed: `ATTEND.*`, `KV.PREFIX.*`,
+  `AI.FLARE.*` and LMCache's RESP connector (`resp://`) work as before. The two
+  RESP clients that engine tests borrowed from these packages now live in
+  `tests/` (`pion_store.py`, `attention_client.py`).
+
+## [0.9.10] — 2026-10-20
+
+A vector index answers without `FT.OPTIMIZE`, so a stock Redis client that
+creates an index, HSETs and searches gets results; it used to get `[0]`. The
+graph builds by itself once inserts pause, and vectors written after it are
+searched exactly until the next rebuild. Those exact searches are slow on a
+large index: on an EPYC 8124P at 500K vectors a query takes 1.6 ms from the
+graph and 190 ms during a rebuild (`doc/vector_engine.md`). FT.SEARCH scores
+from an INT8 index no longer read high on real embeddings. The README's
+comparisons are re-measured on that EPYC: about 2.4x RediSearch's vector
+queries per second at 500K, not 3.5x, with the cases where Pion loses named,
+and the one-keyspace KV table with `--io-threads`.
+
+### Added
+
+- **A vector index answers without `FT.OPTIMIZE`.** A stock Redis client
+  (RedisVL, LangChain, VectorDBBench's own) creates an index, HSETs and
+  searches, and never sends `FT.OPTIMIZE`; it used to get `[0]` back. Now,
+  until the graph exists, `FT.SEARCH` answers exactly from the inserted vectors
+  (same reply, same score units, `FILTER` and deletes honoured). Once inserts
+  pause for 200 ms, the graph builds on a background thread while searches
+  stay exact, and is then published and saved. A vector written after that
+  build is scanned exactly and merged into every search, and a tenth of the
+  index written that way triggers a rebuild. `FT.INFO` counts the vectors
+  searchable before a build, and `INFO` reports `vector_index`,
+  `vector_graph_rows`, `vector_exact_rows`, `vector_auto_builds` and
+  `vector_unindexed_writes`. An explicit `FT.OPTIMIZE` keeps its meaning:
+  build now, and later HSETs are stored but not indexed (now counted).
+  `FT.HYBRID` and `FT.SEARCH … HYBRID` take the same exact path.
+  `doc/vector_engine.md`, "Searching without FT.OPTIMIZE".
+- **The graph build uses one link lane per CPU** (4 to 16; it was always 4).
+  `PION_BUILD_LANES=N` overrides it.
+
+### Changed
+
+- **The README's one-keyspace KV table is re-measured with `--io-threads`.** On
+  an AMD EPYC 8124P (2026-10-12), Pion 0.9.9 at `--io-threads 8` led Redis 8.10.2
+  at `io-threads 8` at every pipeline depth, and with both persisting at P=10.
+  The README and the landing page no longer say that Redis's I/O threads win at
+  shallow pipelines. Raw output:
+  `benchmarks/results/2026-10-12-linux-epyc-8124p/`.
+- **The 32-keyspace KV figure (15.9M ops/sec) is no longer quoted.** In those runs
+  Pion's 800 connections landed on about half of its 32 workers, while each Redis
+  process got exactly its own client's. The idle workers left the shared machine's
+  CPU to the client, so the runs measured that asymmetry, not either server. The
+  2026-10-06 results page explains it from the GET hit rates. The KV tile now leads
+  with one keyspace (2.97M against Redis's 1.66M at P=10), next to the 16-keyspace
+  comparison, where Redis leads.
+
+### Fixed
+
+- **A worker that served another worker's index could build into that
+  worker's buffers.** Borrowing an index overwrote the borrower's own arrays,
+  and giving it back only cleared a flag. An `FT.OPTIMIZE` that then landed on
+  the borrower wrote into the owner's graph. Borrowers now keep their own
+  arrays and take them back. A borrow of an index that was since replaced is
+  noticed and renewed. A worker whose own graph is no longer the published
+  index stops searching it.
+- **`FT.OPTIMIZE` freed the ingest buffer while other workers could still
+  write to it or read it.** It now waits for them first, as `FT.DROPINDEX`
+  does.
+- **Writing the same vector again before a build listed the document twice.**
+  The identical rewrite now keeps its one slot, as it already did after a
+  build.
+- **`FT.OPTIMIZE` with nothing new to build republished the worker's own
+  graph**, which on a worker that had not built the index was an empty one. It
+  now keeps the served index.
+- **FT.SEARCH scores from an INT8 index read high on real embeddings.** The
+  quantizer's calibration clips the few near-constant outlier dimensions that
+  OpenAI embeddings have (to mean ± 8 sigma); that costs search nothing, but the
+  score compared the unclipped query with the clipped codes and counted the
+  difference: on OpenAI-50K, `1 - cos` read 0.094 high on average. A client that
+  thresholds on the score was misled. The score now clamps the query to the
+  same range, and reads each code from the middle of its quantization step
+  (the quantizer truncates). On the same data the error is now under 0.002.
+
 ## [0.9.9] — 2026-10-11
 
 FT.SEARCH, FT.HYBRID and FT.INFO answer RESP3 connections with

@@ -1,0 +1,7 @@
+block /opt/out/K50_1_pion
+run 1 load: insert 12.1 s, optimize/build 11.8 s, load_duration 23.9 s
+ef  150: recall 0.9597  peak QPS   6910.0  C=1 QPS   822.8  serial P99 1.30 ms  repeats [6050.8, 6910.0, 7300.4]
+ef  200: recall 0.9691  peak QPS   5507.8  C=1 QPS   683.6  serial P99 1.50 ms  repeats [5507.8, 6040.1, 5495.2]
+ef  300: recall 0.9768  peak QPS   4119.7  C=1 QPS   494.4  serial P99 1.70 ms  repeats [4207.2, 4089.9, 4119.7]
+ef  400: recall 0.9796  peak QPS   3823.8  C=1 QPS   444.8  serial P99 2.60 ms  repeats [3823.8, 3461.4, 3855.1]
+ef  600: recall 0.9818  peak QPS   3019.6  C=1 QPS   396.1  serial P99 2.60 ms  repeats [3040.2, 3019.6, 2881.3]

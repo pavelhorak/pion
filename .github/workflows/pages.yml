@@ -33,14 +33,6 @@ on:
       - 'examples/README.md'
       - 'benchmarks/reproducers/README.md'
       - 'pion-vllm-mlx/**'
-      - 'pion-lmcache/**'
-      - 'mcp/**'
-      - 'pion_context/**'
-      - 'pion_glide/**'
-      - 'pion-langgraph/**'
-      - 'pion-autogen/**'
-      - 'pion-llamaindex/**'
-      - 'pion-exo/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 

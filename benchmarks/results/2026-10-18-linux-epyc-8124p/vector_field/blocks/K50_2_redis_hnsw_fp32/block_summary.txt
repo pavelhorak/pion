@@ -1,0 +1,7 @@
+block /opt/out/K50_2_redis_hnsw_fp32
+run 1 load: insert 12.9 s, optimize/build 0.0 s, load_duration 12.9 s
+ef  150: recall 0.9630  peak QPS   1879.8  C=1 QPS   264.7  serial P99 5.10 ms  repeats [1879.8, 1911.3, 1862.2]
+ef  200: recall 0.9777  peak QPS   1725.1  C=1 QPS   198.0  serial P99 5.70 ms  repeats [1724.2, 1725.1, 1799.3]
+ef  300: recall 0.9892  peak QPS   1512.7  C=1 QPS   170.1  serial P99 7.00 ms  repeats [1534.1, 1512.7, 1498.3]
+ef  400: recall 0.9939  peak QPS   1333.5  C=1 QPS   157.6  serial P99 8.10 ms  repeats [1351.4, 1318.5, 1333.5]
+ef  600: recall 0.9973  peak QPS   1067.2  C=1 QPS   129.4  serial P99 9.90 ms  repeats [1064.5, 1069.0, 1067.2]
