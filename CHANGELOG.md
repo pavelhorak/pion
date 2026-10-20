@@ -4,7 +4,18 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [0.9.10] — 2026-10-20
+
+A vector index answers without `FT.OPTIMIZE`, so a stock Redis client that
+creates an index, HSETs and searches gets results; it used to get `[0]`. The
+graph builds by itself once inserts pause, and vectors written after it are
+searched exactly until the next rebuild. Those exact searches are slow on a
+large index: on an EPYC 8124P at 500K vectors a query takes 1.6 ms from the
+graph and 190 ms during a rebuild (`doc/vector_engine.md`). FT.SEARCH scores
+from an INT8 index no longer read high on real embeddings. The README's
+comparisons are re-measured on that EPYC: about 2.4x RediSearch's vector
+queries per second at 500K, not 3.5x, with the cases where Pion loses named,
+and the one-keyspace KV table with `--io-threads`.
 
 ### Added
 
@@ -25,6 +36,22 @@ enumerated — there were roughly 1,100 of them.
   `doc/vector_engine.md`, "Searching without FT.OPTIMIZE".
 - **The graph build uses one link lane per CPU** (4 to 16; it was always 4).
   `PION_BUILD_LANES=N` overrides it.
+
+### Changed
+
+- **The README's one-keyspace KV table is re-measured with `--io-threads`.** On
+  an AMD EPYC 8124P (2026-10-12), Pion 0.9.9 at `--io-threads 8` led Redis 8.10.2
+  at `io-threads 8` at every pipeline depth, and with both persisting at P=10.
+  The README and the landing page no longer say that Redis's I/O threads win at
+  shallow pipelines. Raw output:
+  `benchmarks/results/2026-10-12-linux-epyc-8124p/`.
+- **The 32-keyspace KV figure (15.9M ops/sec) is no longer quoted.** In those runs
+  Pion's 800 connections landed on about half of its 32 workers, while each Redis
+  process got exactly its own client's. The idle workers left the shared machine's
+  CPU to the client, so the runs measured that asymmetry, not either server. The
+  2026-10-06 results page explains it from the GET hit rates. The KV tile now leads
+  with one keyspace (2.97M against Redis's 1.66M at P=10), next to the 16-keyspace
+  comparison, where Redis leads.
 
 ### Fixed
 
@@ -52,22 +79,6 @@ enumerated — there were roughly 1,100 of them.
   thresholds on the score was misled. The score now clamps the query to the
   same range, and reads each code from the middle of its quantization step
   (the quantizer truncates). On the same data the error is now under 0.002.
-
-### Changed
-
-- **The README's one-keyspace KV table is re-measured with `--io-threads`.** On
-  an AMD EPYC 8124P (2026-10-12), Pion 0.9.9 at `--io-threads 8` led Redis 8.10.2
-  at `io-threads 8` at every pipeline depth, and with both persisting at P=10.
-  The README and the landing page no longer say that Redis's I/O threads win at
-  shallow pipelines. Raw output:
-  `benchmarks/results/2026-10-12-linux-epyc-8124p/`.
-- **The 32-keyspace KV figure (15.9M ops/sec) is no longer quoted.** In those runs
-  Pion's 800 connections landed on about half of its 32 workers, while each Redis
-  process got exactly its own client's. The idle workers left the shared machine's
-  CPU to the client, so the runs measured that asymmetry, not either server. The
-  2026-10-06 results page explains it from the GET hit rates. The KV tile now leads
-  with one keyspace (2.97M against Redis's 1.66M at P=10), next to the 16-keyspace
-  comparison, where Redis leads.
 
 ## [0.9.9] — 2026-10-11
 
