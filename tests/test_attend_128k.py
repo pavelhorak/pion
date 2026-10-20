@@ -14,10 +14,10 @@ per token, so a wrong row is visible). Timings are reported, never asserted.
 import sys
 import time
 
-sys.path.insert(0, "vllm-pion")
+sys.path.insert(0, "tests")
 
 import numpy as np
-from vllm_pion.attention_client import PionAttentionClient
+from attention_client import PionAttentionClient
 
 HOST = "127.0.0.1"
 PORT = 1974

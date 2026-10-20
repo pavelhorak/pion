@@ -8,7 +8,6 @@ Spins up a pion-server with `--ns-prefix tenant_a:` and verifies:
   3. PionStore configured with the WRONG tenant_prefix is rejected.
   4. KV.PREFIX.LOOKUP / OWNER / REGISTER all enforce uniformly.
 
-Pairs with `pion-lmcache/MULTITENANT.md`.
 """
 from __future__ import annotations
 
@@ -20,11 +19,11 @@ import sys
 import time
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "pion-lmcache"))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "tests"))
 
 import numpy as np
-from pion_lmcache import PionStore
-from pion_lmcache.store import _RESPError
+from pion_store import PionStore
+from pion_store import _RESPError
 
 
 def parse_args():

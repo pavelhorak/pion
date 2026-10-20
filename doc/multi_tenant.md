@@ -29,7 +29,7 @@ pion-server -p 1974 --requirepass "$TENANT_A_PW" --profile kv -w 4 --independent
 pion-server -p 1975 --requirepass "$TENANT_B_PW" --profile kv -w 4 --independent-workers   # tenant B
 ```
 
-Each process has a private keyspace, WAL, HNSW graph, and (with `--requirepass`) its own authentication boundary. Route each tenant's clients to their own port. This is the model `pion-lmcache/MULTITENANT.md` describes.
+Each process has a private keyspace, WAL, HNSW graph, and (with `--requirepass`) its own authentication boundary. Route each tenant's clients to their own port.
 
 ## Authentication
 

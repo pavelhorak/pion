@@ -146,7 +146,7 @@ the main README). From any other process the patch uses lane 2 or 3, and then **
 decode step pays one round trip per layer**. So for a consumer that only generates text from
 another process, the four Stage-1 lines above are the faster end-to-end path;
 Stage 2 is for consumers that want the attention itself in Pion — the sparse
-long-context selectors (`sparse_full_layers=`), `pion-exo`, a custom vLLM
+long-context selectors (`sparse_full_layers=`), a custom vLLM
 CacheEngine. `stage2=True` without `make_pion_prompt_cache` changes nothing
 except a slightly slower cold path.
 

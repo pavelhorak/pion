@@ -153,7 +153,7 @@ When `--kvcache` is enabled, the following modules are activated:
 
 **Data flow (externalized attention):**
 ```
-Inference engine (vLLM/MLX) → PionAttentionClient (vllm-pion/)
+Inference engine (vLLM/MLX) → PionAttentionClient (tests/attention_client.py)
     │
     ├── ATTEND.CREATE session_id key_dim value_dim
     ├── ATTEND.STORE session_id layer_id num_tokens keys_fp32 values_fp32

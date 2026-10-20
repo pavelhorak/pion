@@ -595,7 +595,7 @@ Binary protocol commands on port 1975 (0xCA5E framing):
 | 0x22 | ATTEND.FINALIZE | Batch build HNSW from staged keys |
 | 0x23 | ATTEND.QUERY | Top-k HNSW query |
 
-Requires `--kvcache` flag. Python client: `vllm-pion/` package (`PionKVClient`, `PionAttentionClient`, `ExternalizedAttentionLayer`).
+Requires `--kvcache` flag. Python client: `tests/attention_client.py` (`PionAttentionClient`).
 
 ---
 

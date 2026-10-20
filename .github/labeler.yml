@@ -26,14 +26,6 @@
           - src/network/*attention_engine.mojo
           - src/ffi/metal*
           - pion-vllm-mlx/**
-          - pion-lmcache/**
-
-"area: serve":
-  - changed-files:
-      - any-glob-to-any-file:
-          - pion-serve/**
-          - flare_gateway/**
-          - mcp/**
 
 "area: vector":
   - changed-files:

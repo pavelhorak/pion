@@ -234,7 +234,7 @@ RESP-based equivalents (KV.STORE, KV.FETCH, KV.INFO, ATTEND.*) are also availabl
 
 ### Python client
 
-`vllm-pion/` package provides `PionKVClient`, `PionAttentionClient`, and `ExternalizedAttentionLayer` for integration with vLLM/MLX inference engines.
+`tests/attention_client.py` (`PionAttentionClient`) is a minimal Python client for this lane; the ATTEND tests use it.
 
 ---
 

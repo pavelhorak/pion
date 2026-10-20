@@ -467,8 +467,7 @@ The README's TTFT table has the measured row. Tests: `tests/test_v_export.py`
 ### Stage 2 in-process fast lane
 
 When the cold prefill happens in the **same Python process** that serves
-the warm forwards (single-process inference servers, `bench_w1_stage2.py`,
-`pion-exo` running mlx-lm in-process), `PionPromptCache` keeps the per-layer
+the warm forwards (single-process inference servers, `bench_w1_stage2.py`), `PionPromptCache` keeps the per-layer
 prefix K/V as MLX arrays (`self._mlx_prefix_kv[namespace]`). The patched
 `pion_scaled_dot_product_attention` then concats `[prefix | suffix]` and
 calls `mx.fast.scaled_dot_product_attention` directly — **zero wire
@@ -715,24 +714,16 @@ Concrete fits for this build (single-instance, MLX, Apple Silicon, a high hit ra
 directory makes `KV.PREFIX.LOOKUP` answer correctly regardless of which
 worker the connection lands on. V buffers stay per-worker; non-owner
 `V.STOREBATCH`/`V.FETCH` return `-ERR session lives on worker N` and
-clients reconnect. `pion-lmcache.PionStore` handles this transparently
-via `auto_redirect=True` (default).
+clients reconnect to the worker it names. The test client
+`tests/pion_store.py` does this with `auto_redirect=True` (its default),
+and `tests/test_kvprefix_autoredirect.py` checks it.
 
 ```bash
 ./pion-server --kvcache -w 4 --independent-workers   # one Pion, four workers
 ```
 
-```python
-from pion_lmcache import PionStore
-with PionStore(port=1974, vquant="fp16") as s:
-    s.register("my_app|prompt_a", kv_dim=128)
-    s.store_layer("my_app|prompt_a", "V", layer=0,
-                  token_offset=0, tensor_fp32=v)
-    # auto_redirect transparently handles cross-worker -ERR
-```
-
 For multi-tenant isolation, deploy one Pion per tenant; see
-`doc/multi_tenant.md` and `pion-lmcache/MULTITENANT.md`.
+`doc/multi_tenant.md`.
 
 The legacy "two Pion instances" pattern (`-w N` + `--kvcache -w 1`) still
 works for callers that prefer a hard split between vector/KV traffic and
@@ -776,7 +767,6 @@ KV-cache traffic — it's no longer required.
 | `tests/test_multitenant.py` | `--ns-prefix` enforcement matrix |
 | `tests/test_dropindex_grace.py` | DROP+REBUILD cycle stress with grace period |
 | `tests/bench_g2_strict.py` | Strict numerics — memory savings + MLX-vs-CPU |
-| `pion-lmcache/tests/test_pion_lmcache.py` | PionStore / LMCacheRemoteBackend integration (5/5) |
 | `tests/test_lmcache_resp_connector.py` | LMCache RESPConnector wire-pattern emulation |
 
 To reproduce the headlines:

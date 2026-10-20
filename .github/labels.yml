@@ -15,7 +15,7 @@
 # ── area (the PR labeler sets these from changed paths) ──
 - { name: "area: wire",          color: c5def5, description: "RESP/RESP3 protocol, command dispatch, keyspace commands" }
 - { name: "area: kv-cache",      color: c5def5, description: "KV.PREFIX / ATTEND / V-store / Metal attention / pion-vllm-mlx" }
-- { name: "area: serve",         color: c5def5, description: "pion-serve, FLARE gateway, MCP server" }
+- { name: "area: serve",         color: c5def5, description: "pion-serve, FLARE gateway, MCP server (all removed 2026-10; kept for old issues)" }
 - { name: "area: vector",        color: c5def5, description: "HNSW, FT.* / V* search, quantization, libpion_vector" }
 - { name: "area: persistence",   color: c5def5, description: "WAL, snapshots, blob tier, restart" }
 - { name: "area: build-release", color: c5def5, description: "Build, packaging, Docker, CI, release artifacts" }

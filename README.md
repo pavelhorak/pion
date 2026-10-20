@@ -623,19 +623,11 @@ removed, and each carries an **Experimental** banner on its own page.
 
 | Part | Its page | What is tested |
 |---|---|---|
-| `pion-serve`, the semantic-cache proxy (not `pion-vllm-mlx serve`) | [`doc/pion_serve.md`](doc/pion_serve.md) | its embedding path in the gate tier; router and backends in the full tier |
-| MCP server (`mcp/`) | [`mcp/README.md`](mcp/README.md) | its tools, called directly, in the gate tier; no test drives the MCP protocol |
 | Cluster: slots, gossip, Raft, replication, failover | [`doc/distributed_systems.md`](doc/distributed_systems.md) | gate and full tier; replication covers worker 0 only and its stream is unauthenticated |
 | Tenant binding (`--tenant`) | [`doc/multi_tenant.md`](doc/multi_tenant.md) | gate tier; isolation reviewed only by this project |
 | `AI.COMPLETE`, `AI.CHAT`, `AI.ROUTE.*`, `RAG.*`, `AI.FLARE.*` | [`doc/ai_gateway.md`](doc/ai_gateway.md) | wire-tested in the gate tier (needs Ollama) |
-| FLARE gateway proxy (`flare_gateway/`) | [`flare_gateway/README.md`](flare_gateway/README.md) | no test of its own |
 | `AI.KNN_LM.*`, `NEURON.PKM.*` | [the command reference](https://pion.pavelhorak.com/docs/reference/commands/rag-knn-pkm/) | full tier |
 | `MOE.EXPERT.*` expert paging | [the command reference](https://pion.pavelhorak.com/docs/reference/commands/moe-expert/) | wire-tested in the gate tier and the full tier; decode is research-grade |
-| `pion-exo` (exo attention hook) | [`pion-exo/README.md`](pion-exo/README.md) | full tier; exo has no upstream hook API |
-| `vllm-pion` (vLLM connector client) | [`vllm-pion/README.md`](vllm-pion/README.md) | no test of its own; the connector is not merged upstream |
-| LangGraph, AutoGen and LlamaIndex packages | [`pion-langgraph/`](pion-langgraph/README.md), [`pion-autogen/`](pion-autogen/README.md), [`pion-llamaindex/`](pion-llamaindex/README.md) | one gate-tier test of their basic calls |
-| LMCache backend (`pion-lmcache/`) | [`pion-lmcache/README.md`](pion-lmcache/README.md) | full tier; the CUDA connector test needs a CUDA box |
-| `pion-glide` (GLIDE client) | [`pion_glide/README.md`](pion_glide/README.md) | no test |
 | RedisVL and LangChain through their Redis clients | — | no test in the suite |
 
 ---

@@ -65,11 +65,9 @@ forward passes, it does not run them.
 Everything else is experimental: in the tree, tested as far as each page
 says, with no published measurement of what it buys and no user outside this
 project, so it may change or be removed. Each such page opens with an
-**Experimental** banner: [Pion Serve](pion_serve.md) (the semantic-cache
-proxy), the rest of the [AI gateway](ai_gateway.md) (`AI.COMPLETE`, `AI.CHAT`,
-`AI.ROUTE.*`, `RAG.*`, FLARE, the MCP server), [Distributed
-systems](distributed_systems.md), [Multi-tenant](multi_tenant.md), and the
-framework packages. The README's
+**Experimental** banner: the rest of the [AI gateway](ai_gateway.md)
+(`AI.COMPLETE`, `AI.CHAT`, `AI.ROUTE.*`, `RAG.*`, `AI.FLARE.*`), [Distributed
+systems](distributed_systems.md) and [Multi-tenant](multi_tenant.md). The README's
 [Experimental table](https://github.com/pavelhorak/pion#experimental) lists
 each part and what tests it.
 

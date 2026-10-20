@@ -96,7 +96,7 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          paths: [pion-vllm-mlx, pion-lmcache, mcp, pion_context, pion_glide, pion-langgraph, pion-autogen, pion-llamaindex]
+          paths: [pion-vllm-mlx]
           options:
             show_source: false
             show_root_heading: true
@@ -163,15 +163,11 @@ nav:
           - PION.STATS and INFO: reference/commands/stats.md
       - Python API:
           - pion-vllm-mlx: reference/python/pion-vllm-mlx.md
-          - pion-lmcache: reference/python/pion-lmcache.md
-          - pion-glide: reference/python/pion-glide.md
-          - LangGraph · AutoGen · LlamaIndex · exo: reference/python/integrations.md
           - Client APIs: client_apis.md
       - Wire protocols: networking.md
   - Guides & examples:
       - Examples: guides/examples.md
       - Reproducers: guides/reproducers.md
-      - Pion Serve: pion_serve.md
       - AI gateway: ai_gateway.md
   - Operations:
       - Running in production: operations.md
