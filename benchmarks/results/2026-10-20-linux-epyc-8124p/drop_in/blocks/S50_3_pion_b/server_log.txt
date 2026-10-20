@@ -1,0 +1,298 @@
+Binding to 127.0.0.1 [default (no password set)]
+--- Pion Configuration ---
+Profile:    cloud
+Port:       6395
+Workers:    16 (INDEPENDENT KEYSPACES)
+Huge Pages: False
+Affinity:   False
+Vector Dim: 1536
+INT4:       False
+PolarQuant: False
+TurboQuant: False
+NanoQuant:  False
+BQ:         False
+GPU:        False
+AI Gateway: False
+MAX Engine: False
+Embedding:  disabled
+LLM:        disabled
+Inference:  disabled
+KV Cache:   False (--kvcache enables ATTEND.*/M13 router/M9 RAG)
+Cluster:    False
+--------------------------
+
+=== INDEPENDENT WORKERS: 16 SEPARATE KEYSPACES ===
+  Each worker owns a private keyspace, hash map, WAL and HNSW graph.
+  Connections are assigned by accept() race — a write acked on one
+  connection is NOT readable from another. Cross-worker PUBLISH delivers
+  to zero subscribers, FLUSHALL clears one slice, and replication covers
+  worker 0 only.
+  Safe only if every client pins a single connection, or shards keys
+  across per-worker ports itself. Use -w 1 for shared-keyspace semantics.
+=======================================================
+
+--- Pion Master: Spawning 16 Persistent Mojo Workers ---
+Open-file limit raised from 1024 to 65536
+Shared listen socket: port=6395 fd=5
+Shared listen socket: port=6397 fd=6
+Shared listen socket: port=6398 fd=7
+Shared listen socket: port=6399 fd=8
+Shared listen socket: port=6400 fd=9
+Shared listen socket: port=6401 fd=10
+Shared listen socket: port=6402 fd=11
+Shared listen socket: port=6403 fd=12
+Shared listen socket: port=6404 fd=13
+Shared listen socket: port=6405 fd=14
+Shared listen socket: port=6406 fd=15
+Shared listen socket: port=6407 fd=16
+Shared listen socket: port=6408 fd=17
+Shared listen socket: port=6409 fd=18
+Shared listen socket: port=6410 fd=19
+Shared listen socket: port=6411 fd=20
+Shared listen socket: port=6412 fd=21
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=0 tid=129306390931136
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=2 tid=129306013460160
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=7 tid=129305929553600
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=15 tid=129305795303104
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=14 tid=129305812084416
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=3 tid=129305996678848
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=13 tid=129305828865728
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=8 tid=129305912772288
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=1 tid=129306030241472
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=5 tid=129305963116224
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=11 tid=129305862428352
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=9 tid=129305895990976
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=12 tid=129305845647040
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=6 tid=129305946334912
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=4 tid=129305979897536
+Multishot recv: 256 × 16384B provided buffers registered
+--- Pion IO_URING Engine Active --- worker=10 tid=129305879209664
+[vector] auto-build: indexing 200 vectors in the background; FT.SEARCH answers exactly until it is done
+[HNSW] calibrated [-0.20474462, 0.20334823] from 200 vectors
+[vector] auto-build: 200 vectors indexed in 64 ms; FT.SEARCH uses the graph now
+HNSW saved: 200 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 600 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20473736, 0.20333642] from 600 vectors
+[vector] auto-build: 600 vectors indexed in 201 ms; FT.SEARCH uses the graph now
+HNSW saved: 600 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 1000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20472525, 0.20332666] from 1000 vectors
+[vector] auto-build: 1000 vectors indexed in 367 ms; FT.SEARCH uses the graph now
+HNSW saved: 1000 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 1400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20471224, 0.20331398] from 1400 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 1400 vectors indexed in 541 ms; FT.SEARCH uses the graph now
+HNSW saved: 1400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 1800 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20470113, 0.20330238] from 1800 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 1800 vectors indexed in 741 ms; FT.SEARCH uses the graph now
+HNSW saved: 1800 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 2200 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20467694, 0.20327802] from 2200 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 2200 vectors indexed in 943 ms; FT.SEARCH uses the graph now
+HNSW saved: 2200 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 2600 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20465903, 0.20325921] from 2600 vectors
+[HNSW] level-0 reachability: 1 unreachable node(s) linked into the graph
+[vector] auto-build: 2600 vectors indexed in 1208 ms; FT.SEARCH uses the graph now
+HNSW saved: 2600 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 3000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20464516, 0.2032451] from 3000 vectors
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 3000 vectors indexed in 1410 ms; FT.SEARCH uses the graph now
+HNSW saved: 3000 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 3400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20463318, 0.20323262] from 3400 vectors
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 3400 vectors indexed in 1676 ms; FT.SEARCH uses the graph now
+HNSW saved: 3400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 3800 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20460005, 0.20320015] from 3800 vectors
+[HNSW] level-0 reachability: 3 unreachable node(s) linked into the graph
+[vector] auto-build: 3800 vectors indexed in 1914 ms; FT.SEARCH uses the graph now
+HNSW saved: 3800 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 4200 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20456663, 0.20316681] from 4200 vectors
+[HNSW] parallel link: 44 contended link drops, 17 under-linked nodes repaired
+[HNSW] level-0 reachability: 3 unreachable node(s) linked into the graph
+[vector] auto-build: 4200 vectors indexed in 306 ms; FT.SEARCH uses the graph now
+HNSW saved: 4200 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 4800 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20452279, 0.20312288] from 4800 vectors
+[HNSW] parallel link: 71 contended link drops, 6 under-linked nodes repaired
+[HNSW] level-0 reachability: 5 unreachable node(s) linked into the graph
+[vector] auto-build: 4800 vectors indexed in 346 ms; FT.SEARCH uses the graph now
+HNSW saved: 4800 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 5400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20448814, 0.20308839] from 5400 vectors
+[HNSW] parallel link: 62 contended link drops, 7 under-linked nodes repaired
+[HNSW] level-0 reachability: 3 unreachable node(s) linked into the graph
+[vector] auto-build: 5400 vectors indexed in 410 ms; FT.SEARCH uses the graph now
+HNSW saved: 5400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 6000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20446049, 0.20306109] from 6000 vectors
+[HNSW] parallel link: 50 contended link drops, 23 under-linked nodes repaired
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 6000 vectors indexed in 473 ms; FT.SEARCH uses the graph now
+HNSW saved: 6000 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 6600 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20443605, 0.2030368] from 6600 vectors
+[HNSW] parallel link: 54 contended link drops, 15 under-linked nodes repaired
+[HNSW] level-0 reachability: 3 unreachable node(s) linked into the graph
+[vector] auto-build: 6600 vectors indexed in 513 ms; FT.SEARCH uses the graph now
+HNSW saved: 6600 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 7400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.2043629, 0.20296383] from 7400 vectors
+[HNSW] parallel link: 62 contended link drops, 19 under-linked nodes repaired
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 7400 vectors indexed in 550 ms; FT.SEARCH uses the graph now
+HNSW saved: 7400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 8200 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20426965, 0.20287079] from 8200 vectors
+[HNSW] parallel link: 84 contended link drops, 17 under-linked nodes repaired
+[HNSW] level-0 reachability: 4 unreachable node(s) linked into the graph
+[vector] auto-build: 8200 vectors indexed in 681 ms; FT.SEARCH uses the graph now
+HNSW saved: 8200 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 9200 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20416671, 0.20276773] from 9200 vectors
+[HNSW] parallel link: 68 contended link drops, 23 under-linked nodes repaired
+[HNSW] level-0 reachability: 6 unreachable node(s) linked into the graph
+[vector] auto-build: 9200 vectors indexed in 715 ms; FT.SEARCH uses the graph now
+HNSW saved: 9200 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 10200 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20407862, 0.20267987] from 10200 vectors
+[HNSW] parallel link: 69 contended link drops, 12 under-linked nodes repaired
+[HNSW] level-0 reachability: 3 unreachable node(s) linked into the graph
+[vector] auto-build: 10200 vectors indexed in 817 ms; FT.SEARCH uses the graph now
+HNSW saved: 10200 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 11400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20399343, 0.20259447] from 11400 vectors
+[HNSW] parallel link: 43 contended link drops, 15 under-linked nodes repaired
+[HNSW] level-0 reachability: 3 unreachable node(s) linked into the graph
+[vector] auto-build: 11400 vectors indexed in 924 ms; FT.SEARCH uses the graph now
+HNSW saved: 11400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 12600 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.2039242, 0.20252492] from 12600 vectors
+[HNSW] parallel link: 62 contended link drops, 14 under-linked nodes repaired
+[HNSW] level-0 reachability: 2 unreachable node(s) linked into the graph
+[vector] auto-build: 12600 vectors indexed in 1059 ms; FT.SEARCH uses the graph now
+HNSW saved: 12600 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 14000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20384288, 0.20244351] from 14000 vectors
+[HNSW] parallel link: 54 contended link drops, 20 under-linked nodes repaired
+[HNSW] level-0 reachability: 8 unreachable node(s) linked into the graph
+[vector] auto-build: 14000 vectors indexed in 1193 ms; FT.SEARCH uses the graph now
+HNSW saved: 14000 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 15400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.2036216, 0.20222217] from 15400 vectors
+[HNSW] parallel link: 57 contended link drops, 28 under-linked nodes repaired
+[HNSW] level-0 reachability: 4 unreachable node(s) linked into the graph
+[vector] auto-build: 15400 vectors indexed in 1294 ms; FT.SEARCH uses the graph now
+HNSW saved: 15400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 17000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20338912, 0.2019896] from 17000 vectors
+[HNSW] parallel link: 66 contended link drops, 27 under-linked nodes repaired
+[HNSW] level-0 reachability: 6 unreachable node(s) linked into the graph
+[vector] auto-build: 17000 vectors indexed in 1540 ms; FT.SEARCH uses the graph now
+HNSW saved: 17000 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 18800 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.2031497, 0.20175019] from 18800 vectors
+[HNSW] parallel link: 63 contended link drops, 23 under-linked nodes repaired
+[HNSW] level-0 reachability: 8 unreachable node(s) linked into the graph
+[vector] auto-build: 18800 vectors indexed in 1705 ms; FT.SEARCH uses the graph now
+HNSW saved: 18800 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 20800 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20292836, 0.20152855] from 20800 vectors
+[HNSW] parallel link: 56 contended link drops, 29 under-linked nodes repaired
+[HNSW] level-0 reachability: 6 unreachable node(s) linked into the graph
+[vector] auto-build: 20800 vectors indexed in 1915 ms; FT.SEARCH uses the graph now
+HNSW saved: 20800 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 23000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20272797, 0.20132807] from 23000 vectors
+[HNSW] parallel link: 57 contended link drops, 28 under-linked nodes repaired
+[HNSW] level-0 reachability: 10 unreachable node(s) linked into the graph
+[vector] auto-build: 23000 vectors indexed in 2097 ms; FT.SEARCH uses the graph now
+HNSW saved: 23000 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 25400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20254955, 0.20114976] from 25400 vectors
+[HNSW] parallel link: 74 contended link drops, 33 under-linked nodes repaired
+[HNSW] level-0 reachability: 9 unreachable node(s) linked into the graph
+[vector] auto-build: 25400 vectors indexed in 2570 ms; FT.SEARCH uses the graph now
+HNSW saved: 25400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 28000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20235118, 0.20095143] from 28000 vectors
+[HNSW] parallel link: 77 contended link drops, 26 under-linked nodes repaired
+[HNSW] level-0 reachability: 5 unreachable node(s) linked into the graph
+[vector] auto-build: 28000 vectors indexed in 3187 ms; FT.SEARCH uses the graph now
+HNSW saved: 28000 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 30800 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20190273, 0.2005028] from 30800 vectors
+[HNSW] parallel link: 111 contended link drops, 42 under-linked nodes repaired
+[HNSW] level-0 reachability: 11 unreachable node(s) linked into the graph
+[vector] auto-build: 30800 vectors indexed in 3565 ms; FT.SEARCH uses the graph now
+HNSW saved: 30800 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 34000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20136836, 0.19996837] from 34000 vectors
+[HNSW] parallel link: 87 contended link drops, 35 under-linked nodes repaired
+[HNSW] level-0 reachability: 8 unreachable node(s) linked into the graph
+[vector] auto-build: 34000 vectors indexed in 4887 ms; FT.SEARCH uses the graph now
+HNSW saved: 34000 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 37400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.2008346, 0.19943467] from 37400 vectors
+[HNSW] parallel link: 76 contended link drops, 27 under-linked nodes repaired
+[HNSW] level-0 reachability: 8 unreachable node(s) linked into the graph
+[vector] auto-build: 37400 vectors indexed in 4173 ms; FT.SEARCH uses the graph now
+HNSW saved: 37400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 41200 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20032254, 0.1989227] from 41200 vectors
+[HNSW] parallel link: 77 contended link drops, 31 under-linked nodes repaired
+[HNSW] level-0 reachability: 13 unreachable node(s) linked into the graph
+[vector] auto-build: 41200 vectors indexed in 4276 ms; FT.SEARCH uses the graph now
+HNSW saved: 41200 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 45400 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.20371045, 0.20231067] from 45400 vectors
+[HNSW] parallel link: 65 contended link drops, 27 under-linked nodes repaired
+[HNSW] level-0 reachability: 15 unreachable node(s) linked into the graph
+[vector] auto-build: 45400 vectors indexed in 4749 ms; FT.SEARCH uses the graph now
+HNSW saved: 45400 nodes → pion.hnsw.0
+[vector] auto-build: re-indexing 50000 vectors in the background; the current index keeps serving
+[HNSW] calibrated [-0.21328467, 0.2118851] from 50000 vectors
+[HNSW] parallel link: 60 contended link drops, 50 under-linked nodes repaired
+[HNSW] level-0 reachability: 18 unreachable node(s) linked into the graph
+[vector] auto-build: 50000 vectors indexed in 6106 ms; FT.SEARCH uses the graph now
+HNSW saved: 50000 nodes → pion.hnsw.0
+PION: shutdown requested, draining (WAL flush) — repeat the signal to force
+[pion] worker 4 stopped (shutdown)
+[pion] worker 12 stopped (shutdown)
+[pion] worker 0 stopped (shutdown)
+[pion] worker 3 stopped (shutdown)
+[pion] worker 10 stopped (shutdown)
+[pion] worker 7 stopped (shutdown)
+[pion] worker 9 stopped (shutdown)
+[pion] worker 8 stopped (shutdown)
+[pion] worker 15 stopped (shutdown)
+[pion] worker 13 stopped (shutdown)
+[pion] worker 14 stopped (shutdown)
+[pion] worker 2 stopped (shutdown)
+[pion] worker 11 stopped (shutdown)
+[pion] worker 5 stopped (shutdown)
+[pion] worker 1 stopped (shutdown)
+[pion] worker 6 stopped (shutdown)

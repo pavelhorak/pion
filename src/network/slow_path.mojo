@@ -71,6 +71,7 @@ from src.commands.command_info import cmd_pause_write, cmd_is_container
 from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro, handle_pfselftest, handle_pfdebug
 from src.commands.monitor import MonitorRegistry, monitor_line
 from src.network.vector_ingest import ingest_hash_vector, record_all_dead, ingest_whole_hash, hash_addr, after_rename
+from src.network.vector_auto import VectorAuto, vector_auto_await, vector_auto_hold, vector_auto_release, auto_building_here, auto_worker_of
 from src.commands.replication_cmds import handle_role, handle_replicaof, handle_failover, handle_sync, handle_replconf
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
@@ -83,7 +84,7 @@ from src.commands.migrate import handle_dump, handle_restore, handle_migrate
 from src.commands.string_kv import handle_incrby, handle_decrby, handle_incrbyfloat, handle_append, handle_strlen, handle_getset, handle_getdel, handle_getex, handle_setnx, handle_setex, handle_psetex, handle_msetnx, handle_msetex, handle_getrange, handle_substr, handle_setrange, handle_expiretime, handle_pexpiretime, handle_unlink, handle_lcs
 from src.commands.ai import handle_ai_chat, handle_ai_flare, handle_ai_complete, handle_ai_semantic_cache, handle_ai_embed, handle_ai_generate, handle_ai_loadmodel, handle_ai_memory
 from src.commands.sorted_set import zmpop_pop, handle_zrem, handle_zcard, handle_zrank, handle_zrevrank, handle_zscore, handle_zcount, handle_zincrby, handle_zrange, handle_zrevrange, handle_zrangebyscore, handle_zrevrangebyscore, handle_zunion, handle_zinter, handle_zunionstore, handle_zinterstore, handle_zlexcount, handle_zrangebylex, handle_zrevrangebylex, handle_zpopmax, handle_zmpop, handle_zrandmember, handle_zmscore, handle_zscan, handle_zrangestore, handle_zintercard, handle_zdiff, handle_zdiffstore, handle_zremrangebylex, handle_zremrangebyrank, handle_zremrangebyscore
-from src.commands.vector import handle_ft_info, handle_ft_dropindex, handle_ft_optimize, handle_ft_create, handle_ft_addtext, handle_ft_searchtext, handle_ft_search, handle_ft_hybrid, write_ft_search_response
+from src.commands.vector import handle_ft_info, handle_ft_dropindex, handle_ft_optimize, handle_ft_create, handle_ft_addtext, handle_ft_searchtext, handle_ft_search, handle_ft_hybrid, write_ft_search_response, refresh_index_view
 from src.commands.kv_cache import handle_kv_store, handle_kv_fetch, handle_kv_info
 from src.commands.attend import handle_attend_create, handle_attend_store, handle_attend_query, handle_attend_finalize, handle_attend_info, ATTEND_MAX_K
 from src.commands.v_store import handle_v_create, handle_v_storebatch, handle_v_fetch, handle_v_info, handle_v_snapshot, handle_v_restore, handle_v_commit, handle_v_export
@@ -389,6 +390,9 @@ struct SlowPathHandler:
     var script_big_tok_cap: Int
     # #52: tenant_scratch's size; grown to fit a command with many keys
     var tenant_scratch_cap: Int
+    # Drop-in: this worker's side of the automatic vector index build
+    # (vector_auto.mojo). At END per the field rule.
+    var vauto: VectorAuto
 
     def __init__(
         out self,
@@ -478,6 +482,7 @@ struct SlowPathHandler:
         self.script_big_tokens = null_ptr[RESP3Token, MutUntrackedOrigin]()
         self.script_big_tok_cap = 0
         self.tenant_scratch_cap = TENANT_SCRATCH_CAP if self.tenant_table.count > 0 else 1
+        self.vauto = VectorAuto()
         self.cluster = cluster
         self.shard_query_seq = alloc[UInt64](1)
         self.shard_query_seq[0] = 1
@@ -922,7 +927,43 @@ struct SlowPathHandler:
         s += "moe_hits:" + String(self.moe_tier.hits) + "\r\n"
         s += "moe_misses:" + String(self.moe_tier.misses) + "\r\n"
         s += "vector_queries:" + String(self.ledger.vector_queries) + "\r\n"
+        s += self._vector_index_info()
         return s
+
+    def _vector_index_info(self) -> String:
+        """Drop-in: what serves FT.SEARCH, process-wide. vector_index is none
+        (no index defined), exact (vectors, no graph yet: answered by exact
+        scan), building (exact meanwhile), graph, or graph+delta (vectors
+        written after an automatic build, scanned exactly and merged).
+        vector_unindexed_writes counts vectors stored after an explicit
+        FT.OPTIMIZE, which nothing indexes."""
+        var sh = self.shared_hnsw
+        if is_null(sh):
+            return String("")
+        var ready = UInt64(0)
+        if is_not_null(sh[].ready_atomic):
+            ready = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](sh[].ready_atomic, UInt64(0))
+        var graph = sh[].num_nodes if ready != 0 else 0
+        var rows = sh[].ingested()
+        var delta = rows - graph if is_not_null(sh[].ingest_fp32) and rows > graph else 0
+        var building = auto_worker_of(sh) >= 0
+        var state = String("none")
+        if building:
+            state = "building"
+        elif ready != 0:
+            state = "graph+delta" if delta > 0 else "graph"
+        elif rows > 0:
+            state = "exact"
+        elif sh[].pre_index_ready:
+            state = "empty"
+        var unindexed = sh[].vec_stats[0] if is_not_null(sh[].vec_stats) else UInt64(0)
+        var builds = sh[].vec_stats[1] if is_not_null(sh[].vec_stats) else UInt64(0)
+        var o = String("vector_index:") + state + "\r\n"
+        o += "vector_graph_rows:" + String(graph) + "\r\n"
+        o += "vector_exact_rows:" + String(delta if ready != 0 else rows) + "\r\n"
+        o += "vector_auto_builds:" + String(builds) + "\r\n"
+        o += "vector_unindexed_writes:" + String(unindexed) + "\r\n"
+        return o
 
     def update_dispatch_gate(mut self):
         """Recompute `fast_path_off` after anything it depends on changed."""
@@ -3230,17 +3271,26 @@ struct SlowPathHandler:
                             _ = handle_ft_info(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, writer)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.dropindex"): # FT.DROPINDEX
+                            vector_auto_hold(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
+                                             self.vec_tomb, self.worker_id, self.vauto)
                             _ = handle_ft_dropindex(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, writer, self.worker_id)
+                            vector_auto_release(self.shared_hnsw, self.worker_id)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.optimize"): # FT.OPTIMIZE
+                            vector_auto_hold(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
+                                             self.vec_tomb, self.worker_id, self.vauto)
                             _ = handle_ft_optimize(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, self.keyspace, self.worker_id, writer)
+                            vector_auto_release(self.shared_hnsw, self.worker_id)
                             # #46: the slots already dead, under the new build's id
                             if is_not_null(self.shared_hnsw) and is_not_null(self.shared_hnsw[].ready_atomic) \
                                     and self.shared_hnsw[].ready_atomic[] != 0:
                                 record_all_dead(self.shared_hnsw, self.vec_tomb, self.dispatcher)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.create"): # FT.CREATE
+                            vector_auto_hold(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
+                                             self.vec_tomb, self.worker_id, self.vauto)
                             _ = handle_ft_create(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, config, writer, self.worker_id)
+                            vector_auto_release(self.shared_hnsw, self.worker_id)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.addtext"): # FT.ADDTEXT
                             _ = handle_ft_addtext(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, self.keyspace, self.dispatcher, self.scache, writer)
@@ -3255,7 +3305,8 @@ struct SlowPathHandler:
                             # rest of a pipelined batch is never dropped (this site
                             # used to `return consumed_bytes`, eating the tail).
                             _ = handle_ft_hybrid(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw,
-                                self.keyspace, self.scache, fd, writer, server, kq, consumed_bytes)
+                                self.keyspace, self.scache, fd, writer, server, kq, consumed_bytes,
+                                self.worker_id)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.search"): # FT.SEARCH
                             self.ledger.vector_queries += UInt64(1)   # gh #262
@@ -3597,6 +3648,16 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── RAG.QUERY ── (9 bytes)
                     elif cmd_eq(tp, tl, "rag.query"):
+                        # It searches this worker's graph directly: not while a
+                        # background build owns it, and not through a borrow of
+                        # an index since dropped or replaced (drop-in).
+                        if auto_building_here(self.shared_hnsw, self.worker_id):
+                            vector_auto_await(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
+                                              self.vec_tomb, self.worker_id, self.vauto)
+                        if is_not_null(self.shared_hnsw) and is_not_null(self.shared_hnsw[].ready_atomic):
+                            _ = refresh_index_view(hnsw, self.shared_hnsw, self.worker_id,
+                                Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
+                                    self.shared_hnsw[].ready_atomic, UInt64(0)))
                         _ = handle_rag_query(tokens, i, num_tokens, writer, self.spec_rag, hnsw, server, fd, kq)
                         i = cmd_end_tok - 1
                     # ── INCRBY ──

@@ -1,0 +1,9 @@
+2026-10-20 07:59:55 preflight: clean
+1.93 4.44 4.39 1/419 51265
+md1 : active raid1 nvme1n1p3[1] nvme0n1p4[0]
+      902550528 blocks super 1.2 [2/2] [UU]
+      [=>...................]  resync =  8.0% (72215680/902550528) finish=13198.7min speed=1048K/sec
+--
+md0 : active raid1 nvme1n1p2[1] nvme0n1p3[0]
+      523264 blocks super 1.2 [2/2] [UU]
+      

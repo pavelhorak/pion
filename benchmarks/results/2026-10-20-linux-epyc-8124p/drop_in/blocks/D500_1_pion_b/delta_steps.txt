@@ -1,0 +1,37 @@
+[   23.6s] train (500000, 1536), test (1000, 1536), steps [10000, 25000, 45000]
+[   39.1s] ingested 500000 rows in 15.5 s; state (index, graph, exact, builds, running) ('exact', 0, 500000, 0, 0)
+[  107.7s] first build: settled 68.6 s after the ingest ended; state ('graph', 500000, 0, 1, 0)
+[  109.3s] RESULT delta 0: p50 1.613 ms  p90 1.849 ms (graph only)
+[  113.6s] RESULT delta 10000: p50 3.444 ms  p90 3.699 ms  added 1.831 ms = 113.5% of the delta-0 p50 (client RTT included in it)
+[  120.0s] RESULT delta 25000: p50 5.470 ms  p90 5.729 ms  added 3.857 ms = 239.1% of the delta-0 p50 (client RTT included in it)
+[  129.3s] RESULT delta 45000: p50 8.103 ms  p90 8.361 ms  added 6.489 ms = 402.3% of the delta-0 p50 (client RTT included in it)
+[  129.3s] RESULT fit over the 3 delta points: added = 0.512 ms fixed + 0.1330 ms per 1,000 delta rows
+[  129.3s] RESULT at a 34000-row delta the fit gives +5.035 ms = 312.1% of the delta-0 p50
+[  129.3s] RESULT at a 61000-row delta the fit gives +8.626 ms = 534.7% of the delta-0 p50
+[  129.5s] added 6000 rows (551000 in all): the delta is past 1/10 of the index, so a rebuild starts (during the ingest or after a 200 ms pause); state ('graph+delta', 500000, 51000, 1, 1)
+[  131.5s] during the rebuild: t+2.0 s delta 51000 p50 8.970 ms p90 9.291 ms
+[  137.3s] during the rebuild: t+7.8 s delta 51000 p50 31.153 ms p90 33.913 ms
+[  142.9s] during the rebuild: t+13.4 s delta 51000 p50 30.763 ms p90 34.130 ms
+[  148.5s] during the rebuild: t+19.0 s delta 51000 p50 30.967 ms p90 34.160 ms
+[  154.3s] during the rebuild: t+24.8 s delta 51000 p50 31.280 ms p90 34.093 ms
+[  160.1s] during the rebuild: t+30.6 s delta 51000 p50 31.505 ms p90 34.159 ms
+[  165.9s] during the rebuild: t+36.4 s delta 51000 p50 31.125 ms p90 34.188 ms
+[  171.6s] during the rebuild: t+42.1 s delta 51000 p50 31.447 ms p90 34.235 ms
+[  177.3s] during the rebuild: t+47.8 s delta 51000 p50 30.909 ms p90 34.230 ms
+[  183.3s] during the rebuild: t+53.8 s delta 51000 p50 31.711 ms p90 34.311 ms
+[  189.0s] during the rebuild: t+59.5 s delta 51000 p50 31.248 ms p90 34.369 ms
+[  194.8s] during the rebuild: t+65.3 s delta 51000 p50 31.390 ms p90 34.134 ms
+[  200.2s] during the rebuild: t+70.7 s delta 51000 p50 31.330 ms p90 34.114 ms
+[  202.0s] during the rebuild: t+72.5 s delta 51000 p50 9.038 ms p90 9.260 ms
+[  203.8s] during the rebuild: t+74.3 s delta 51000 p50 8.960 ms p90 9.249 ms
+[  205.6s] during the rebuild: t+76.1 s delta 51000 p50 8.982 ms p90 9.254 ms
+[  207.4s] during the rebuild: t+77.9 s delta 51000 p50 8.998 ms p90 9.278 ms
+[  208.6s] during the rebuild: t+79.1 s delta 51000 p50 2.065 ms p90 9.074 ms
+[  208.9s] during the rebuild: t+79.4 s delta 1000 p50 1.820 ms p90 2.116 ms
+[  209.3s] during the rebuild: t+79.8 s delta 1000 p50 1.892 ms p90 2.124 ms
+[  209.7s] during the rebuild: t+80.2 s delta 1000 p50 1.917 ms p90 2.179 ms
+[  210.1s] during the rebuild: t+80.6 s delta 1000 p50 2.136 ms p90 2.368 ms
+[  210.5s] during the rebuild: t+81.0 s delta 1000 p50 2.043 ms p90 2.327 ms
+[  210.5s] RESULT rebuild published 81.0 s after the last row was added (client clock; the server's 'indexed in' line is the build's own time); state ('graph+delta', 550000, 1000, 2, 0)
+[  210.5s] RESULT during the rebuild: 23 batches of 200 queries, delta 51000-1000, p50 median 30.763 ms, max 31.711 ms
+[  212.5s] RESULT after the rebuild: p50 2.021 ms  p90 2.263 ms; state ('graph+delta', 550000, 1000, 2, 0)

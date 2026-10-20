@@ -1,0 +1,15 @@
+rc=0
+[  109.3s] RESULT delta 0: p50 1.613 ms  p90 1.849 ms (graph only)
+[  113.6s] RESULT delta 10000: p50 3.444 ms  p90 3.699 ms  added 1.831 ms = 113.5% of the delta-0 p50 (client RTT included in it)
+[  120.0s] RESULT delta 25000: p50 5.470 ms  p90 5.729 ms  added 3.857 ms = 239.1% of the delta-0 p50 (client RTT included in it)
+[  129.3s] RESULT delta 45000: p50 8.103 ms  p90 8.361 ms  added 6.489 ms = 402.3% of the delta-0 p50 (client RTT included in it)
+[  129.3s] RESULT fit over the 3 delta points: added = 0.512 ms fixed + 0.1330 ms per 1,000 delta rows
+[  129.3s] RESULT at a 34000-row delta the fit gives +5.035 ms = 312.1% of the delta-0 p50
+[  129.3s] RESULT at a 61000-row delta the fit gives +8.626 ms = 534.7% of the delta-0 p50
+[  210.5s] RESULT rebuild published 81.0 s after the last row was added (client clock; the server's 'indexed in' line is the build's own time); state ('graph+delta', 550000, 1000, 2, 0)
+[  210.5s] RESULT during the rebuild: 23 batches of 200 queries, delta 51000-1000, p50 median 30.763 ms, max 31.711 ms
+[  212.5s] RESULT after the rebuild: p50 2.021 ms  p90 2.263 ms; state ('graph+delta', 550000, 1000, 2, 0)
+[vector] auto-build: indexing 500000 vectors in the background; FT.SEARCH answers exactly until it is done
+[vector] auto-build: 500000 vectors indexed in 67323 ms; FT.SEARCH uses the graph now
+[vector] auto-build: re-indexing 550000 vectors in the background; the current index keeps serving
+[vector] auto-build: 550000 vectors indexed in 78794 ms; FT.SEARCH uses the graph now

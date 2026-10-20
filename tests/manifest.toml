@@ -1535,6 +1535,14 @@ server = "self"
 tier = "gate"
 timeout = 300
 
+# Drop-in phase A: answers without FT.OPTIMIZE (exact before the build, the
+# background build, the delta, the rebuild, -w 4 through the affinity ports)
+[[test]]
+file = "tests/test_vector_auto_build.py"
+server = "self"
+tier = "gate"
+timeout = 600
+
 # Every keyword argument of the differential's scripts, mangled: a parser that
 # matches a keyword by its first letters, or ignores an unknown one, shows up
 # as a divergence from Redis (#32).

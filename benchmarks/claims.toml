@@ -1931,7 +1931,7 @@ note = "Pion = the lower of its two blocks per size (K50_5, K500_5). 2.4x = 3766
 
 [[claim]]
 file = "README.md"
-where = "It becomes searchable later:"
+where = "It became searchable later:"
 numbers = ["265.6 s", "126.7 s", "500K"]
 kind = "result"
 evidence = ["benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/summary.md"]
@@ -1945,3 +1945,72 @@ numbers = ["0.58×", "0.83×"]
 kind = "result"
 evidence = ["benchmarks/results/2026-10-10-mac-m4-io-threads/summary.md"]
 expect = ["| 0.58 |", "| 0.83 |"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "Once inserts pause for 200 ms"
+numbers = ["200ms"]
+kind = "code"
+evidence = ["src/network/vector_auto.mojo"]
+expect = ["comptime AUTO_QUIET_NS = UInt64(200_000_000)"]
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "The kept buffer costs"
+numbers = ["6KB", "300MB", "50K"]
+kind = "arithmetic"
+note = "1536 x 4 bytes = 6 KB per vector; 50,000 x 6,144 bytes = 307 MB"
+
+[[claim]]
+file = "README.md"
+where = "VectorDBBench's stock client, which never sends"
+numbers = ["0.998×", "50K", "0.959", "0.960", "0.998"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-19-mac-m4-drop-in/summary_ab.md"]
+expect = ["| new_p1 | full | 1,229 / 7,018 / 8,657 | 8,657 | 0.9592 |", "| new_p3 | full | 1,139 / 6,866 / 8,902 | 8,902 | 0.9604 |", "new/old = 0.998"]
+note = "Stock client (no FT.OPTIMIZE) on the branch against 619aea2 with the patched client; recall from the 3 full runs (0.9592 / 0.9600 / 0.9604), QPS = median of 6 search-only runs per arm, 8,660 / 8,675"
+
+[[claim]]
+file = "README.md"
+where = "Searches during the stream answer at the ceiling"
+numbers = ["50%", "80%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-19-mac-m4-drop-in/summary_s50.md", "benchmarks/results/2026-10-18-linux-epyc-8124p/vector_field/summary.md"]
+expect = ["| 6ca3181_run2 | 0.5039 | 0.7948 |", "| 6ca3181_run1 | 0.5047 | 0.7947 | 0.8018 | 0.7622 |"]
+note = "0.50 / 0.79 = runs 2-7 at 50% and 80% inserted (0.4986-0.5049, 0.7900-0.7953); RediSearch 0.5106 / 0.7974 from the 2026-10-18 summary; 0.76 = run 1 after optimize()"
+
+[[claim]]
+file = "README.md"
+where = "During the stream Pion answers at RediSearch's"
+numbers = ["50%", "80%", "1.18×", "1.66×", "3.6×"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/summary.md"]
+expect = ["| S50_4_pion_a | 0.5132 | 0.8001 | 0.9671 | 0.9602 | 2,126 / 2,905 / 6,954 / 6,662 |", "| S50_2_redis_hnsw_fp32 | 0.5084 | 0.7974 | 0.9629 | 0.9629 | 1,797 / 1,752 / 1,852 / 1,836 |", "| S50_1_pion_a | 0.5138 | 0.7993 | 0.9669 | 0.9599 | 2,155 / 2,928 / 6,709 / 7,077 |"]
+note = "Pion A = the lower of its two runs per stage: 2,126 / 1,797 = 1.18, 2,905 / 1,752 = 1.66; after the stream the lowest Pion A max (6,662) over RediSearch's lowest (1,836) = 3.63. 50% / 80% are the case's stages (inputs)"
+
+[[claim]]
+file = "README.md"
+where = "Where it is slow: a large index that keeps taking writes"
+numbers = ["1.6 ms", "3.8 ms", "190 ms", "84 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/delta_steps.txt", "benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/builds.txt"]
+expect = ["RESULT delta 0: p50 1.616 ms", "RESULT delta 10000: p50 3.820 ms", "p50 189.590 ms", "p50 194.537 ms", "551000 vectors indexed in 84091 ms"]
+note = "Pion A, -w 1, one client, p50 incl. client RTT; 190 ms = the two batches of 200 queries timed during the rebuild (189.6 / 194.5)"
+
+[[claim]]
+file = "doc/vector_engine.md"
+where = "An exact scan reads every vector it covers"
+numbers = ["1.6 ms", "3.8 ms", "0.18 ms", "190 ms", "84 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/delta_steps.txt", "benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/builds.txt"]
+expect = ["RESULT delta 0: p50 1.616 ms", "RESULT delta 10000: p50 3.820 ms", "0.1756 ms per 1,000 delta rows", "p50 189.590 ms", "551000 vectors indexed in 84091 ms"]
+note = "0.18 ms per 1,000 = the fit over the 10K / 25K / 45K delta points (plus 0.457 ms fixed)"
+
+[[claim]]
+file = "website/landing/sections.md"
+where = "A large vector index that keeps taking writes"
+numbers = ["1.6 ms", "3.8 ms", "190 ms", "84 s"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/delta_steps.txt", "benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/builds.txt"]
+expect = ["RESULT delta 0: p50 1.616 ms", "RESULT delta 10000: p50 3.820 ms", "p50 189.590 ms", "p50 194.537 ms", "551000 vectors indexed in 84091 ms"]
+

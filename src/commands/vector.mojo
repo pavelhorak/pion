@@ -19,6 +19,7 @@ from src.common.config import PionConfig
 from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_len, parse_filter_float, is_valid_float_arg, parse_float64, arg_eq
 from src.common.lock_free import ShardQueryBus
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
+from src.vector.fp32_scan import scan_dot_f32, l2sq_f32_4chain, dot_f32_4chain
 # gh #87.1: src/vector/ivf_pq.mojo deleted (a measured dead end).
 from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_name
 from src.network.rerank_client import RerankClient
@@ -916,6 +917,274 @@ def passes_filters(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Drop-in (phase A): the vectors no built graph holds are searched exactly.
+# Before the first build that is every vector; after an automatic build it is
+# the delta, the slots written after its snapshot (vector_auto.mojo).
+# ---------------------------------------------------------------------------
+
+comptime EXACT_BLOCK = 512    # rows per visibility check and per score block
+
+
+def exact_knn(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    query: UnsafePointer[Float32, MutUntrackedOrigin],
+    k: Int, lo: Int, hi: Int,
+    mut ids: List[Int], mut scores: List[Float32],
+    filters: FtFilters,
+    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+):
+    """The k nearest of ingest slots [lo, hi), exactly, in the metric's units
+    (`1 - cos` under COSINE, squared L2 under L2, as _rescore_knn reports),
+    ascending. Skips slots not yet committed (commit_ingest), dead slots
+    (#46), and, with FILTER, documents that fail it: the filter is read only
+    for a row that would enter the top k, so a filter costs what it rejects.
+
+    COSINE vectors were normalized at ingest, so the query is normalized and
+    one GEMV per block gives the dot products (Accelerate on macOS). L2 has no
+    stored norms, so it reads each row once with the four-chain kernel."""
+    ids.clear()
+    scores.clear()
+    if is_null(shared) or k <= 0 or hi <= lo:
+        return
+    var fp = shared[].ingest_fp32
+    var dim = shared[].pre_dim
+    if is_null(fp) or dim <= 0:
+        return
+    var cosine = shared[].pre_distance_metric == 1
+    var q = alloc[Float32](dim)
+    var ss = Float32(0.0)
+    for d in range(dim):
+        ss += query[d] * query[d]
+    var inv = Float32(1.0) / sqrt(ss) if cosine and ss > 0.0 else Float32(1.0)
+    for d in range(dim):
+        q[d] = query[d] * inv
+    var blk = alloc[Float32](EXACT_BLOCK)
+    var live = alloc[UInt8](EXACT_BLOCK)
+    var cap = k if k < hi - lo else hi - lo
+    var hs = alloc[Float32](cap)      # max-heap on score: the worst kept row on top
+    var hi_ = alloc[Int](cap)
+    var hn = 0
+    var any_dead = shared[].any_dead()
+    var b0 = lo
+    while b0 < hi:
+        var nb = EXACT_BLOCK if hi - b0 > EXACT_BLOCK else hi - b0
+        var nlive = 0
+        for r in range(nb):
+            var s = b0 + r
+            var ok = shared[].row_visible(s) and not (any_dead and shared[].slot_dead(s))
+            live[r] = 1 if ok else 0
+            if ok: nlive += 1
+        if nlive == 0:
+            b0 += nb
+            continue
+        # the ids above were read before the rows below (commit_ingest's pair)
+        external_call["pion_full_fence", NoneType]()
+        var rows = fp + b0 * dim
+        if cosine:
+            scan_dot_f32(rows, nb, dim, q, blk)
+            for r in range(nb):
+                blk[r] = Float32(1.0) - blk[r]
+        else:
+            for r in range(nb):
+                if live[r] != 0:
+                    blk[r] = l2sq_f32_4chain(q, rows + r * dim, dim)
+        for r in range(nb):
+            if live[r] == 0:
+                continue
+            var sc = blk[r]
+            if hn == cap and not (sc < hs[0]):
+                continue
+            var slot = b0 + r
+            if filters.count > 0 and not passes_filters(
+                    slot, keyspace, filters.count, filters.types, filters.field_lens,
+                    filters.field_names, filters.str_ptrs, filters.str_lens,
+                    filters.lo, filters.hi):
+                continue
+            if hn < cap:
+                var c = hn                     # sift up
+                hn += 1
+                while c > 0:
+                    var par = (c - 1) // 2
+                    if hs[par] >= sc:
+                        break
+                    hs[c] = hs[par]
+                    hi_[c] = hi_[par]
+                    c = par
+                hs[c] = sc
+                hi_[c] = slot
+            else:
+                var c = 0                      # replace the top, sift down
+                while True:
+                    var l = 2 * c + 1
+                    if l >= hn:
+                        break
+                    var m = l
+                    if l + 1 < hn and hs[l + 1] > hs[l]:
+                        m = l + 1
+                    if hs[m] <= sc:
+                        break
+                    hs[c] = hs[m]
+                    hi_[c] = hi_[m]
+                    c = m
+                hs[c] = sc
+                hi_[c] = slot
+        b0 += nb
+    # pop the heap from the back: ascending order
+    for _ in range(hn):
+        ids.append(0)
+        scores.append(0.0)
+    var n = hn
+    while n > 0:
+        var top_s = hs[0]
+        var top_i = hi_[0]
+        n -= 1
+        ids[n] = top_i
+        scores[n] = top_s
+        var sc = hs[n]
+        var si = hi_[n]
+        var c = 0
+        while True:
+            var l = 2 * c + 1
+            if l >= n:
+                break
+            var m = l
+            if l + 1 < n and hs[l + 1] > hs[l]:
+                m = l + 1
+            if hs[m] <= sc:
+                break
+            hs[c] = hs[m]
+            hi_[c] = hi_[m]
+            c = m
+        if n > 0:
+            hs[c] = sc
+            hi_[c] = si
+    q.free()
+    blk.free()
+    live.free()
+    hs.free()
+    hi_.free()
+
+
+def merge_delta(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    built: Int,
+    query: UnsafePointer[Float32, MutUntrackedOrigin],
+    k: Int,
+    filters: FtFilters,
+    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    mut ids: List[Int], mut scores: List[Float32],
+):
+    """Drop-in: the graph holds slots [0, built); slots written since (kept by
+    an automatic build) are scanned exactly and merged in, both lists sorted
+    ascending, k kept. Nothing to do after FT.OPTIMIZE, which frees the buffer."""
+    if is_null(shared) or is_null(shared[].ingest_fp32) or built <= 0:
+        return
+    var rows = shared[].ingested()
+    if rows <= built:
+        return
+    var d_ids = List[Int]()
+    var d_scores = List[Float32]()
+    exact_knn(shared, query, k, built, rows, d_ids, d_scores, filters, keyspace)
+    if len(d_ids) == 0:
+        return
+    _exact_rescore(shared, query, built, ids, scores)
+    var n_a = len(ids) if len(ids) < len(scores) else len(scores)
+    var out_ids = List[Int](capacity=k)
+    var out_scores = List[Float32](capacity=k)
+    var a = 0
+    var b = 0
+    while len(out_ids) < k and (a < n_a or b < len(d_ids)):
+        if b >= len(d_ids) or (a < n_a and scores[a] <= d_scores[b]):
+            out_ids.append(ids[a])
+            out_scores.append(scores[a])
+            a += 1
+        else:
+            out_ids.append(d_ids[b])
+            out_scores.append(d_scores[b])
+            b += 1
+    ids = out_ids^
+    scores = out_scores^
+
+
+def _exact_rescore(
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    query: UnsafePointer[Float32, MutUntrackedOrigin],
+    built: Int,
+    mut ids: List[Int], mut scores: List[Float32],
+):
+    """The graph's results, scored exactly from the FP32 ingest rows, ascending.
+
+    _rescore_knn scores them from the INT8 codes, and the quantization noise
+    ADDS to every distance: on 1536-d OpenAI embeddings about +0.1 of `1 - cos`
+    (0.264 reported against 0.167 exact for the same document). Ranking among
+    graph rows survives that; a merge with exact delta rows does not: every
+    delta row within 0.1 of the true neighbours outranked all of them, and
+    in-stream recall@100 fell to 0.07-0.10. The delta merge needs both sides
+    exact, and in auto mode the FP32 rows are all still here."""
+    var n = len(ids) if len(ids) < len(scores) else len(scores)
+    var fp = shared[].ingest_fp32
+    var dim = shared[].pre_dim
+    if n == 0 or is_null(fp) or dim <= 0:
+        return
+    var cosine = shared[].pre_distance_metric == 1
+    var q = alloc[Float32](dim)
+    var ss = Float32(0.0)
+    for d in range(dim):
+        ss += query[d] * query[d]
+    var inv = Float32(1.0) / sqrt(ss) if cosine and ss > 0.0 else Float32(1.0)
+    for d in range(dim):
+        q[d] = query[d] * inv
+    for i in range(n):
+        var slot = ids[i]
+        if slot < 0 or slot >= built or not shared[].row_visible(slot):
+            continue
+        var row = fp + slot * dim
+        if cosine:
+            scores[i] = Float32(1.0) - dot_f32_4chain(q, row, dim)
+        else:
+            scores[i] = l2sq_f32_4chain(q, row, dim)
+    q.free()
+    for a in range(1, n):
+        var b = a
+        while b > 0 and scores[b] < scores[b - 1]:
+            var ts = scores[b]; scores[b] = scores[b - 1]; scores[b - 1] = ts
+            var ti = ids[b]; ids[b] = ids[b - 1]; ids[b - 1] = ti
+            b -= 1
+
+
+def refresh_index_view(
+    mut hnsw: HNSWGraph,
+    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    worker_id: Int,
+    ready: UInt64,
+) -> Bool:
+    """Whether this worker's graph serves the published index now, after
+    making it so where it can. `ready` is the caller's ACQUIRE load of
+    ready_atomic.
+
+    - A borrow of an index that was unpublished, or replaced (publish_seq
+      moved on), is given back (_unborrow).
+    - The owner (the worker whose graph was published) searches its own
+      graph; any other worker borrows the published one, also over a stale
+      build of its own.
+    - Nothing is live while ready_atomic is 0: the owner's graph may be mid
+      build on another thread (vector_auto.mojo), or dropped elsewhere.
+    Without a shared view (single-graph callers) the graph's own state rules."""
+    if is_null(shared) or is_null(shared[].ready_atomic):
+        return hnsw.index_ready and hnsw.entry_point_id != -1
+    var seq = shared[].publish_seq[] if is_not_null(shared[].publish_seq) else UInt64(0)
+    if hnsw.is_borrowed and (ready == 0 or hnsw.borrow_seq != seq):
+        hnsw._unborrow()
+    if ready == 0:
+        return False
+    if shared[].index_owner == worker_id and not hnsw.is_borrowed:
+        return hnsw.index_ready and hnsw.entry_point_id != -1
+    if not hnsw.is_borrowed and shared[].num_shards <= 1:
+        hnsw.borrow_from_shared(shared)
+    return hnsw.is_borrowed and hnsw.index_ready and hnsw.entry_point_id != -1
+
+
 def populate_hnsw_metadata(
     mut hnsw: HNSWGraph,
     shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
@@ -1510,6 +1779,10 @@ def handle_ft_info(
         num_docs = hnsw.num_nodes
     elif ready > 0 and is_not_null(shared_hnsw):
         num_docs = shared_hnsw[].num_nodes
+    # Drop-in: vectors FT.SEARCH answers exactly (before any build, or written
+    # after an automatic one) are documents of the index too.
+    if is_not_null(shared_hnsw) and shared_hnsw[].ingested() > num_docs:
+        num_docs = shared_hnsw[].ingested()
     if writer.proto == 3:
         # RediSearch answers FT.INFO with a map on RESP3, and redis-py 8 parses
         # it as one. Same two fields as RESP2; num_docs is an integer there.
@@ -1532,47 +1805,19 @@ def handle_ft_info(
 # FT.DROPINDEX command handler
 # ---------------------------------------------------------------------------
 
-def retire_index(
-    mut hnsw: HNSWGraph,
+def wait_for_readers(
     shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     worker_id: Int,
 ):
-    """Unpublish the served index, wait out in-flight readers, reset the graph.
-
-    Used by FT.DROPINDEX, and by FT.CREATE when it replaces a built or
-    ingesting index with a different name or DIM. The reset keeps the index
-    CONFIG (dim, vector field, ef_construction); FT.CREATE overwrites it next.
-    """
-    # Order matters: clear shared ready_atomic FIRST so other workers'
-    # FT.SEARCH borrow check sees not-ready BEFORE this worker frees the
-    # buffers that shared.compact_buffer / .prefix_buffer / .node_*norms
-    # may still point at. Borrowers that already borrowed see ready_atomic=0
-    # in handle_ft_search and reset their own entry_point_id=-1 (forces
-    # re-borrow on next valid publish — see borrower-invalidation below).
-    # This narrows the UAF window to "between read of ready_atomic=1 and
-    # use of compact_buffer in the same FT.SEARCH call", which is small.
-    # A proper RCU/epoch-based reclaim would close it entirely.
-    if is_not_null(shared_hnsw):
-        if is_not_null(shared_hnsw[].ingest_count):
-            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
-                shared_hnsw[].ingest_count, UInt64(0)
-            )
-        # #46: slot numbering starts over, and so do the tombstones
-        shared_hnsw[].new_generation()
-        shared_hnsw[].ready = False
-        if is_not_null(shared_hnsw[].ready_atomic):
-            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
-                shared_hnsw[].ready_atomic, UInt64(0))
-        # Reset shard_ready so next FT.OPTIMIZE triggers full rebuild
-        var n_sr = shared_hnsw[].num_shards
-        if is_not_null(shared_hnsw[].shard_ready) and n_sr > 0:
-            for sri in range(n_sr):
-                Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
-                    shared_hnsw[].shard_ready + sri * 8, UInt64(0)
-                )
+    """gh #14: return once no other worker can still hold a pointer it read
+    before this call: what to wait for between unpublishing a buffer (or
+    nulling a shared pointer) and freeing it. Retiring an index, freeing the
+    ingest buffer after FT.OPTIMIZE, and the automatic rebuild all use it.
+    Call it from a worker inside a dispatch batch (its own slot is skipped)
+    or from housekeeping, which runs between batches."""
     # gh #14 — PHASE-2 EPOCH RCU (replaces the phase-1 `usleep(10000)`).
     #
-    # The `ready_atomic = 0` RELEASE-store above is what makes borrower
+    # The caller's `ready_atomic = 0` RELEASE-store is what makes borrower
     # invalidation kick in on the next ACQUIRE. But a search that ALREADY
     # passed its ACQUIRE-load with ready_atomic=1 may still be using the
     # buffers we are about to free. Phase 1 slept 10 ms, on the reasoning that
@@ -1641,6 +1886,47 @@ def retire_index(
         # what shipped before, so the fallback cannot be worse than the old
         # code.
         _ = external_call["usleep", Int32](Int32(10000))
+
+
+def retire_index(
+    mut hnsw: HNSWGraph,
+    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    worker_id: Int,
+):
+    """Unpublish the served index, wait out in-flight readers, reset the graph.
+
+    Used by FT.DROPINDEX, and by FT.CREATE when it replaces a built or
+    ingesting index with a different name or DIM. The reset keeps the index
+    CONFIG (dim, vector field, ef_construction); FT.CREATE overwrites it next.
+    """
+    # Order matters: clear shared ready_atomic FIRST so other workers'
+    # FT.SEARCH borrow check sees not-ready BEFORE this worker frees the
+    # buffers that shared.compact_buffer / .prefix_buffer / .node_*norms
+    # may still point at. Borrowers that already borrowed see ready_atomic=0
+    # in handle_ft_search and reset their own entry_point_id=-1 (forces
+    # re-borrow on next valid publish — see borrower-invalidation below).
+    # This narrows the UAF window to "between read of ready_atomic=1 and
+    # use of compact_buffer in the same FT.SEARCH call", which is small.
+    # A proper RCU/epoch-based reclaim would close it entirely.
+    if is_not_null(shared_hnsw):
+        if is_not_null(shared_hnsw[].ingest_count):
+            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
+                shared_hnsw[].ingest_count, UInt64(0)
+            )
+        # #46: slot numbering starts over, and so do the tombstones
+        shared_hnsw[].new_generation()
+        shared_hnsw[].ready = False
+        if is_not_null(shared_hnsw[].ready_atomic):
+            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
+                shared_hnsw[].ready_atomic, UInt64(0))
+        # Reset shard_ready so next FT.OPTIMIZE triggers full rebuild
+        var n_sr = shared_hnsw[].num_shards
+        if is_not_null(shared_hnsw[].shard_ready) and n_sr > 0:
+            for sri in range(n_sr):
+                Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
+                    shared_hnsw[].shard_ready + sri * 8, UInt64(0)
+                )
+    wait_for_readers(shared_hnsw, worker_id)
     hnsw.reset_index()
 
 
@@ -1731,6 +2017,26 @@ def adopt_index_config(
         hnsw.ef_construction = shared_hnsw[].pre_ef_construction
 
 
+def _close_ingest(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
+    """FT.OPTIMIZE ends ingest: free the FP32 ingest buffer. Null the pointers,
+    wait out every batch that may have read them (an HSET writing a row, an
+    exact scan reading one), then free, and restart the count, which nothing
+    may use to read a buffer that is gone."""
+    var old_fp32 = shared_hnsw[].ingest_fp32
+    var old_ids = shared_hnsw[].ingest_ids
+    if is_null(old_fp32) and is_null(old_ids):
+        return
+    shared_hnsw[].ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
+    shared_hnsw[].ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
+    wait_for_readers(shared_hnsw, worker_id)
+    if is_not_null(old_fp32):
+        old_fp32.free()
+    if is_not_null(old_ids):
+        old_ids.free()
+    if is_not_null(shared_hnsw[].ingest_count):
+        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared_hnsw[].ingest_count, UInt64(0))
+
+
 @always_inline
 def handle_ft_optimize(
     tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
@@ -1782,6 +2088,38 @@ def handle_ft_optimize(
         hnsw.index_name_len = _onl
         for _bi in range(_onl): hnsw.index_name[_bi] = tokens[ci].ptr[_bi]
     adopt_index_config(hnsw, shared_hnsw)
+    # Nothing ingested since the served index was built (FT.OPTIMIZE again, or
+    # after the automatic build consumed nothing new): keep that index. Only
+    # this worker's text-side state is rebuilt (BM25 and filter metadata are
+    # per worker). This used to rebuild and republish this worker's graph,
+    # which on a worker that had not built the index was an EMPTY one.
+    var _served: UInt64 = 0
+    if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].ready_atomic):
+        _served = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
+            shared_hnsw[].ready_atomic, UInt64(0))
+    # After an automatic build the ingest count is not reset, so `_pending` is
+    # not 0; but when the served graph already holds every vector ingested,
+    # there is nothing to build either. FT.OPTIMIZE then only ends ingest: the
+    # buffer is freed (below), as after its own build. A client that sends it
+    # 200 ms after its last insert no longer pays for a second build.
+    var _covered = _served != 0 and is_not_null(shared_hnsw[].ingest_fp32) \
+        and shared_hnsw[].num_nodes >= shared_hnsw[].ingested()
+    if (_pending == 0 or _covered) and _served != 0:
+        populate_hnsw_metadata(hnsw, shared_hnsw, keyspace)
+        if _covered:
+            _close_ingest(shared_hnsw, worker_id)
+        writer.append_ok_response()
+        return ci
+    # Drop-in: build into this graph's OWN arrays. A graph that borrowed the
+    # published index used to build straight into the publisher's arrays.
+    # And when this worker's graph IS the published index, unpublish it and
+    # wait out its readers first: the build rewrites and frees those buffers.
+    # (Other workers search exactly over the ingest buffer meanwhile.)
+    if _served != 0 and shared_hnsw[].index_owner == worker_id and not hnsw.is_borrowed:
+        shared_hnsw[].ready = False
+        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared_hnsw[].ready_atomic, UInt64(0))
+        wait_for_readers(shared_hnsw, worker_id)
+    hnsw._unborrow()
     try:
         var _dbg_ic = UInt64(0)
         if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].ingest_count):
@@ -1860,16 +2198,12 @@ def handle_ft_optimize(
     hnsw.build_id = _bid if _bid != 0 else UInt64(1)
     # Publish full index + PQ data to shared view (all workers borrow via borrow_from_shared)
     if is_not_null(shared_hnsw):
-        hnsw.publish_to_shared(shared_hnsw)
-        # Free FP32 ingest buffer — no longer needed after INT8 compact_buffer is built.
-        # add_ingest_vector() guards with `if not self.ingest_fp32: return`, so
-        # post-optimize HGSETs safely skip ingest (new vectors use live add_vector path).
-        if is_not_null(shared_hnsw[].ingest_fp32):
-            shared_hnsw[].ingest_fp32.free()
-            shared_hnsw[].ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
-        if is_not_null(shared_hnsw[].ingest_ids):
-            shared_hnsw[].ingest_ids.free()
-            shared_hnsw[].ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
+        hnsw.publish_to_shared(shared_hnsw, worker_id)
+        # Free the FP32 ingest buffer: FT.OPTIMIZE means ingest is over. An
+        # HSET after it is stored but NOT indexed (add_ingest_vector finds no
+        # buffer; INFO vector_unindexed_writes counts it). Nothing else indexes
+        # it: the automatic build keeps the buffer instead (vector_auto.mojo).
+        _close_ingest(shared_hnsw, worker_id)
     # Phase 1: persist HNSW to disk so warm restarts skip FT.OPTIMIZE.
     # FT.OPTIMIZE accept-races to a random worker; with num_shards=1 (current default,
     # see commit 7b90d41) the worker that handled the request has the full index
@@ -2127,12 +2461,18 @@ def handle_ft_create(
             ordering=Ordering.ACQUIRE](shared_hnsw[].ready_atomic, UInt64(0)) != 0 and shared_hnsw[].num_nodes > 0
         if is_null(shared_hnsw[].ingest_fp32) and not _serving:
             var cap = hnsw.max_elements
-            shared_hnsw[].ingest_fp32 = alloc[Float32](cap * hnsw.dim)
-            shared_hnsw[].ingest_ids = alloc[Int32](cap)
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                 shared_hnsw[].ingest_count, UInt64(0)
             )
             shared_hnsw[].new_generation()      # #46: slots start again from 0
+            # Drop-in: ids double as commit marks (-1 = not written yet, read
+            # by the exact scan), so they are -1 before any HSET can see the
+            # buffer; the FP32 buffer, which add_ingest_vector checks, last.
+            var id_cap = cap if cap > shared_hnsw[].hk_max_elements else shared_hnsw[].hk_max_elements
+            var ids = alloc[Int32](id_cap)
+            unsafe_memset(ids.bitcast[UInt8](), 0xFF, id_cap * 4)
+            shared_hnsw[].ingest_ids = ids
+            shared_hnsw[].ingest_fp32 = alloc[Float32](cap * hnsw.dim)
 
     writer.append_ok_response()
     return ci
@@ -2331,6 +2671,7 @@ def handle_ft_hybrid(
     server: TCPServer,
     kq: Int32,
     consumed_bytes: Int,
+    worker_id: Int,
 ) raises -> Int:
     """FT.HYBRID <index> <text_query> <vector_blob> [K <k>] [ALPHA <a>] [RERANK <host> <port> <model> [<top_n>]]
     Single-command BM25+vector fusion with Reciprocal Rank Fusion.
@@ -2432,8 +2773,16 @@ def handle_ft_hybrid(
                 _rerank_enabled = True
         ci += 1
 
+    # The published index, borrowed or owned (refresh_index_view); before a
+    # build (drop-in) the vector half is exact over the ingest buffer.
+    var _h_ready: UInt64 = 0
+    if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].ready_atomic):
+        _h_ready = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
+            shared_hnsw[].ready_atomic, UInt64(0))
+    var _h_live = refresh_index_view(hnsw, shared_hnsw, worker_id, _h_ready)
+    var _h_rows = shared_hnsw[].ingested() if is_not_null(shared_hnsw) else 0
     # Validate: need HNSW index for vector search
-    if not hnsw.index_ready:
+    if not _h_live and _h_rows == 0 and not hnsw.index_ready:
         writer.append_error_response("ERR no index — run FT.CREATE + FT.OPTIMIZE first")
         writer.flush_response(fd, server, kq)
         return -1
@@ -2449,23 +2798,35 @@ def handle_ft_hybrid(
     # Validate vector blob dimension
     var _blob_ptr = _blob_tok.ptr
     var _blob_len = _blob_tok.length
-    if _blob_len != hnsw.dim * 4:
-        writer.append_error_response("ERR vector blob size mismatch (expected " + String(hnsw.dim * 4) + " bytes)")
+    var _h_dim = hnsw.dim
+    if not _h_live and is_not_null(shared_hnsw) and shared_hnsw[].pre_dim > 0:
+        _h_dim = shared_hnsw[].pre_dim
+    if _blob_len != _h_dim * 4:
+        writer.append_error_response("ERR vector blob size mismatch (expected " + String(_h_dim * 4) + " bytes)")
         writer.flush_response(fd, server, kq)
         return -1
 
     # ── Run vector search ──
     var _vec_ids = List[Int]()
     var _vec_scores = List[Float32]()
-    var _hybrid_ef = hnsw.ef_runtime
-    if hnsw.num_nodes > 50000:
-        var _hr = Float64(hnsw.num_nodes) / 50000.0
-        var _hef = Int(150.0 * sqrt(sqrt(_hr)))
-        if _hef > _hybrid_ef: _hybrid_ef = _hef
-    try:
-        var _fp32 = _blob_ptr.bitcast[Float32]()
-        _vec_ids = hnsw.search_fp32_scored(_fp32, _k * 4, _vec_scores, _hybrid_ef)
-    except: pass
+    if _h_live:
+        var _hybrid_ef = hnsw.ef_runtime
+        if hnsw.num_nodes > 50000:
+            var _hr = Float64(hnsw.num_nodes) / 50000.0
+            var _hef = Int(150.0 * sqrt(sqrt(_hr)))
+            if _hef > _hybrid_ef: _hybrid_ef = _hef
+        try:
+            var _fp32 = _blob_ptr.bitcast[Float32]()
+            _vec_ids = hnsw.search_fp32_scored(_fp32, _k * 4, _vec_scores, _hybrid_ef)
+            # drop-in: rows written after an automatic build, in metric units
+            if _h_rows > hnsw.num_nodes and is_not_null(shared_hnsw[].ingest_fp32):
+                _rescore_knn(hnsw, _fp32, _vec_ids, _vec_scores)
+                merge_delta(shared_hnsw, hnsw.num_nodes, _fp32, _k * 4, FtFilters(),
+                            keyspace, _vec_ids, _vec_scores)
+        except: pass
+    elif _h_rows > 0:
+        exact_knn(shared_hnsw, _blob_ptr.bitcast[Float32](), _k * 4, 0, _h_rows,
+                  _vec_ids, _vec_scores, FtFilters(), keyspace)
 
     # ── Run BM25 search ──
     var _bm25_ids = List[Int]()
@@ -2721,18 +3082,16 @@ def handle_ft_search(
     if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].ready_atomic):
         _ready_a = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
             shared_hnsw[].ready_atomic, UInt64(0))
-    # Borrower-side invalidation: if we previously borrowed (entry_point_id != -1
-    # and is_borrowed) but the publisher has dropped the index (ready_atomic=0),
-    # our borrowed pointers are about to dangle. Reset to entry_point_id=-1 so
-    # we'll re-borrow on the next valid publish (or return empty until then).
-    # See handle_ft_dropindex for the publisher-side ordering that pairs with this.
-    if hnsw.is_borrowed and _ready_a == 0:
-        hnsw.entry_point_id = -1
-        hnsw.num_nodes = 0
-        hnsw.is_borrowed = False
-        hnsw.index_ready = False
-    if n_s <= 1 and hnsw.entry_point_id == -1 and is_not_null(shared_hnsw) and _ready_a > 0:
-        hnsw.borrow_from_shared(shared_hnsw)
+    # Borrower-side invalidation and (re)borrow: a borrow of an index the
+    # publisher dropped (ready_atomic=0) or replaced (publish_seq moved on) is
+    # given back, and the published index is borrowed unless this worker's own
+    # graph is it (refresh_index_view). `_live`: this worker's graph serves the
+    # published index. When it does not, the KNN form answers exactly from the
+    # ingest buffer (drop-in: a stock client never sends FT.OPTIMIZE, and the
+    # build runs in the background, vector_auto.mojo).
+    _ = n_s
+    var _live = refresh_index_view(hnsw, shared_hnsw, worker_id, _ready_a)
+    var _rows = shared_hnsw[].ingested() if is_not_null(shared_hnsw) else 0
     if ci + 2 < num_tokens:
         ci += 1  # move to index name token
         var idx_name_tok_ptr = tokens[ci].ptr
@@ -2877,7 +3236,7 @@ def handle_ft_search(
             # Run vector search (if blob provided)
             var _hvec_ids    = List[Int]()
             var _hvec_scores = List[Float32]()
-            if _hvec_len == hnsw.dim * 4 and hnsw.index_ready:
+            if _live and _hvec_len == hnsw.dim * 4:
                 var _st_ef = hnsw.ef_runtime
                 if hnsw.num_nodes > 50000:
                     var _str = Float64(hnsw.num_nodes) / 50000.0
@@ -2886,7 +3245,17 @@ def handle_ft_search(
                 try:
                     var _hfp32 = _hvec_ptr.bitcast[Float32]()
                     _hvec_ids = hnsw.search_fp32_scored(_hfp32, _hk * 4, _hvec_scores, _st_ef)
+                    # drop-in: rows written after an automatic build (RRF reads
+                    # ranks, so both sides go to metric units before merging)
+                    if _rows > hnsw.num_nodes and is_not_null(shared_hnsw[].ingest_fp32):
+                        _rescore_knn(hnsw, _hfp32, _hvec_ids, _hvec_scores)
+                        merge_delta(shared_hnsw, hnsw.num_nodes, _hfp32, _hk * 4, FtFilters(),
+                                    keyspace, _hvec_ids, _hvec_scores)
                 except: pass
+            elif not _live and _rows > 0 and _hvec_len == shared_hnsw[].pre_dim * 4:
+                # drop-in: no built index serves here yet; the vector leg is exact
+                exact_knn(shared_hnsw, _hvec_ptr.bitcast[Float32](), _hk * 4, 0, _rows,
+                          _hvec_ids, _hvec_scores, FtFilters(), keyspace)
             # Run BM25 search (if text provided)
             var _hbm25_scores = List[Float32]()
             var _hbm25_ids    = List[Int]()
@@ -3054,7 +3423,7 @@ def handle_ft_search(
                              + "' is not this index's vector field '@" + _vfn + "'")
         # Auto-scale ef with dataset size: ef = max(ef, 150 * (N/50K)^0.25)
         # At 50K: ef=150 (baseline). At 5M: ef≈475. Prevents recall regression at scale.
-        if hnsw.num_nodes > 50000:
+        if _live and hnsw.num_nodes > 50000:
             var scale_ratio = Float64(hnsw.num_nodes) / 50000.0
             # (N/50K)^0.25 = sqrt(sqrt(N/50K))
             var scaled_ef = Int(150.0 * sqrt(sqrt(scale_ratio)))
@@ -3157,13 +3526,17 @@ def handle_ft_search(
                     if same:
                         found = True
                         var vt = tokens[params_at + 2 * pi + 1]
-                        if vt.length == hnsw.dim * 4:
+                        # the served graph's DIM; before a build, the defined index's
+                        var _qdim = hnsw.dim
+                        if not _live and is_not_null(shared_hnsw) and shared_hnsw[].pre_dim > 0:
+                            _qdim = shared_hnsw[].pre_dim
+                        if vt.length == _qdim * 4:
                             blob_ptr = vt.ptr.bitcast[Float32]()
                             blob_set = True
                         else:
                             q_err = ("ERR query vector $" + _bytes_str(vec_param_p, vec_param_l) + " is "
                                      + String(vt.length) + " bytes; this index expects "
-                                     + String(hnsw.dim * 4) + " (DIM " + String(hnsw.dim) + " x FLOAT32)")
+                                     + String(_qdim * 4) + " (DIM " + String(_qdim) + " x FLOAT32)")
                         break
             if not found and q_err.byte_length() == 0:
                 q_err = "ERR query parameter $" + _bytes_str(vec_param_p, vec_param_l) + " is not in PARAMS"
@@ -3218,10 +3591,18 @@ def handle_ft_search(
             writer.append_error_response(_wmsg)
         elif q_err.byte_length() > 0:
             writer.append_error_response(q_err)   # gh #361 / #367
-        elif k == 0 or not blob_set or not hnsw.index_ready or hnsw.entry_point_id == -1:
-            # KNN 0, or a created-but-unbuilt index: a well-formed empty reply,
-            # `[0]` — `[]` is not an FT.SEARCH reply shape (gh #361).
+        elif k == 0 or not blob_set or (not _live and _rows == 0):
+            # KNN 0, or a defined index with no vectors yet: a well-formed empty
+            # reply, `[0]` — `[]` is not an FT.SEARCH reply shape (gh #361).
             write_ft_search_response(writer, List[Int](), List[Float32](), keyspace, shared_hnsw, opts)
+        elif not _live:
+            # Drop-in: vectors are in, no built index serves them (none built
+            # yet, or this worker's owner is rebuilding it). Exact, in metric
+            # units, dead slots and FILTER honoured; EF_RUNTIME does not apply.
+            var _x_ids = List[Int]()
+            var _x_scores = List[Float32]()
+            exact_knn(shared_hnsw, blob_ptr, k, 0, _rows, _x_ids, _x_scores, filters, keyspace)
+            write_ft_search_response(writer, _x_ids, _x_scores, keyspace, shared_hnsw, opts)
         else:
             var n_shards2 = 1
             if is_not_null(shared_hnsw): n_shards2 = shared_hnsw[].num_shards
@@ -3443,6 +3824,8 @@ def handle_ft_search(
                         if sk > n_total: sk = n_total
                         if sk > FT_FILTER_MAX_CANDIDATES: sk = FT_FILTER_MAX_CANDIDATES
                     _rescore_knn(hnsw, blob_ptr, filtered_ids, filtered_scores)
+                    merge_delta(shared_hnsw, hnsw.num_nodes, blob_ptr, k, filters, keyspace,
+                                filtered_ids, filtered_scores)          # drop-in
                     write_ft_search_response(writer, filtered_ids, filtered_scores, keyspace, shared_hnsw, opts)
                 else:
                     if use_gpu_search:
@@ -3459,6 +3842,8 @@ def handle_ft_search(
                             blob_ptr, k, scratch_dists, ef_query,
                             p3_batch_start_node)
                     _rescore_knn(hnsw, blob_ptr, results2, scratch_dists)
+                    merge_delta(shared_hnsw, hnsw.num_nodes, blob_ptr, k, filters, keyspace,
+                                results2, scratch_dists)                # drop-in
                     write_ft_search_response(writer, results2, scratch_dists, keyspace, shared_hnsw, opts)
     else:
         # gh #361: `FT.SEARCH <index>` with no query is an arity error, not `[]`.

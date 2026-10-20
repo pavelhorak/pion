@@ -366,8 +366,12 @@ def main() -> int:
         print(f"\n{'FAIL' if FAILS else 'PASS'}: {len(FAILS)} failure(s)")
         return 1 if FAILS else 0
 
-    print("RESP3, index created but not built")
-    check_search_map("unbuilt FT.SEARCH", c3.cmd(*knn), expect_n=0)
+    print("RESP3, index created, graph not built yet")
+    # Drop-in: before a build FT.SEARCH answers exactly from the ingest buffer
+    # (it used to answer 0 results, which a stock client never got past).
+    early = check_search_map("unbuilt FT.SEARCH (exact)", c3.cmd(*knn), expect_n=len(DOCS))
+    check("unbuilt FT.SEARCH: every document key comes back",
+          sorted(doc_fields(d)[0] for d in early) == sorted(DOCS), str(early)[:200])
 
     optimized = c3.cmd("FT.OPTIMIZE", "idx")
     check("FT.OPTIMIZE", optimized == ("+", "OK"), repr(optimized))

@@ -1,0 +1,7 @@
+vector_queries:9600
+vector_index:graph+delta
+vector_graph_rows:550000
+vector_exact_rows:1000
+vector_auto_builds:2
+vector_build_running:0
+vector_unindexed_writes:0

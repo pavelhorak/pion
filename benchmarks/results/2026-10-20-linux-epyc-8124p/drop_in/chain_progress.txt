@@ -1,0 +1,40 @@
+2026-10-20 07:26:11 chain start pid 12434, session b, cap 2 started hours, DRY=0, queue 8 blocks
+2026-10-20 07:26:11 start B_build (timeout 45 min, estimate 30 min, hours used 1, cap 2)
+2026-10-20 07:26:11   B: build window start, Pion f638318e90c316225dff42e8d33f9595e47c0bd1, 32 threads
+2026-10-20 07:49:19   B: branches done: datasets rc=0 harness rc=0 redis rc=0 pion_B rc=0 pion_A rc=0 
+2026-10-20 07:49:19   smoke pion_a: results 5 [b'sm:4', [b'score', b'0.0582', b'id', b'4']]
+2026-10-20 07:49:20   smoke pion_b: results 5 [b'sm:4', [b'score', b'0.0582', b'id', b'4']]
+2026-10-20 07:49:20   smoke redis_hnsw_fp32: results 5 [b'sm:4', [b'score', b'0.0582799315453', b'id', b'4']]
+2026-10-20 07:49:20 end B_build rc=0 (24 min)
+2026-10-20 07:49:20 start SETUP (timeout 10 min, estimate 2 min, hours used 1, cap 2)
+2026-10-20 07:49:25   SETUP written (231 lines)
+2026-10-20 07:49:25 end SETUP rc=0 (1 min)
+2026-10-20 07:49:25 start S50_1_pion_a (timeout 25 min, estimate 10 min, hours used 1, cap 2)
+2026-10-20 07:49:25   S50_1_pion_a: Pion phase A (index builds itself; stock client) streaming 50K
+2026-10-20 07:57:53   S50_1_pion_a done: result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.5138, 0.7993, 0.9669, 0.9599] maxqps=[2155, 2928, 6709, 7077] insert=250.0324532049999 optimize=0
+2026-10-20 07:57:53 end S50_1_pion_a rc=0 (9 min)
+2026-10-20 07:57:53 start S50_2_redis_hnsw_fp32 (timeout 25 min, estimate 10 min, hours used 1, cap 2)
+2026-10-20 07:57:53   S50_2_redis_hnsw_fp32: Redis 8.10.2 + RediSearch, HNSW FLOAT32 streaming 50K
+2026-10-20 08:06:59   S50_2_redis_hnsw_fp32 done: result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.5084, 0.7974, 0.9629, 0.9629] maxqps=[1797, 1752, 1852, 1836] insert=250.03609477400005 optimize=
+2026-10-20 08:06:59 end S50_2_redis_hnsw_fp32 rc=0 (10 min)
+2026-10-20 08:06:59 start S50_3_pion_b (timeout 25 min, estimate 11 min, hours used 1, cap 2)
+2026-10-20 08:06:59   S50_3_pion_b: Pion phase B (rebuilds into a second graph; stock client) streaming 50K
+2026-10-20 08:15:56   S50_3_pion_b done: result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.5097, 0.7998, 0.9672, 0.9597] maxqps=[3125, 3128, 6694, 6721] insert=250.03216305100023 optimize=
+2026-10-20 08:15:56 end S50_3_pion_b rc=0 (9 min)
+2026-10-20 08:15:56 start D500_1_pion_b (timeout 40 min, estimate 15 min, hours used 2, cap 2)
+2026-10-20 08:15:56   D500_1_pion_b: Pion phase B (rebuilds into a second graph; stock client), 500K delta steps + a rebuild, -w 1
+2026-10-20 08:21:31   D500_1_pion_b done rc=0: 10 result lines, 4 build lines
+2026-10-20 08:21:31 end D500_1_pion_b rc=0 (6 min)
+2026-10-20 08:21:31 start S50_4_pion_a (timeout 25 min, estimate 11 min, hours used 2, cap 2)
+2026-10-20 08:21:31   S50_4_pion_a: Pion phase A (index builds itself; stock client) streaming 50K
+2026-10-20 08:31:12   S50_4_pion_a done: result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.5132, 0.8001, 0.9671, 0.9602] maxqps=[2126, 2905, 6954, 6662] insert=250.0326710510003 optimize=0
+2026-10-20 08:31:12 end S50_4_pion_a rc=0 (10 min)
+2026-10-20 08:31:12 start S50_5_pion_b (timeout 25 min, estimate 11 min, hours used 2, cap 2)
+2026-10-20 08:31:12   S50_5_pion_b: Pion phase B (rebuilds into a second graph; stock client) streaming 50K
+2026-10-20 08:40:20   S50_5_pion_b done: result: label=:) streaming stages=[50, 80, 100, 110] recall=[0.5086, 0.7993, 0.9678, 0.9601] maxqps=[3049, 3276, 6856, 6935] insert=250.0337247970001 optimize=0
+2026-10-20 08:40:20 end S50_5_pion_b rc=0 (10 min)
+2026-10-20 08:40:20 start A (analysis + capture)
+2026-10-20 08:40:20 ALL_DONE
+2026-10-20 08:40:20 capture /opt/vector_session.tgz 488K, 150 files
+2026-10-20 08:55:25   D500_2_pion_a: Pion phase A (index builds itself; stock client), 500K delta steps + a rebuild, -w 1
+2026-10-20 08:59:02   D500_2_pion_a done rc=0: 9 result lines, 4 build lines

@@ -271,13 +271,38 @@ At matched recall Pion serves about **2.4×** the queries per second of Redis
 recall@100 ≥ 0.95, and **3,250** against 1,363 at ≥ 0.97. At 50K it is 3.6× at
 0.95 (6,846 against 1,880) and 2.4× at 0.97.
 
-Pion searches INT8 codes in an index built once, by `FT.OPTIMIZE`. RediSearch
-searches FP32 and indexes every insert as it arrives. Pion loses where that
-difference shows:
-- It becomes searchable later: 265.6 s against 126.7 s at 500K.
-- In VectorDBBench's streaming case it returns nothing until `FT.OPTIMIZE`, while
-  RediSearch answers during the stream.
-- A stock Redis client never sends `FT.OPTIMIZE`.
+In that run Pion searched INT8 codes in an index built once, by `FT.OPTIMIZE`.
+RediSearch searches FP32 and indexes every insert as it arrives. Pion lost where
+that difference shows:
+- It became searchable later: 265.6 s against 126.7 s at 500K.
+- In VectorDBBench's streaming case it returned nothing until `FT.OPTIMIZE`,
+  while RediSearch answered during the stream.
+- A stock Redis client never sends `FT.OPTIMIZE`, so it got nothing back.
+
+**`FT.OPTIMIZE` is now optional.** Until the graph exists, `FT.SEARCH` answers
+exactly from the inserted vectors. Once inserts pause, the graph builds itself in
+the background, and a vector written after that is found at once
+([how](doc/vector_engine.md#searching-without-ftoptimize)). Measured on a Mac
+([`benchmarks/results/2026-10-19-mac-m4-drop-in/`](benchmarks/results/2026-10-19-mac-m4-drop-in/README.md)):
+- **The stock client.** VectorDBBench's stock client, which never sends
+  `FT.OPTIMIZE`, gets recall@100 of 0.959–0.960 at 50K. After the background
+  build its QPS is 0.998× that of today's path with `FT.OPTIMIZE`.
+- **The streaming case.** Searches during the stream answer at the ceiling:
+  0.50 and 0.79 at 50% and 80% inserted, against RediSearch's 0.51 and 0.80
+  above. In one run of seven, the end of the stream read 0.76; the cause is
+  not yet known.
+
+Re-measured on the EPYC box, with the same setup and the stock client
+([`benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/`](benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/README.md)):
+- **The streaming case.** During the stream Pion answers at RediSearch's
+  recall. At 50% and 80% inserted it serves 1.18× and 1.66× RediSearch's
+  queries per second (2,126 and 2,905 against 1,797 and 1,752), and about
+  3.6× once the stream ends.
+- **Where it is slow: a large index that keeps taking writes.** Vectors written
+  since the last build are searched exactly. At 500K vectors a query takes
+  1.6 ms from the graph alone, and 3.8 ms with 10,000 vectors written since.
+  During a rebuild every search is exact: 190 ms per query while that rebuild
+  ran, for 84 s. A load-once index pays none of this.
 
 The same run covers RediSearch's 8-bit SVS-VAMANA index and valkey-search.
 Method and raw runs:
@@ -425,7 +450,7 @@ vecs = {f"doc:{i}": rng.random(D).astype(np.float32) for i in range(20)}
 for key, v in vecs.items():
     r.execute_command("HSET", key, "vec", v.tobytes(), "title", key)
 
-r.execute_command("FT.OPTIMIZE", "idx")         # build the graph, then query
+r.execute_command("FT.OPTIMIZE", "idx")         # optional: build the graph now
 
 q = (Query("*=>[KNN 3 @vec $B AS score]")       # the 3 nearest, closest first
      .sort_by("score").return_fields("title", "score").dialect(2))

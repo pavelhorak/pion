@@ -1,0 +1,30 @@
+GT agreement (numpy vs dataset neighbors): 1.0
+w0: recall@100 0.9572 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 49798, 'expires': 0, 'avg_ttl': 0}]
+w1: recall@100 0.9572 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w2: recall@100 0.9572 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w3: recall@100 0.9572 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 50202, 'expires': 0, 'avg_ttl': 0}]
+run 3 rc=0
+w0: recall@100 0.9580 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 100000, 'expires': 0, 'avg_ttl': 0}]
+w1: recall@100 0.9580 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w2: recall@100 0.9580 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w3: recall@100 0.9580 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+run 4 rc=0
+w0: recall@100 0.9563 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w1: recall@100 0.9563 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 100000, 'expires': 0, 'avg_ttl': 0}]
+w2: recall@100 0.9563 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w3: recall@100 0.9563 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+run 5 rc=0
+w0: recall@100 0.9564 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w1: recall@100 0.9564 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 50798, 'expires': 0, 'avg_ttl': 0}]
+w2: recall@100 0.9564 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 49202, 'expires': 0, 'avg_ttl': 0}]
+w3: recall@100 0.9564 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+run 6 rc=0
+w0: recall@100 0.9571 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w1: recall@100 0.9571 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 50398, 'expires': 0, 'avg_ttl': 0}]
+w2: recall@100 0.9571 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 49602, 'expires': 0, 'avg_ttl': 0}]
+w3: recall@100 0.9571 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+run 7 rc=0
+w0: recall@100 0.9581 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w1: recall@100 0.9581 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w2: recall@100 0.9581 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys=None]
+w3: recall@100 0.9581 results/query 100.0 duplicates 0 [graph graph=50000 exact=0 keys={'keys': 100000, 'expires': 0, 'avg_ttl': 0}]

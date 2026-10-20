@@ -26,6 +26,7 @@ before FT.OPTIMIZE has no build yet: it is recorded when the build is
 """
 
 from std.memory import alloc, unsafe_memcpy
+from std.atomic import Atomic, Ordering
 from std.memory.unsafe_pointer import UnsafePointer
 from std.collections import List
 from src.common.ptr import is_not_null, is_null, null_ptr
@@ -75,8 +76,20 @@ def ingest_hash_vector(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
     var hv = keyspace[].get(GenericValue.borrow(key, klen))
     if hv.type.value != ValueType.HASH:
         return False
+    # #46 keeps an identical rewrite's slot alive (SlabHashMap._vector_field_set),
+    # so that slot still holds this vector: a second slot would list the
+    # document twice (an ingest script run twice, before or after a build).
+    var hm = hv.as_hash().bitcast[SlabHashMap]()
+    if hm[].vec_slot >= 0 and is_not_null(tomb) and Int(hm[].vec_tomb) == Int(tomb) \
+            and hm[].vec_gen == tomb[].generation() and not shared[].slot_dead(hm[].vec_slot):
+        return False
     var slot = shared[].add_ingest_vector(0, val.bitcast[Float32]())
     if slot < 0:
+        # Drop-in: after an explicit FT.OPTIMIZE the ingest buffer is gone and
+        # this vector is stored but not indexed. Count it (INFO
+        # vector_unindexed_writes) rather than lose it without a trace.
+        if is_null(shared[].ingest_fp32) and is_not_null(shared[].vec_stats):
+            _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](shared[].vec_stats, UInt64(1))
         return False
     # heap, not stack_allocation: it goes to the WAL appender, an out-of-line
     # call (a stack buffer may cross only into C or @always_inline, gh #349)
@@ -98,6 +111,7 @@ def ingest_hash_vector(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
     hk.unsafe_free()
     if is_not_null(tomb):
         hv.as_hash().bitcast[SlabHashMap]()[].index_vector(slot, _field_hash(field, flen), tomb)
+    shared[].commit_ingest(slot)          # drop-in: the exact scan may read it now
     return True
 
 
