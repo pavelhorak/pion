@@ -1,0 +1,53 @@
+preflight: clean
+Starting server: /opt/wt/main/pion-server -p 1974 --no-auto-detect --no-auto-embed -w 1
+  Server on port 1974 ready.
+Running benchmark for Pion (grouped, FLUSHALL between groups):
+  [Pion] group 'ping': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t ping
+  [Pion] group 'set,get,incr': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t set,get,incr
+  [Pion] group 'lpush,rpush,lpop,rpop': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t lpush,rpush,lpop,rpop
+  [Pion] group 'lrange': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t lrange
+  [Pion] group 'sadd,spop': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t sadd,spop
+  [Pion] group 'hset': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t hset
+  [Pion] group 'zadd,zpopmin': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t zadd,zpopmin
+  [Pion] group 'mset': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t mset
+  [Pion] group 'xadd': /opt/redis-8.10.2/src/redis-benchmark -p 1974 -q -c 50 -n 100000 -P 10 -t xadd
+Stopping server...
+
+### Benchmark Run: 2026-10-12 12:08:04
+**Parameters:** Clients: 50, Requests: 100000, Pipeline: 10, Pion workers: 1
+
+| Command | Valkey (RPS) | Redis (RPS) | Dragonfly (RPS) | Pion (RPS) | Winner | Pion vs Best (%) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| GET | 0 | 0 | 0 | **740,740** | **Pion** | 0.0% |
+| HSET | 0 | 0 | 0 | **735,294** | **Pion** | 0.0% |
+| INCR | 0 | 0 | 0 | **740,740** | **Pion** | 0.0% |
+| LPOP | 0 | 0 | 0 | **735,294** | **Pion** | 0.0% |
+| LPUSH | 0 | 0 | 0 | **740,740** | **Pion** | 0.0% |
+| LPUSH (needed to benchmark LRANGE) | 0 | 0 | 0 | **746,268** | **Pion** | 0.0% |
+| LRANGE_100 (first 100 elements) | 0 | 0 | 0 | **164,473** | **Pion** | 0.0% |
+| LRANGE_300 (first 300 elements) | 0 | 0 | 0 | **41,823** | **Pion** | 0.0% |
+| LRANGE_500 (first 500 elements) | 0 | 0 | 0 | **25,303** | **Pion** | 0.0% |
+| LRANGE_600 (first 600 elements) | 0 | 0 | 0 | **21,340** | **Pion** | 0.0% |
+| MSET (10 keys) | 0 | 0 | 0 | **675,675** | **Pion** | 0.0% |
+| PING_INLINE | 0 | 0 | 0 | **704,225** | **Pion** | 0.0% |
+| PING_MBULK | 0 | 0 | 0 | **724,637** | **Pion** | 0.0% |
+| RPOP | 0 | 0 | 0 | **735,294** | **Pion** | 0.0% |
+| RPUSH | 0 | 0 | 0 | **740,740** | **Pion** | 0.0% |
+| SADD | 0 | 0 | 0 | **740,740** | **Pion** | 0.0% |
+| SET | 0 | 0 | 0 | **740,740** | **Pion** | 0.0% |
+| SPOP | 0 | 0 | 0 | **751,879** | **Pion** | 0.0% |
+| XADD | 0 | 0 | 0 | **724,637** | **Pion** | 0.0% |
+| ZADD | 0 | 0 | 0 | **740,740** | **Pion** | 0.0% |
+| ZPOPMIN | 0 | 0 | 0 | **746,268** | **Pion** | 0.0% |
+
+Results prepended to benchmark_results.md
+Cleaning up temporary data files...
+Deleted: pion.wal.0
+
+============================================================
+GATE FAILED [Linux EPYC 8124P @ 2.45 GHz (Zen 4c Siena)] — 4 command(s) below/missing at P=10:
+  LRANGE_100 (first 100 elements): 164,473 < 167,200 (baseline)
+  LRANGE_300 (first 300 elements): 41,823 < 53,200 (baseline)
+  LRANGE_500 (first 500 elements): 25,303 < 31,350 (baseline)
+  LRANGE_600 (first 600 elements): 21,340 < 26,600 (baseline)
+============================================================

@@ -1874,6 +1874,15 @@ evidence = ["benchmarks/results/2026-10-10-mac-m4-io-threads/summary.md"]
 expect = ["| 0.58 |", "| 0.83 |"]
 
 [[claim]]
+file = "doc/benchmarking_guide.md"
+where = "**On Linux the script pins the server and the client**"
+numbers = ["25%"]
+kind = "result"
+evidence = ["benchmarks/results/2026-10-12-linux-epyc-8124p/placement/arms/same_l3_r1_kv.txt", "benchmarks/results/2026-10-12-linux-epyc-8124p/placement/arms/other_l3_r1_kv.txt"]
+expect = ["| SET | 0 | 0 | 0 | **740,740** |", "| SET | 0 | 0 | 0 | **588,235** |"]
+note = "740,740/588,235 = 1.259; the other rows split the same way (placement/README.md)"
+
+[[claim]]
 file = "doc/vector_engine.md"
 where = "Once inserts pause for 200 ms"
 numbers = ["200ms"]

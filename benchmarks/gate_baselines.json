@@ -100,6 +100,12 @@
       "pipelines": {
         "10": {
           "source": "2026-05-02, commit b214fbe, valkey-benchmark -w 1 P=10 (gh #56); HSET LPUSH RPUSH MSET PING_INLINE PING_MBULK ZADD ZPOPMIN XADD re-derived 2026-10-09 at 4b672bb (native build), median of 5 recorded rounds, floor = 95% (#28; raw runs in benchmarks/results/2026-10-09-linux-epyc-8124p/gate_floors/)",
+          "row_notes": {
+            "LRANGE_100 (first 100 elements)": "client-bound (gh #189); floor from 2026-05-02, measured with a client the record does not name. Re-measure with the client the harness now records, at the next box session (gh #480).",
+            "LRANGE_300 (first 300 elements)": "client-bound (gh #189); floor from 2026-05-02, client not recorded. The client moves this row: redis-benchmark 7.0.15 reads 1.46x (x86-64) and 1.23x (arm64) what 8.10.2 does (GitHub runners, 2026-10-12). Re-measure with the recorded client at the next box session (gh #480).",
+            "LRANGE_500 (first 500 elements)": "client-bound (gh #189); floor from 2026-05-02, client not recorded. Re-measure with the recorded client (gh #480).",
+            "LRANGE_600 (first 600 elements)": "client-bound (gh #189); floor from 2026-05-02, client not recorded. Re-measure with the recorded client (gh #480)."
+          },
           "commands": {
             "GET":                              {"min": 589950, "known_good": 621000},
             "SET":                              {"min": 698250, "known_good": 735000},
