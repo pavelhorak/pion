@@ -10,13 +10,13 @@ computed client-side by pion-serve and never by the server.
 What this file pins:
   [1] INFO reports the REAL port, RSS, uptime and per-worker key counts, and
       no longer contains the old hardcoded values.
-  [2] PION.STATS is a 16-pair map, zero on a fresh server, RESP2 flat array.
+  [2] PION.STATS is a 14-pair map, zero on a fresh server, RESP2 flat array.
   [3] KV.PREFIX.LOOKUP records misses and hits; a hit on a prefix registered
       with PREFILL_MS is credited exactly that MEASURED time.
   [4] A hit on a prefix registered WITHOUT PREFILL_MS is credited a per-token
       ESTIMATE from the stored token count; the measured twin does not move.
   [5] V.FETCH RANGE bytes are counted.
-  [6] HELLO 3 turns the reply into a RESP3 map (%16).
+  [6] HELLO 3 turns the reply into a RESP3 map (%14).
   [7] PION.STATS RESET zeroes the counters; PREFILL_MS is range-checked.
   [8] Pipeline integrity: PION.STATS + PING → exactly two replies.
   [9] MetricsRegistry is gone from the tree.
@@ -147,7 +147,7 @@ def main():
                     "kvprefix_prefill_us_saved", "kvprefix_prefill_us_measured",
                     "prefill_seconds_avoided", "prefill_seconds_avoided_measured",
                     "semantic_hits", "semantic_misses", "vector_queries"]
-        check("16 fields, in order", list(s.keys()) == expected, list(s.keys()))
+        check("14 fields, in order", list(s.keys()) == expected, list(s.keys()))
         zero = [k for k in expected if k not in ("worker_id", "uptime_in_seconds", "prefill_seconds_avoided", "prefill_seconds_avoided_measured")]
         check("all counters zero", all(s.get(k) == 0 for k in zero), {k: s.get(k) for k in zero})
         check("seconds text is 0.000", s.get("prefill_seconds_avoided") == "0.000" and s.get("prefill_seconds_avoided_measured") == "0.000", s)
@@ -197,8 +197,8 @@ def main():
         check("HELLO 3 accepted", h is not None)
         c3.sock.sendall(encode(["PION.STATS"]))
         first = c3.f.readline()
-        check("reply starts with %16", first == b"%16\r\n", first)
-        for _ in range(32): c3._read()
+        check("reply starts with %14", first == b"%14\r\n", first)
+        for _ in range(28): c3._read()   # 14 pairs
         c3.close()
 
         print("\n[7] RESET and argument validation")
