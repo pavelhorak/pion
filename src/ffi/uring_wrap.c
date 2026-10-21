@@ -62,44 +62,9 @@ ssize_t pion_read(int fd, void* buf, size_t count) {
     return read(fd, buf, count);
 }
 
-/* pion_pread: positional read — used by MOE.EXPERT.FETCH to read a per-expert
-   byte slice from a safetensors shard at a precomputed offset, without
-   advancing the file pointer (safe across concurrent FETCHes on shared fd). */
-ssize_t pion_pread(int fd, void* buf, size_t count, off_t offset) {
-    return pread(fd, buf, count, offset);
-}
-
 /* pion_open_rdonly: open file read-only (O_RDONLY=0; variadic open needs mode only for O_CREAT) */
 int pion_open_rdonly(const char* path) {
     return open(path, O_RDONLY);
-}
-
-/* pion_fadvise_willneed: hint the kernel to prefetch a byte range into the
-   page cache. Used by MOE.EXPERT.PREFETCH (Stage-4 async I/O) — the prefetch
-   handler advises ranges for the requested experts then returns +OK; the
-   kernel performs the actual read-ahead asynchronously so the next FETCH
-   on the same range hits page cache.
-
-   Linux: posix_fadvise(fd, offset, len, POSIX_FADV_WILLNEED) — initiates
-   asynchronous read-ahead into the page cache. Non-blocking.
-
-   macOS: fcntl(fd, F_RDADVISE, &radvisory{ra_offset, ra_count}) — same
-   semantics. The kernel reads the range into the unified buffer cache.
-
-   Returns 0 on success, -1 on failure. Failures are non-fatal (FETCH will
-   still serve correctly; it just won't have benefited from prefetch). */
-int pion_fadvise_willneed(int fd, int64_t offset, size_t length) {
-#ifdef __linux__
-    return posix_fadvise(fd, (off_t)offset, length, POSIX_FADV_WILLNEED);
-#elif defined(__APPLE__)
-    struct radvisory ra;
-    ra.ra_offset = (off_t)offset;
-    ra.ra_count = (int)length;
-    return fcntl(fd, F_RDADVISE, &ra);
-#else
-    (void)fd; (void)offset; (void)length;
-    return 0;
-#endif
 }
 
 /* pion_creat: open for write, truncate/create */

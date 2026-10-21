@@ -39,8 +39,6 @@ from src.network.cluster import ClusterState
 from src.network.inference_bridge import InferenceBridge, InferenceResponse, INFER_MSG_EMBED, INFER_MSG_GENERATE, INFER_MSG_LOAD_MODEL, INFER_STATUS_OK, INFER_STATUS_ERROR, INFER_RECV_BUF_SIZE
 from src.network.metal_attention_engine import MetalAttentionEngine
 from src.network.cuda_attention_engine import CudaAttentionEngine
-from src.network.knn_lm import KNNLMIndex
-from src.network.pkm import PKMIndex
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
 from std.math import log, sin, cos, sqrt, asin, pi
@@ -93,23 +91,8 @@ from src.network.state_store import StateStore
 from src.commands.kv_prefix import handle_kv_prefix_register, handle_kv_prefix_lookup, handle_kv_prefix_info, handle_kv_prefix_save, handle_kv_prefix_commit, handle_kv_prefix_drop, handle_kv_prefix_owner, handle_kv_prefix_warm, handle_kv_prefix_blocks, handle_kv_prefix_membership
 from src.commands.attend_prefix import handle_attend_prefix_store, handle_attend_prefix_query, handle_attend_prefix_query_fused, handle_attend_prefix_query_sparse, handle_attend_prefix_query_sparse_auto, handle_attend_prefix_query_sparse_auto_fused, handle_attend_prefix_lookup
 from src.commands.ssm_prefix import handle_ssm_prefix_store, handle_ssm_prefix_fetch, handle_ssm_prefix_drop, ssm_durability_startup
-from src.commands.moe_expert import handle_moe_expert_fetch, handle_moe_expert_prefetch, handle_moe_expert_pin, handle_moe_expert_unpin, handle_moe_expert_info, handle_moe_expert_stats, handle_moe_expert_hist, handle_moe_expert_prune, handle_moe_expert_load
-from src.network.moe_expert_tier import MoEExpertTier
-from src.commands.knn_lm import (
-    handle_ai_knn_lm_create, handle_ai_knn_lm_store, handle_ai_knn_lm_storebatch,
-    handle_ai_knn_lm_query, handle_ai_knn_lm_info, handle_ai_knn_lm_drop,
-)
-from src.commands.pkm import (
-    handle_neuron_pkm_create, handle_neuron_pkm_setkeys, handle_neuron_pkm_setvals,
-    handle_neuron_pkm_query, handle_neuron_pkm_ffn, handle_neuron_pkm_info,
-    handle_neuron_pkm_drop,
-)
 from src.network.v_store import VStoreIndex, VStoreDirectory
-from src.commands.route import handle_ai_route_register, handle_ai_route_update, handle_ai_route, handle_ai_route_remove, handle_ai_route_info
-from src.commands.speculative import handle_rag_speculate_enable, handle_rag_query, handle_rag_speculate_info
 from src.commands.vset import handle_vadd, handle_vsim, handle_vcard, handle_vdim, handle_vrem, handle_vemb, handle_vismember, handle_vsetattr, handle_vgetattr, handle_vinfo, handle_vrandmember, handle_vlinks, handle_vrange
-from src.network.semantic_router import SemanticRouter
-from src.network.speculative_rag import SpeculativeRAG
 from src.network.kv_cache_store import KVCacheStore
 from src.network.layer_store import LayerStore
 from src.network.attention_index import AttentionIndex, ATTEND_QUERY_EF
@@ -248,10 +231,6 @@ struct SlowPathHandler:
     # A4 (issue #31): per-request fixed-size state cache (SWA tail, SSM intermediates).
     # Backed by --kvcache flag — paper §3.6.1 couples KV cache and state cache.
     var state_store: StateStore
-    # M13: Semantic router (HNSW-indexed inference load balancer)
-    var router: SemanticRouter
-    # M9: Speculative RAG (branch prediction for RAG pipeline)
-    var spec_rag: SpeculativeRAG
     # Blocked XREAD readers (per-worker)
     var blocked_readers: BlockedReaderRegistry
     # Pub/Sub registry (per-worker) + cross-worker broadcast ring
@@ -292,12 +271,6 @@ struct SlowPathHandler:
     # gh #9: In-process CUDA SDPA engine (Linux GPU equivalent of metal_attn_engine).
     # Same C ABI surface; comptime-guarded so non-Linux builds compile to no-ops.
     var cuda_attn_engine: CudaAttentionEngine
-    # AI.KNN_LM.* substrate (token-id-tagged FP32 kNN datastore registry)
-    var knn_lm: KNNLMIndex
-    # NEURON.PKM.* substrate (gh #146: product-key memory-layer tables)
-    var pkm: PKMIndex
-    # MOE.EXPERT.* substrate (gh #61 Stage-2 skeleton; backend in flight)
-    var moe_tier: MoEExpertTier
     # A1: VSET state (element name ↔ HNSW node ID mapping)
     # Lua 5.1 scripting engine (per-worker, shared-nothing)
     var lua_engine: UnsafePointer[LuaEngine, MutUntrackedOrigin]
@@ -533,10 +506,6 @@ struct SlowPathHandler:
             # the V-store path; the SSM substrate is itself substrate-only
             # and lives next to it.
             ssm_durability_startup(worker_id)
-        # M13: Semantic router (enabled when kvcache is enabled)
-        self.router = SemanticRouter(config.embedding.dimensions, config.server.kvcache_enabled)
-        # M9: Speculative RAG
-        self.spec_rag = SpeculativeRAG(config.embedding.dimensions, config.server.kvcache_enabled)
         self.blocked_readers = BlockedReaderRegistry()
         self.pubsub = PubSubRegistry()
         self.tx_state = TransactionState()
@@ -596,25 +565,6 @@ struct SlowPathHandler:
         # gh #9: CUDA engine — only meaningful on Linux GPU; on macOS/aarch64
         # the FFI symbols aren't linked and self.available stays False.
         self.cuda_attn_engine = CudaAttentionEngine(config.cuda_attention.enabled, Int(worker_id), config.cuda_attention.fa_window)
-        # AI.KNN_LM.* enabled whenever the AI surface is available (kvcache or inference).
-        # Cheap to init when disabled (no allocations until CREATE).
-        self.knn_lm = KNNLMIndex(config.server.kvcache_enabled or config.inference.enabled)
-        # gh #146: NEURON.PKM.* rides the same AI-surface gate as AI.KNN_LM.*.
-        # Zero allocation when disabled; per-table buffers land at CREATE.
-        self.pkm = PKMIndex(config.server.kvcache_enabled or config.inference.enabled)
-        # MOE.EXPERT.* tier (gh #61 Stage 2). Enabled when --moe-cache <path>
-        # is passed; cache budget from --moe-cache-mib (default 1024).
-        # When enabled, the manifest loader reads <path>/config.json to
-        # populate the model handle. Per-expert byte offsets land in a
-        # follow-on (safetensors-shard parser).
-        var moe_enabled = config.server.moe_cache_path.byte_length() > 0
-        var moe_max_bytes = UInt64(config.server.moe_cache_mib) * UInt64(1 << 20) if moe_enabled else UInt64(0)
-        self.moe_tier = MoEExpertTier(enabled=moe_enabled, cache_max_bytes=moe_max_bytes)
-        if moe_enabled:
-            _ = self.moe_tier.load_manifest(config.server.moe_cache_path)
-            # Stage 4b-1: spawn the warming thread + ring buffers. Idle until
-            # Stage 4b-3 wires PREFETCH → enqueue.
-            self.moe_tier.init_warm_pool()
         # Initialize Lua engine (one per worker)
         self.lua_engine = alloc[LuaEngine](1)
         self.lua_engine.unsafe_write(LuaEngine())
@@ -924,8 +874,6 @@ struct SlowPathHandler:
         s += "prefill_seconds_avoided_measured:" + self.ledger.prefill_seconds_avoided_measured() + "\r\n"
         s += "semantic_hits:" + String(self.scache.hits) + "\r\n"
         s += "semantic_misses:" + String(self.scache.misses) + "\r\n"
-        s += "moe_hits:" + String(self.moe_tier.hits) + "\r\n"
-        s += "moe_misses:" + String(self.moe_tier.misses) + "\r\n"
         s += "vector_queries:" + String(self.ledger.vector_queries) + "\r\n"
         s += self._vector_index_info()
         return s
@@ -3373,77 +3321,6 @@ struct SlowPathHandler:
                     elif tl == 9 and (tp[0]|0x20)==97 and (tp[1]|0x20)==105 and tp[2]==46 and (tp[3]|0x20)==109 and (tp[4]|0x20)==101 and (tp[5]|0x20)==109 and (tp[6]|0x20)==111 and (tp[7]|0x20)==114 and (tp[8]|0x20)==121:
                         _ = handle_ai_memory(tokens, i, cmd_end_tok, writer, self.keyspace, self.scache, self.dispatcher.list_pool, server, fd, kq)
                         i = cmd_end_tok - 1
-                    # ── AI.KNN_LM.STOREBATCH ── (20 bytes)
-                    elif cmd_eq(tp, tl, "ai.knn_lm.storebatch"):
-                        _ = handle_ai_knn_lm_storebatch(tokens, i, num_tokens, writer, self.knn_lm)
-                        i = cmd_end_tok - 1
-                    # ── AI.KNN_LM.CREATE ── (16 bytes; case-folded byte 10 == 'c')
-                    elif cmd_eq(tp, tl, "ai.knn_lm.create"):
-                        _ = handle_ai_knn_lm_create(tokens, i, num_tokens, writer, self.knn_lm)
-                        i = cmd_end_tok - 1
-                    # ── AI.KNN_LM.STORE / AI.KNN_LM.QUERY ── (both 15 bytes; disambiguate on byte 10)
-                    elif cmd_eq(tp, tl, "ai.knn_lm.store"):
-                        # AI.KNN_LM.STORE
-                        _ = handle_ai_knn_lm_store(tokens, i, num_tokens, writer, self.knn_lm)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "ai.knn_lm.query"):
-                        # AI.KNN_LM.QUERY
-                        _ = handle_ai_knn_lm_query(tokens, i, num_tokens, writer, self.knn_lm)
-                        i = cmd_end_tok - 1
-                    # ── AI.KNN_LM.INFO / AI.KNN_LM.DROP ── (both 14 bytes; disambiguate on byte 10)
-                    elif cmd_eq(tp, tl, "ai.knn_lm.info"):
-                        # AI.KNN_LM.INFO
-                        _ = handle_ai_knn_lm_info(tokens, i, num_tokens, writer, self.knn_lm)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "ai.knn_lm.drop"):
-                        # AI.KNN_LM.DROP
-                        _ = handle_ai_knn_lm_drop(tokens, i, num_tokens, writer, self.knn_lm)
-                        i = cmd_end_tok - 1
-                    # ── MOE.EXPERT.* (gh #61 Phase-0 Stage-1 wire-surface registration) ──
-                    # Common prefix: tp[0..2]="moe", tp[3]='.', tp[10]='.' (after "MOE.EXPERT.")
-                    # Stage 1 handlers stub UNAVAILABLE/+OK until backend lands in Stage 2.
-                    # All handlers use i = cmd_end_tok - 1 to skip the right number of RESP tokens.
-                    elif cmd_eq(tp, tl, "moe.expert.fetch"):
-                        # MOE.EXPERT.FETCH — needs fd for writev big-blob response
-                        _ = handle_moe_expert_fetch(tokens, i, num_tokens, writer, self.moe_tier, fd)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "moe.expert.stats"):
-                        # MOE.EXPERT.STATS
-                        _ = handle_moe_expert_stats(tokens, i, num_tokens, writer, self.moe_tier)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "moe.expert.unpin"):
-                        # MOE.EXPERT.UNPIN
-                        _ = handle_moe_expert_unpin(tokens, i, num_tokens, writer, self.moe_tier)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "moe.expert.info"):
-                        # MOE.EXPERT.INFO
-                        _ = handle_moe_expert_info(tokens, i, num_tokens, writer, self.moe_tier)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "moe.expert.hist"):
-                        # MOE.EXPERT.HIST — per-(layer, expert) usage histogram
-                        # (optional SAVE/LOAD subcommand reads start+2/3 — must
-                        # bound at cmd_end_tok so pipelined calls don't bleed)
-                        _ = handle_moe_expert_hist(tokens, i, cmd_end_tok, writer, self.moe_tier)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "moe.expert.load"):
-                        # MOE.EXPERT.LOAD — dynamic model registration
-                        _ = handle_moe_expert_load(tokens, i, cmd_end_tok, writer, self.moe_tier)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "moe.expert.prune"):
-                        # MOE.EXPERT.PRUNE — optional [on] flag at start+4, must
-                        # bound at cmd_end_tok so a pipelined NEXT command's first
-                        # token isn't mis-read as our flag.
-                        _ = handle_moe_expert_prune(tokens, i, cmd_end_tok, writer, self.moe_tier)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "moe.expert.pin"):
-                        # MOE.EXPERT.PIN
-                        _ = handle_moe_expert_pin(tokens, i, num_tokens, writer, self.moe_tier)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "moe.expert.prefetch"):
-                        # MOE.EXPERT.PREFETCH — variadic trailing expert IDs, must
-                        # bound at cmd_end_tok (not num_tokens) when pipelined.
-                        _ = handle_moe_expert_prefetch(tokens, i, cmd_end_tok, writer, self.moe_tier)
-                        i = cmd_end_tok - 1
                     # ── KV.STORE ── (8 bytes: k=107,v=118,.,s,t,o,r,e)
                     elif tl == 8 and (tp[0]|0x20)==107 and (tp[1]|0x20)==118 and tp[2]==46 and (tp[3]|0x20)==115 and (tp[4]|0x20)==116 and (tp[5]|0x20)==111 and (tp[6]|0x20)==114 and (tp[7]|0x20)==101:
                         _ = handle_kv_store(tokens, i, cmd_end_tok, writer, self.kvcache, server, fd, kq)
@@ -3617,48 +3494,6 @@ struct SlowPathHandler:
                     # ── SSM.PREFIX.DROP ── gh #65 (15 bytes: s,s,m,.,p,r,e,f,i,x,.,d,r,o,p)
                     elif cmd_eq(tp, tl, "ssm.prefix.drop"):
                         _ = handle_ssm_prefix_drop(tokens, i, num_tokens, writer, self.worker_id)
-                        i = cmd_end_tok - 1
-                    # ── AI.ROUTE.REGISTER ── (17 bytes)
-                    elif cmd_eq(tp, tl, "ai.route.register"):
-                        _ = handle_ai_route_register(tokens, i, num_tokens, writer, self.router)
-                        i = cmd_end_tok - 1
-                    # ── AI.ROUTE.UPDATE ── (15 bytes)
-                    elif cmd_eq(tp, tl, "ai.route.update"):
-                        _ = handle_ai_route_update(tokens, i, num_tokens, writer, self.router)
-                        i = cmd_end_tok - 1
-                    # ── AI.ROUTE.REMOVE ── (15 bytes)
-                    elif cmd_eq(tp, tl, "ai.route.remove"):
-                        _ = handle_ai_route_remove(tokens, i, num_tokens, writer, self.router)
-                        i = cmd_end_tok - 1
-                    # ── AI.ROUTE.INFO ── (13 bytes)
-                    elif cmd_eq(tp, tl, "ai.route.info"):
-                        _ = handle_ai_route_info(writer, self.router)
-                        i = cmd_end_tok - 1
-                    # ── AI.ROUTE ── (8 bytes) — must be after longer AI.ROUTE.* commands
-                    elif tl == 8 and (tp[0]|0x20)==97 and (tp[1]|0x20)==105 and tp[2]==46 and (tp[3]|0x20)==114 and (tp[4]|0x20)==111 and (tp[5]|0x20)==117 and (tp[6]|0x20)==116 and (tp[7]|0x20)==101:
-                        _ = handle_ai_route(tokens, i, num_tokens, writer, self.router, server, fd, kq)
-                        i = cmd_end_tok - 1
-                    # ── RAG.SPECULATE.ENABLE ── (20 bytes)
-                    elif cmd_eq(tp, tl, "rag.speculate.enable"):
-                        _ = handle_rag_speculate_enable(tokens, i, num_tokens, writer, self.spec_rag)
-                        i = cmd_end_tok - 1
-                    # ── RAG.SPECULATE.INFO ── (18 bytes)
-                    elif cmd_eq(tp, tl, "rag.speculate.info"):
-                        _ = handle_rag_speculate_info(tokens, i, num_tokens, writer, self.spec_rag)
-                        i = cmd_end_tok - 1
-                    # ── RAG.QUERY ── (9 bytes)
-                    elif cmd_eq(tp, tl, "rag.query"):
-                        # It searches this worker's graph directly: not while a
-                        # background build owns it, and not through a borrow of
-                        # an index since dropped or replaced (drop-in).
-                        if auto_building_here(self.shared_hnsw, self.worker_id):
-                            vector_auto_await(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
-                                              self.vec_tomb, self.worker_id, self.vauto)
-                        if is_not_null(self.shared_hnsw) and is_not_null(self.shared_hnsw[].ready_atomic):
-                            _ = refresh_index_view(hnsw, self.shared_hnsw, self.worker_id,
-                                Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
-                                    self.shared_hnsw[].ready_atomic, UInt64(0)))
-                        _ = handle_rag_query(tokens, i, num_tokens, writer, self.spec_rag, hnsw, server, fd, kq)
                         i = cmd_end_tok - 1
                     # ── INCRBY ──
                     elif tl == 6 and cmd_matches_6(tp, 105, 110, 99, 114, 98, 121):
@@ -4634,7 +4469,7 @@ struct SlowPathHandler:
                     # (the scalars, the element name) was re-dispatched and
                     # answered a second time — one command in, two replies out,
                     # and every later reply in a pipeline attributed to the
-                    # wrong request. Same shape as NEURON.PKM.* below: the
+                    # wrong request. The
                     # parser's command boundary is authoritative, so discard the
                     # return and skip to cmd_end_tok unconditionally. Handlers
                     # also get cmd_end_tok as their bound, not num_tokens, so an
@@ -4693,44 +4528,6 @@ struct SlowPathHandler:
                     elif tl == 6 and cmd_matches_6(tp, 118, 114, 97, 110, 103, 101):
                         _ = handle_vrange(tokens, i, cmd_end_tok, self.keyspace, writer)
                         i = cmd_end_tok - 1
-                    # ── NEURON.PKM.* (gh #146) ──
-                    # Deliberately at the TAIL of the chain: the elif ladder is
-                    # ordered by descending frequency, and a memory-layer lookup
-                    # is rarer than every stream/pubsub/transaction command above
-                    # it. Placing it upstream of XADD cost measurable RPS in the
-                    # pre-push gate.
-                    # Prefix "NEURON.PKM." is 11 bytes, so tp[11] is the
-                    # subcommand's first byte; SETKEYS/SETVALS share a length
-                    # and split on tp[14]. All handlers consume a whole command,
-                    # so every branch uses the cmd_end_tok skip.
-                    elif cmd_eq(tp, tl, "neuron.pkm.create"):
-                        # NEURON.PKM.CREATE
-                        _ = handle_neuron_pkm_create(tokens, i, cmd_end_tok, writer, self.pkm)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "neuron.pkm.setkeys"):
-                        # NEURON.PKM.SETKEYS
-                        _ = handle_neuron_pkm_setkeys(tokens, i, cmd_end_tok, writer, self.pkm)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "neuron.pkm.setvals"):
-                        # NEURON.PKM.SETVALS
-                        _ = handle_neuron_pkm_setvals(tokens, i, cmd_end_tok, writer, self.pkm)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "neuron.pkm.query"):
-                        # NEURON.PKM.QUERY
-                        _ = handle_neuron_pkm_query(tokens, i, cmd_end_tok, writer, self.pkm)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "neuron.pkm.ffn"):
-                        # NEURON.PKM.FFN
-                        _ = handle_neuron_pkm_ffn(tokens, i, cmd_end_tok, writer, self.pkm)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "neuron.pkm.info"):
-                        # NEURON.PKM.INFO
-                        _ = handle_neuron_pkm_info(tokens, i, cmd_end_tok, writer, self.pkm)
-                        i = cmd_end_tok - 1
-                    elif cmd_eq(tp, tl, "neuron.pkm.drop"):
-                        # NEURON.PKM.DROP
-                        _ = handle_neuron_pkm_drop(tokens, i, cmd_end_tok, writer, self.pkm)
-                        i = cmd_end_tok - 1
                     # ── PION.STATS [RESET] (gh #262) ── the value receipt, per worker
                     elif cmd_eq(tp, tl, "pion.stats"):
                         var _ps_reset = False
@@ -4743,8 +4540,7 @@ struct SlowPathHandler:
                             self.scache.misses = UInt64(0)
                             writer.append_ok_response()
                         else:
-                            _ = handle_pion_stats(writer, self.ledger, self.scache.hits, self.scache.misses,
-                                                  self.moe_tier.hits, self.moe_tier.misses, self.worker_id)
+                            _ = handle_pion_stats(writer, self.ledger, self.scache.hits, self.scache.misses, self.worker_id)
                         i = cmd_end_tok - 1
                     # ── TIME (#30) ── at the tail: see the elif-order note above
                     elif cmd_eq(tp, tl, "time"):

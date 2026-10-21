@@ -10,7 +10,7 @@ to queue anything with +QUEUED and only fail at replay, by which point the
 other commands in the transaction had already been applied — one typo silently
 turned an atomic transaction into a partially applied one.
 
-Case folding here is A-Z only, NOT the usual `| 0x20`: 18 of these
+Case folding here is A-Z only, NOT the usual `| 0x20`: 12 of these
 names contain '_' (AI.KNN_LM.QUERY), and '_' | 0x20 is 0x7F, so the cheap fold
 would fail to match every substrate command.
 """
@@ -18,7 +18,7 @@ would fail to match every substrate command.
 from src.common.ptr import null_ptr, is_null, is_not_null
 
 
-comptime PION_COMMAND_COUNT = 355
+comptime PION_COMMAND_COUNT = 325
 
 
 @always_inline
@@ -248,7 +248,6 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         return (
             _cmd_eq_ci(tp, tl, "ai.embed") or
             _cmd_eq_ci(tp, tl, "ai.flare") or
-            _cmd_eq_ci(tp, tl, "ai.route") or
             _cmd_eq_ci(tp, tl, "bitcount") or
             _cmd_eq_ci(tp, tl, "bitfield") or
             _cmd_eq_ci(tp, tl, "bzpopmax") or
@@ -289,7 +288,6 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "geosearch") or
             _cmd_eq_ci(tp, tl, "hexpireat") or
             _cmd_eq_ci(tp, tl, "pexpireat") or
-            _cmd_eq_ci(tp, tl, "rag.query") or
             _cmd_eq_ci(tp, tl, "randomkey") or
             _cmd_eq_ci(tp, tl, "readwrite") or
             _cmd_eq_ci(tp, tl, "replicaof") or
@@ -365,53 +363,33 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         )
     elif tl == 13:
         return (
-            _cmd_eq_ci(tp, tl, "ai.route.info") or
             _cmd_eq_ci(tp, tl, "attend.create") or
             _cmd_eq_ci(tp, tl, "ft.searchtext") or
             _cmd_eq_ci(tp, tl, "zrangebyscore")
         )
     elif tl == 14:
         return (
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.drop") or
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.info") or
             _cmd_eq_ci(tp, tl, "geosearchstore") or
             _cmd_eq_ci(tp, tl, "kv.prefix.drop") or
             _cmd_eq_ci(tp, tl, "kv.prefix.info") or
             _cmd_eq_ci(tp, tl, "kv.prefix.save") or
             _cmd_eq_ci(tp, tl, "kv.prefix.warm") or
-            _cmd_eq_ci(tp, tl, "moe.expert.pin") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.ffn") or
             _cmd_eq_ci(tp, tl, "restore-asking") or
             _cmd_eq_ci(tp, tl, "zremrangebylex") or
             _cmd_eq_ci(tp, tl, "zrevrangebylex")
         )
     elif tl == 15:
         return (
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.query") or
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.store") or
-            _cmd_eq_ci(tp, tl, "ai.route.remove") or
-            _cmd_eq_ci(tp, tl, "ai.route.update") or
             _cmd_eq_ci(tp, tl, "attend.finalize") or
             _cmd_eq_ci(tp, tl, "kv.prefix.owner") or
-            _cmd_eq_ci(tp, tl, "moe.expert.hist") or
-            _cmd_eq_ci(tp, tl, "moe.expert.info") or
-            _cmd_eq_ci(tp, tl, "moe.expert.load") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.drop") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.info") or
             _cmd_eq_ci(tp, tl, "ssm.prefix.drop") or
             _cmd_eq_ci(tp, tl, "zremrangebyrank")
         )
     elif tl == 16:
         return (
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.create") or
             _cmd_eq_ci(tp, tl, "kv.prefix.blocks") or
             _cmd_eq_ci(tp, tl, "kv.prefix.commit") or
             _cmd_eq_ci(tp, tl, "kv.prefix.lookup") or
-            _cmd_eq_ci(tp, tl, "moe.expert.fetch") or
-            _cmd_eq_ci(tp, tl, "moe.expert.prune") or
-            _cmd_eq_ci(tp, tl, "moe.expert.stats") or
-            _cmd_eq_ci(tp, tl, "moe.expert.unpin") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.query") or
             _cmd_eq_ci(tp, tl, "ssm.prefix.fetch") or
             _cmd_eq_ci(tp, tl, "ssm.prefix.store") or
             _cmd_eq_ci(tp, tl, "zremrangebyscore") or
@@ -419,31 +397,23 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
         )
     elif tl == 17:
         return (
-            _cmd_eq_ci(tp, tl, "ai.route.register") or
             _cmd_eq_ci(tp, tl, "ai.semantic_cache") or
-            _cmd_eq_ci(tp, tl, "georadiusbymember") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.create")
+            _cmd_eq_ci(tp, tl, "georadiusbymember")
         )
     elif tl == 18:
         return (
-            _cmd_eq_ci(tp, tl, "kv.prefix.register") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.setkeys") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.setvals") or
-            _cmd_eq_ci(tp, tl, "rag.speculate.info")
+            _cmd_eq_ci(tp, tl, "kv.prefix.register")
         )
     elif tl == 19:
         return (
             _cmd_eq_ci(tp, tl, "attend.prefix.query") or
-            _cmd_eq_ci(tp, tl, "attend.prefix.store") or
-            _cmd_eq_ci(tp, tl, "moe.expert.prefetch")
+            _cmd_eq_ci(tp, tl, "attend.prefix.store")
         )
     elif tl == 20:
         return (
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.storebatch") or
             _cmd_eq_ci(tp, tl, "attend.prefix.lookup") or
             _cmd_eq_ci(tp, tl, "georadiusbymember_ro") or
-            _cmd_eq_ci(tp, tl, "kv.prefix.membership") or
-            _cmd_eq_ci(tp, tl, "rag.speculate.enable")
+            _cmd_eq_ci(tp, tl, "kv.prefix.membership")
         )
     elif tl == 25:
         return (
@@ -468,7 +438,7 @@ def command_exists(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
 def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
     """Redis's arity for this command, or 0 when Pion does not know one.
 
-    266 of 355 commands have an entry; the rest are Pion-specific
+    266 of 325 commands have an entry; the rest are Pion-specific
     (FT.*, KV.PREFIX.*, AI.*, ATTEND.*) and are deliberately NOT validated.
 
     Encoding is Redis's own, kept verbatim so it can be checked against
@@ -768,7 +738,7 @@ def command_arity(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Int:
 def command_is_write(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command mutates the keyspace, per real Redis's `write` flag.
 
-    110 of 355 commands are writes. Used by gh #260 to refuse mutations
+    110 of 325 commands are writes. Used by gh #260 to refuse mutations
     once the WAL can no longer persist them, instead of acknowledging writes
     that will not survive a restart.
 
@@ -1035,7 +1005,7 @@ def command_is_noscript(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
 def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
     """True when this command is refused while memory is over --maxmemory (gh #261).
 
-    83 of 355 commands: real Redis's `denyoom` flag plus Pion's
+    75 of 325 commands: real Redis's `denyoom` flag plus Pion's
     substrate ingest commands (PION_DENYOOM in tools/gen_command_table.py).
     Reads, DEL and the POP family stay served under the limit, as in Redis.
     """
@@ -1146,35 +1116,21 @@ def command_is_denyoom(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int) -> Bool:
             _cmd_eq_ci(tp, tl, "kv.prefix.warm") or
             _cmd_eq_ci(tp, tl, "restore-asking")
         )
-    elif tl == 15:
-        return (
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.store") or
-            _cmd_eq_ci(tp, tl, "moe.expert.load")
-        )
     elif tl == 16:
         return (
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.create") or
             _cmd_eq_ci(tp, tl, "kv.prefix.commit")
         )
     elif tl == 17:
         return (
-            _cmd_eq_ci(tp, tl, "ai.route.register") or
-            _cmd_eq_ci(tp, tl, "georadiusbymember") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.create")
+            _cmd_eq_ci(tp, tl, "georadiusbymember")
         )
     elif tl == 18:
         return (
-            _cmd_eq_ci(tp, tl, "kv.prefix.register") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.setkeys") or
-            _cmd_eq_ci(tp, tl, "neuron.pkm.setvals")
+            _cmd_eq_ci(tp, tl, "kv.prefix.register")
         )
     elif tl == 19:
         return (
             _cmd_eq_ci(tp, tl, "attend.prefix.store")
-        )
-    elif tl == 20:
-        return (
-            _cmd_eq_ci(tp, tl, "ai.knn_lm.storebatch")
         )
     return False
 

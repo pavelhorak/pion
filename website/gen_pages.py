@@ -129,10 +129,9 @@ write("reference/cli-flags.md", "\n".join(_md), "../src/main.mojo")
 _FAMILY_PAGE = {
     "KV.PREFIX": "kv-prefix", "KV": "kv-prefix", "V": "v-store", "STATE": "v-store",
     "ATTEND": "attend", "ATTEND.PREFIX": "attend", "SSM.PREFIX": "ssm-prefix",
-    "MOE.EXPERT": "moe-expert", "FT": "vector", "VSET": "vector",
-    "AI": "ai", "AI.ROUTE": "ai", "AI.SEMANTIC_CACHE": "ai", "AI.FLARE": "ai", "AI.MEMORY": "ai",
-    "AI.KNN_LM": "rag-knn-pkm", "RAG": "rag-knn-pkm", "RAG.SPECULATE": "rag-knn-pkm",
-    "NEURON.PKM": "rag-knn-pkm", "PION": "stats",
+    "FT": "vector", "VSET": "vector",
+    "AI": "ai", "AI.SEMANTIC_CACHE": "ai", "AI.FLARE": "ai", "AI.MEMORY": "ai",
+    "PION": "stats",
 }
 _VSET = {"vadd", "vsim", "vcard", "vdim", "vinfo", "vismember", "vsetattr", "vgetattr", "vemb",
          "vrandmember", "vrem", "vrange", "vlinks"}

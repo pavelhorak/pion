@@ -403,7 +403,7 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | LASTSAVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | The unix time of the last SAVE/BGSAVE, and the startup time before one, as Redis (#47) |
 | TIME | ✅ | ✅ | ✅ | **SLOW** | ✅ | [unix seconds, microseconds] |
 | INFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Server / Memory / Cluster / Replication / Persistence / Stats / Pion / Keyspace sections; `INFO <section> ...` returns only those. Port, RSS, uptime, per-worker key counts and the replication role are resolved from real state; `redis_version` stays `7.0.0` for client feature gating, `pion_version` carries the build. A RESP3 verbatim string under `HELLO 3`. |
-| PION.STATS | n/a | n/a | n/a | **SLOW** | n/a | Pion-only. The value receipt: a 16-pair map (RESP3 `%`, RESP2 flat array) — `kvprefix_hits/misses/tokens_served/bytes_served`, `prefill_seconds_avoided` (measured + estimated) and `prefill_seconds_avoided_measured` (client-reported `PREFILL_MS` only), `semantic_hits/misses`, `moe_hits/misses`, `vector_queries`. Per WORKER. `PION.STATS RESET` zeroes the counters. |
+| PION.STATS | n/a | n/a | n/a | **SLOW** | n/a | Pion-only. The value receipt: a 14-pair map (RESP3 `%`, RESP2 flat array) — `kvprefix_hits/misses/tokens_served/bytes_served`, `prefill_seconds_avoided` (measured + estimated) and `prefill_seconds_avoided_measured` (client-reported `PREFILL_MS` only), `semantic_hits/misses`, `vector_queries`. Per WORKER. `PION.STATS RESET` zeroes the counters. |
 | CONFIG GET | ✅ | ✅ | ✅ | **SLOW** | ✅ | Glob patterns over the parameters Pion can state truthfully (`databases`, `maxmemory`, `maxmemory-policy`, `appendonly`, `save`, `port`, `timeout`, `enable-debug-command`, `slowlog-*`, `latency-monitor-threshold` 0, `latency-tracking` no) |
 | CONFIG SET | ✅ | ✅ | 🟡 | **SLOW** | ✅ | `maxmemory`, `slowlog-log-slower-than` and `slowlog-max-len` are runtime-settable, several pairs at once (all checked before any is set); `latency-monitor-threshold 0` and `latency-tracking no` are accepted (that is what Pion is); every other key refuses with an explanatory `-ERR` |
 | CONFIG REWRITE | ✅ | ✅ | ✅ | **SLOW** | ✅ | `ERR The server is running without a config file`, as Redis without one |
@@ -488,44 +488,12 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | AI.FLARE LOAD | **SLOW** | ❌ | Add text to in-Mojo FLARE knowledge base |
 | AI.FLARE RUN | **SLOW** | ❌ | Mid-generation retrieval loop (FLARE algorithm in Mojo) |
 | AI.FLARE INFO | **SLOW** | ❌ | FLARE KB stats |
-| AI.KNN_LM.CREATE | **SLOW** | ❌ | Allocate token-id-tagged kNN datastore: `<ds_id> <dim> [<max_entries>]` (default max=100K). Up to 16 datastores per worker. Substrate enabled when `--kvcache` or `--inference` is on. |
-| AI.KNN_LM.STORE | **SLOW** | ❌ | Append one (token_id, embedding) pair: `<ds_id> <next_token_id> <emb_blob>`. Auto-builds HNSW once count crosses 5000. |
-| AI.KNN_LM.STOREBATCH | **SLOW** | ❌ | Bulk append: `<ds_id> <n> <ids_blob> <emb_blob>` (ids: n × Int32 LE; emb: n × dim × Float32 LE). |
-| AI.KNN_LM.QUERY | **SLOW** | ❌ | Top-k kNN: `<ds_id> <k> <emb_blob>`. Returns `k × 8 bytes` packed as `<Int32 LE token_id><Float32 LE distance>`. Brute-force scan below 5K, focused FP32 HNSW above. |
-| AI.KNN_LM.INFO | **SLOW** | ❌ | `count=N dim=D max_entries=M` |
-| AI.KNN_LM.DROP | **SLOW** | ❌ | Free datastore + HNSW graph buffers |
-| NEURON.PKM.CREATE | **SLOW** | ❌ | Allocate a product-key memory table: `<table> <dim> <n_slots> [VDIM <v>] [VALTYPE F32\|F16]`. `n_slots` must be a perfect square S² (S ≤ 4096); dim must be even. Up to 8 tables per worker. Enabled by `--kvcache` / `--inference`. |
-| NEURON.PKM.SETKEYS | **SLOW** | ❌ | Load codebook half 0 or 1: `<table> <half> <blob>` — S × (dim/2) Float32 LE. Builds the INT8 mirror. Both halves required before QUERY. |
-| NEURON.PKM.SETVALS | **SLOW** | ❌ | Write value rows: `<table> <off> <n> <blob>` — n × vdim in VALTYPE. Value matrix is allocated on the first call. |
-| NEURON.PKM.QUERY | **SLOW** | ❌ | **Exact** top-k over all n_slots: `<table> <k> <q_blob> [FAST]`. `nq = len(q_blob)/(dim·4)` heads share one codebook pass. Returns `nq·k × 8 bytes` as `<Int32 LE slot_id><Float32 LE score>`, descending, padded `(-1, -inf)`. dim=896 k=32 1M slots: **0.075 ms** p50 (vs 5.13 ms for kNN-LM HNSW at the same shape; `tests/test_neuron_pkm.py --bench`, M4 Mac mini, [raw](../benchmarks/results/2026-10-06-mac-m4/neuron_pkm_bench.txt)). |
-| NEURON.PKM.FFN | **SLOW** | ❌ | Fused lookup + softmax-weighted value read: `<table> <k> <q_blob> [FAST] [TEMP <t>]` → `nq × vdim × 4 bytes` Float32 LE. Value rows never cross the wire. |
-| NEURON.PKM.INFO | **SLOW** | ❌ | `dim=D half=H s_rows=S n_slots=N d_pad=P keys_ready=0\|1 vdim=V valtype=f32\|f16 val_rows=R queries=Q` |
-| NEURON.PKM.DROP | **SLOW** | ❌ | Free codebooks, value matrix, and query scratch |
 | AI.EMBED | **SLOW** | ❌ | Embed text with the in-process model. `-ERR AI.EMBED requires --inference or --emb-enabled` when no backend is active |
 | AI.GENERATE | **SLOW** | ❌ | Generate via the sidecar; `-ERR ... requires --inference` otherwise |
 | AI.LOADMODEL | **SLOW** | ❌ | Load a sidecar model; `-ERR ... requires --inference` otherwise |
 | AI.MEMORY | **SLOW** | ❌ | `AI.MEMORY ADD\|RECALL\|CONTEXT ...` — agent-memory surface; a bare call returns the syntax line |
 
 ---
-
-## 16b. MoE Expert Paging — `MOE.EXPERT.*` (`--moe-cache <DIR> --moe-cache-mib N`)
-
-Expert weights served from a tiered cache (per-worker RAM LRU → SSD → network)
-so a MoE model larger than device RAM runs at interactive cache-hit latency.
-Without `--moe-cache` every command answers `-UNAVAILABLE` naming the flag,
-rather than a plausible empty result.
-
-| Command | Pion path | Reply | Notes |
-|---|:---:|---|---|
-| MOE.EXPERT.LOAD `<model_id> <dir>` | **SLOW** | `+OK` / `-UNAVAILABLE` | Loads a manifest and opens the tier |
-| MOE.EXPERT.FETCH `<model_id> <layer> <expert>` | **SLOW** | bulk blob / `-UNAVAILABLE` | Served from the RAM LRU, SSD or network tier, whichever holds it |
-| MOE.EXPERT.PREFETCH `<model_id> <layer> <expert>...` | **SLOW** | `+OK` | Asynchronous warm; returns before the fetch completes |
-| MOE.EXPERT.PIN `<model_id> <layer> <expert>` | **SLOW** | `+OK` | Protects an expert from LRU eviction |
-| MOE.EXPERT.UNPIN `<model_id> <layer> <expert>` | **SLOW** | `+OK` | |
-| MOE.EXPERT.INFO `<model_id>` | **SLOW** | JSON / `-UNAVAILABLE` | Per-model manifest |
-| MOE.EXPERT.STATS | **SLOW** | JSON | Always available, even with the tier disabled — `{"stage":1,"enabled":false,...}` |
-| MOE.EXPERT.HIST `<model_id>` | **SLOW** | JSON / `-UNAVAILABLE` | Per-distribution access histograms |
-| MOE.EXPERT.PRUNE `<model_id> <layer> <expert> [on]` | **SLOW** | `+OK` / `-ERR` | **HIST namespaces are per-distribution but PRUNE is global.** A prune driven by one narrow histogram wrecks perplexity on other distributions — use the union-safe client policy |
 
 ## 16c. Fixed-Size State Cache — `STATE.*` (`--kvcache`)
 
@@ -596,36 +564,6 @@ Binary protocol commands on port 1975 (0xCA5E framing):
 | 0x23 | ATTEND.QUERY | Top-k HNSW query |
 
 Requires `--kvcache` flag. Python client: `tests/attention_client.py` (`PionAttentionClient`).
-
----
-
-## 18. Semantic Router Commands (`--kvcache`)
-
-| Command | Pion path | GLIDE | Description |
-|---|:---:|:---:|---|
-| AI.ROUTE.REGISTER | **SLOW** | ❌ | Register inference node with semantic centroid embedding + optional CAPACITY |
-| AI.ROUTE.UPDATE | **SLOW** | ❌ | Update a node's centroid embedding (as KV cache evolves) |
-| AI.ROUTE | **SLOW** | ❌ | Route query embedding to best node by cosine similarity |
-| AI.ROUTE.REMOVE | **SLOW** | ❌ | Remove node from routing table |
-| AI.ROUTE.INFO | **SLOW** | ❌ | Per-node stats: routed count, capacity, endpoint |
-
-Routing strategy: FP32 brute-force cosine for <=16 nodes (perfect accuracy); HNSW O(log N) for >16 nodes. No routing accuracy is published with a harness yet.
-
-Requires `--kvcache` flag.
-
----
-
-## 19. Speculative RAG Commands (`--kvcache`)
-
-| Command | Pion path | GLIDE | Description |
-|---|:---:|:---:|---|
-| RAG.SPECULATE.ENABLE | **SLOW** | ❌ | Enable speculative RAG for a session (creates trajectory ring buffer of last 10 embeddings) |
-| RAG.QUERY | **SLOW** | ❌ | Query with speculation: check pre-computed cache first (cosine > 0.9), fall back to live HNSW search |
-| RAG.SPECULATE.INFO | **SLOW** | ❌ | Per-session stats: hit rate, trajectory length, predictions outstanding |
-
-Prediction model: `predicted = current + alpha * (current - previous)`, alpha in [0.5, 1.0, 1.5] (3 predictions per query). No hit rate is published with a harness yet.
-
-Requires `--kvcache` flag.
 
 ---
 

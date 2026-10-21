@@ -18,10 +18,8 @@ Quick index. Start with the **5-minute demo** at the top; the rest are research 
 |---|---|---|
 | [`hybrid_retrieval_demo.py`](hybrid_retrieval_demo.py) | Hybrid Retrieval Cache | Chunk-id-keyed K/V, inproc + pion backends |
 | [`sparse_mask_64k_niah.py`](sparse_mask_64k_niah.py) | Sparse-mask SDPA at 64K context | Single-needle NIAH with a sparse prefix budget; use `--skip-vanilla` on a 16 GB Mac |
-| [`moe_expert_substrate_demo.py`](moe_expert_substrate_demo.py) | MoE expert paging | `MOE.EXPERT.*` — models beyond RAM |
 | [`agent_memory_demo.py`](agent_memory_demo.py) | Agent memory across a restart | `pion_memory`'s `remember` / `recall`; no model needed |
 | [`ai_platform_scenario.py`](ai_platform_scenario.py) | Multi-command AI gateway scenario | Semantic cache + RAG + routing |
-| [`cache_aware_router.py`](cache_aware_router.py) | `AI.ROUTE.*` semantic load balancer | Routes a query embedding to the closest node |
 | [`prefix_routing_demo.py`](prefix_routing_demo.py) | `KV.PREFIX.*` routing | Cross-worker prefix directory |
 | [`multinode_prefix_routing.py`](multinode_prefix_routing.py) | Cross-host prefix routing | two OpenAI-compatible endpoints; stub mode needs none |
 | [`session_affinity_demo.py`](session_affinity_demo.py) | Session affinity routing | blake2b session-id hashing |
@@ -42,14 +40,3 @@ The `step*.py` files are an incremental research series exploring speculative/kN
 | `step8_rest_13b.py`, `step9_knnlm.py` | kNN-LM baseline |
 | `step10_vocab_bias.py`, `step11_rest_probabilistic.py` | Vocabulary bias; REST probabilistic draft |
 | `step12_kv_cache_aligned.py`, `step13_flare_mojo.py` | KV-cache-aligned draft; FLARE in Mojo |
-
-## Modules, not demos
-
-Two files here are imported by the demos rather than run directly:
-
-- `pion_moe_tier.py` — the MoE expert substrate, used by
-  [`moe_expert_substrate_demo.py`](moe_expert_substrate_demo.py).
-- `pion_moe_tier_client.py` — its wire-backed client.
-
-Both were moved here from the private research tree so the demo actually
-runs outside the development repo.

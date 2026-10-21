@@ -251,7 +251,6 @@ INFO                  → the same numbers under a `# Pion` section
 | `prefill_seconds_avoided_measured` | the part backed by client-reported `PREFILL_MS` only |
 | `kvprefix_hits_measured` | hits credited with a reported time |
 | `semantic_hits` / `semantic_misses` | `AI.SEMANTIC_CACHE GET` and every other `cache_get` caller |
-| `moe_hits` / `moe_misses` | `MOE.EXPERT.FETCH` tier hits |
 | `vector_queries` | `FT.SEARCH` + `FT.HYBRID` answered |
 
 Two kinds of number, kept apart on purpose. `PionPromptCache` times its local

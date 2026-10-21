@@ -193,14 +193,6 @@ evidence = ["benchmarks/reproducers/results/stage1_qwen3_5_prefix_sweep_2026_10_
 expect = ["\"speedup\": 14.03", "\"speedup\": 25.25", "\"speedup\": 29.04", "\"actual_prefix_tokens\": 2048", "\"actual_prefix_tokens\": 4096"]
 
 [[claim]]
-file = "website/pages/reference/commands/rag-knn-pkm.md"
-where = "Product-key memory"
-numbers = ["0.075 ms", "5.13 ms"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/neuron_pkm_bench.txt"]
-expect = ["1048576  1024    0.075", "5.13"]
-
-[[claim]]
 file = "doc/ai_gateway.md"
 where = "receive buffer; reads until server closes"
 numbers = ["1MB"]
@@ -311,22 +303,6 @@ numbers = ["10 ms", "1 ms"]
 kind = "code"
 evidence = ["src/ffi/fcntl_wrap.c"]
 expect = ["static int64_t pion_slowlog_slower_than = 10000;"]
-
-[[claim]]
-file = "doc/command_matrix.md"
-where = "Brute-force scan below 5K"
-numbers = ["5K"]
-kind = "code"
-evidence = ["src/network/knn_lm.mojo"]
-expect = ["comptime KNN_HNSW_BUILD_THRESHOLD = 5_000"]
-
-[[claim]]
-file = "doc/command_matrix.md"
-where = "| NEURON.PKM.QUERY |"
-numbers = ["0.075 ms", "5.13 ms"]
-kind = "result"
-evidence = ["benchmarks/results/2026-10-06-mac-m4/neuron_pkm_bench.txt"]
-expect = ["1048576  1024    0.075", "5.13"]
 
 [[claim]]
 file = "doc/configuration.md"

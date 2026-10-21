@@ -33,8 +33,6 @@
           - src/vector/**
           - src/commands/vector.mojo
           - src/commands/vset.mojo
-          - src/commands/pkm.mojo
-          - src/commands/knn_lm.mojo
           - vendor/pion-vector/**
 
 "area: persistence":

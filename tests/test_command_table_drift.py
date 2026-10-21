@@ -51,7 +51,7 @@ def main():
     text = TABLE.read_text()
     required = ["get", "set", "del", "multi", "exec", "discard", "watch",
                 "ft.search", "zrevrangebyscore", "zrevrangebylex",
-                "ai.knn_lm.query", "replconf"]
+                "attend.prefix.query_sparse", "replconf"]
     missing = [c for c in required if f'"{c}"' not in text]
     if missing:
         print(f"FAIL: table is current but missing core commands: {missing}")

@@ -8,6 +8,16 @@ enumerated — there were roughly 1,100 of them.
 
 ### Removed
 
+- **Five experimental engine planes are gone**: `AI.ROUTE.*` (the semantic
+  router), `RAG.SPECULATE.*` and `RAG.QUERY`, `AI.KNN_LM.*`, `NEURON.PKM.*`
+  and `MOE.EXPERT.*` with its `--moe-cache` / `--moe-cache-mib` flags, its warm
+  pool (`src/ffi/moe_warm_pool.c`) and the `build-iouring` variant that existed
+  for it. That is 30 commands. None had a published measurement of what it buys
+  or a user outside this project. The `moe_hits` / `moe_misses` fields leave
+  `PION.STATS` (now a 14-pair map) and `INFO`. Each event loop no longer drains
+  the MoE warm pool on every tick. The product-key kernels stay in the vector
+  library, which ships them unchanged, and the differential test still checks
+  them against the open reference.
 - **The Python packages that nobody used are gone from the tree**: `pion-serve`,
   `vllm-pion`, the MCP server (`mcp/`) and `pion_context`, `pion-exo`,
   `flare_gateway`, `pion_glide`, and the LMCache, LangGraph, AutoGen and

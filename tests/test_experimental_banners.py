@@ -52,9 +52,9 @@ m = re.search(r"^## Experimental\n(.*?)(?=^## )", readme, re.S | re.M)
 check("the README has an Experimental section", m is not None)
 rows = [ln for ln in (m.group(1) if m else "").splitlines()
         if ln.startswith("|") and not ln.startswith(("| Part", "|---"))]
-# A floor that catches a parse which finds no rows. It was ten until the
-# unused Python packages left the tree (2026-10), which took the table to six.
-check("it lists at least five parts", len(rows) >= 5, f"{len(rows)} rows")
+# Catches a parse that finds no rows. The table shrinks as experimental parts
+# leave the tree (ten rows until 2026-10), so the floor is only "not empty".
+check("it lists at least one part", len(rows) >= 1, f"{len(rows)} rows")
 for row in rows:
     cells = [c.strip() for c in row.strip("|").split("|")]
     links = re.findall(r"\]\(([^)]+)\)", cells[1] if len(cells) > 1 else "")

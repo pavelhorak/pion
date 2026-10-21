@@ -52,24 +52,6 @@ comptime CMD_ATTEND_QUERY = UInt8(0x23)
 # (handle_attend_prefix_query_fused in src/commands/attend_prefix.mojo) but
 # trades the RESP framing tax for a single 0xCA5E binary frame on port+1.
 comptime CMD_ATTEND_PREFIX_QUERY_FUSED = UInt8(0x24)
-# gh #61 Phase-0 → Stage 1: MOE.EXPERT.* substrate.
-# Read-only command surface against a pre-populated tier of MoE expert
-# weights — operators can share one tier across N consumers on the same
-# host (or across the cluster) instead of each consumer loading the
-# expert weights into its own unified memory.
-#
-# Stage 1 (this drop): read-only handlers — FETCH, INFO, STATS. Returns
-# STATUS_MISS / "-UNAVAILABLE" until the backend tier lands in a follow-on.
-# Wire surface registered now so consumers (pion_moe_tier in-proc and
-# the future cross-process Pion-server-backed variant) can target the
-# same protocol.
-comptime CMD_MOE_EXPERT_FETCH    = UInt8(0x31)
-comptime CMD_MOE_EXPERT_PREFETCH = UInt8(0x32)
-comptime CMD_MOE_EXPERT_PIN      = UInt8(0x33)
-comptime CMD_MOE_EXPERT_UNPIN    = UInt8(0x34)
-comptime CMD_MOE_EXPERT_INFO     = UInt8(0x35)
-comptime CMD_MOE_EXPERT_STATS    = UInt8(0x36)
-# 0x30 (CMD_MOE_EXPERT_STORE) reserved for Stage 2 writeable tier.
 # gh #100 (C2): binary-lane authentication. Body is the raw password bytes.
 # Only required when --requirepass is set; until an AUTH frame succeeds on a
 # binary connection, every other command returns STATUS_ERROR. Mirrors the RESP

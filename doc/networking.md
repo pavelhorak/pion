@@ -224,7 +224,6 @@ Opcodes (from the `comptime CMD_*` block in `src/network/binary_protocol.mojo`):
 | 0x22 | ATTEND.FINALIZE | Batch build HNSW index from staged keys |
 | 0x23 | ATTEND.QUERY | Top-k HNSW search |
 | 0x24 | ATTEND.PREFIX.QUERY_FUSED | Fused sparse-mask prefix query |
-| 0x31–0x36 | MOE.EXPERT.{FETCH,PREFETCH,PIN,UNPIN,INFO,STATS} | MoE expert paging |
 | 0x37 | AUTH | Authenticate the binary connection (under `--requirepass`) |
 | 0xFF | PING | Binary keepalive |
 
