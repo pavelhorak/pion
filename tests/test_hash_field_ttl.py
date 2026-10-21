@@ -109,7 +109,12 @@ def main():
         check("HLEN skips it", c.cmd("HLEN", "e"), 1)
         check("HGETALL skips it", c.cmd("HGETALL", "e"), [b"g", b"w"])
         c.cmd("HSET", "e1", "f", "v"); c.cmd("HPEXPIRE", "e1", "50", "FIELDS", "1", "f")
-        time.sleep(0.15)
+        # EXISTS reads no field, so the key goes when the field sweep (every 100
+        # loop ticks) reaches it. A fixed 150 ms wait failed once in the 0.9.10
+        # release tier.
+        deadline = time.time() + 1
+        while time.time() < deadline and c.cmd("EXISTS", "e1") != 0:
+            time.sleep(0.02)
         check("the key goes with its last field", c.cmd("EXISTS", "e1"), 0)
         c.cmd("FLUSHALL")
         c.cmd("HSET", "act", "f", "v"); c.cmd("HPEXPIRE", "act", "50", "FIELDS", "1", "f")

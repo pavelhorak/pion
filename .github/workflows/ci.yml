@@ -81,6 +81,12 @@ jobs:
             exit 1
           }
 
+      - name: Every shipped Python file finds its local imports
+        # #91's result scripts imported vectordb_bench, which this checker read
+        # as an unshipped local module. It ran only in the full tier, so no PR
+        # saw it, and 0.9.10's release tier was the first to fail.
+        run: python3 tests/test_export_imports_resolve.py .
+
       - name: Documentation links resolve
         run: python3 scripts/check_doc_links.py .
 
