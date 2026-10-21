@@ -69,13 +69,6 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # deployment runs one pion-server per tenant with `--ns-prefix tenant_<id>:`.
     # See doc/multi_tenant.md.
     var ns_prefix: String
-    # gh #61 Stage 2: MoE-expert tier. Empty = disabled (Stage 1 stub
-    # handlers active). Non-empty = path to a directory containing MoE
-    # safetensors shards; loaded at startup, manifest populated.
-    var moe_cache_path: String
-    # Cache budget in MiB. Default 1024 mirrors the Phase-0 empirical
-    # sweet-spot on 16 GB Mac mini.
-    var moe_cache_mib: Int
     # gh #100 (C2): server password. Empty = no auth (default). When non-empty,
     # every RESP connection must issue `AUTH <password>` before any other command;
     # the binary port (port+1) requires the same via its 0x30 AUTH frame.
@@ -169,8 +162,6 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         self.use_iouring = False
         self.use_epoll = False
         self.ns_prefix = ""
-        self.moe_cache_path = ""
-        self.moe_cache_mib = 1024
         self.requirepass = ""
         self.tenants = ""
         # Defaults are port-stamped at parse time in main.mojo so concurrent
@@ -468,9 +459,7 @@ struct PionConfig(Copyable, Movable, ImplicitlyCopyable):
                 print("CUDA Attn:  enabled (fa-window=" + String(self.cuda_attention.fa_window) + ")")
             else:
                 print("CUDA Attn:  enabled")
-        print("KV Cache:   " + String(self.server.kvcache_enabled) + " (--kvcache enables ATTEND.*/M13 router/M9 RAG)")
-        if self.server.moe_cache_path.byte_length() > 0:
-            print("MoE Cache:  enabled (path=" + self.server.moe_cache_path + ", " + String(self.server.moe_cache_mib) + " MiB)")
+        print("KV Cache:   " + String(self.server.kvcache_enabled) + " (--kvcache enables KV.PREFIX.*/ATTEND.*/V.*)")
         print("Cluster:    " + String(self.cluster.enabled))
         if self.cluster.enabled:
             print("  Host:     " + self.cluster.my_host)

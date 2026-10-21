@@ -111,11 +111,6 @@ timeout = 180
 requires = ["ollama:nomic-embed-text"]
 
 [[test]]
-file = "tests/test_ai_knn_lm.py"
-server = "--kvcache -w 1"
-tier = "full"
-
-[[test]]
 file = "tests/test_attend_128k.py"
 # --kvcache: without it ATTEND is disabled, every call failed, and the
 # test "passed" having exercised nothing.
@@ -902,32 +897,6 @@ tier = "full"
 requires = ["py:mlx_lm", "hf:mlx-community/Llama-3.2-1B-Instruct-4bit"]
 
 [[test]]
-file = "tests/test_moe_expert_load_dedup.py"
-server = "self"
-tier = "full"
-
-[[test]]
-file = "tests/test_moe_expert_wire.py"
-server = "self"
-tier = "full"
-
-[[test]]
-file = "tests/test_moe_hist_namespaces.py"
-server = "self"
-tier = "full"
-
-[[test]]
-file = "tests/test_moe_ns_prune_selection.py"
-server = "-w 1"
-tier = "gate"
-
-[[test]]
-file = "tests/test_moe_wire_tensor_parity.py"
-server = "self"
-tier = "full"
-requires = ["py:mlx_lm"]
-
-[[test]]
 file = "tests/test_mojo_packages.py"
 server = "none"
 tier = "gate"
@@ -951,11 +920,6 @@ args = "--start --port 6396"
 tier = "gate"
 
 [[test]]
-file = "tests/test_neuron_pkm.py"
-server = "--kvcache -w 1"
-tier = "full"
-
-[[test]]
 file = "tests/test_numeric_validation.py"
 server = "-w 1"
 tier = "gate"
@@ -977,12 +941,6 @@ server = "none"
 tier = "gate"
 # Tokenizers only: the long-context harnesses' prompts hold one <bos>, first.
 requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit", "hf:mlx-community/Llama-3.2-1B-Instruct-4bit"]
-
-[[test]]
-file = "tests/test_ppl_eval_methodology.py"
-server = "-w 1"
-tier = "full"
-requires = ["py:mlx_lm"]
 
 [[test]]
 file = "tests/test_quest_selector.py"
@@ -1500,11 +1458,9 @@ files = [
   "tests/bench_attend_fused.py",
   "tests/bench_bleu_3b_stage2.py",
   "tests/bench_g2_strict.py",
-  "tests/bench_knn_lm_hnsw.py",
   "tests/bench_metal_attention.mojo",
   "tests/bench_metal_flash_attention.mojo",
   "tests/bench_mlx_vs_mojo.py",
-  "tests/bench_moe_fetch_iouring.py",
   "tests/bench_pion_metal_attention.py",
   "tests/bench_pion_metal_attention_dsweep.py",
   "tests/bench_pion_metal_batched.py",

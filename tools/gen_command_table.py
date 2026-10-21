@@ -397,10 +397,7 @@ PION_DENYOOM = {
     "v.create", "v.commit", "v.storebatch", "v.restore",
     "attend.create", "attend.store", "attend.prefix.store",
     "ft.create", "ft.addtext", "ft.optimize",
-    "ai.knn_lm.create", "ai.knn_lm.store", "ai.knn_lm.storebatch",
-    "ai.route.register", "ai.loadmodel",
-    "neuron.pkm.create", "neuron.pkm.setkeys", "neuron.pkm.setvals",
-    "moe.expert.load",
+    "ai.loadmodel",
 }
 
 

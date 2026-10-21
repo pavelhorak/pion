@@ -1225,11 +1225,6 @@ struct NetworkEngine:
             if self.slow_path.blocked_clients._count() > 0:
                 self._service_blocked_clients(Int32(-1), hnsw, db_size, -1)
 
-            # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the
-            # LRU cache. Cheap (atomic load, 0-N memcpy per tick); no-op
-            # when --moe-cache isn't on (warm_pool == 0).
-            _ = self.slow_path.moe_tier.drain_warm_into_cache()
-
             # Deferred shard responses: drain every tick when queries are pending
             # (was gated to every 64 ticks — added 2×64-tick round-trip latency).
             if self.slow_path.deferred_count > 0:
@@ -1504,11 +1499,6 @@ struct NetworkEngine:
             if self.slow_path.blocked_clients._count() > 0:
                 self._service_blocked_clients(Int32(-1), hnsw, db_size, Int(buf_group_id))
 
-            # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the LRU
-            # cache. Cheap (atomic load, no-op when --moe-cache isn't on). gh #85:
-            # was present on xdp/kqueue only — aligned across all four loops.
-            _ = self.slow_path.moe_tier.drain_warm_into_cache()
-
             # Deferred shard responses: drain every tick when queries are pending
             # (was gated to every 64 ticks — added 2×64-tick round-trip latency).
             if self.slow_path.deferred_count > 0:
@@ -1691,10 +1681,6 @@ struct NetworkEngine:
             # #38: parked BLPOP & co., the same way.
             if self.slow_path.blocked_clients._count() > 0:
                 self._service_blocked_clients(kq, hnsw, db_size)
-
-            # MOE.EXPERT.* Stage 4b warming-completion drain (no-op without
-            # --moe-cache). gh #85: aligned across all four loops.
-            _ = self.slow_path.moe_tier.drain_warm_into_cache()
 
             if nevents <= 0: continue
 
@@ -1975,7 +1961,6 @@ struct NetworkEngine:
                     self._service_blocked_readers(kq, hnsw, db_size)
                 if self.slow_path.blocked_clients._count() > 0:
                     self._service_blocked_clients(kq, hnsw, db_size)
-                _ = self.slow_path.moe_tier.drain_warm_into_cache()
                 if self.slow_path.deferred_count > 0:
                     self.slow_path.drain_deferred_shard_responses(hnsw, self.writer, self.server, kq)
                 if self.slow_path.parked_waits.count() > 0:
@@ -2101,11 +2086,6 @@ struct NetworkEngine:
             # #38: parked BLPOP & co., the same way.
             if self.slow_path.blocked_clients._count() > 0:
                 self._service_blocked_clients(kq, hnsw, db_size)
-
-            # MOE.EXPERT.* Stage 4b: drain warming-thread completions into the
-            # LRU cache. Cheap (atomic load, 0-N memcpy per tick); no-op
-            # when --moe-cache isn't on (warm_pool == 0).
-            _ = self.slow_path.moe_tier.drain_warm_into_cache()
 
             if nevents < 0: continue
 

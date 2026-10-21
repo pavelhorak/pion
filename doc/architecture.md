@@ -29,8 +29,6 @@ Each worker owns **privately**:
 - `ObjectPool[SlabHashMap/SlabSkipList/SlabList]` — recycled data structure instances
 - `WAL`, `RaftNode` — persistence and replication state
 - `KVCacheStore`, `LayerStore`, `AttentionIndex` — externalized attention state (when `--kvcache`)
-- `SemanticRouter` — semantic router state (when `--kvcache`)
-- `SpeculativeRAG` — per-session trajectory tracking + speculative cache (when `--kvcache`)
 - Network socket + kqueue fd + recv buffer + response buffer
 
 **Shared across all workers:**
@@ -170,40 +168,4 @@ Inference engine (vLLM/MLX) → PionAttentionClient (tests/attention_client.py)
 - Memory: ~125 MB per layer at 128K
 
 ---
-
-## Semantic Router Modules
-
-When `--kvcache` is enabled, the semantic routing modules are activated:
-
-| Module | File | Role |
-|---|---|---|
-| SemanticRouter | `src/network/semantic_router.mojo` | HNSW/FP32 routing table indexed by node centroid embeddings |
-| route commands | `src/commands/route.mojo` | AI.ROUTE.REGISTER, AI.ROUTE.UPDATE, AI.ROUTE, AI.ROUTE.REMOVE, AI.ROUTE.INFO handlers |
-
-**Routing strategy:** FP32 brute-force cosine similarity for <=16 nodes (zero recall loss); HNSW O(log N) for >16 nodes. Per-node capacity limits, exclude filters. No accuracy or latency result is published with a harness yet.
-
----
-
-## Speculative RAG Modules
-
-When `--kvcache` is enabled, the speculative RAG modules are activated:
-
-| Module | File | Role |
-|---|---|---|
-| SpeculativeRAG | `src/network/speculative_rag.mojo` | Per-session trajectory ring buffer (last 10 embeddings), momentum prediction, speculative HNSW cache |
-| speculative commands | `src/commands/speculative.mojo` | RAG.SPECULATE.ENABLE, RAG.QUERY, RAG.SPECULATE.INFO handlers |
-
-**Data flow (speculative RAG):**
-```
-RAG.SPECULATE.ENABLE session_id
-    └── Creates per-session trajectory ring buffer
-
-RAG.QUERY session_id query_embedding
-    ├── Append embedding to trajectory ring buffer
-    ├── Check speculative cache (cosine > 0.9 match against predictions)
-    │     └── HIT: return pre-computed HNSW results
-    ├── MISS: execute live HNSW search
-    ├── Generate 3 predictions: current + alpha * (current - previous), alpha=[0.5, 1.0, 1.5]
-    └── Pre-execute HNSW search for each prediction → store in speculative cache
-```
 

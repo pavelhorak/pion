@@ -364,9 +364,7 @@ def _print_help():
     print("      --gpu                 enable GPU search path (Metal on macOS)")
     print("")
     print("Externalized attention / KV cache (Mac)")
-    print("      --kvcache             enable KV.PREFIX.* / ATTEND.* / V.* / AI.ROUTE.* / RAG.* + binary protocol on port+1")
-    print("      --moe-cache PATH      enable MOE.EXPERT.* tier (path to MoE safetensors directory)")
-    print("      --moe-cache-mib N     MoE tier LRU cache budget in MiB (default 1024)")
+    print("      --kvcache             enable KV.PREFIX.* / ATTEND.* / V.* + binary protocol on port+1")
     print("      --metal-attention     native Metal SDPA, fp32 (Apple Silicon, no Python sidecar)")
     print("      --metal-attention-fp16   fp16 kernel — matches vanilla mlx-lm precision")
     print("      --cuda-attention      native CUDA SDPA (Linux GPU). Routes ATTEND.PREFIX.{STORE,QUERY,QUERY_SPARSE,QUERY_SPARSE_AUTO} through cuda_kernels.cu")
@@ -744,21 +742,6 @@ def main():
             if config.server.tenants.byte_length() > 0:
                 config.server.tenants += "\n"
             config.server.tenants += args[i + 1]
-            i += 2
-        elif args[i] == "--moe-cache" and i + 1 < len(args):
-            # gh #61 Stage 2: MoE-expert tier. Path to a directory of MoE
-            # safetensors shards (e.g. an HF cache snapshot dir). When set,
-            # MoEExpertTier loads the manifest at startup; MOE.EXPERT.*
-            # handlers serve real INFO/FETCH/STATS from disk.
-            config.server.moe_cache_path = args[i + 1]
-            i += 2
-        elif args[i] == "--moe-cache-mib" and i + 1 < len(args):
-            # gh #61 Stage 2: LRU cache budget in MiB. Default 1024
-            # (Phase-0 sweet spot on 16 GB Mac).
-            try:
-                config.server.moe_cache_mib = atol(args[i + 1])
-            except:
-                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]))   # gh #372
             i += 2
         elif (args[i] == "--dim") and i + 1 < len(args):
             try:
@@ -1738,13 +1721,6 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                 if worker_config.server.tenants.byte_length() > 0:
                     worker_config.server.tenants += "\n"
                 worker_config.server.tenants += args[j + 1]
-            elif args[j] == "--moe-cache" and j + 1 < len(args):
-                worker_config.server.moe_cache_path = args[j + 1]
-            elif args[j] == "--moe-cache-mib" and j + 1 < len(args):
-                try:
-                    worker_config.server.moe_cache_mib = atol(args[j + 1])
-                except:
-                    pass
             elif (args[j] == "--dim") and j + 1 < len(args):
                 try:
                     worker_config.vector.dimensions = atol(args[j+1])

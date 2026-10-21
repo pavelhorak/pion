@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""gh #400: the exact FP32 scans behind VSIM and kNN-LM's brute force, checked
+"""gh #400: the exact FP32 scan behind VSIM, checked
 against numpy at dimensions that exercise every part of the kernel.
 
 VSIM scores a whole set with one GEMV (Accelerate on macOS) or the
-four-chain FMA kernel; kNN-LM's brute force uses the four-chain L2 kernel.
-The kernels walk 16 floats at a time, then 4, then one, so the dims here
+four-chain FMA kernel. The kernel walks 16 floats at a time, then 4, then one, so the dims here
 include multiples of 16, a 4-remainder and a scalar tail. The scores move
 only by reassociation, so each check is a tolerance, and the rankings must
 match numpy's wherever numpy's own gaps are wider than that tolerance.
@@ -65,31 +64,6 @@ def vsim(r, rng, dim):
     r.delete(key)
 
 
-def knn(r, rng, dim):
-    n = 400
-    ds = f"fp32scan_knn_{dim}"
-    try:
-        r.execute_command("AI.KNN_LM.DROP", ds)
-    except redis.ResponseError:
-        pass
-    r.execute_command("AI.KNN_LM.CREATE", ds, str(dim), str(n + 10))
-    X = rng.standard_normal((n, dim)).astype(np.float32)
-    tok = np.arange(n, dtype=np.int32).tobytes()
-    r.execute_command("AI.KNN_LM.STOREBATCH", ds, str(n), tok, X.tobytes())
-    q = rng.standard_normal(dim).astype(np.float32)
-    k = 8
-    blob = r.execute_command("AI.KNN_LM.QUERY", ds, str(k), q.tobytes())
-    rows = [struct.unpack_from("<if", blob, 8 * i) for i in range(len(blob) // 8)]
-    d2 = ((X.astype(np.float64) - q.astype(np.float64)) ** 2).sum(axis=1)
-    order = np.argsort(d2)
-    check(len(rows) == k, f"KNN_LM dim={dim}: {k} results")
-    worst = max(abs(dist - d2[tid]) / max(1.0, d2[tid]) for tid, dist in rows)
-    check(worst < 1e-5, f"KNN_LM dim={dim}: distances within 1e-5 (relative) of numpy (worst {worst:.2e})")
-    check([tid for tid, _ in rows] == [int(t) for t in order[:k]],
-          f"KNN_LM dim={dim}: same top-{k} as numpy")
-    r.execute_command("AI.KNN_LM.DROP", ds)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=1974)
@@ -98,7 +72,6 @@ def main():
     rng = np.random.default_rng(400)
     for dim in DIMS:
         vsim(r, rng, dim)
-        knn(r, rng, dim)
     print(f"{len(FAILS)} failed")
     return 1 if FAILS else 0
 

@@ -15,8 +15,7 @@ behind one wire protocol, with one durability story.
 | Vectors and retrieval | `FT.*`, `VADD`/`VSIM` and the rest of VSET, BM25, hybrid | supported | [FT.* and VSET](/reference/commands/vector.md) |
 | Semantic cache | `AI.SEMANTIC_CACHE`, `AI.EMBED` | supported | [AI.*](/reference/commands/ai.md) |
 | Key-value | the Redis command surface | supported | [Redis-compatible commands](/command_matrix.md) |
-| MoE expert paging | `MOE.EXPERT.*` | **experimental** | [MOE.EXPERT.*](/reference/commands/moe-expert.md) |
-| Routing, RAG, kNN-LM, product keys | `AI.ROUTE.*`, `RAG.*`, `AI.KNN_LM.*`, `NEURON.PKM.*`, `AI.COMPLETE`, `AI.CHAT` | **experimental** | [AI.*](/reference/commands/ai.md) · [RAG and friends](/reference/commands/rag-knn-pkm.md) |
+| Gateway commands | `AI.COMPLETE`, `AI.CHAT` | **experimental** | [AI.*](/reference/commands/ai.md) |
 
 An experimental plane is in the tree and tested as far as its page says, with
 no published measurement of what it buys and no user outside this project; it

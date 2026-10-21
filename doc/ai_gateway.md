@@ -1,6 +1,6 @@
 # AI Gateway
 
-> **What is supported here.** `AI.SEMANTIC_CACHE`, `AI.EMBED`, `FT.ADDTEXT` and `FT.SEARCHTEXT` are part of Pion's supported surface. Everything else on this page — `AI.COMPLETE`, `AI.CHAT`, `AI.FLARE.*`, the clustered-inference integrations, the semantic router (`AI.ROUTE.*`) and speculative RAG (`RAG.*`) — is **experimental**: wire-tested by `tests/test_ai_gateway.py` (gate tier, needs Ollama), with no published measurement of what it buys and no user outside this project ([README](../README.md#experimental)).
+> **What is supported here.** `AI.SEMANTIC_CACHE`, `AI.EMBED`, `FT.ADDTEXT` and `FT.SEARCHTEXT` are part of Pion's supported surface. Everything else on this page — `AI.COMPLETE`, `AI.CHAT`, `AI.FLARE.*` and the clustered-inference integrations — is **experimental**: wire-tested by `tests/test_ai_gateway.py` (gate tier, needs Ollama), with no published measurement of what it buys and no user outside this project ([README](../README.md#experimental)).
 
 Pion implements a native AI pipeline directly in the database engine, eliminating the need for
 external orchestration layers. All AI commands are handled in `src/network/slow_path.mojo` via
@@ -426,96 +426,3 @@ commands with key normalization for INT8 HNSW quantization. The ATTEND tests use
 | BinaryProtocol | `src/network/binary_protocol.mojo` |
 | KV.* handlers | `src/commands/kv_cache.mojo` |
 | ATTEND.* handlers | `src/commands/attend.mojo` |
-
----
-
-## Semantic Router
-
-> **Experimental.** `AI.ROUTE.*` is wire-tested by `tests/test_ai_gateway.py` (gate tier); its accuracy and latency are not measured with a published harness. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
-
-Routes inference queries to the node whose cached KV state is semantically closest. Instead of round-robin or least-connections, Pion routes by meaning.
-
-### Commands
-
-| Command | Syntax | Description |
-|---|---|---|
-| `AI.ROUTE.REGISTER` | `AI.ROUTE.REGISTER <node_id> <endpoint> <embedding_fp32> [CAPACITY <n>]` | Register inference node with semantic centroid |
-| `AI.ROUTE.UPDATE` | `AI.ROUTE.UPDATE <node_id> <new_embedding_fp32>` | Update node centroid (as KV cache evolves) |
-| `AI.ROUTE` | `AI.ROUTE <query_embedding_fp32> [EXCLUDE <node_id>]` | Route query to best node by cosine similarity |
-| `AI.ROUTE.REMOVE` | `AI.ROUTE.REMOVE <node_id>` | Remove node from routing table |
-| `AI.ROUTE.INFO` | `AI.ROUTE.INFO` | Per-node stats: routed count, capacity, endpoint |
-
-### Routing strategy
-
-FP32 brute-force cosine for <=16 nodes (zero recall loss); HNSW O(log N) for >16 nodes. Per-node capacity limits and exclude filters prevent overloading.
-
-### Results
-
-No accuracy or latency result is published with a harness yet.
-
-### Mojo modules
-
-| Module | File |
-|---|---|
-| SemanticRouter | `src/network/semantic_router.mojo` |
-| AI.ROUTE.* handlers | `src/commands/route.mojo` |
-
-### Enabling
-
-```bash
-./pion-server --kvcache -w 1
-```
-
----
-
-## Speculative RAG
-
-> **Experimental.** `RAG.*` is wire-tested by `tests/test_ai_gateway.py` (gate tier); its hit rate is not measured with a published harness. No measurement of what it buys is published and nobody outside this project is known to use it, so it is outside Pion's supported surface and may change or be removed.
-
-Predicts upcoming RAG queries using embedding-space momentum and pre-executes HNSW search before the query arrives.
-
-### How it works
-
-```
-Session starts:
-  RAG.SPECULATE.ENABLE session_id  → creates per-session trajectory ring buffer (last 10 embeddings)
-
-Each query:
-  RAG.QUERY session_id query_embedding
-    1. Append embedding to trajectory ring buffer
-    2. Check speculative cache (cosine > 0.9 match against predictions)
-       → HIT: return pre-computed HNSW results instantly (0.2ms)
-       → MISS: execute live HNSW search
-    3. Generate 3 predictions using momentum:
-       predicted = current + alpha * (current - previous)
-       alpha = [0.5, 1.0, 1.5]
-    4. Pre-execute HNSW search for each prediction → store in speculative cache
-```
-
-### Commands
-
-| Command | Syntax | Description |
-|---|---|---|
-| `RAG.SPECULATE.ENABLE` | `RAG.SPECULATE.ENABLE <session_id>` | Enable speculative RAG for a session |
-| `RAG.QUERY` | `RAG.QUERY <session_id> <query_embedding_fp32>` | Query with speculation: check cache first, predict next queries |
-| `RAG.SPECULATE.INFO` | `RAG.SPECULATE.INFO [session_id]` | Per-session stats: hit rate, trajectory length, predictions |
-
-### Parameters
-
-| Parameter | Value |
-|---|---|
-| Predictions per query | 3 (alpha = 0.5, 1.0, 1.5) |
-| Match threshold | cosine > 0.9 |
-
-### Mojo modules
-
-| Module | File |
-|---|---|
-| SpeculativeRAG | `src/network/speculative_rag.mojo` |
-| RAG.* handlers | `src/commands/speculative.mojo` |
-
-### Enabling
-
-```bash
-./pion-server --kvcache -w 1
-```

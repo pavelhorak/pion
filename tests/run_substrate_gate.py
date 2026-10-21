@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Gate 2c — AI substrate wire tests (gh #109).
 
-Runs the pure-wire subset of the attend/kv_prefix/ssm/moe/wal test files —
+Runs the pure-wire subset of the attend/kv_prefix/ssm/wal test files —
 no MLX, no model downloads, no GPU — so the flagship substrate surface has an
 automated guard next to the KV/parity gates.
 
 Two phases:
   1. WIRE  — tests that talk to a shared pion-server this runner starts
-             (--kvcache + --moe-cache, single worker).
+             (--kvcache, single worker).
   2. SELF  — durability tests that manage their own server lifecycle
              (SIGKILL + restart); run after the shared server is stopped.
 
@@ -23,11 +23,9 @@ Usage:
 import argparse
 import functools
 import os
-import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 
 print = functools.partial(print, flush=True)
@@ -61,12 +59,6 @@ WIRE_TESTS = [
     # SSM.PREFIX.*
     "test_ssm_prefix_roundtrip.py",
     "test_ssm_prefix_large_blob.py",
-    # MOE.EXPERT.*
-    "test_moe_expert_wire.py",
-    "test_moe_expert_load_dedup.py",
-    "test_moe_hist_namespaces.py",
-    "test_moe_ns_prune_selection.py",
-    "test_moe_wire_tensor_parity.py",
 ]
 
 # Tests that spawn/kill their own pion-server (durability / multi-worker).
@@ -126,7 +118,7 @@ def ping(port: int) -> bool:
         return False
 
 
-def start_server(binary: str, port: int, moe_dir: str, no_engine: bool = False) -> subprocess.Popen:
+def start_server(binary: str, port: int, no_engine: bool = False) -> subprocess.Popen:
     log = open(os.path.join(REPO, "pion_gate2c.log"), "w")
     proc = subprocess.Popen(
         [
@@ -135,8 +127,6 @@ def start_server(binary: str, port: int, moe_dir: str, no_engine: bool = False) 
             "-w", "1",
             "-p", str(port),
             "--no-auto-embed",
-            "--moe-cache", moe_dir,
-            "--moe-cache-mib", "256",
         ] + ([] if no_engine else
              (["--metal-attention"] if sys.platform == "darwin" else ["--cuda-attention"])),
         cwd=REPO,
@@ -244,9 +234,8 @@ def main() -> int:
             print(f"FATAL: port {args.port} already in use — stop the other server first")
             return 2
         clean_state()
-        moe_dir = tempfile.mkdtemp(prefix="pion_gate2c_moe_")
-        print(f"[gate2c] starting {args.binary} --kvcache -w 1 -p {args.port} (moe-cache {moe_dir})")
-        proc = start_server(args.binary, args.port, moe_dir, args.no_attention_engine)
+        print(f"[gate2c] starting {args.binary} --kvcache -w 1 -p {args.port}")
+        proc = start_server(args.binary, args.port, args.no_attention_engine)
         try:
             for t in wire:
                 status, dt, detail = run_test(t, args.port, args.timeout)
@@ -267,7 +256,6 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-            shutil.rmtree(moe_dir, ignore_errors=True)
 
     # Phase 2 — self-managed durability tests (need the port free)
     if selfm and not args.skip_self:

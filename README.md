@@ -625,9 +625,7 @@ removed, and each carries an **Experimental** banner on its own page.
 |---|---|---|
 | Cluster: slots, gossip, Raft, replication, failover | [`doc/distributed_systems.md`](doc/distributed_systems.md) | gate and full tier; replication covers worker 0 only and its stream is unauthenticated |
 | Tenant binding (`--tenant`) | [`doc/multi_tenant.md`](doc/multi_tenant.md) | gate tier; isolation reviewed only by this project |
-| `AI.COMPLETE`, `AI.CHAT`, `AI.ROUTE.*`, `RAG.*`, `AI.FLARE.*` | [`doc/ai_gateway.md`](doc/ai_gateway.md) | wire-tested in the gate tier (needs Ollama) |
-| `AI.KNN_LM.*`, `NEURON.PKM.*` | [the command reference](https://pion.pavelhorak.com/docs/reference/commands/rag-knn-pkm/) | full tier |
-| `MOE.EXPERT.*` expert paging | [the command reference](https://pion.pavelhorak.com/docs/reference/commands/moe-expert/) | wire-tested in the gate tier and the full tier; decode is research-grade |
+| `AI.COMPLETE`, `AI.CHAT`, `AI.FLARE.*` | [`doc/ai_gateway.md`](doc/ai_gateway.md) | wire-tested in the gate tier (needs Ollama) |
 | RedisVL and LangChain through their Redis clients | — | no test in the suite |
 
 ---

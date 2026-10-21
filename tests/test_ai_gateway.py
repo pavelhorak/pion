@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integration tests for AI gateway commands.
 
-Section 1-3: No external deps (AI.ROUTE, RAG.SPECULATE, AI.SEMANTIC_CACHE)
+Section 3: AI.SEMANTIC_CACHE (sections 1-2 tested AI.ROUTE and RAG.*, removed 2026-10)
 Section 4-8: Require Ollama (AI.CHAT, AI.COMPLETE, AI.EMBED, AI.MEMORY, AI.FLARE)
 
 Requires: pion-server --kvcache -w 1  on port 1974
@@ -46,10 +46,6 @@ def connect():
     sock.settimeout(5)
     return sock
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# M13: Semantic Router (AI.ROUTE.*)
-# ──────────────────────────────────────────────────────────────────────────────
 
 passed = 0
 failed = 0
@@ -97,262 +93,6 @@ def check(name, condition, detail=""):
         if detail:
             msg += f" — {detail}"
         print(msg)
-
-
-def test_route_info_empty():
-    """AI.ROUTE.INFO on empty routing table."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["AI.ROUTE.INFO"])
-    sock.close()
-    check("ROUTE.INFO empty returns bulk string", b"$" in resp, repr(resp[:100]))
-    check("ROUTE.INFO shows nodes:0", b"nodes:0" in resp, repr(resp[:200]))
-
-
-def test_route_register():
-    """AI.ROUTE.REGISTER with valid embedding."""
-    sock = connect()
-    emb = make_embedding(100)
-
-    resp = send_raw_resp(sock, ["AI.ROUTE.REGISTER", "node-math", "http://gpu1:8080/v1", emb.tobytes()])
-    check("REGISTER node-math returns +OK", b"+OK" in resp, repr(resp))
-
-    # Register a second node with a different domain
-    emb2 = make_embedding(200)
-    resp = send_raw_resp(sock, ["AI.ROUTE.REGISTER", "node-code", "http://gpu2:8080/v1", emb2.tobytes()])
-    check("REGISTER node-code returns +OK", b"+OK" in resp, repr(resp))
-
-    # Register with CAPACITY
-    emb3 = make_embedding(300)
-    resp = send_raw_resp(sock, ["AI.ROUTE.REGISTER", "node-med", "http://gpu3:8080/v1", emb3.tobytes(), "CAPACITY", "10"])
-    check("REGISTER node-med with CAPACITY returns +OK", b"+OK" in resp, repr(resp))
-
-    sock.close()
-
-
-def test_route_register_bad_embedding():
-    """AI.ROUTE.REGISTER with wrong embedding size should fail."""
-    sock = connect()
-    bad_emb = np.zeros(16, dtype=np.float32)  # wrong dim
-    resp = send_raw_resp(sock, ["AI.ROUTE.REGISTER", "bad-node", "http://x:1", bad_emb.tobytes()])
-    check("REGISTER wrong dim returns ERR", b"-ERR" in resp, repr(resp))
-    sock.close()
-
-
-def test_route_register_duplicate():
-    """AI.ROUTE.REGISTER duplicate node_id should fail."""
-    sock = connect()
-    emb = make_embedding(999)
-    resp = send_raw_resp(sock, ["AI.ROUTE.REGISTER", "node-math", "http://dup:1", emb.tobytes()])
-    check("REGISTER duplicate returns ERR", b"-ERR" in resp, repr(resp))
-    sock.close()
-
-
-def test_route_info_populated():
-    """AI.ROUTE.INFO after registering 3 nodes."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["AI.ROUTE.INFO"])
-    sock.close()
-    check("ROUTE.INFO shows nodes:3", b"nodes:3" in resp, repr(resp[:300]))
-    check("ROUTE.INFO shows node-math", b"node-math" in resp, repr(resp[:500]))
-    check("ROUTE.INFO shows node-code", b"node-code" in resp, repr(resp[:500]))
-    check("ROUTE.INFO shows node-med", b"node-med" in resp, repr(resp[:500]))
-
-
-def test_route_query_routing():
-    """AI.ROUTE with query embedding closest to a registered node."""
-    sock = connect()
-    # Query close to node-math (seed=100)
-    query_math = make_embedding(100)  # exact same as node-math centroid
-    resp = send_raw_resp(sock, ["AI.ROUTE", query_math.tobytes()])
-    check("ROUTE to math returns gpu1 endpoint", b"gpu1" in resp, repr(resp))
-
-    # Query close to node-code (seed=200)
-    query_code = make_embedding(200)
-    resp = send_raw_resp(sock, ["AI.ROUTE", query_code.tobytes()])
-    check("ROUTE to code returns gpu2 endpoint", b"gpu2" in resp, repr(resp))
-    sock.close()
-
-
-def test_route_query_exclude():
-    """AI.ROUTE with EXCLUDE should skip the excluded node."""
-    sock = connect()
-    query = make_embedding(100)  # closest to node-math
-    resp = send_raw_resp(sock, ["AI.ROUTE", query.tobytes(), "EXCLUDE", "node-math"])
-    check("ROUTE with EXCLUDE skips node-math", b"gpu1" not in resp, repr(resp))
-    # Should route to one of the other nodes
-    check("ROUTE with EXCLUDE returns some endpoint", b"gpu" in resp, repr(resp))
-    sock.close()
-
-
-def test_route_update():
-    """AI.ROUTE.UPDATE changes a node's centroid."""
-    sock = connect()
-    # Update node-math to have node-code's embedding
-    new_emb = make_embedding(200)
-    resp = send_raw_resp(sock, ["AI.ROUTE.UPDATE", "node-math", new_emb.tobytes()])
-    check("UPDATE node-math returns +OK", b"+OK" in resp, repr(resp))
-
-    # Now querying with seed=100 should NOT route to node-math (centroid changed)
-    query = make_embedding(100)
-    resp = send_raw_resp(sock, ["AI.ROUTE", query.tobytes()])
-    # node-math now has seed=200 centroid, so seed=100 query should go elsewhere
-    check("ROUTE after UPDATE doesn't go to updated node", b"gpu1" not in resp or b"gpu" in resp, repr(resp))
-
-    # Restore original centroid
-    orig_emb = make_embedding(100)
-    send_raw_resp(sock, ["AI.ROUTE.UPDATE", "node-math", orig_emb.tobytes()])
-    sock.close()
-
-
-def test_route_update_nonexistent():
-    """AI.ROUTE.UPDATE on unknown node should fail."""
-    sock = connect()
-    emb = make_embedding(1)
-    resp = send_raw_resp(sock, ["AI.ROUTE.UPDATE", "nonexistent", emb.tobytes()])
-    check("UPDATE nonexistent returns ERR", b"-ERR" in resp, repr(resp))
-    sock.close()
-
-
-def test_route_remove():
-    """AI.ROUTE.REMOVE deletes a node."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["AI.ROUTE.REMOVE", "node-med"])
-    check("REMOVE node-med returns +OK", b"+OK" in resp, repr(resp))
-
-    # Verify gone from INFO
-    resp = send_raw_resp(sock, ["AI.ROUTE.INFO"])
-    check("ROUTE.INFO shows nodes:2 after remove", b"nodes:2" in resp, repr(resp[:300]))
-    check("ROUTE.INFO no longer shows node-med", b"node-med" not in resp, repr(resp[:500]))
-    sock.close()
-
-
-def test_route_remove_nonexistent():
-    """AI.ROUTE.REMOVE on unknown node should fail."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["AI.ROUTE.REMOVE", "ghost-node"])
-    check("REMOVE nonexistent returns ERR", b"-ERR" in resp, repr(resp))
-    sock.close()
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# M9: Speculative RAG (RAG.SPECULATE.*, RAG.QUERY)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_rag_info_global_empty():
-    """RAG.SPECULATE.INFO returns valid stats."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.INFO"])
-    sock.close()
-    check("RAG.INFO global returns bulk string", b"$" in resp, repr(resp[:100]))
-    check("RAG.INFO shows sessions field", b"sessions:" in resp, repr(resp[:200]))
-    check("RAG.INFO shows enabled:True", b"enabled:True" in resp, repr(resp[:200]))
-
-
-def test_rag_enable_session():
-    """RAG.SPECULATE.ENABLE creates a session."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.ENABLE", "sess-1"])
-    check("ENABLE sess-1 returns +OK", b"+OK" in resp, repr(resp))
-
-    # Enable with custom DEPTH and THRESHOLD
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.ENABLE", "sess-2", "DEPTH", "5", "THRESHOLD", "0.85"])
-    check("ENABLE sess-2 with DEPTH/THRESHOLD returns +OK", b"+OK" in resp, repr(resp))
-    sock.close()
-
-
-def test_rag_info_per_session():
-    """RAG.SPECULATE.INFO <session_id> returns per-session stats."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.INFO", "sess-1"])
-    check("RAG.INFO sess-1 returns bulk string", b"$" in resp, repr(resp[:100]))
-    check("RAG.INFO sess-1 shows queries field", b"queries:" in resp, repr(resp[:300]))
-    check("RAG.INFO sess-1 shows depth:3", b"depth:3" in resp, repr(resp[:300]))
-
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.INFO", "sess-2"])
-    check("RAG.INFO sess-2 shows depth:5", b"depth:5" in resp, repr(resp[:300]))
-    check("RAG.INFO sess-2 shows threshold:0.85", b"threshold:0.85" in resp.replace(b"0.849999", b"0.85"), repr(resp[:300]))
-    sock.close()
-
-
-def test_rag_info_nonexistent():
-    """RAG.SPECULATE.INFO on unknown session should fail."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.INFO", "no-such-session"])
-    check("RAG.INFO unknown session returns ERR", b"-ERR" in resp, repr(resp))
-    sock.close()
-
-
-def test_rag_query_no_hnsw():
-    """RAG.QUERY without HNSW populated returns empty array or valid results."""
-    sock = connect()
-    emb = make_embedding(10)
-    resp = send_raw_resp(sock, ["RAG.QUERY", "sess-1", emb.tobytes()])
-    # May return *0 if HNSW empty, or results if prior tests populated it
-    is_valid = resp.startswith(b"*0") or resp.startswith(b"$") or resp.startswith(b"*")
-    check("RAG.QUERY returns valid RESP response", is_valid, repr(resp[:100]))
-    sock.close()
-
-
-def test_rag_query_builds_trajectory():
-    """Multiple RAG.QUERY calls build trajectory history."""
-    sock = connect()
-    # Send 3 queries to build trajectory
-    for i in range(3):
-        emb = make_embedding(10 + i)
-        send_raw_resp(sock, ["RAG.QUERY", "sess-1", emb.tobytes()])
-
-    # Check session stats — should show queries incremented
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.INFO", "sess-1"])
-    # Extract query count (may vary if server reused across runs)
-    check("RAG.INFO after queries shows queries field", b"queries:" in resp, repr(resp[:300]))
-    check("RAG.INFO shows history_count > 0", b"history_count:0\r\n" not in resp, repr(resp[:300]))
-    sock.close()
-
-
-def test_rag_global_info_after_queries():
-    """RAG.SPECULATE.INFO global shows updated stats."""
-    sock = connect()
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.INFO"])
-    check("RAG.INFO global shows sessions:2", b"sessions:2" in resp, repr(resp[:200]))
-    sock.close()
-
-
-def test_rag_query_with_hnsw():
-    """RAG.QUERY with HNSW populated returns results."""
-    import time
-
-    # Use a fresh connection for HNSW setup
-    sock1 = connect()
-    send_raw_resp(sock1, ["FT.CREATE", "rag_test_idx", "ON", "HASH",
-                          "SCHEMA", "vec", "VECTOR", "HNSW", "6",
-                          "TYPE", "FLOAT32", "DIM", "768", "DISTANCE_METRIC", "L2"])
-
-    # Insert 20 vectors
-    for i in range(20):
-        v = make_embedding(1000 + i)
-        send_raw_resp(sock1, ["HSET", f"doc:{i}", "vec", v.tobytes()])
-
-    send_raw_resp(sock1, ["FT.OPTIMIZE", "rag_test_idx"])
-    sock1.close()
-    time.sleep(1)  # let optimize complete
-
-    # Fresh connection for RAG.QUERY
-    sock2 = connect()
-
-    # Check if HNSW is actually ready (FT.INFO should show index)
-    resp_info = send_raw_resp(sock2, ["FT.INFO", "rag_test_idx"])
-
-    query_emb = make_embedding(1005)  # matches doc:5 exactly
-    resp = send_raw_resp(sock2, ["RAG.QUERY", "sess-1", query_emb.tobytes(), "K", "3"])
-    # RAG.QUERY returns *0 if HNSW not ready, or a bulk string with results
-    # After FT.OPTIMIZE with 20 vectors, HNSW should be ready
-    # Accept either non-empty results OR *0 (if optimize hasn't completed yet)
-    is_valid_response = resp.startswith(b"*") or resp.startswith(b"$")
-    check("RAG.QUERY with HNSW returns valid RESP response", is_valid_response, repr(resp[:200]))
-
-    # Clean up
-    send_raw_resp(sock2, ["FT.DROPINDEX", "rag_test_idx"])
-    sock2.close()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -414,42 +154,6 @@ def test_semantic_cache():
         env_skip(f"AI.SEMANTIC_CACHE", f"server returned: {resp.decode(errors='replace').strip()}")
     else:
         env_skip("AI.SEMANTIC_CACHE", "embedding not enabled — requires Ollama")
-
-    sock.close()
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Error handling
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_route_missing_args():
-    """AI.ROUTE.* with missing arguments should return errors."""
-    sock = connect()
-
-    resp = send_raw_resp(sock, ["AI.ROUTE.REGISTER"])
-    check("REGISTER no args returns ERR", b"-ERR" in resp, repr(resp))
-
-    resp = send_raw_resp(sock, ["AI.ROUTE.UPDATE"])
-    check("UPDATE no args returns ERR", b"-ERR" in resp, repr(resp))
-
-    resp = send_raw_resp(sock, ["AI.ROUTE"])
-    check("ROUTE no args returns ERR", b"-ERR" in resp, repr(resp))
-
-    resp = send_raw_resp(sock, ["AI.ROUTE.REMOVE"])
-    check("REMOVE no args returns ERR", b"-ERR" in resp, repr(resp))
-
-    sock.close()
-
-
-def test_rag_missing_args():
-    """RAG.* with missing arguments should return errors."""
-    sock = connect()
-
-    resp = send_raw_resp(sock, ["RAG.SPECULATE.ENABLE"])
-    check("ENABLE no args returns ERR", b"-ERR" in resp, repr(resp))
-
-    resp = send_raw_resp(sock, ["RAG.QUERY"])
-    check("RAG.QUERY no args returns ERR", b"-ERR" in resp, repr(resp))
 
     sock.close()
 
@@ -884,20 +588,6 @@ def test_ai_loadmodel_missing_args():
     sock.close()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Cleanup: remove remaining test nodes
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_cleanup():
-    """Remove test nodes."""
-    sock = connect()
-    send_raw_resp(sock, ["AI.ROUTE.REMOVE", "node-math"])
-    send_raw_resp(sock, ["AI.ROUTE.REMOVE", "node-code"])
-    resp = send_raw_resp(sock, ["AI.ROUTE.INFO"])
-    check("Cleanup: all nodes removed", b"nodes:0" in resp, repr(resp[:200]))
-    sock.close()
-
-
 def main():
     global passed, failed
 
@@ -906,32 +596,6 @@ def main():
     print(f"Target: {HOST}:{PORT} (requires --kvcache -w 1)")
     print("=" * 60)
 
-    # M13: Semantic Router
-    print("\n=== Section 1: AI.ROUTE.* (M13 Semantic Router) ===")
-    test_route_info_empty()
-    test_route_register()
-    test_route_register_bad_embedding()
-    test_route_register_duplicate()
-    test_route_info_populated()
-    test_route_query_routing()
-    test_route_query_exclude()
-    test_route_update()
-    test_route_update_nonexistent()
-    test_route_remove()
-    test_route_remove_nonexistent()
-    test_route_missing_args()
-
-    # M9: Speculative RAG
-    print("\n=== Section 2: RAG.SPECULATE.* (M9 Speculative RAG) ===")
-    test_rag_info_global_empty()
-    test_rag_enable_session()
-    test_rag_info_per_session()
-    test_rag_info_nonexistent()
-    test_rag_query_no_hnsw()
-    test_rag_query_builds_trajectory()
-    test_rag_global_info_after_queries()
-    test_rag_query_with_hnsw()
-    test_rag_missing_args()
 
     # Probe the backends ONCE, before any section that depends on them, so a
     # section can tell "backend absent" (skip) from "backend present but the
@@ -998,9 +662,6 @@ def main():
         test_ai_loadmodel_llm()
         test_ai_loadmodel_missing_args()
 
-    # Cleanup
-    print("\n=== Cleanup ===")
-    test_cleanup()
 
     print("\n" + "=" * 60)
     print(f"AI Gateway Tests: {passed} passed, {failed} failed, {skipped} skipped (no backend)")

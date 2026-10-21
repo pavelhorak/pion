@@ -448,15 +448,14 @@ def _ps_str(mut writer: ResponseWriter, k: StringLiteral, v: String):
 
 @always_inline
 def handle_pion_stats(mut writer: ResponseWriter, ledger: ValueLedger,
-                      sem_hits: UInt64, sem_misses: UInt64,
-                      moe_hits: UInt64, moe_misses: UInt64, worker_id: Int) -> Int:
+                      sem_hits: UInt64, sem_misses: UInt64, worker_id: Int) -> Int:
     """PION.STATS — the value receipt as a map (RESP3 `%`, RESP2 flat array).
 
     gh #262. Per WORKER: the counters live in the worker that answered, so
     a client pool spanning workers reads each worker's own receipt.
     `prefill_seconds_avoided` is measured + estimated; the `_measured`
     twin is the part backed by client-reported PREFILL_MS only."""
-    writer.append_map_header(16)
+    writer.append_map_header(14)
     _ps_int(writer, "worker_id", UInt64(worker_id))
     _ps_int(writer, "uptime_in_seconds", UInt64(ledger.uptime_seconds()))
     _ps_int(writer, "kvprefix_hits", ledger.kvprefix_hits)
@@ -470,8 +469,6 @@ def handle_pion_stats(mut writer: ResponseWriter, ledger: ValueLedger,
     _ps_str(writer, "prefill_seconds_avoided_measured", ledger.prefill_seconds_avoided_measured())
     _ps_int(writer, "semantic_hits", sem_hits)
     _ps_int(writer, "semantic_misses", sem_misses)
-    _ps_int(writer, "moe_hits", moe_hits)
-    _ps_int(writer, "moe_misses", moe_misses)
     _ps_int(writer, "vector_queries", ledger.vector_queries)
     return 0
 

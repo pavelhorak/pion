@@ -146,7 +146,7 @@ def main():
                     "kvprefix_hits_measured", "kvprefix_tokens_served", "kvprefix_bytes_served",
                     "kvprefix_prefill_us_saved", "kvprefix_prefill_us_measured",
                     "prefill_seconds_avoided", "prefill_seconds_avoided_measured",
-                    "semantic_hits", "semantic_misses", "moe_hits", "moe_misses", "vector_queries"]
+                    "semantic_hits", "semantic_misses", "vector_queries"]
         check("16 fields, in order", list(s.keys()) == expected, list(s.keys()))
         zero = [k for k in expected if k not in ("worker_id", "uptime_in_seconds", "prefill_seconds_avoided", "prefill_seconds_avoided_measured")]
         check("all counters zero", all(s.get(k) == 0 for k in zero), {k: s.get(k) for k in zero})
