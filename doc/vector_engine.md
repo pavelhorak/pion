@@ -151,6 +151,10 @@ FT.CREATE <index> ON HASH SCHEMA … <field> VECTOR HNSW 6
   Re-issuing `FT.CREATE` for the index being built adds nothing, since a hash
   already in it is skipped. Over a large keyspace this blocks the worker
   while it runs, as `FT.OPTIMIZE` does.
+- **`PREFIX` is accepted and not applied.** Every hash with the index's
+  vector field and `DIM` is indexed, whatever its key, whether it was written
+  before `FT.CREATE` or after. RediSearch indexes only the keys under the
+  prefixes.
 
   Before 1.0.1, `FT.CREATE` indexed only what was written after it, so an index
   created over existing documents answered `[0]`. That included the restart
