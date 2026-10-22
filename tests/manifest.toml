@@ -290,9 +290,10 @@ file = "tests/test_export_imports_resolve.py"
 server = "none"
 cmd = "python3 tests/test_export_imports_resolve.py ."
 # The export tree is retired (development happens in the public repo since
-# 2026-10-02), so the checkout itself is what ships.
-tier = "full"
-timeout = 600
+# 2026-10-02), so the checkout itself is what ships. Gate tier and CI's source
+# checks since #91 broke it unseen: under a second, no server.
+tier = "gate"
+timeout = 60
 
 [[test]]
 file = "tests/test_experimental_banners.py"
