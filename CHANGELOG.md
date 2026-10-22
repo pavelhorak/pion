@@ -4,7 +4,44 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.0.0] — 2026-10-22
+
+**1.0 means the documented surface can be relied on, not that Pion does
+more.** 0.9.0 shipped as a public preview and listed its gaps. 1.0 is measured
+against what was set for it then:
+
+- **TLS is documented at a proxy.** Pion has no TLS. `doc/operations.md` §6
+  puts stunnel in front of a loopback server with a password, and
+  `tests/test_tls_proxy.py` runs that recipe as written in the gate tier.
+- **Memory has a ceiling.** `--maxmemory` (or `CONFIG SET maxmemory`) refuses
+  memory-growing writes with Redis's `-OOM` error at a bound on RSS, the number
+  `INFO` reports as `used_memory`. Nothing is evicted.
+- **Linux binaries come from CI.** x86_64 and arm64 tarballs and a multi-arch
+  container image, each leg gated before it is packaged, since 0.9.0.
+- **A value receipt.** `PION.STATS` and the `# Pion` section of `INFO` report
+  prefill time avoided, measured when the client reports its cold prefill and
+  labelled an estimate when it does not.
+- **No open bug reports.** None is open on the public tracker at release.
+
+What "relied on" covers is the README's *What works*, each part in the gate
+tier: the prompt cache for mlx-lm and its endpoint for coding agents, the
+Redis-compatible KV store with its write-ahead log, and vector search with the
+semantic cache. The README's *Experimental* table (cluster and replication,
+tenant binding, `AI.COMPLETE`, `AI.CHAT`, `AI.FLARE.*`, RedisVL and LangChain
+through their Redis clients) stays in the tree, labelled, outside that promise.
+
+The 0.9.0 list, revisited:
+
+- **No TLS:** unchanged; documented and tested at a proxy, as above.
+- **No eviction:** unchanged; `--maxmemory` refuses, it does not evict.
+- **`-w N` is N independent keyspaces:** unchanged, and still refused without
+  `--independent-workers`. One keyspace can now use more cores with
+  `--io-threads N`: one executor runs every command, N-1 threads own the
+  sockets.
+- **Cluster mode is single-node:** unchanged, and labelled experimental.
+- **CUDA is source-build only:** unchanged.
+- **One maintainer:** unchanged. Crash, desync and data-loss reports come
+  first.
 
 ### Removed
 
