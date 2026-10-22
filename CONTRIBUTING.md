@@ -44,7 +44,7 @@ not against the floor alone.
 # Toolchain — Pion pins an exact Mojo release:
 pixi install                           # reads pixi.toml; installs Mojo + Python
 
-# C FFI shims (Lua, io_uring, XDP, SSM-state, MoE warm-pool):
+# C FFI shims (Lua, io_uring, XDP, SSM-state):
 pixi run build-ffi
 
 # Release binary:
@@ -90,7 +90,7 @@ The short version:
 - New tests go in `tests/` (Mojo + Python) or `pion-*/tests/` (per-package).
 - Wire-protocol tests use `tests/test_raw.py` style (raw socket + RESP).
 - Behavior parity vs Redis goes in `tests/test_parity.py` (uses `redis-py < 5.0`).
-- The MoE / KV-prefix substrate has its own perf gates in `tests/bench_*.py`. If you're touching those, run the gates and quote numbers.
+- The KV-prefix and attention substrate has its own perf gates in `tests/bench_*.py`. If you're touching those, run the gates and quote numbers.
 
 ## License
 
