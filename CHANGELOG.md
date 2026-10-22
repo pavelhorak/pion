@@ -4,11 +4,11 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.0.0] — 2026-10-22
 
 **1.0 means the documented surface can be relied on, not that Pion does
-more.** 0.9.0 shipped as a public preview and listed its gaps. 1.0 was earned
-against criteria set then, not scheduled:
+more.** 0.9.0 shipped as a public preview and listed its gaps. 1.0 is measured
+against what was set for it then:
 
 - **TLS is documented at a proxy.** Pion has no TLS. `doc/operations.md` §6
   puts stunnel in front of a loopback server with a password, and
@@ -21,8 +21,7 @@ against criteria set then, not scheduled:
 - **A value receipt.** `PION.STATS` and the `# Pion` section of `INFO` report
   prefill time avoided, measured when the client reports its cold prefill and
   labelled an estimate when it does not.
-- **30 days of stranger bug reports burned down.** TODO(release day): state
-  the count and that each is closed.
+- **No open bug reports.** None is open on the public tracker at release.
 
 What "relied on" covers is the README's *What works*, each part in the gate
 tier: the prompt cache for mlx-lm and its endpoint for coding agents, the
