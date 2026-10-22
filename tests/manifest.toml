@@ -327,6 +327,16 @@ tier = "gate"
 timeout = 300
 
 [[test]]
+file = "tests/test_vector_restart_ingest.py"
+# A restart leaves a vector index as its build left it: an automatic build's
+# keeps indexing (rows refilled from the hashes, the delta back), an
+# FT.OPTIMIZE build's stays closed and counts what it misses; -w 4 through the
+# affinity ports.
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
 file = "tests/test_ft_create_redimension.py"
 server = "self"
 tier = "gate"

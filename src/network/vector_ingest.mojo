@@ -104,10 +104,16 @@ def ingest_hash_vector(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
     keyspace[].set(GenericValue.borrow(hk, hk_end), GenericValue.borrow_buf(key, klen))
     if is_not_null(wal):
         _ = wal[].append_kv(1, hk, hk_end, key, klen)
-    if is_not_null(shared[].hk_keys_buf) and slot < shared[].hk_max_elements and klen <= 31:
+    if is_not_null(shared[].hk_keys_buf) and slot < shared[].hk_max_elements:
         var dst = shared[].hk_keys_buf + slot * 32
-        dst[0] = UInt8(klen)
-        unsafe_memcpy(dest=dst + 1, src=key, count=klen)
+        if klen <= 31:
+            dst[0] = UInt8(klen)
+            unsafe_memcpy(dest=dst + 1, src=key, count=klen)
+        else:
+            # The key resolves through `__hk__<slot>`, read only when this map
+            # has nothing for the slot: a key an earlier numbering left here
+            # (FT.DROPINDEX, then FT.CREATE) would answer in this one's place.
+            dst[0] = 0
     hk.unsafe_free()
     if is_not_null(tomb):
         hv.as_hash().bitcast[SlabHashMap]()[].index_vector(slot, _field_hash(field, flen), tomb)
@@ -269,12 +275,19 @@ def restore_index_state(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
                         tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]):
     """#46, at startup once the index has loaded: mark the slots this worker
     recorded dead for this build, then link each live slot's hash (this
-    worker's `__hk__<slot>` entries) back to its slot, which replay cannot."""
+    worker's `__hk__<slot>` entries) back to its slot, which replay cannot.
+
+    When the load reopened ingest (an automatic build's index,
+    vector_auto.reopen_after_load), each relinked hash also puts its vector
+    back in the slot's row, which the index file does not hold."""
     if is_null(shared) or is_null(shared[].vec_dead) or is_null(shared[].ready_atomic) \
             or shared[].ready_atomic[] == 0:
         return
     var bid = shared[].build_id[] if is_not_null(shared[].build_id) else UInt64(0)
-    var n = shared[].hk_max_elements
+    # Only the graph's slots: a slot past it was written after the build (the
+    # delta), and a reopened ingest numbers the delta again from the graph's
+    # end, so a tombstone of the old numbering would kill a new document.
+    var n = min(shared[].num_nodes, shared[].hk_max_elements)
     # 1. this worker's dead slots for this build
     var dv = keyspace[].get(GenericValue.borrow(HK_DEAD_KEY.unsafe_ptr(), HK_DEAD_KEY.byte_length()))
     if dv.type.value == ValueType.SET:
@@ -315,8 +328,9 @@ def restore_index_state(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
     hk[4] = 95
     hk[5] = 95
     var kbuf = alloc[UInt8](24)
-    var nodes = shared[].num_nodes
-    for s in range(min(nodes, n)):
+    var refill = is_not_null(shared[].restart_refill) and shared[].restart_refill[1] != 0 \
+        and is_not_null(shared[].ingest_fp32)
+    for s in range(n):
         if shared[].vec_dead[s] != 0:
             continue
         var hk_end = format_int_to_buf(hk, 6, Int64(s))
@@ -325,6 +339,36 @@ def restore_index_state(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
             continue
         var hv = keyspace[].get(GenericValue.borrow(kv.as_string_safe(kbuf), kv.string_len()))
         if hv.type.value == ValueType.HASH:
-            hv.as_hash().bitcast[SlabHashMap]()[].index_vector(s, field_h, tomb)
+            var hm = hv.as_hash().bitcast[SlabHashMap]()
+            if refill:
+                # A row whose hash has no vector of this DIM stays unwritten:
+                # the last worker to refill declares it dead.
+                if not _refill_row(shared, hm, s):
+                    continue
+                shared[].commit_ingest(s)
+            hm[].index_vector(s, field_h, tomb)
     hk.unsafe_free()
     kbuf.unsafe_free()
+
+
+def _refill_row(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                h: UnsafePointer[SlabHashMap, MutUntrackedOrigin], slot: Int) -> Bool:
+    """Row `slot` from the index's vector field of hash `h`. False when the
+    hash has no such field of `dim` float32s."""
+    var fbuf = alloc[UInt8](24)
+    var vbuf = alloc[UInt8](24)
+    var ok = False
+    for i in range(h[].capacity):
+        if (h[].metadata[i] & 0x80) != 0:
+            continue
+        var f = h[].keys[i]
+        if not _is_vector_field(shared, f.as_string_safe(fbuf), f.string_len()):
+            continue
+        var v = h[].values[i]
+        if v.is_string() and v.string_len() == shared[].pre_dim * 4:
+            shared[].fill_ingest_row(slot, v.as_string_safe(vbuf).bitcast[Float32]())
+            ok = True
+        break
+    fbuf.unsafe_free()
+    vbuf.unsafe_free()
+    return ok

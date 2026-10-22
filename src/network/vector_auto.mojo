@@ -22,6 +22,14 @@ An explicit FT.OPTIMIZE keeps its meaning: build now, from everything
 ingested, and free the buffer (later HSETs are stored, not indexed, and
 counted in INFO vector_unindexed_writes).
 
+A restart keeps each meaning. The index file records an automatic build
+(word 25, bit 8). Loading one reopens ingest (reopen_after_load), and before
+any worker serves, every worker puts back the FP32 rows of its own hashes
+and adds the hashes the graph does not hold as the delta
+(vector_restart_refill). The file holds the graph, not those rows. A file
+from FT.OPTIMIZE, or from before 1.0.2, loads with ingest closed, as before,
+and says so; its later HSETs are counted as unindexed.
+
 Who builds. `index_owner` is the worker whose graph holds the published
 index; only it rebuilds, so a build never touches buffers another worker's
 graph owns. Before the first publish, the first worker to claim `auto_state`
@@ -59,7 +67,7 @@ from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.network.dispatcher import CommandDispatcher
 from src.io.wal import WAL
 from src.network.vector_ingest import record_all_dead, backfill_index
-from src.commands.vector import populate_hnsw_metadata, adopt_index_config, wait_for_readers
+from src.commands.vector import populate_hnsw_metadata, adopt_index_config, wait_for_readers, _close_ingest
 
 comptime AUTO_IDLE = 0
 comptime AUTO_BUILDING = 1
@@ -241,6 +249,7 @@ def _start(mut hnsw: HNSWGraph,
         Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared[].ready_atomic, UInt64(0))
         wait_for_readers(shared, worker_id)
     hnsw.reset_graph()          # gives back a borrow; BM25 keeps serving
+    hnsw.auto_built = True      # its index file reopens ingest after a restart
     if shared[].index_name_len > 0:
         hnsw.index_name_len = shared[].index_name_len
         for b in range(hnsw.index_name_len):
@@ -385,3 +394,113 @@ def vector_auto_release(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
     var st = auto_load(shared)
     if auto_phase(st) == AUTO_HOLD and auto_worker(st) == worker_id:
         _set(shared, worker_id, AUTO_IDLE)
+
+
+def reopen_after_load(hnsw: HNSWGraph,
+                      shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                      worker_id: Int):
+    """Restart: `hnsw` was just warm-loaded and published (state.mojo phase 6,
+    on the loading worker, before the others stop waiting for the load).
+
+    An automatic build's index reopens ingest as that build left it: HSETs are
+    indexed again, the graph holds slots [0, N), later ones are the delta, and
+    the index rebuilds itself as before. Every worker then refills the rows
+    (vector_restart_refill) before any serves.
+
+    Any other index (FT.OPTIMIZE ended its ingest, or its file predates the
+    flag) keeps ingest closed, as before. It still takes the index config, so
+    a vector written to it is counted as unindexed (INFO
+    vector_unindexed_writes) rather than dropped without a trace, and the log
+    says so: a restart used to look like this from the outside with no sign."""
+    if is_null(shared) or is_null(shared[].ingest_count) or is_not_null(shared[].ingest_fp32):
+        return
+    shared[].pre_dim = hnsw.dim
+    shared[].pre_ef_construction = hnsw.ef_construction
+    shared[].pre_distance_metric = hnsw.distance_metric
+    var name = String("")
+    for b in range(hnsw.index_name_len):
+        name += chr(Int(hnsw.index_name[b]))        # a log line: a name is ASCII in practice
+    if hnsw.auto_built and is_not_null(shared[].restart_refill):
+        shared[].open_ingest(hnsw.max_elements, hnsw.dim)
+        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
+            shared[].ingest_count, UInt64(hnsw.num_nodes))
+        shared[].restart_refill[1] = 1
+        external_call["pion_full_fence", NoneType]()
+        shared[].pre_index_ready = True
+        print("[vector] index '" + name + "' loaded (" + String(hnsw.num_nodes)
+              + " vectors, built automatically): it keeps indexing; refilling its rows from the hashes")
+        return
+    shared[].pre_index_ready = True
+    print("[vector] index '" + name + "' loaded (" + String(hnsw.num_nodes)
+          + " vectors) with ingest closed (FT.OPTIMIZE built it, or its file predates 1.0.2):"
+          + " a vector written from now on is stored, not indexed, and counted in INFO"
+          + " vector_unindexed_writes. FT.DROPINDEX then FT.CREATE indexes every hash.")
+
+
+def vector_restart_refill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                          keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                          wal: UnsafePointer[WAL, MutUntrackedOrigin],
+                          tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+                          worker_id: Int):
+    """Restart, on every worker after restore_index_state (which refilled the
+    rows of the graph's documents this worker holds): add this worker's
+    hashes the graph does not hold (written after its build, or rewritten
+    since) as the delta, as FT.CREATE indexes existing hashes. Then wait for
+    every worker. The last one to get here declares the graph's rows nobody
+    refilled dead (their documents are gone), or, when none was refilled at
+    all, closes ingest and serves the index as loaded. No worker serves
+    before that: a search reads those rows (the delta merge rescores the
+    graph's results from them), and a rebuild builds from them."""
+    var rr = shared[].restart_refill if is_not_null(shared) else null_ptr[UInt64, MutUntrackedOrigin]()
+    if is_null(rr) or Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](rr + 1, UInt64(0)) == 0:
+        return
+    var t0 = UInt64(perf_counter_ns())
+    var added = backfill_index(shared, keyspace, wal, tomb)
+    if added > 0:
+        print("[vector] restart: worker " + String(worker_id) + " indexed " + String(added)
+              + " vectors the graph does not hold, in "
+              + String(Int((UInt64(perf_counter_ns()) - t0) // 1_000_000)) + " ms")
+    var before = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE_RELEASE](rr, UInt64.MAX)
+    if before == 1:
+        _finish_refill(shared, worker_id)
+        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](rr + 1, UInt64(0))
+        return
+    var waited_ms = 0
+    while Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](rr + 1, UInt64(0)) != 0:
+        _ = external_call["usleep", Int32](Int32(1000))
+        waited_ms += 1
+        if waited_ms >= 600_000:
+            # A worker that died never arrives; serving beats never serving.
+            print("Worker " + String(worker_id) + ": gave up waiting for the vector index refill after 600 s")
+            break
+
+
+def _finish_refill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
+    """The last worker's half of vector_restart_refill."""
+    external_call["pion_full_fence", NoneType]()
+    var n = shared[].num_nodes
+    var refilled = 0
+    for s in range(n):
+        if shared[].row_visible(s):
+            refilled += 1
+    if refilled == 0 and n > 0 and shared[].ingested() <= n:
+        # None of the index's documents is in the keyspace (a server run with
+        # --no-wal, or the index file copied without its data): nothing to
+        # rebuild from. Serve the index as loaded, as a warm load always did,
+        # with ingest closed as FT.OPTIMIZE leaves it.
+        _close_ingest(shared, worker_id)
+        print("[vector] restart: none of the index's " + String(n) + " documents is in the keyspace;"
+              + " it serves as loaded with ingest closed: a vector written from now on is stored, not"
+              + " indexed, and counted in INFO vector_unindexed_writes")
+        return
+    var gone = 0
+    for s in range(n):
+        if shared[].row_visible(s):
+            continue
+        shared[].clear_ingest_row(s)
+        shared[].mark_dead(s)
+        shared[].commit_ingest(s)
+        gone += 1
+    print("[vector] restart: " + String(refilled) + " of the graph's rows refilled"
+          + (", " + String(gone) + " documents gone" if gone > 0 else String(""))
+          + "; " + String(shared[].ingested() - n) + " vectors are the delta; the index keeps indexing")

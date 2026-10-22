@@ -111,7 +111,12 @@ Vector index persistence for warm restarts — skips the expensive `FT.OPTIMIZE`
 Header: magic, version, num_nodes, M, ef_construction, global_min/max, etc.
 The slot stride, header size and format bits live in header words 20–22, the
 distance metric in word 24, and the optional-section flags (quantized indexes:
-FP32 re-rank buffer, QJL signs) in word 25; words 12–19 hold the index name. Warm restore only exists for the server's startup
+FP32 re-rank buffer, QJL signs) in word 25; words 12–19 hold the index name.
+Word 25 bit 8 (from 1.0.2) marks an automatic build, whose ingest stays open:
+a warm load of it reopens ingest, and every worker puts back the FP32 rows of
+its own hashes before any serves (`doc/vector_engine.md`, "Searching without
+FT.OPTIMIZE"). `FT.OPTIMIZE` writes the bit clear, or clears it in place when
+it only ends ingest over an automatic build. Warm restore only exists for the server's startup
 dimension; a config-mismatch file is refused rather than loaded.
 
 ---

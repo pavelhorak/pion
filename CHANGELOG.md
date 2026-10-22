@@ -4,6 +4,48 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [1.0.2] — 2026-10-22
+
+After a restart, a vector index that built itself keeps indexing what is
+written next. An index `FT.OPTIMIZE` built still takes no new vectors, but
+now counts them and says so. A dropped index stays dropped.
+
+### Fixed
+
+- **After a restart, a vector index loaded from its file indexed nothing
+  written afterwards, and nothing said so.** It served the vectors it was built
+  with. `FT.SEARCH` missed every vector written after the restart, with no
+  error, and `INFO` `vector_unindexed_writes` read 0. Only `FT.DROPINDEX`
+  followed by `FT.CREATE` brought those vectors in. A restart now leaves an
+  index as its build left it:
+  - An index that built itself (no `FT.OPTIMIZE`) keeps indexing. Its file
+    records that it was built automatically. Before any worker serves, each
+    one puts back the FP32 rows of the documents it holds, since the file has
+    the graph and not those rows. The documents written after the build
+    become the delta again. A vector written after the restart is found at
+    once, and the index rebuilds itself as before.
+  - An index `FT.OPTIMIZE` built keeps ingest closed, as that command says. A
+    vector written to it after the restart is now counted in
+    `vector_unindexed_writes`, and the log says at startup that ingest is
+    closed. A file written before this release loads the same way, because it
+    does not record how its index was built. `FT.DROPINDEX` followed by
+    `FT.CREATE` indexes every hash, and the next automatic build's file
+    records it.
+
+  Test: `tests/test_vector_restart_ingest.py` (gate tier; 31 failures on
+  1.0.1).
+- **A dropped vector index came back after a restart.** `FT.DROPINDEX` left
+  the index file, `pion.hnsw.0`, in place, so after a restart `FT.INFO` knew
+  the dropped index again and `FT.SEARCH` answered from it. Dropping an index
+  now deletes its file, and so does an `FT.CREATE` that replaces an index of
+  another name or `DIM`.
+- **A key over 31 bytes could be answered as another document's key.** The
+  slot-to-key map keeps keys of up to 31 bytes, and a longer key is resolved
+  from the keyspace only when the map has nothing for its slot. After
+  `FT.DROPINDEX` and `FT.CREATE` numbered the slots again, a long key whose
+  slot an earlier short key had held came back from `FT.SEARCH` as that short
+  key. Writing a long key now clears its slot in the map.
+
 ## [1.0.1] — 2026-10-22
 
 `FT.CREATE` indexes the hashes already in the keyspace, as RediSearch does,
