@@ -243,9 +243,9 @@ reading GET as a bulk string, and a wire break to add observability is the wrong
 trade. `EXPLAIN` needs no flag.
 
 Implementation note: `workspaces[]` runs parallel to `responses[]`, and other
-callers (MCP memory in `ai.mojo`, RAG ingest in `vector.mojo`) append to
-`responses` directly without knowing about workspaces. `cache_set` therefore
-PADS to `count` before appending rather than assuming alignment — if the two
+callers (`AI.MEMORY ADD` in `ai.mojo`, `FT.ADDTEXT` in `vector.mojo`) add
+entries without a workspace. `cache_set` and `add_entry` therefore
+PAD to `count` before appending rather than assuming alignment — if the two
 ever drift, `EXPLAIN` returns some other entry's audit trail, which is worse
 than returning none.
 

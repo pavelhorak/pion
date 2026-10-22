@@ -482,7 +482,7 @@ redis-cli -p 1974 AI.SEMANTIC_CACHE GET "What is the capital of France?"
 ```bash
 ./pion-server --profile kv            # KV-only: ~50MB/worker, no HNSW
 ./pion-server --profile vector        # KV + vector search
-./pion-server --profile ai --flare    # KV + vector + AI (semantic cache; RAG and FLARE are experimental)
+./pion-server --profile ai --flare    # KV + vector + AI (semantic cache; FLARE is experimental)
 ./pion-server --kvcache -w 1          # + externalized attention (ATTEND.*)
 ./pion-server --metal-attention -w 1  # + native Metal SDPA on Mac (no Python; fp32, more accurate)
 ./pion-server --metal-attention-fp16 -w 1  # fp16 kernel — matches vanilla mlx-lm precision
@@ -555,7 +555,6 @@ the footnotes carry the sources.
 | KV quantization | FP8; 4-bit demo³ | FP8 | ✓ TurboQuant | ✓ `--kv-bits`⁵ | **fp16/int8/turbo4/INT3/INT2/mlx4g32** |
 | Hybrid (Mamba/GDN) prefix state | in-process⁴ | host + storage tiers⁴ | in-process + SSD | ✓ in the file⁵ | **cross-process + persisted** |
 | Sparse long-context selector | ✗ | ✗ | ✗ | ✗ | **✓ block-mean, bit-identical decode** |
-| MoE expert paging | ✗ | ✗ | ✓ in-process (experimental) | ✗ | cross-process + histograms (experimental) |
 | Apple Silicon | ✗ (CUDA) | ✗ (CUDA) | ✓ | ✓ | **✓** (+ Linux CPU) |
 | Redis wire / any RESP client | ✗ | ✗ | ✗ | ✗ | **✓** |
 | Runs as | vLLM plugin + service | serving engine | menu-bar app / server | library | **one server binary** |
