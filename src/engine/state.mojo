@@ -17,6 +17,7 @@ from src.network.replication import PrimaryReplicator, ReplicaReceiver, apply_wa
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.vec_tomb import VecTomb
 from src.network.vector_ingest import restore_index_state
+from src.network.vector_auto import reopen_after_load, vector_restart_refill
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
 from src.memory.slab_allocator import SlabAllocator
@@ -249,6 +250,9 @@ struct Pion:
         if self.hnsw.load_from_disk(hnsw_path, _hk_buf, _hk_max):
             if is_not_null(self.shared_hnsw):
                 self.hnsw.publish_to_shared(self.shared_hnsw, worker_id)
+                # an automatic build's index keeps indexing HSETs; any other
+                # says, once, that it does not
+                reopen_after_load(self.hnsw, self.shared_hnsw, worker_id)
         # #19: this worker's share of the startup load is done (published, or
         # refused as stale). Then wait for every other loader: a worker that
         # loads nothing used to serve at once and answer FT.SEARCH with "no
@@ -273,6 +277,9 @@ struct Pion:
         # #46: the index has loaded (or there is none): apply this worker's
         # recorded tombstones for its build and relink the hashes to their slots
         restore_index_state(self.shared_hnsw, self.keyspace, self.vec_tomb)
+        # A reopened index: this worker's hashes the graph lacks are the delta,
+        # and no worker serves until every worker has refilled its rows
+        vector_restart_refill(self.shared_hnsw, self.keyspace, self.wal, self.vec_tomb, worker_id)
 
         # === Phase 7: Gossip + Replication (worker 0 only) ===
         # Only worker 0 starts background threads; other workers read shared ClusterState.

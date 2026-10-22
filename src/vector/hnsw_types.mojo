@@ -256,6 +256,10 @@ struct SharedHNSWView(Movable):
     # Counts FT.CREATEs that asked every worker to index the hashes its
     # keyspace already holds (vector_auto.mojo, vector_backfill_now).
     var backfill_gen: Pointer[UInt64, MutUntrackedOrigin]
+    # A warm load of an automatic build reopens ingest (vector_auto.mojo,
+    # reopen_after_load), and every worker refills the rows of its own hashes
+    # before any serves: [0] workers still refilling, [1] 1 while they do.
+    var restart_refill: Pointer[UInt64, MutUntrackedOrigin]
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -302,6 +306,7 @@ struct SharedHNSWView(Movable):
         self.publish_seq = null_ptr[UInt64, MutUntrackedOrigin]()
         self.vec_stats = null_ptr[UInt64, MutUntrackedOrigin]()
         self.backfill_gen = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.restart_refill = null_ptr[UInt64, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -431,6 +436,7 @@ struct SharedHNSWView(Movable):
         self.publish_seq = take.publish_seq
         self.vec_stats = take.vec_stats
         self.backfill_gen = take.backfill_gen
+        self.restart_refill = take.restart_refill
 
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:
@@ -463,6 +469,52 @@ struct SharedHNSWView(Movable):
         # Drop-in: no slot is written yet, so the exact scan sees none
         if Int(self.ingest_ids) != 0 and self.hk_max_elements > 0:
             unsafe_memset(self.ingest_ids.bitcast[UInt8](), 0xFF, self.hk_max_elements * 4)
+
+    def open_ingest(mut self, cap: Int, dim: Int):
+        """Allocate the ingest buffer for `cap` rows of `dim` floats. Ids double
+        as commit marks (-1 = not written yet, read by the exact scan), so they
+        are -1 before any HSET can see the buffer; the FP32 buffer, which
+        add_ingest_vector checks, comes last. Both hold every slot
+        add_ingest_vector can hand out (it bounds them by hk_max_elements)."""
+        var id_cap = cap if cap > self.hk_max_elements else self.hk_max_elements
+        var ids = alloc[Int32](id_cap)
+        unsafe_memset(ids.bitcast[UInt8](), 0xFF, id_cap * 4)
+        self.ingest_ids = ids
+        self.ingest_fp32 = alloc[Float32](id_cap * dim)
+
+    def fill_ingest_row(self, slot: Int, vector: Pointer[Float32, MutUntrackedOrigin]):
+        """Row `slot` from `vector`, as add_ingest_vector writes one (normalized
+        under COSINE). A warm load's refill: the index file holds the graph,
+        not the FP32 rows a rebuild and the exact rescore read."""
+        var dim = self.pre_dim
+        var off = slot * dim
+        for i in range(dim):
+            self.ingest_fp32[unsafe_offset=off + i] = vector[unsafe_offset=i]
+        self._normalize_row(off)
+
+    def clear_ingest_row(self, slot: Int):
+        """Row `slot` zeroed: a warm load's graph row whose document is gone."""
+        var dim = self.pre_dim
+        unsafe_memset((self.ingest_fp32 + slot * dim).bitcast[UInt8](), 0, dim * 4)
+
+    def _normalize_row(self, off: Int):
+        # gh #271: under COSINE the index stores unit vectors. FT.OPTIMIZE both
+        # calibrates the quantizer and builds the graph straight out of this
+        # buffer, so normalizing at the moment the vector lands here is the one
+        # place that covers every consumer. Scalar and in place, matching the
+        # copy loops — this is the ingest path, not a query path, and a zero
+        # vector has no direction so it is left alone rather than made NaN.
+        if self.pre_distance_metric != 1:
+            return
+        var dim = self.pre_dim
+        var norm_sq = Float32(0.0)
+        for i in range(dim):
+            var v = self.ingest_fp32[unsafe_offset=off + i]
+            norm_sq += v * v
+        if norm_sq > 0.0:
+            var inv = Float32(1.0) / sqrt(norm_sq)
+            for i in range(dim):
+                self.ingest_fp32[unsafe_offset=off + i] = self.ingest_fp32[unsafe_offset=off + i] * inv
 
     def commit_ingest(self, slot: Int):
         """Drop-in: slot `slot` is fully written (its vector and its key): the
@@ -522,21 +574,7 @@ struct SharedHNSWView(Movable):
         var off = slot * dim
         for i in range(dim):
             self.ingest_fp32[unsafe_offset=off + i] = vector[unsafe_offset=i]
-        # gh #271: under COSINE the index stores unit vectors. FT.OPTIMIZE both
-        # calibrates the quantizer and builds the graph straight out of this
-        # buffer, so normalizing at the moment the vector lands here is the one
-        # place that covers every consumer. Scalar and in place, matching the
-        # copy loop above — this is the ingest path, not a query path, and a
-        # zero vector has no direction so it is left alone rather than made NaN.
-        if self.pre_distance_metric == 1:
-            var norm_sq = Float32(0.0)
-            for i in range(dim):
-                var v = self.ingest_fp32[unsafe_offset=off + i]
-                norm_sq += v * v
-            if norm_sq > 0.0:
-                var inv = Float32(1.0) / sqrt(norm_sq)
-                for i in range(dim):
-                    self.ingest_fp32[unsafe_offset=off + i] = self.ingest_fp32[unsafe_offset=off + i] * inv
+        self._normalize_row(off)
         # The slot is the HNSW node id (not key-parsed digits). The caller
         # writes it with commit_ingest once the slot's key is recorded too:
         # until then the exact scan skips the row.

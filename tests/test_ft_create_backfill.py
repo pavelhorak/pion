@@ -215,9 +215,9 @@ def phase_restart(binary, port, d, rng):
 
 def phase_warm_restart(binary, port, d, rng):
     print("=== warm restart: FT.DROPINDEX then FT.CREATE takes what was written since ===")
-    # At --dim 16 the index file loads and serves, but takes no new vector, and
-    # re-issuing FT.CREATE leaves a served index as it is. A new index takes
-    # every hash, the ones written after the restart included.
+    # At --dim 16 the index file loads and serves (since 1.0.2 an automatic
+    # build's index keeps indexing: tests/test_vector_restart_ingest.py). A new
+    # index takes every hash, the ones written after the restart included.
     p = serve(binary, port, d, wal=True, dim=DIM)
     vecs = rng.standard_normal((300, DIM)).astype(np.float32)
     try:

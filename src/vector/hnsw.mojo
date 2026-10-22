@@ -309,6 +309,12 @@ struct HNSWGraph(Movable):
     var own_neighbor_pool: UnsafePointer[UInt32, MutUntrackedOrigin]
     var own_deleted_bitset: UnsafePointer[UInt8, MutUntrackedOrigin]
     var borrow_seq: UInt64
+    # This graph is an automatic build (vector_auto.mojo), which leaves ingest
+    # open: HSETs after it are indexed. Saved in the index file (word 25, bit
+    # 8), so a warm load of it reopens ingest (reopen_after_load). An
+    # FT.OPTIMIZE build is False: ingest is over, as that command says, after a
+    # restart too. At END per the field rule.
+    var auto_built: Bool
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
@@ -413,6 +419,7 @@ struct HNSWGraph(Movable):
         self.fp32_norm_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.residual_scratch_cap = 0
         self.build_id = 0
+        self.auto_built = False
         self.own_nodes = self.nodes
         self.own_node_map = self.node_map
         self.own_neighbor_pool = self.neighbor_pool
@@ -875,6 +882,7 @@ struct HNSWGraph(Movable):
         clears before it builds. A borrowing graph gives the borrowed buffers
         back first (_unborrow), so everything freed below is this graph's own."""
         self._unborrow()
+        self.auto_built = False
         self.num_nodes = 0
         self.entry_point_id = -1
         self.max_level = -1
@@ -1206,6 +1214,10 @@ struct HNSWGraph(Movable):
         var _qsec: UInt64 = 0
         if _fmt != 0 and is_not_null(self.gpu_rerank_fp32): _qsec |= 1
         if self.compact_is_3bit and is_not_null(self.qjl_buffer) and is_not_null(self.qjl_res_norms): _qsec |= 2
+        # Bit 8: an automatic build, whose ingest a warm load reopens. A loader
+        # that predates it tests bits 0 and 1 only, and a file that predates it
+        # reads 0: it loads with ingest closed, as every warm load used to.
+        if self.auto_built: _qsec |= 256
         hdr[25] = _qsec
         # gh #407: the vector field name — word 26 = length, bytes 216-247 (words
         # 27-30) = up to 32 bytes. Same no-bump reasoning as words 24/25: an
@@ -1585,6 +1597,7 @@ struct HNSWGraph(Movable):
         self.compact_is_int4 = (saved_fmt & 1) != 0
         self.compact_is_3bit = (saved_fmt & 2) != 0
         self.compact_is_2bit = (saved_fmt & 4) != 0
+        self.auto_built = (saved_qsec & 256) != 0   # an automatic build's file
 
         self.num_nodes       = saved_num_nodes
         self.entry_point_id  = saved_entry
