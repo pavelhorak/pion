@@ -141,6 +141,25 @@ FT.CREATE <index> ON HASH SCHEMA … <field> VECTOR HNSW 6
 
 - Sets `hnsw.index_ready = True`.
 - Subsequent multi-field HSET calls will route the matching field to the HNSW index.
+- **The hashes already in the keyspace are indexed too**, as RediSearch does:
+  every hash whose vector field has `DIM` float32s, on every worker. The
+  worker that ran `FT.CREATE` indexes its own before it answers `+OK`; the
+  others index theirs at their next housekeeping tick (tens of
+  milliseconds). The server log says `[vector] FT.CREATE: indexed N existing
+  hashes from worker W's keyspace in M ms`. `SKIPINITIALSCAN`, placed before
+  `SCHEMA`, turns this off: only hashes written afterwards are indexed.
+  Re-issuing `FT.CREATE` for the index being built adds nothing, since a hash
+  already in it is skipped. Over a large keyspace this blocks the worker
+  while it runs, as `FT.OPTIMIZE` does.
+- **`PREFIX` is accepted and not applied.** Every hash with the index's
+  vector field and `DIM` is indexed, whatever its key, whether it was written
+  before `FT.CREATE` or after. RediSearch indexes only the keys under the
+  prefixes.
+
+  Before 1.0.1, `FT.CREATE` indexed only what was written after it, so an index
+  created over existing documents answered `[0]`. That included the restart
+  of an index whose `DIM` differs from the server's `--dim`. Its file is not
+  restored, and re-issuing `FT.CREATE` after the restart is the way back.
 
 ### HSET (multi-field, fast path)
 ```
@@ -232,7 +251,7 @@ Costs and limits:
 - The kept buffer costs `dim × 4` bytes per vector: 6 KB at 1536 dimensions, about 300 MB at 50K. An explicit `FT.OPTIMIZE` frees it.
 - An exact scan reads every vector it covers, so an index searched before its graph exists, or during a rebuild, serves far fewer queries per second than the graph does. Measured on an EPYC 8124P at 500K vectors of 1,536 dimensions, one worker and one client (`benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/`): a query takes 1.6 ms from the graph alone, 3.8 ms with 10,000 vectors written since the build (about 0.18 ms per 1,000), and 190 ms during the 84 s rebuild of 551,000.
 - Link lanes: the build uses one per online CPU, from 4 to 16. `PION_BUILD_LANES=N` overrides it.
-- After a restart, the graph loads from `pion.hnsw.0`. A vector written after the restart is not indexed until `FT.CREATE` runs again, as before.
+- After a restart, the graph loads from `pion.hnsw.0` and serves, but a vector written after the restart is not indexed, and re-issuing `FT.CREATE` does not change that for a served index. `FT.DROPINDEX` followed by `FT.CREATE` does: the new index takes every hash in the keyspace, those written since the restart included (from 1.0.1, when `FT.CREATE` began indexing existing hashes).
 
 Only the worker whose graph holds the published index rebuilds it. `FT.CREATE`, `FT.DROPINDEX` and `FT.OPTIMIZE` wait for a running build. A worker that borrowed another worker's index gives its buffers back before it builds or resets. It used to build straight into them.
 

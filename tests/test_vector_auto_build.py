@@ -474,9 +474,14 @@ def phase_multi(binary, port, workdir):
 
         # Drop on a worker that does not own the graph, then a new index from
         # scratch: every worker must serve the NEW vectors (stale borrows and a
-        # stale owner graph are the hazard).
+        # stale owner graph are the hazard). SKIPINITIALSCAN keeps the old
+        # documents out: FT.CREATE indexes the hashes already in the keyspace
+        # (test_ft_create_backfill.py), and this phase is about the new ones.
         check("FT.DROPINDEX on worker 3", cs[3].cmd("FT.DROPINDEX", "idx") == b"OK")
-        check("FT.CREATE again on worker 2", cs[2].cmd("FT.CREATE", "idx", *schema(dim, "COSINE")) == b"OK")
+        sch = schema(dim, "COSINE")
+        at = sch.index("SCHEMA")
+        check("FT.CREATE again on worker 2 (SKIPINITIALSCAN)",
+              cs[2].cmd("FT.CREATE", "idx", *sch[:at], "SKIPINITIALSCAN", *sch[at:]) == b"OK")
         vecs2 = rng.standard_normal((3000, dim)).astype(np.float32)
         keys2 = [f"doc:{i}" for i in range(3000)]
         ingest(cs[0], vecs2)
