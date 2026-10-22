@@ -4,7 +4,11 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.0.1] — 2026-10-22
+
+`FT.CREATE` indexes the hashes already in the keyspace, as RediSearch does,
+so an index created over existing documents, or re-created after a restart,
+no longer answers `[0]`. `SKIPINITIALSCAN` keeps the old behaviour.
 
 ### Fixed
 
