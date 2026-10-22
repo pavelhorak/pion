@@ -69,7 +69,7 @@ from src.commands.command_info import cmd_pause_write, cmd_is_container
 from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro, handle_pfselftest, handle_pfdebug
 from src.commands.monitor import MonitorRegistry, monitor_line
 from src.network.vector_ingest import ingest_hash_vector, record_all_dead, ingest_whole_hash, hash_addr, after_rename
-from src.network.vector_auto import VectorAuto, vector_auto_await, vector_auto_hold, vector_auto_release, auto_building_here, auto_worker_of
+from src.network.vector_auto import VectorAuto, vector_auto_await, vector_auto_hold, vector_auto_release, auto_building_here, auto_worker_of, vector_backfill_now
 from src.commands.replication_cmds import handle_role, handle_replicaof, handle_failover, handle_sync, handle_replconf
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
 from src.commands.set import handle_scard, handle_sismember, handle_smismember, handle_smembers, handle_srandmember, handle_srem, handle_smove, handle_sinter, handle_sinterstore, handle_sintercard, handle_sunion, handle_sunionstore, handle_sdiff, handle_sdiffstore, handle_sscan
@@ -3237,7 +3237,12 @@ struct SlowPathHandler:
                         elif cmd_eq(tp, tl, "ft.create"): # FT.CREATE
                             vector_auto_hold(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
                                              self.vec_tomb, self.worker_id, self.vauto)
-                            _ = handle_ft_create(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, config, writer, self.worker_id)
+                            var _backfill = False
+                            _ = handle_ft_create(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, config, writer,
+                                                 self.worker_id, _backfill)
+                            if _backfill:      # index the hashes already written, as RediSearch does
+                                vector_backfill_now(self.shared_hnsw, self.keyspace, self.dispatcher.wal,
+                                                    self.vec_tomb, self.worker_id, self.vauto)
                             vector_auto_release(self.shared_hnsw, self.worker_id)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.addtext"): # FT.ADDTEXT

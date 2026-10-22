@@ -57,7 +57,8 @@ from src.common.hash_map import StripedHashMap
 from src.common.vec_tomb import VecTomb
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.network.dispatcher import CommandDispatcher
-from src.network.vector_ingest import record_all_dead
+from src.io.wal import WAL
+from src.network.vector_ingest import record_all_dead, backfill_index
 from src.commands.vector import populate_hnsw_metadata, adopt_index_config, wait_for_readers
 
 comptime AUTO_IDLE = 0
@@ -85,6 +86,7 @@ struct VectorAuto(Movable):
     var snapshot: Int         # rows the running build covers
     var failed_at: Int        # ingest count a build failed at: not retried until it moves
     var t0_ns: UInt64
+    var backfill_seen: UInt64 # SharedHNSWView.backfill_gen when this worker last backfilled
 
     def __init__(out self):
         self.seen = -1
@@ -94,6 +96,7 @@ struct VectorAuto(Movable):
         self.snapshot = 0
         self.failed_at = -1
         self.t0_ns = 0
+        self.backfill_seen = 0
 
 
 @always_inline
@@ -135,6 +138,23 @@ def vector_auto_tick(mut hnsw: HNSWGraph,
     or start one when ingest has gone quiet with vectors no graph holds."""
     if is_null(shared) or is_null(shared[].auto_state) or is_null(shared[].ingest_count):
         return
+    # An FT.CREATE on another worker asked every worker to index the hashes
+    # its keyspace already holds (vector_backfill_now). Housekeeping runs
+    # between dispatch batches, where wait_for_readers counts this worker as
+    # idle, so the backfill holds the state instead (AUTO_HOLD): FT.CREATE,
+    # FT.DROPINDEX and FT.OPTIMIZE on another worker wait for it before they
+    # free the ingest buffer it writes into, and no build starts under it.
+    # When the state is taken (a build, or another worker's command), it waits
+    # for a later tick rather than for that worker, so it cannot deadlock.
+    if is_not_null(shared[].backfill_gen):
+        var bg = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared[].backfill_gen, UInt64(0))
+        if bg != st.backfill_seen:
+            var idle = UInt64(0)
+            if Atomic[Scalar[DType.uint64]].compare_exchange(
+                    shared[].auto_state, idle, (UInt64(worker_id) << 8) | UInt64(AUTO_HOLD)):
+                st.backfill_seen = bg
+                _backfill(shared, keyspace, dispatcher.wal, tomb, worker_id)
+                _set(shared, worker_id, AUTO_IDLE)
     var cur = auto_load(shared)
     if auto_phase(cur) != AUTO_IDLE:
         if auto_worker(cur) == worker_id:
@@ -169,6 +189,37 @@ def vector_auto_tick(mut hnsw: HNSWGraph,
             shared[].auto_state, expected, (UInt64(worker_id) << 8) | UInt64(AUTO_BUILDING)):
         return
     _start(hnsw, shared, worker_id, rows, ready, st)
+
+
+def vector_backfill_now(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                        keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                        wal: UnsafePointer[WAL, MutUntrackedOrigin],
+                        tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+                        worker_id: Int, mut st: VectorAuto):
+    """After an FT.CREATE that opened ingest: index the hashes already in this
+    worker's keyspace now, before the +OK leaves, and ask every other worker to
+    index its own at its next housekeeping tick (vector_auto_tick). The bump's
+    release half publishes the index config FT.CREATE just wrote. Called inside
+    the FT.CREATE's vector_auto_hold, which keeps the ingest buffer alive."""
+    if is_null(shared) or is_null(shared[].backfill_gen):
+        return
+    var prev = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE_RELEASE](
+        shared[].backfill_gen, UInt64(1))
+    st.backfill_seen = prev + UInt64(1)
+    _backfill(shared, keyspace, wal, tomb, worker_id)
+
+
+def _backfill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+              keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+              wal: UnsafePointer[WAL, MutUntrackedOrigin],
+              tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+              worker_id: Int):
+    var t0 = UInt64(perf_counter_ns())
+    var n = backfill_index(shared, keyspace, wal, tomb)
+    if n > 0:
+        print("[vector] FT.CREATE: indexed " + String(n) + " existing hashes from worker "
+              + String(worker_id) + "'s keyspace in "
+              + String(Int((UInt64(perf_counter_ns()) - t0) // 1_000_000)) + " ms")
 
 
 def _start(mut hnsw: HNSWGraph,

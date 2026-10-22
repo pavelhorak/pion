@@ -4,6 +4,26 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Fixed
+
+- **`FT.CREATE` indexes the hashes already in the keyspace**, as RediSearch
+  does. It used to index only what was written after it, so an index created
+  over existing documents answered `[0]` with no error, and every document had
+  to be written again. The same happened after a restart to an index whose
+  `DIM` differs from the server's `--dim`: its file is not restored, and
+  re-issuing `FT.CREATE` gave back an empty index while every hash was still
+  in the keyspace. Every worker indexes its own keyspace; the one that ran
+  `FT.CREATE` does so before it answers. `SKIPINITIALSCAN` keeps the old
+  behaviour, and re-issuing `FT.CREATE` for the index being built adds
+  nothing. Test: `tests/test_ft_create_backfill.py` (gate tier; 17 failures
+  on 1.0.0).
+- **`doc/vector_engine.md` said re-issuing `FT.CREATE` after a restart indexes
+  the vectors written since.** It never did for a served index. `FT.DROPINDEX`
+  followed by `FT.CREATE` now does, because the new index takes every hash in
+  the keyspace.
+
 ## [1.0.0] — 2026-10-22
 
 **1.0 means the documented surface can be relied on, not that Pion does

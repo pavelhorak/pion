@@ -253,6 +253,9 @@ struct SharedHNSWView(Movable):
     var index_owner: Int
     var publish_seq: Pointer[UInt64, MutUntrackedOrigin]
     var vec_stats: Pointer[UInt64, MutUntrackedOrigin]
+    # Counts FT.CREATEs that asked every worker to index the hashes its
+    # keyspace already holds (vector_auto.mojo, vector_backfill_now).
+    var backfill_gen: Pointer[UInt64, MutUntrackedOrigin]
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -298,6 +301,7 @@ struct SharedHNSWView(Movable):
         self.index_owner = -1
         self.publish_seq = null_ptr[UInt64, MutUntrackedOrigin]()
         self.vec_stats = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.backfill_gen = null_ptr[UInt64, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -426,6 +430,7 @@ struct SharedHNSWView(Movable):
         self.index_owner = take.index_owner
         self.publish_seq = take.publish_seq
         self.vec_stats = take.vec_stats
+        self.backfill_gen = take.backfill_gen
 
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:

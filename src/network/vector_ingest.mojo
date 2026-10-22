@@ -150,6 +150,47 @@ def ingest_whole_hash(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     return done
 
 
+def backfill_index(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                   keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                   wal: UnsafePointer[WAL, MutUntrackedOrigin],
+                   tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]) -> Int:
+    """FT.CREATE indexes the hashes this worker's keyspace already holds, as
+    RediSearch does (`SKIPINITIALSCAN` opts out). Without it, an index created
+    after its documents were written stayed empty: FT.SEARCH answered `[0]`
+    with no error, and the documents had to be written again. That is also the
+    restart of an index whose DIM differs from the server's --dim: its file is
+    refused, and re-issuing FT.CREATE was the only way back.
+
+    A hash already linked to a live slot of this index is skipped by
+    ingest_hash_vector, so a defensive re-create adds nothing. Returns the
+    number of hashes indexed."""
+    if is_null(shared) or is_null(keyspace) or not shared[].pre_index_ready \
+            or is_null(shared[].ingest_fp32):
+        return 0
+    # Collect first: an ingest sets `__hk__<slot>` in this same keyspace, which
+    # can rehash a shard under a walk that is still reading it.
+    var keys = List[GenericValue]()
+    for shard_i in range(8):
+        var sp = keyspace[].shards.unsafe_offset(shard_i)
+        for slot in range(sp[].capacity):
+            var m = sp[].metadata[unsafe_offset=slot]
+            if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
+                continue
+            if sp[].values[unsafe_offset=slot].type.value != ValueType.HASH:
+                continue
+            if keyspace[].is_expired(sp[].keys[unsafe_offset=slot]):
+                continue
+            keys.append(sp[].keys[unsafe_offset=slot].clone())
+    var kbuf = alloc[UInt8](24)
+    var n = 0
+    for k in range(len(keys)):
+        if ingest_whole_hash(shared, keyspace, wal, tomb, keys[k].as_string_safe(kbuf), keys[k].string_len()):
+            n += 1
+        keys[k].free_str_payload()
+    kbuf.unsafe_free()
+    return n
+
+
 def hash_addr(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
               key: UnsafePointer[UInt8, MutUntrackedOrigin], klen: Int) -> Int:
     """The address of the hash at `key` (0 when it is not a hash): to see,

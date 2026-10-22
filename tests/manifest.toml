@@ -319,6 +319,14 @@ tier = "gate"
 timeout = 900
 
 [[test]]
+file = "tests/test_ft_create_backfill.py"
+# FT.CREATE indexes the hashes already in the keyspace (SKIPINITIALSCAN opts
+# out): after the data, after a restart, -w 4 through the affinity ports.
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
 file = "tests/test_ft_create_redimension.py"
 server = "self"
 tier = "gate"

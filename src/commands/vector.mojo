@@ -2233,11 +2233,31 @@ def handle_ft_create(
     shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     config: PionConfig,
     mut writer: ResponseWriter,
-    worker_id: Int = 0,
+    worker_id: Int,
+    mut backfill: Bool,
 ) -> Int:
     """FT.CREATE <index> ... ON HASH PREFIX ... SCHEMA <fields> — create vector/text index.
-    Returns the new token index after consuming arguments."""
+    Returns the new token index after consuming arguments. `backfill` comes back
+    True when the index was created with ingest open and without SKIPINITIALSCAN:
+    the caller then indexes the hashes already written (vector_backfill_now).
+    Whenever ingest is open, not only when this call opened the buffer:
+    FT.DROPINDEX keeps the buffer and starts the slots over, so the FT.CREATE
+    after it opens nothing and still finds every hash unindexed. A hash this
+    index already holds is skipped, so a defensive re-create walks the keyspace
+    and changes nothing."""
     var ci = i
+    backfill = False
+    # SKIPINITIALSCAN (RediSearch): do not index the hashes already in the
+    # keyspace. An option, so it is read only before SCHEMA, where a field of
+    # that name would be a field.
+    var skip_initial_scan = False
+    var sk = ci + 2
+    while sk < num_tokens:
+        if arg_eq(tokens[sk].ptr, tokens[sk].length, "schema"):
+            break
+        if arg_eq(tokens[sk].ptr, tokens[sk].length, "skipinitialscan"):
+            skip_initial_scan = True
+        sk += 1
     # gh #271 — DISTANCE_METRIC, resolved in a PRE-SCAN, before a single byte of
     # index state is written. Until this landed the keyword fell through to the
     # field-name catch-all below and was silently dropped, so `L2` and `COSINE`
@@ -2473,6 +2493,7 @@ def handle_ft_create(
             unsafe_memset(ids.bitcast[UInt8](), 0xFF, id_cap * 4)
             shared_hnsw[].ingest_ids = ids
             shared_hnsw[].ingest_fp32 = alloc[Float32](cap * hnsw.dim)
+        backfill = not skip_initial_scan and is_not_null(shared_hnsw[].ingest_fp32)
 
     writer.append_ok_response()
     return ci

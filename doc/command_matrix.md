@@ -473,7 +473,7 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 
 | Command | Pion path | GLIDE | Description |
 |---|:---:|:---:|---|
-| FT.CREATE | **SLOW** | ❌ | Create vector index (HNSW, SCHEMA, VECTOR field) |
+| FT.CREATE | **SLOW** | ❌ | Create vector index (HNSW, SCHEMA, VECTOR field); indexes the hashes already in the keyspace unless `SKIPINITIALSCAN` |
 | FT.SEARCH | **SLOW** | ❌ | KNN vector search; PARAMS format; `BM25 <q> [K k] [K1 f] [B f]`; HYBRID (vector+text); TAG/FILTER predicates |
 | FT.OPTIMIZE | **SLOW** | ❌ | Build l0_compact, compact_buffer; save HNSW to disk (`pion.hnsw.0`) |
 | FT.DROPINDEX | **SLOW** | ❌ | Drop vector index; clears in-memory HNSW. An unknown name is refused, nothing dropped |
