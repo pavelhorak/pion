@@ -78,4 +78,4 @@ belongs in this table in the same change.
 
 ## Supported versions
 
-Pre-1.0, only the latest release receives fixes. There are no backports.
+Only the latest release receives fixes. There are no backports.
