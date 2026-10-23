@@ -421,15 +421,16 @@ redis-cli -p 1974 GET user:1
 default `DIM 1536` — so this needs a real client rather than `redis-cli`. Three
 things the API requires, in this order:
 
-1. `FT.CREATE` **before** any `HSET`. Vectors are only routed into the HNSW once
-   the index exists; documents added earlier are ordinary hashes and are not
-   searchable.
+1. `FT.CREATE` defines the index. Hashes written before it are indexed by it
+   too (from 1.0.1), as in RediSearch; `SKIPINITIALSCAN` turns that off.
 2. `HSET <key> vec <blob> <field> <value>` — at least two field/value pairs. The
    vector-ingest path is only taken for `HSET` with 6 or more arguments.
 3. `DISTANCE_METRIC` accepts **`L2`** and **`COSINE`**. Any other value — `IP`
    included — is refused at `FT.CREATE` rather than silently answered with the
-   wrong ordering.
-   Omitting the keyword gives `L2`.
+   wrong ordering. Omitting the keyword gives `L2`. `TYPE` must be `FLOAT32`. An `FT.CREATE` or `FT.SEARCH`
+   option Pion does not apply is refused, never ignored; the remaining
+   differences from RediSearch are
+   [listed](doc/vector_engine.md#differences-from-redisearch).
 
 `DIM` is per-index in the RediSearch API but the blob must be `DIM * 4` bytes of
 float32 either way; the example below uses the server's default 1536.

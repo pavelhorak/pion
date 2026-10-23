@@ -473,11 +473,12 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 
 | Command | Pion path | GLIDE | Description |
 |---|:---:|:---:|---|
-| FT.CREATE | **SLOW** | ❌ | Create vector index (HNSW, SCHEMA, VECTOR field); indexes the hashes already in the keyspace unless `SKIPINITIALSCAN` |
-| FT.SEARCH | **SLOW** | ❌ | KNN vector search; PARAMS format; `BM25 <q> [K k] [K1 f] [B f]`; HYBRID (vector+text); TAG/FILTER predicates |
+| FT.CREATE | **SLOW** | ❌ | Create vector index (HNSW, SCHEMA, VECTOR field); indexes the hashes already in the keyspace unless `SKIPINITIALSCAN`; PREFIX, TAG SEPARATOR / CASESENSITIVE, NOINDEX applied; ON JSON, FILTER, TEMPORARY, AS, non-FLOAT32 TYPE and unknown options refused ([vector_engine.md](vector_engine.md#ftcreate)) |
+| FT.SEARCH | **SLOW** | ❌ | KNN vector search; PARAMS format; SORTBY, LIMIT (offset, total, default 10), RETURN, NOCONTENT, WITHSCORES; `BM25 <q> [K k] [K1 f] [B f]`; HYBRID (vector+text); TAG/NUMERIC prefilters and FILTER; INKEYS, GEOFILTER, WITHPAYLOADS, WITHSORTKEYS, EXPLAINSCORE and unknown options refused |
 | FT.OPTIMIZE | **SLOW** | ❌ | Build l0_compact, compact_buffer; save HNSW to disk (`pion.hnsw.0`) |
-| FT.DROPINDEX | **SLOW** | ❌ | Drop vector index; clears in-memory HNSW. An unknown name is refused, nothing dropped |
-| FT.INFO | **SLOW** | ❌ | `[index_name, <name>, num_docs, <n>]`; checks the name against the shared registry, same answer on every worker; unknown name → `Unknown index name` |
+| FT.DROPINDEX | **SLOW** | ❌ | Drop vector index; clears in-memory HNSW. `DD` deletes the documents too (`-w 1`). An unknown name or argument is refused, nothing dropped |
+| FT.INFO | **SLOW** | ❌ | `[index_name, <name>, num_docs, <n>]` (documents with a vector, deleted ones not counted); checks the name against the shared registry, same answer on every worker; unknown name → `Unknown index name` |
+| FT._LIST | **SLOW** | ❌ | The index this server holds, or none |
 | FT.HYBRID | **SLOW** | ❌ | `FT.HYBRID <index> <text_query> <vector_blob> [K <k>] [ALPHA <a>] [K1 <f>] [B <f>]` — BM25+vector fusion with Reciprocal Rank Fusion |
 | FT.ADDTEXT | **SLOW** | ❌ | Add text doc: store in keyspace + BM25 doc set (integer ids), embed via HTTP → insert into semantic HNSW |
 | FT.SEARCHTEXT | **SLOW** | ❌ | Semantic text search over docs added via FT.ADDTEXT |

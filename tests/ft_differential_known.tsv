@@ -1,0 +1,93 @@
+# FT.* steps where Pion and RediSearch disagree on purpose (tests/test_ft_differential.py).
+# case<TAB>step<TAB>refused|differs<TAB>why
+# refused: Pion answers an error where RediSearch answers (documented as unsupported).
+# differs: both answer, differently, as documented. Any other divergence fails the test,
+# and a step listed here that now agrees fails it too: remove the line on purpose.
+built.prefilter	filter_bracket	differs	Pion extension, documented: FILTER f [lo hi] (RediSearch reads [10 20] as a bad bound)
+built.prefilter	filter_clause	differs	Pion extension, documented: FILTER @f:[lo hi] (RediSearch's FILTER takes field lo hi only)
+built.prefilter	filter_eq	differs	Pion extension, documented: FILTER f=value (TAG equality)
+built.prefilter	not	refused	negation in a prefilter is refused, documented
+built.prefilter	or_clauses	refused	OR between prefilter clauses is refused, documented
+built.prefilter	text_term	refused	no full-text terms in a prefilter: refused, documented
+create.again_same	again	differs	documented: re-issuing FT.CREATE for the served index answers +OK and changes nothing (RediSearch: Index already exists)
+create.filter_numeric	create	refused	FT.CREATE FILTER is refused (PREFIX is supported); later steps: no such index
+create.filter_numeric	ids	refused	FT.CREATE FILTER is refused (PREFIX is supported); later steps: no such index
+create.filter_numeric	info	refused	FT.CREATE FILTER is refused (PREFIX is supported); later steps: no such index
+create.filter_numeric	knn	refused	FT.CREATE FILTER is refused (PREFIX is supported); later steps: no such index
+create.filter_startswith	create	refused	FT.CREATE FILTER is refused (PREFIX is supported); later steps: no such index
+create.filter_startswith	ids	refused	FT.CREATE FILTER is refused (PREFIX is supported); later steps: no such index
+create.filter_startswith	info	refused	FT.CREATE FILTER is refused (PREFIX is supported); later steps: no such index
+create.filter_startswith	knn	refused	FT.CREATE FILTER is refused (PREFIX is supported); later steps: no such index
+create.temporary	create	refused	FT.CREATE TEMPORARY is refused; later steps: no such index
+create.temporary	ids	refused	FT.CREATE TEMPORARY is refused; later steps: no such index
+create.temporary	info	refused	FT.CREATE TEMPORARY is refused; later steps: no such index
+create.temporary	knn	refused	FT.CREATE TEMPORARY is refused; later steps: no such index
+doc.bad_number	info	differs	RediSearch drops a whole document whose NUMERIC field is not a number; Pion keeps its vector indexed (a range filter skips it)
+doc.bad_number	knn	differs	RediSearch drops a whole document whose NUMERIC field is not a number; Pion keeps its vector indexed (a range filter skips it)
+doc.flushall	info	differs	RediSearch drops its indexes on FLUSHALL; Pion keeps the index definition (num_docs 0, no hits)
+doc.flushall	knn	differs	RediSearch drops its indexes on FLUSHALL; Pion keeps the index definition (num_docs 0, no hits)
+doc.hdel_vec	info	differs	num_docs counts documents with a vector; RediSearch also counts hashes indexed only by their other fields
+doc.no_vec	info	differs	num_docs counts documents with a vector; RediSearch also counts hashes indexed only by their other fields
+field.numeric_as	alias	refused	AS aliases are refused; later steps: no such index
+field.numeric_as	create	refused	AS aliases are refused; later steps: no such index
+field.tag_as	alias	refused	AS aliases are refused; later steps: no such index
+field.tag_as	create	refused	AS aliases are refused; later steps: no such index
+field.tag_separator	whole	differs	Pion reads punctuation in a tag query literally; RediSearch needs it escaped
+field.upper_hash_field	knn	differs	the vector field's name is matched case-insensitively (RediSearch: exactly), documented
+field.upper_name	knn_lower	differs	the vector field's name is matched case-insensitively (RediSearch: exactly), documented
+field.vec_as	create	refused	AS aliases are refused; later steps: no such index
+field.vec_as	info	refused	AS aliases are refused; later steps: no such index
+field.vec_as	knn_alias	refused	AS aliases are refused; later steps: no such index
+module	aggregate	refused	FT.AGGREGATE is not implemented: unknown command, documented
+module	aliasadd	refused	FT.ALIASADD is not implemented: unknown command, documented
+module	alter	refused	FT.ALTER is not implemented: unknown command, documented
+module	config	refused	FT.CONFIG is not implemented: unknown command, documented
+module	dictadd	refused	FT.DICTADD is not implemented: unknown command, documented
+module	explain	refused	FT.EXPLAIN is not implemented: unknown command, documented
+module	profile	refused	FT.PROFILE is not implemented: unknown command, documented
+module	spellcheck	refused	FT.SPELLCHECK is not implemented: unknown command, documented
+module	sugadd	refused	FT.SUGADD is not implemented: unknown command, documented
+module	syndump	refused	FT.SYNDUMP is not implemented: unknown command, documented
+module	tagvals	refused	FT.TAGVALS is not implemented: unknown command, documented
+prefilter	filter_bracket	differs	Pion extension, documented: FILTER f [lo hi] (RediSearch reads [10 20] as a bad bound)
+prefilter	filter_clause	differs	Pion extension, documented: FILTER @f:[lo hi] (RediSearch's FILTER takes field lo hi only)
+prefilter	filter_eq	differs	Pion extension, documented: FILTER f=value (TAG equality)
+prefilter	not	refused	negation in a prefilter is refused, documented
+prefilter	or_clauses	refused	OR between prefilter clauses is refused, documented
+prefilter	text_term	refused	no full-text terms in a prefilter: refused, documented
+prefilter.sort_tie_update	asc	differs	SORTBY ties go by document order; RediSearch renumbers a document on every write, Pion when its vector is written
+search	count_only	refused	queries without a KNN clause are refused, documented
+search	default_limit_unsorted	differs	without LIMIT Pion returns every KNN hit (RediSearch 10), and without SORTBY in distance order (RediSearch: its internal document order)
+search	dialect1	differs	Pion reads every query as DIALECT 2 (RediSearch 8 defaults to 1, where KNN is a syntax error)
+search	explainscore	refused	FT.SEARCH EXPLAINSCORE is refused, documented
+search	inkeys	refused	FT.SEARCH INKEYS is refused, documented
+search	limit_unsorted	differs	without SORTBY, Pion orders KNN hits by distance, RediSearch by its internal document order, so a LIMIT page holds different hits
+search	no_dialect	differs	Pion reads every query as DIALECT 2 (RediSearch 8 defaults to 1, where KNN is a syntax error)
+search	return_as	differs	RETURN of a NUMERIC field: RediSearch reformats the number (51.0 -> 51), Pion returns the stored bytes as HGET does
+search	return_price	differs	RETURN of a NUMERIC field: RediSearch reformats the number (51.0 -> 51), Pion returns the stored bytes as HGET does
+search	star	refused	queries without a KNN clause are refused, documented
+search	tag_query	refused	queries without a KNN clause are refused, documented
+search	withpayloads	refused	FT.SEARCH WITHPAYLOADS is refused, documented
+search	withsortkeys	refused	FT.SEARCH WITHSORTKEYS is refused, documented
+vec.bfloat16	create	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.bfloat16	info	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.float16	create	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.float16	info	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.float64	create	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.float64	info	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.float64	knn64	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.int8	create	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.int8	info	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.ip	create	refused	DISTANCE_METRIC IP is refused (gh #271); later steps: no such index
+vec.ip	ids	refused	DISTANCE_METRIC IP is refused (gh #271); later steps: no such index
+vec.ip	info	refused	DISTANCE_METRIC IP is refused (gh #271); later steps: no such index
+vec.ip	knn	refused	DISTANCE_METRIC IP is refused (gh #271); later steps: no such index
+vec.two_vectors	create	refused	one VECTOR field per index: a second is refused; later steps: no such index
+vec.two_vectors	info	refused	one VECTOR field per index: a second is refused; later steps: no such index
+vec.two_vectors	knn1	refused	one VECTOR field per index: a second is refused; later steps: no such index
+vec.two_vectors	knn2	refused	one VECTOR field per index: a second is refused; later steps: no such index
+vec.uint8	create	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.uint8	info	refused	vector TYPE other than FLOAT32 is refused; later steps: no such index
+vec.no_metric	create	differs	DISTANCE_METRIC may be left out and is L2, as Pion documents; RediSearch requires it
+vec.no_metric	info	differs	DISTANCE_METRIC may be left out and is L2, as Pion documents; RediSearch requires it
+search	default_limit	differs	without LIMIT Pion returns every KNN hit; RediSearch pages 10 (LIMIT 0 10 is its default)

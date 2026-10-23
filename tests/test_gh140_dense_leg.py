@@ -31,6 +31,12 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# The index's vector field, written out in full: FT.CREATE refuses a bare
+# `vec VECTOR` from 1.0.4, as RediSearch does. 1536 is the server's --dim, which
+# a bare field used to take. FT.ADDTEXT's embeddings have their own graph.
+VEC_ATTRS = ("HNSW", "6", "TYPE", "FLOAT32", "DIM", "1536", "DISTANCE_METRIC", "L2")
+
+
 PASS, FAIL = [], []
 
 
@@ -205,7 +211,7 @@ def main():
         # the data, not the K plumbing this part checks; NLEmbedding happened
         # to separate the templates. Offset ids, so no sentence here repeats
         # one Part C stores.
-        c.cmd("FT.CREATE", "gh140a", "SCHEMA", "body", "TEXT", "vec", "VECTOR")
+        c.cmd("FT.CREATE", "gh140a", "SCHEMA", "body", "TEXT", "vec", "VECTOR", *VEC_ATTRS)
         for i in range(300):
             c.cmd("FT.ADDTEXT", "gh140a", str(i), unique_doc(100_000 + i))
         c.cmd("FT.OPTIMIZE", "gh140a")
@@ -222,7 +228,7 @@ def main():
         check("K=200 returns 200 (was clamped to 32)", depths[200] == 200, f"got {depths[200]}")
 
         print("\nPart B — FT.ADDTEXT survives past the 1000-object hash pool")
-        c.cmd("FT.CREATE", "gh140b", "SCHEMA", "body", "TEXT", "vec", "VECTOR")
+        c.cmd("FT.CREATE", "gh140b", "SCHEMA", "body", "TEXT", "vec", "VECTOR", *VEC_ATTRS)
         survived = 0
         try:
             for i in range(1500):
@@ -260,7 +266,7 @@ def main():
         # near-duplicate bodies two docs can quantize alike and tie out self at
         # rank 1, which would be an embedding-discrimination artefact, not the
         # graph bug under test.
-        c.cmd("FT.CREATE", "gh140c", "SCHEMA", "body", "TEXT", "vec", "VECTOR")
+        c.cmd("FT.CREATE", "gh140c", "SCHEMA", "body", "TEXT", "vec", "VECTOR", *VEC_ATTRS)
         N = 800
         stored = [unique_doc(i) for i in range(N)]
         for i in range(N):

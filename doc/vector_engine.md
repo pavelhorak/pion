@@ -114,12 +114,47 @@ Pion is wire-compatible with Redis Stack's vector search subset. Commands are di
 
 ### FT.CREATE
 ```
-FT.CREATE <index> ON HASH SCHEMA … <field> VECTOR HNSW 6
-    TYPE FLOAT32 DIM <d> DISTANCE_METRIC L2 M <m> EF_CONSTRUCTION <ef>
+FT.CREATE <index> [ON HASH] [PREFIX <n> <prefix>...] [SKIPINITIALSCAN] SCHEMA
+    <field> VECTOR HNSW|FLAT <count> TYPE FLOAT32 DIM <d> DISTANCE_METRIC L2|COSINE
+        [M <m>] [EF_CONSTRUCTION <ef>] [EF_RUNTIME <ef>] [INITIAL_CAP <n>] ...
+    <field> TAG [SEPARATOR <c>] [CASESENSITIVE] [SORTABLE [UNF]] [NOINDEX]
+    <field> NUMERIC [SORTABLE [UNF]] [NOINDEX]
+    <field> TEXT | GEO | GEOSHAPE ...
 ```
-- Captures `<index>` (first token after the command) as `hnsw.index_name`.
-- Scans remaining tokens for the `VECTOR` keyword; captures the immediately preceding token as `vector_field_name`.
-- Scans for `EF_CONSTRUCTION` keyword; parses the following integer as `hnsw.ef_construction`.
+The whole command is parsed and checked before any index state is written, so
+a refused `FT.CREATE` changes nothing. From 1.0.4 every part of it is applied or
+refused. Before, the handler picked out the words it knew and took every other
+word for a field name, so an option it did not know answered `+OK` and changed
+nothing (`tests/test_ft_differential.py` compares every option with
+RediSearch's own answer):
+
+- **Applied:** `ON HASH`, `PREFIX`, `SKIPINITIALSCAN`; one `VECTOR` field with
+  `TYPE FLOAT32`, `DIM`, `DISTANCE_METRIC L2` or `COSINE`, `EF_CONSTRUCTION`;
+  `TAG` with `SEPARATOR` and `CASESENSITIVE`, `NUMERIC`, `TEXT` (for BM25), and
+  `NOINDEX` (the field matches no filter, as in RediSearch). `SORTABLE`, `UNF`
+  and `M` change nothing Pion answers.
+- **Accepted, with no effect on an answer Pion gives:** the full-text index's
+  options (`LANGUAGE`, `LANGUAGE_FIELD`, `SCORE`, `SCORE_FIELD`,
+  `PAYLOAD_FIELD`, `MAXTEXTFIELDS`, `NOOFFSETS`, `NOHL`, `NOFIELDS`, `NOFREQS`,
+  `STOPWORDS`), a `TEXT` field's `WEIGHT`, `NOSTEM` and `PHONETIC`,
+  `INDEXEMPTY`, `INDEXMISSING`, `WITHSUFFIXTRIE`, the `FLAT` and `SVS-VAMANA`
+  algorithms (built as HNSW) and their attributes, and `GEO` and `GEOSHAPE`
+  fields, whose queries Pion refuses.
+- **Refused:** `ON JSON`, `FILTER`, `TEMPORARY`, `AS` aliases, a vector `TYPE`
+  other than `FLOAT32`, `DISTANCE_METRIC IP`, a second `VECTOR` field, an
+  unknown option, field type or vector algorithm, a vector attribute count that
+  does not match its attributes, a missing `TYPE` or `DIM`, `DIM 0`, a missing
+  or empty `SCHEMA`, a field named twice, a field name over 32 bytes, and more
+  than 16 fields besides the vector. The errors are RediSearch's words where it
+  has some.
+
+- Captures `<index>` (first token after the command) as `hnsw.index_name`, and
+  the `VECTOR` field's name as `vector_field_name`.
+- The schema's fields, with their kind, `SEPARATOR` and flags, go to the shared
+  view (`schema_field_*`), where every worker's filters read them, and are
+  saved with the index (index-file word 25, bit 10), so a restart keeps them.
+  An index file written before 1.0.4 has no schema: it loads as before, and
+  its filters then read any hash field.
 - **`DISTANCE_METRIC`** — resolved in a pre-scan, *before* any index
   state is written, so refusing one is a true no-op. `L2` → `distance_metric =
   0`, `COSINE` → `1`, anything else → `-ERR unsupported DISTANCE_METRIC`.
@@ -193,15 +228,52 @@ HSET <key> <f1> <v1> <f2> <v2> … <vec_field> <float32_bytes>
 
 ### FT.SEARCH
 ```
-FT.SEARCH <index> "*=>[KNN <k> @<field> $blob EF_RUNTIME <ef> AS score]"
-    PARAMS 2 blob <float32_bytes> [DIALECT 2] [SORTBY score] [LIMIT 0 <k>]
+FT.SEARCH <index> "<prefilter>=>[KNN <k> @<field> $blob [EF_RUNTIME <ef>] [AS score]]"
+    PARAMS 2 blob <float32_bytes> [FILTER ...] [RETURN ...] [NOCONTENT] [WITHSCORES]
+    [SORTBY <field> [ASC|DESC]] [LIMIT <offset> <count>] [DIALECT 2] [TIMEOUT <ms>]
 ```
-- Verifies `<index>` matches `hnsw.index_name` (case-sensitive byte comparison; skipped if no index has been created).
-- Extracts `k` by scanning the query string for `KNN `.
-- Extracts `EF_RUNTIME <ef>` from the query string if present; falls back to `hnsw.ef_runtime` (default 150).
-- Extracts `LIMIT offset count` from the outer token stream; if `count < k`, uses `count` as the result cap.
-- Resolves the query's `$<param>` (and an `EF_RUNTIME $<param>`) against PARAMS by name; the vector must be `hnsw.dim * 4` bytes.
-- Calls `hnsw.search_fp32_scored(blob_ptr, k, dist_scores, ef_query)` with the resolved ef. `KNN 0` returns an empty result.
+- `<index>` must be the index this server holds, registered by `FT.CREATE` or
+  `FT.OPTIMIZE` and removed by `FT.DROPINDEX`. Another name gets
+  `no such index` (or, when another index is served, an error naming it). Before
+  1.0.4, after an `FT.DROPINDEX` or a refused `FT.CREATE`, `FT.SEARCH` answered
+  from the vectors the dropped definition kept routing while `FT.INFO` said
+  `Unknown index name`.
+- Extracts `k` from the query's `KNN ` clause, and `EF_RUNTIME <ef>` if present
+  (else `hnsw.ef_runtime`). Resolves the query's `$<param>` (and an `EF_RUNTIME
+  $<param>`) against PARAMS by name; the vector must be `hnsw.dim * 4` bytes.
+- Calls `hnsw.search_fp32_scored(blob_ptr, k, dist_scores, ef_query)` for the k
+  nearest. `KNN 0` returns an empty result.
+- **`SORTBY <field> [ASC|DESC]`** then orders those k hits: by the KNN score
+  (its `AS` alias or `__<field>_score`; `DESC` reverses), or by a schema field,
+  NUMERIC as a number, TAG and TEXT by their bytes. As in RediSearch, documents
+  without the field come last in both directions, and ties go by document
+  order (reversed by `DESC`). A field that is not in the schema is refused
+  (`Property ... not loaded nor in schema`). Before 1.0.4 SORTBY was read and
+  dropped: the hits came back by distance whatever was asked.
+- **`LIMIT <offset> <count>`** then takes the page, and the reply's total is
+  every hit, as in RediSearch. Both numbers must be integers of 0 or more.
+  Without `LIMIT`, every hit is returned (`KNN 20` returns 20). Before 1.0.4 the
+  offset was ignored (`LIMIT 2 3` answered with the first three), and the total
+  was the page's size.
+- Without `SORTBY`, Pion returns the hits by distance. RediSearch returns them
+  in its internal document order, so a `LIMIT` page without `SORTBY` holds
+  different hits on the two. Clients that page (RedisVL, LangChain) send
+  `SORTBY` on the score.
+- Options that change nothing a KNN query answers are accepted: `DIALECT`,
+  `TIMEOUT`, and the text query's `VERBATIM`, `NOSTOPWORDS`, `INORDER`, `SLOP`,
+  `LANGUAGE`, `SCORER`, `EXPANDER`, `PAYLOAD`, `INFIELDS`, `SUMMARIZE` and
+  `HIGHLIGHT`. `INKEYS`, `GEOFILTER`, `WITHPAYLOADS`, `WITHSORTKEYS` and
+  `EXPLAINSCORE` are refused, and so is any other option (RediSearch's
+  ``Unknown argument `X` ``). Before 1.0.4 an option FT.SEARCH did not know was
+  skipped, so `INKEYS` and `GEOFILTER` answered as if absent.
+- A document past its key's TTL is gone, as for any read: the search expires
+  it (Redis's lazy expiry) and does not return it. It used to come back until
+  the active sweep reached the key.
+- Every query is read as `DIALECT 2`. RediSearch 8 defaults to dialect 1, where
+  the KNN syntax is an error; clients send `DIALECT 2`.
+- After an automatic build the graph's hits are scored from the FP32 rows the
+  build keeps, so the scores are exact. They came from the INT8 codes, a little
+  off the true distance, when no vector had been written since the build.
 - Returns RediSearch's reply. In RESP2:
 
 ```
@@ -236,7 +308,15 @@ replies (`--oracle` runs the cases against RediSearch itself).
 ```
 FT.INFO <index>
 ```
-Returns `index_name` and `num_docs` (the vectors FT.SEARCH answers from: the built graph's, plus any it answers exactly, so before a build every vector ingested; 0 before any): a 4-element array of bulk strings in RESP2, a map with `num_docs` an integer in RESP3. Returns `-ERR Unknown index name` for a name the server does not hold. RediSearch's FT.INFO has more fields (`attributes`, sizes, statistics); Pion sends these two.
+Returns `index_name` and `num_docs` (the documents FT.SEARCH answers from: the built graph's, plus any it answers exactly, so before a build every vector ingested, less the documents that left: deleted, expired, renamed or given a new vector; 0 before any): a 4-element array of bulk strings in RESP2, a map with `num_docs` an integer in RESP3. Returns `-ERR Unknown index name` for a name the server does not hold. RediSearch's FT.INFO has more fields (`attributes`, sizes, statistics); Pion sends these two.
+
+`num_docs` counts documents with a vector. RediSearch also counts a hash it indexed only by its other fields (one without the vector field, or whose vector was removed). Before 1.0.4 `num_docs` counted every slot ever written, so it only grew: 40 documents, two of them deleted and one updated, read 41.
+
+### FT._LIST
+```
+FT._LIST
+```
+The names of the indexes this server holds: the one index, or none. RedisVL calls it to see whether an index exists before `FT.CREATE`. Added in 1.0.4; it was an unknown command.
 
 ### FT.OPTIMIZE
 ```
@@ -278,8 +358,10 @@ Only the worker whose graph holds the published index rebuilds it. `FT.CREATE`, 
 
 ### FT.DROPINDEX
 ```
-FT.DROPINDEX <index>
+FT.DROPINDEX <index> [DD]
 ```
+`DD` also deletes the index's documents, as in RediSearch: each live document's key goes as with `DEL` (WAL record, `WATCH`), with Pion's own `__hk__<slot>` link. Before 1.0.4 `DD` was read and dropped, so the documents stayed. Under `-w N` each worker holds its own documents, and one worker cannot delete another's: `DD` is refused there. Any other argument is refused (it used to drop the index anyway).
+
 Calls `hnsw.reset_index()` — zeroes `num_nodes`, resets `entry_point_id = -1`, clears `node_map` and `visited_map`, resets `index_name_len = 0`, resets `global_min/max` to calibration defaults, sets `index_ready = False`. Returns `+OK`. It also deletes the index file, `pion.hnsw.0`, so a restart does not bring the dropped index back. Before 1.0.2 the file stayed, and after a restart `FT.INFO` and `FT.SEARCH` answered from the dropped index. An `FT.CREATE` that replaces an index of another name or `DIM` deletes its file the same way.
 
 ### FT.HYBRID — Hybrid Vector + BM25 Search
@@ -406,13 +488,32 @@ FT.SEARCH idx "*=>[KNN 10 @vec $v]"               FILTER cat=a            PARAMS
 FT.SEARCH idx "*=>[KNN 10 @vec $v]"               FILTER price [10 50]    PARAMS 2 v <blob>
 ```
 
-- **NUMERIC** `@f:[lo hi]` is inclusive; `-inf` / `+inf` work. Exclusive `(` bounds are refused.
-- **TAG** `@f:{a}` matches the value exactly; `@f:{a|b}` matches either.
+- **NUMERIC** `@f:[lo hi]` is inclusive; `(` makes a bound exclusive (`@f:[(10 20]`, `FILTER f (10 20`); `-inf` / `+inf` work, and so does `1e400` (infinity, as strtod reads it). Bounds and values are doubles: a stored value that is not a number fails the clause. Before 1.0.4 `(` was refused and both sides were Float32, which cannot tell 1,700,000,014 from 1,700,000,000, so a timestamp range matched documents outside it.
+- **TAG** values are tag lists, as RediSearch indexes them: the stored value is split at the field's `SEPARATOR` (`,` by default), each tag is trimmed of spaces, and `@f:{a}` matches a document with the tag `a`, ignoring ASCII case unless the field is `CASESENSITIVE`. `@f:{a|b}` matches either. Before 1.0.4 the whole value was compared byte for byte, so `a,b` matched neither `{a}` nor `{b}`, and `{A}` did not match `a`. RediSearch also folds non-ASCII letters; Pion folds only A-Z.
+- The field must be in the index's schema, and of the clause's kind: a range on a NUMERIC field, a tag set on a TAG field. Anything else is RediSearch's error (`Unknown field`, `Expected a NUMERIC field`, `Field is not a numeric field`). A `NOINDEX` field matches nothing. An index loaded from a file written before 1.0.4 has no saved schema: there a clause reads any hash field, as before.
 - Up to **4** clauses, ANDed — several `FILTER` arguments and/or clauses in the query prefix. `|` between clauses (OR) and negation are refused.
-- Filtering is applied to KNN candidates, widening the candidate set (4×, 16×, … up to 16,384 or the whole index) until `k` rows pass — a selective filter costs more search, it does not silently return fewer rows while matches exist below that bound.
+- Filtering is applied to KNN candidates, widening the candidate set (4×, 16×, … up to 16,384 or the whole index) until `k` rows pass — a selective filter costs more search, it does not silently return fewer rows while matches exist below that bound. Each candidate's fields are read from its hash, so a field changed after a build counts at once. The build used to keep a copy of each document's TAG and NUMERIC values, which went stale when a field changed.
 - Field names are case-sensitive, as in the hash.
+- `FILTER f=value`, `FILTER @f:[lo hi]` and `FILTER f [lo hi]` are Pion's own forms; RediSearch's `FILTER` takes `field lo hi` only.
 
 The query itself must be `<prefilter>=>[KNN k @field $param [EF_RUNTIME n] [AS alias]]` with the vector in `PARAMS` by name; an unknown form, an unknown vector field, a missing `$param` or a blob of the wrong size is an error.
+
+### Differences from RediSearch
+
+`tests/test_ft_differential.py` sends every `FT.*` option to Pion and to RediSearch (Redis 8's search module) and compares the answers. Where they differ on purpose, `tests/ft_differential_known.tsv` says why. Besides what Pion refuses (above), these remain:
+
+- `FT.CREATE` for the index already served answers `+OK` and changes nothing; RediSearch answers `Index already exists`. Clients re-create defensively, and both answers let them.
+- `DISTANCE_METRIC` may be left out, and is then `L2`; RediSearch requires it.
+- `FLUSHALL` keeps the index definition (`num_docs` 0, no hits); RediSearch drops its indexes.
+- A hash whose NUMERIC field is not a number stays in the index for KNN (a range filter skips it); RediSearch does not index the document at all.
+- `num_docs` counts documents with a vector; RediSearch also counts hashes it indexed by their other fields only.
+- The vector field's name is matched ignoring case (`Vec` and `vec` are one field); RediSearch matches it exactly.
+- Punctuation in a tag query is read literally (`@f:{x;y}`); RediSearch needs it escaped.
+- Without `SORTBY`, hits come back by distance; RediSearch returns them in its internal document order. `SORTBY` ties go by document order: RediSearch numbers a document again on every write, Pion when its vector is written.
+- `RETURN` of a NUMERIC field returns the bytes stored, as `HGET` does; RediSearch reformats the number (`51.0` comes back as `51`).
+- Every query is read as `DIALECT 2`.
+- Without `LIMIT`, `FT.SEARCH` returns every KNN hit; RediSearch returns 10 (`LIMIT 0 10` is its default). Clients send `LIMIT`.
+- FT.INFO sends `index_name` and `num_docs` only. `FT.ALTER`, `FT.AGGREGATE`, `FT.EXPLAIN`, `FT.PROFILE`, `FT.TAGVALS`, `FT.ALIAS*`, `FT.CONFIG`, `FT.SPELLCHECK`, `FT.SYN*`, `FT.DICT*`, `FT.SUG*` and `FT.CURSOR` are unknown commands. A query without a `KNN` clause (`*`, `@cat:{a}`) is refused.
 
 **Scores** are the index metric's distance for each returned row — squared L2 under `L2`, `1 - cos` under `COSINE` — computed from the stored vectors (FP32 re-rank copy, or the INT8 codes dequantized), not the beam's internal quantized distance. Rows are sorted by that score. From INT8 codes, the score compares them with the query clamped to the calibrated range, because the codes are clipped to it: the calibration (mean ± 8 sigma) leaves an embedding's few near-constant outlier dimensions outside, which cancel between documents but used to add their clipped part to every score.
 

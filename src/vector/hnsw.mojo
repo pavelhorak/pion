@@ -6,7 +6,7 @@ from std.memory import unsafe_memcpy, unsafe_memset
 from src.common.heap import HeapNode, MinHeap, MaxHeap, LinearPool
 from std.atomic import Atomic, Ordering
 from src.common.lock_free import ShardQueryBus
-from .hnsw_types import HNSWNode, SharedHNSWView, HNSW_SHARDED_INGEST_ENABLED, PREFIX_MAX, PREFIX_SLOT
+from .hnsw_types import HNSWNode, SharedHNSWView, HNSW_SHARDED_INGEST_ENABLED, PREFIX_MAX, PREFIX_SLOT, SCHEMA_MAX, SCHEMA_NAME_MAX, SCHEMA_REC
 from .beam_view import BeamView1536
 from .vector_abi import beam_search_1536, quant_beam_search_1536
 from .quant_beam_view import QuantBeamView1536, QUANT_KIND_POLAR, QUANT_KIND_NANO, QUANT_KIND_TURBO
@@ -181,11 +181,6 @@ struct HNSWGraph(Movable):
     var gpu_rerank_fp32: UnsafePointer[Float32, MutUntrackedOrigin]
     # §7v2: Native Mojo GPU context — zero ObjC overhead, direct GPU dispatch
     var gpu_ctx: GPUSearchContext
-    # Phase 3.1: per-node metadata for O(1) filter checks (populated after FT.OPTIMIZE by slow_path)
-    # Indexed by [nidx * 8 + schema_slot]; up to 8 filterable schema fields per node
-    var node_meta_tag_hashes: UnsafePointer[UInt32, MutUntrackedOrigin]  # FNV-1a hash of TAG value
-    var node_meta_numerics:   UnsafePointer[Float32, MutUntrackedOrigin] # Float32 for NUMERIC field
-    var node_meta_field_set:  UnsafePointer[UInt8, MutUntrackedOrigin]   # 1=tag set, 3=numeric set
     # Phase 3.2: BM25 inverted index — built from TEXT schema fields after FT.OPTIMIZE
     # term_hashes[] sorted ascending for O(log V) binary search at query time.
     var bm25_term_hashes:    UnsafePointer[UInt32, MutUntrackedOrigin]   # sorted unique FNV-1a hashes [bm25_vocab_count]
@@ -322,6 +317,14 @@ struct HNSWGraph(Movable):
     # PREFIX_MAX slots of PREFIX_SLOT bytes; 0 = every key. At END.
     var prefix_count: Int
     var prefixes: UnsafePointer[UInt8, MutUntrackedOrigin]
+    # FT.CREATE's schema fields (types, options, names), carried like the
+    # PREFIX list: adopted by the build, saved in the index file (word 25,
+    # bit 10), put back by a warm load. Without it a restart lost the schema,
+    # and with it the filters' field and type checks. SCHEMA_MAX records of
+    # SCHEMA_REC bytes. `schema_known`: the file had one. At END.
+    var schema_count: Int
+    var schema_known: Bool
+    var schema_rec: UnsafePointer[UInt8, MutUntrackedOrigin]
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
@@ -430,6 +433,10 @@ struct HNSWGraph(Movable):
         self.prefix_count = 0
         self.prefixes = alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
         unsafe_memset(self.prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
+        self.schema_count = 0
+        self.schema_known = False
+        self.schema_rec = alloc[UInt8](SCHEMA_MAX * SCHEMA_REC)
+        unsafe_memset(self.schema_rec, 0, SCHEMA_MAX * SCHEMA_REC)
         self.own_nodes = self.nodes
         self.own_node_map = self.node_map
         self.own_neighbor_pool = self.neighbor_pool
@@ -442,9 +449,6 @@ struct HNSWGraph(Movable):
         self.gpu_topk_dists = null_ptr[Float32, MutUntrackedOrigin]()
         self.gpu_rerank_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.gpu_ctx = GPUSearchContext()
-        self.node_meta_tag_hashes = null_ptr[UInt32, MutUntrackedOrigin]()
-        self.node_meta_numerics = null_ptr[Float32, MutUntrackedOrigin]()
-        self.node_meta_field_set = null_ptr[UInt8, MutUntrackedOrigin]()
         self.bm25_term_hashes    = null_ptr[UInt32, MutUntrackedOrigin]()
         self.bm25_term_idf       = null_ptr[Float32, MutUntrackedOrigin]()
         self.bm25_postings_start = null_ptr[UInt32, MutUntrackedOrigin]()
@@ -928,12 +932,6 @@ struct HNSWGraph(Movable):
         self.node_norms = null_ptr[Float32, MutUntrackedOrigin]()
         if is_not_null(self.node_prefix_norms): self.node_prefix_norms.free()
         self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
-        if is_not_null(self.node_meta_tag_hashes): self.node_meta_tag_hashes.free()
-        if is_not_null(self.node_meta_numerics): self.node_meta_numerics.free()
-        if is_not_null(self.node_meta_field_set): self.node_meta_field_set.free()
-        self.node_meta_tag_hashes = null_ptr[UInt32, MutUntrackedOrigin]()
-        self.node_meta_numerics = null_ptr[Float32, MutUntrackedOrigin]()
-        self.node_meta_field_set = null_ptr[UInt8, MutUntrackedOrigin]()
         self.vector_allocator.reset()
 
     def bm25_register_text_doc(mut self, ext_id: Int):
@@ -958,6 +956,41 @@ struct HNSWGraph(Movable):
             self.bm25_text_cap = new_cap
         self.bm25_text_ids[self.bm25_text_count] = Int32(ext_id)
         self.bm25_text_count += 1
+
+    def adopt_schema(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
+        """The shared view's schema (FT.CREATE's), packed for the index file."""
+        unsafe_memset(self.schema_rec, 0, SCHEMA_MAX * SCHEMA_REC)
+        self.schema_count = 0
+        self.schema_known = shared[].schema_known
+        var n = shared[].schema_field_count
+        if n > SCHEMA_MAX: n = SCHEMA_MAX
+        for f in range(n):
+            var r = self.schema_rec + f * SCHEMA_REC
+            r[0] = shared[].schema_field_types[f]
+            r[1] = shared[].schema_field_flags[f]
+            r[2] = shared[].schema_field_seps[f]
+            var l = Int(shared[].schema_field_name_lens[f])
+            if l > SCHEMA_NAME_MAX: l = SCHEMA_NAME_MAX
+            r[3] = UInt8(l)
+            for b in range(l): r[4 + b] = shared[].schema_field_names[f][b]
+        self.schema_count = n
+
+    def publish_schema(self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
+        """A warm load's schema back into the shared view (reopen_after_load,
+        before any worker serves). A file without one leaves the view's
+        schema unknown: its filters read any hash field, as they used to."""
+        shared[].schema_known = self.schema_known
+        if not self.schema_known:
+            return
+        for f in range(self.schema_count):
+            var r = self.schema_rec + f * SCHEMA_REC
+            shared[].schema_field_types[f] = r[0]
+            shared[].schema_field_flags[f] = r[1]
+            shared[].schema_field_seps[f] = r[2]
+            var l = Int(r[3])
+            shared[].schema_field_name_lens[f] = UInt8(l)
+            for b in range(l): shared[].schema_field_names[f][b] = r[4 + b]
+        shared[].schema_field_count = self.schema_count
 
     def publish_to_shared(self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], owner: Int = -1):
         # V2.6: after build_index()+compact_vectors(), publish read-only pointers for other workers.
@@ -1232,6 +1265,9 @@ struct HNSWGraph(Movable):
         # PREFIX_SLOT bytes a prefix). A loader that predates it stops reading
         # before it, and serves the index as it was built.
         if self.prefix_count > 0: _qsec |= 512
+        # Bit 10: a schema section follows the PREFIX one ([count] then
+        # SCHEMA_REC bytes a field). Older loaders stop before it.
+        if self.schema_known: _qsec |= 1024
         hdr[25] = _qsec
         # gh #407: the vector field name — word 26 = length, bytes 216-247 (words
         # 27-30) = up to 32 bytes. Same no-bump reasoning as words 24/25: an
@@ -1358,6 +1394,13 @@ struct HNSWGraph(Movable):
             self._pion_write_all(fd, pc.bitcast[UInt8](), 8)
             pc.free()
             self._pion_write_all(fd, self.prefixes, self.prefix_count * PREFIX_SLOT)
+        if _qsec & 1024:
+            var sc = alloc[UInt64](1)
+            sc[0] = UInt64(self.schema_count)
+            self._pion_write_all(fd, sc.bitcast[UInt8](), 8)
+            sc.free()
+            if self.schema_count > 0:
+                self._pion_write_all(fd, self.schema_rec, self.schema_count * SCHEMA_REC)
 
         print("HNSW saved: " + String(self.num_nodes) + " nodes → pion.hnsw.0")
 
@@ -1622,6 +1665,23 @@ struct HNSWGraph(Movable):
             if npre > PREFIX_MAX or not self._pion_read_all(fd, self.prefixes, npre * PREFIX_SLOT):
                 return False
             self.prefix_count = npre
+        unsafe_memset(self.schema_rec, 0, SCHEMA_MAX * SCHEMA_REC)
+        self.schema_count = 0
+        self.schema_known = False
+        if saved_qsec & 1024:
+            var sc = alloc[UInt64](1)
+            if not self._pion_read_all(fd, sc.bitcast[UInt8](), 8):
+                sc.free()
+                return False
+            var nsc = Int(sc[0])
+            sc.free()
+            if nsc < 0 or nsc > SCHEMA_MAX or (nsc > 0 and not self._pion_read_all(fd, self.schema_rec, nsc * SCHEMA_REC)):
+                return False
+            for f in range(nsc):
+                if Int(self.schema_rec[f * SCHEMA_REC + 3]) > SCHEMA_NAME_MAX:
+                    return False
+            self.schema_count = nsc
+            self.schema_known = True
         # gh #350: the format word was CHECKED above but never applied, so a
         # warm PolarQuant server ran the INT8 beam over INT4 bytes (recall
         # ≈ 0.002 against its own fresh build). The search dispatch keys on
@@ -3285,33 +3345,6 @@ struct HNSWGraph(Movable):
         print("[NanoQuant] Block-INT2 compact buffer: " + String(self.num_nodes) + " vectors × " + String(bpv) + "B = " + String(compact_mb) + " MB")
         print("[NanoQuant] Total working set: " + String(compact_mb + rerank_mb2) + " MB (no QJL)")
         self._register_metal_rerank_buffer()
-
-    @always_inline
-    def _fast_passes_filters(
-        self,
-        nidx: Int,
-        filter_count: Int,
-        filter_schema_slots: Array[Int, 4],
-        filter_types: Array[UInt8, 4],
-        filter_tag_hashes: Array[UInt32, 4],
-        filter_lo: Array[Float32, 4],
-        filter_hi: Array[Float32, 4],
-    ) -> Bool:
-        """Phase 3.1: O(1) per-node filter check using pre-computed metadata arrays.
-        Returns True if all filters pass. Falls through to True if metadata not built
-        (caller then runs _passes_filters keyspace lookup as fallback)."""
-        for fi in range(filter_count):
-            var slot = filter_schema_slots[fi]
-            if slot < 0 or slot >= 8: return False
-            var meta_idx = nidx * 8 + slot
-            var field_set = self.node_meta_field_set[meta_idx]
-            if field_set == 0: return False  # field not in this doc
-            if filter_types[fi] == 0:  # TAG_EQ: compare FNV-1a hash
-                if self.node_meta_tag_hashes[meta_idx] != filter_tag_hashes[fi]: return False
-            else:  # NUMERIC_RANGE
-                var v = self.node_meta_numerics[meta_idx]
-                if v < filter_lo[fi] or v > filter_hi[fi]: return False
-        return True
 
     def _prune_l0_mrng(mut self):
         """V38E: NSG-style MRNG pruning of l0_compact L0 edges.

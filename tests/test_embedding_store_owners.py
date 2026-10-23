@@ -33,6 +33,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from resp_strict import Conn, wait_port_free  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The index's vector field, written out in full: FT.CREATE refuses a bare
+# `vec VECTOR` from 1.0.4, as RediSearch does. 1536 is the server's --dim, which
+# a bare field used to take. FT.ADDTEXT's embeddings have their own graph.
+VEC_ATTRS = ("HNSW", "6", "TYPE", "FLOAT32", "DIM", "1536", "DISTANCE_METRIC", "L2")
+
 failures: list = []
 
 
@@ -93,7 +99,7 @@ def main() -> int:
     proc, c, log_path = start(a.binary, a.port, work)
     try:
         print("[1] FT.SEARCHTEXT sees only its index")
-        c.cmd("FT.CREATE", "ia", "SCHEMA", "body", "TEXT", "vec", "VECTOR")
+        c.cmd("FT.CREATE", "ia", "SCHEMA", "body", "TEXT", "vec", "VECTOR", *VEC_ATTRS)
         for i in range(300):
             c.cmd("FT.ADDTEXT", "ia", f"a{i}", sentence(i))
         for i in range(300, 340):

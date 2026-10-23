@@ -4,6 +4,95 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [1.0.4] — 2026-10-23
+
+`FT.*` against RediSearch, option by option. 1.0.1 to 1.0.3 each fixed one
+`FT.CREATE` option that was accepted and never applied. A new test sends every
+`FT.CREATE`, `FT.SEARCH` and `FT.DROPINDEX` option to Pion and to RediSearch
+(Redis 8's search module) and compares the answers. It found the rest of that
+class. Each option is now applied as RediSearch applies it, or refused.
+`tests/test_ft_differential.py` (gate tier, needs a RediSearch module): 509
+steps, 159 divergences on 1.0.3, none now beyond the 88 documented in
+`tests/ft_differential_known.tsv`.
+
+### Fixed
+
+- **`FT.SEARCH ... LIMIT <offset> <count>` applies the offset, and the total
+  is every hit.** `LIMIT 2 3` answered with the first three hits, and the
+  reply's total was the page's size, so a client paging through results got
+  the first page every time.
+- **`FT.SEARCH ... SORTBY` is applied.** It was read and dropped: the hits came
+  back by distance whatever was asked, `DESC` included. It now sorts the KNN
+  hits by the score or by a schema field, before `LIMIT`, with RediSearch's
+  order for documents without the field (last) and for ties.
+- **TAG filters match tags, as RediSearch indexes them.** The stored value is
+  split at the field's `SEPARATOR` (`,` by default), trimmed, and compared
+  ignoring case unless the field is `CASESENSITIVE`. The whole value was
+  compared byte for byte: a document tagged `a,b` matched neither `{a}` nor
+  `{b}`, and `{A}` did not match `a`.
+- **NUMERIC filters are doubles, and `(` bounds work.** Bounds and values were
+  Float32, which cannot tell 1,700,000,014 from 1,700,000,000: a timestamp
+  range matched documents up to 128 s outside it. Exclusive `(` bounds were
+  refused. A value that is not a number now fails the clause; it read as 0.
+- **A filter must name a schema field of its kind.** A clause on a field the
+  schema lacks read the hash anyway, and a range on a TAG field read `a` as 0.0
+  and matched. Both are now RediSearch's errors. A `NOINDEX` field matches
+  nothing, as in RediSearch.
+- **A field changed after a build is seen by filters.** The build kept a copy
+  of each document's TAG and NUMERIC values for the graph path, which went
+  stale: `HSET doc cat x` after a build, and `{x}` did not find it.
+- **An expired document is not returned.** `FT.SEARCH` returned a document
+  past its key's TTL until the active sweep reached the key. It now expires it
+  on read, as any Redis read does.
+- **`FT.CREATE` refuses what it does not apply.** It picked out the words it
+  knew and took every other word for a field name, so these answered `+OK` and
+  changed nothing: `ON JSON` (the hashes were indexed), `FILTER`, `TEMPORARY`,
+  `AS` aliases (nothing was indexed), `TYPE FLOAT16`, `BFLOAT16`, `INT8`,
+  `UINT8` and `FLOAT64` (blobs read as FLOAT32), a second `VECTOR` field (the
+  first was dropped), a bare `VECTOR` with no algorithm, a missing `TYPE` or
+  `DIM`, `DIM 0`, a vector attribute count that did not match, an unknown option
+  or field type, and a missing `SCHEMA`. Each is now refused, and the refused
+  `FT.CREATE` changes nothing. The full-text index's options are accepted, as
+  they change no answer Pion gives.
+- **`FT.SEARCH` refuses the options it does not apply.** An unknown option was
+  skipped, so `INKEYS` and `GEOFILTER` answered as if absent, and
+  `WITHPAYLOADS`, `WITHSORTKEYS` and `EXPLAINSCORE` returned a reply of the
+  wrong shape. They are refused, as is any unknown option.
+- **`FT.DROPINDEX ... DD` deletes the documents.** It was read and dropped.
+  Under `-w N`, where each worker holds its own documents, `DD` is refused. Any
+  other argument is refused; it dropped the index.
+- **`FT.SEARCH` on a dropped index is an error.** After `FT.DROPINDEX`, or an
+  `FT.CREATE` that was refused, it answered from the vectors the old
+  definition kept routing, while `FT.INFO` said `Unknown index name`.
+- **`FT.INFO num_docs` counts documents, not slots.** It counted every vector
+  ever written, so it only grew: two deletes and an update on 40 documents
+  read 41.
+- **Scores after an automatic build are exact.** The graph's hits were scored
+  from their INT8 codes when no vector had been written since the build
+  (+1.3% on squared L2 at DIM 8). The FP32 rows the build keeps now score them.
+
+### Added
+
+- `FT._LIST`, which RedisVL calls to check that an index exists.
+- The schema (fields, kinds, `SEPARATOR`, `CASESENSITIVE`, `NOINDEX`) is saved
+  with the index (index-file word 25, bit 10), so a restart keeps the filter
+  rules. A file written before 1.0.4 has none: it loads as before, and its
+  filters read any hash field. `tests/test_ft_schema_restart.py` (gate tier).
+
+### Changed
+
+- A TAG filter reads the stored value as a tag list (split at `,`, or the
+  field's `SEPARATOR`), ignoring case unless the field is `CASESENSITIVE`, as
+  RediSearch does. It compared the whole value byte for byte.
+- A filter on a field the index's schema lacks, or of the other kind, is an
+  error. It read the hash.
+- Options `FT.CREATE` and `FT.SEARCH` used to accept and ignore are refused
+  (above). A client that sent one gets an error where it got an answer that
+  did not do what it asked.
+
+Remaining differences from RediSearch are listed in
+[`doc/vector_engine.md`](doc/vector_engine.md#differences-from-redisearch).
+
 ## [1.0.3] — 2026-10-23
 
 `FT.CREATE ... PREFIX` is applied: an index holds only the hashes under its
