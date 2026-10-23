@@ -194,8 +194,10 @@ def single_worker(binary, port):
         check("P6 -inf bound", sorted(got) == [0, 1, 2, 3], str(got))
         got = prices_of(knn(c, vec(40), k=3, extra=("FILTER", "@price:[10 20]", "FILTER", "@price:[15 +inf]")))
         check("P6 two FILTER clauses AND together", len(got) == 3 and all(15 <= p <= 20 for p in got), str(got))
+        # an exclusive '(' bound applies (1.0.4: it was refused), as in RediSearch
+        got = prices_of(knn(c, vec(40), k=10, extra=("FILTER", "@price:[(10 20]")))
+        check("P6 exclusive '(' bound applies", len(got) == 10 and all(10 < p <= 20 for p in got), str(got))
         for label, extra in [("garbage FILTER", ("FILTER", "price>10")),
-                             ("exclusive bound", ("FILTER", "@price:[(10 20]")),
                              ("non-numeric bound", ("FILTER", "@price:[ten 20]")),
                              ("OR of clauses", ("FILTER", "@price:[1 2] | @price:[5 6]"))]:
             r = knn(c, vec(40), k=3, extra=extra)

@@ -16,10 +16,10 @@ from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.container_free import hash_get_live
 from src.common.value import GenericValue, ValueType
 from src.common.config import PionConfig
-from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_len, parse_filter_float, is_valid_float_arg, parse_float64, arg_eq
+from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_len, parse_filter_float, is_valid_float_arg, parse_float64, arg_eq, parse_redis_double, DOUBLE_VALUE, DOUBLE_RANGE, parse_int64_strict, ParsedInt
 from src.common.lock_free import ShardQueryBus
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
-from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT
+from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT, SCHEMA_MAX, SCHEMA_NAME_MAX, SCHEMA_REC, FT_FIELD_TEXT, FT_FIELD_TAG, FT_FIELD_NUMERIC, FT_FIELD_GEO, FT_FIELD_GEOSHAPE, FT_FLAG_SORTABLE, FT_FLAG_UNF, FT_FLAG_NOINDEX, FT_FLAG_CASESENSITIVE
 from src.vector.fp32_scan import scan_dot_f32, l2sq_f32_4chain, dot_f32_4chain
 # gh #87.1: src/vector/ivf_pq.mojo deleted (a measured dead end).
 from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_name
@@ -207,6 +207,253 @@ def drop_dead(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], mu
         _ = scores.pop()
 
 
+def _slot_key(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+              keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], slot: Int,
+              mut owned: Bool) -> GenericValue:
+    """The key of the document at ingest slot `slot`, for a lookup: the shared
+    slot->key map (a copy: `owned`, so the caller frees it with
+    free_str_payload; inline up to 23 bytes), else this worker's
+    `__hk__<slot>` entry (the map's own value: not owned, never freed). NONE
+    when neither has it. Not a borrow: the shared map is no RESP token, and
+    gh #394's audit proves a borrowed key's bytes alive or refuses it."""
+    owned = False
+    if is_not_null(shared) and is_not_null(shared[].hk_keys_buf) and slot >= 0 and slot < shared[].hk_max_elements:
+        var p = shared[].hk_keys_buf + slot * 32
+        var l = Int(p[0])
+        if l > 0 and l <= 31:
+            owned = True
+            return GenericValue.from_ptr(p + 1, l)
+    if is_null(keyspace) or slot < 0:
+        return GenericValue()
+    var hk = stack_allocation[30, UInt8]()
+    hk[0]=95;hk[1]=95;hk[2]=104;hk[3]=107;hk[4]=95;hk[5]=95 # __hk__
+    var e = format_int_to_buf(hk, 6, Int64(slot))
+    # 6 + at most 19 digits: borrow() packs it inline (SSO), no pointer to hk escapes
+    return keyspace[].get(GenericValue.borrow(hk, e))
+
+
+def _slot_hash(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+               keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+               slot: Int) -> UnsafePointer[SlabHashMap, MutUntrackedOrigin]:
+    """The hash of the document at `slot` on this worker, or null."""
+    if is_null(keyspace):
+        return null_ptr[SlabHashMap, MutUntrackedOrigin]()
+    var owned = False
+    var key = _slot_key(shared, keyspace, slot, owned)
+    if key.is_none():
+        return null_ptr[SlabHashMap, MutUntrackedOrigin]()
+    var v = hash_get_live(keyspace, key)
+    if owned: key.free_str_payload()
+    if v.is_none() or v.type.value != ValueType.HASH:
+        return null_ptr[SlabHashMap, MutUntrackedOrigin]()
+    return v.as_hash().bitcast[SlabHashMap]()
+
+
+@always_inline
+def _ttl_any(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) -> Bool:
+    """Whether a key on this worker has a TTL at all (one load when none does)."""
+    return is_not_null(keyspace) and Int(keyspace[].ttl_map) != 0 and keyspace[].ttl_map[].size > 0 \
+        and keyspace[].clock_ns != 0
+
+
+def _slot_expired(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                  keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], slot: Int) -> Bool:
+    """The document at `slot` is past its key's deadline: it is gone, as for any
+    read. The lookup expires the key (Redis's lazy expiry), which kills the
+    slot (#46), so later searches skip it without asking. FT.SEARCH used to
+    return such a document until the active sweep reached it. Only this
+    worker's TTLs are known; under -w N a key on another worker is that
+    worker's sweep's."""
+    var owned = False
+    var key = _slot_key(shared, keyspace, slot, owned)
+    if key.is_none():
+        return False
+    var d = keyspace[].deadline(key)
+    var due = d >= 0 and d < keyspace[].clock_ns
+    if due:
+        _ = keyspace[].get(key)
+    if owned: key.free_str_payload()
+    return due
+
+
+def _schema_slot(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                 p: UnsafePointer[UInt8, MutUntrackedOrigin], l: Int) -> Int:
+    """The index schema's entry for field name `p[:l]` (case-sensitive, as in
+    RediSearch), or -1."""
+    if is_null(shared):
+        return -1
+    for si in range(shared[].schema_field_count):
+        if Int(shared[].schema_field_name_lens[si]) != l:
+            continue
+        var same = True
+        for b in range(l):
+            if shared[].schema_field_names[si][b] != p[b]:
+                same = False
+                break
+        if same:
+            return si
+    return -1
+
+
+struct FtSort(ImplicitlyCopyable, Movable):
+    """FT.SEARCH's SORTBY: a field, or the KNN score, and the direction."""
+    var p: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var l: Int
+    var desc: Bool
+    var set: Bool
+
+    def __init__(out self):
+        self.p = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.l = 0
+        self.desc = False
+        self.set = False
+
+
+def _sort_less(a: Int, b: Int, has: List[Bool], num: List[Float64], is_num: Bool,
+               arena: List[UInt8], s_at: List[Int], s_len: List[Int], ids: List[Int], desc: Bool) -> Bool:
+    """RediSearch's SORTBY order (checked against it): documents without the
+    field last in both directions; ties, and the missing, by document order,
+    reversed with DESC. Pion's document order is the ingest slot."""
+    if has[a] != has[b]:
+        return has[a]
+    if has[a]:
+        var c = 0
+        if is_num:
+            c = -1 if num[a] < num[b] else (1 if num[a] > num[b] else 0)
+        else:
+            var la = s_len[a]
+            var lb = s_len[b]
+            var n = la if la < lb else lb
+            for k in range(n):
+                var x = arena[s_at[a] + k]
+                var y = arena[s_at[b] + k]
+                if x != y:
+                    c = -1 if x < y else 1
+                    break
+            if c == 0 and la != lb:
+                c = -1 if la < lb else 1
+        if c != 0:
+            return (c > 0) if desc else (c < 0)
+    return (ids[a] > ids[b]) if desc else (ids[a] < ids[b])
+
+
+def _sort_knn(mut ids: List[Int], mut scores: List[Float32], sort: FtSort, opts: FtReplyOpts,
+              keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+              shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> String:
+    """SORTBY over the KNN results, before LIMIT pages them (RediSearch's
+    order of operations). It used to be read and dropped: the results came
+    back by distance whatever was asked. The KNN score sorts ascending already;
+    DESC reverses it. A schema field sorts by its value: NUMERIC as a number,
+    TAG and TEXT by their bytes. Returns an error, or ""."""
+    var n = len(ids) if len(ids) < len(scores) else len(scores)
+    if opts.is_score_name(sort.p, sort.l):
+        if sort.desc:
+            for a in range(n // 2):
+                var ti = ids[a]; ids[a] = ids[n - 1 - a]; ids[n - 1 - a] = ti
+                var ts = scores[a]; scores[a] = scores[n - 1 - a]; scores[n - 1 - a] = ts
+        return String("")
+    var si = _schema_slot(shared, sort.p, sort.l)
+    if si < 0:
+        return "Property `" + _bytes_str(sort.p, sort.l) + "` not loaded nor in schema"
+    var is_num = shared[].schema_field_types[si] == 3
+    var has = List[Bool](capacity=n)
+    var num = List[Float64](capacity=n)
+    var arena = List[UInt8]()
+    var s_at = List[Int](capacity=n)
+    var s_len = List[Int](capacity=n)
+    var vbuf = alloc[UInt8](256)
+    for r in range(n):
+        var h = _slot_hash(shared, keyspace, ids[r])
+        var v = GenericValue()
+        if is_not_null(h):
+            v = h[].get(GenericValue.borrow(sort.p, sort.l))
+        var ok = not v.is_none()
+        var x = Float64(0.0)
+        s_at.append(len(arena))
+        if ok and is_num:
+            var vl = _copy_value_clamped(v, vbuf, 256)
+            var pf = parse_redis_double(vbuf, vl, DOUBLE_VALUE)
+            ok = pf.ok
+            x = pf.value
+            s_len.append(0)
+        elif ok:
+            var vl = v.string_len()
+            var tmp = alloc[UInt8](vl + 1)
+            v.copy_to(tmp)
+            for b in range(vl):
+                arena.append(tmp[b])
+            tmp.free()
+            s_len.append(vl)
+        else:
+            s_len.append(0)
+        has.append(ok)
+        num.append(x)
+    vbuf.free()
+    # stable merge sort of positions
+    var order = List[Int](capacity=n)
+    for r in range(n):
+        order.append(r)
+    var tmp_o = List[Int](capacity=n)
+    for r in range(n):
+        tmp_o.append(0)
+    var width = 1
+    while width < n:
+        var lo = 0
+        while lo < n:
+            var mid = lo + width if lo + width < n else n
+            var hi = lo + 2 * width if lo + 2 * width < n else n
+            var a = lo
+            var b = mid
+            var o = lo
+            while a < mid and b < hi:
+                if _sort_less(order[b], order[a], has, num, is_num, arena, s_at, s_len, ids, sort.desc):
+                    tmp_o[o] = order[b]; b += 1
+                else:
+                    tmp_o[o] = order[a]; a += 1
+                o += 1
+            while a < mid:
+                tmp_o[o] = order[a]; a += 1; o += 1
+            while b < hi:
+                tmp_o[o] = order[b]; b += 1; o += 1
+            lo = hi
+        for r in range(n):
+            order[r] = tmp_o[r]
+        width *= 2
+    var new_ids = List[Int](capacity=n)
+    var new_scores = List[Float32](capacity=n)
+    for r in range(n):
+        new_ids.append(ids[order[r]])
+        new_scores.append(scores[order[r]])
+    ids = new_ids^
+    scores = new_scores^
+    return String("")
+
+
+def _ft_knn_reply(mut writer: ResponseWriter, mut ids: List[Int], mut scores: List[Float32],
+                  keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                  shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                  opts: FtReplyOpts, sort: FtSort, offset: Int, count: Int):
+    """A KNN query's reply: every hit sorted (SORTBY), then the LIMIT window.
+    The total is every hit, as RediSearch reports it. LIMIT used to cap the
+    search at its count, so the total was the page's size and the offset was
+    ignored (LIMIT 2 3 answered with the first three)."""
+    if sort.set:
+        var err = _sort_knn(ids, scores, sort, opts, keyspace, shared)
+        if err.byte_length() > 0:
+            writer.append_error_response(err)
+            return
+    var total = len(ids)
+    var page_ids = List[Int]()
+    var page_scores = List[Float32]()
+    var end = total if count < 0 or offset + count >= total else offset + count
+    var r = offset
+    while r < end:
+        page_ids.append(ids[r])
+        page_scores.append(scores[r] if r < len(scores) else Float32(0.0))
+        r += 1
+    write_ft_search_response(writer, page_ids, page_scores, keyspace, shared, opts, total)
+
+
 # RESP3 FT.SEARCH, in RediSearch's shape (checked against RediSearch's own
 # replies): a map whose `results` entry holds one map per document (id, then
 # score with WITHSCORES, then extra_attributes unless NOCONTENT, then values).
@@ -312,9 +559,12 @@ def _put_score_bulk(mut writer: ResponseWriter, dist: Float32):
 def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], dist_scores: List[Float32],
                               keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin] = null_ptr[StripedHashMap, MutUntrackedOrigin](),
                               shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin](),
-                              opts: FtReplyOpts = FtReplyOpts()):
+                              opts: FtReplyOpts = FtReplyOpts(), total: Int = -1):
     """Write a single FT.SEARCH response to writer (does not flush): RESP2's
     flat array, or RediSearch's RESP3 map on a RESP3 connection.
+
+    `results2` is the page to send; `total` is every hit the query had (its
+    LIMIT window cut the page from them), and defaults to the page's size.
 
     Each result is <key>, then (WITHSCORES) the text score, then its fields
     unless NOCONTENT. With RETURN the fields are the ones it names, renamed by
@@ -337,6 +587,7 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
     Clients read fields by name (redis-py drops "id" and uses the key as
     doc.id). Callers must pass `keyspace`, or every result loses its fields."""
     var nr = len(results2)
+    var n_total = total if total >= 0 else nr
     var resp3 = writer.proto == 3
     var content = opts.mode != FT_REPLY_NOCONTENT
     var per_doc = 1 + (1 if opts.with_scores else 0) + (1 if content else 0)
@@ -348,7 +599,7 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
         writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(1 + nr * per_doc))
         writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
         writer.buffer[writer.offset] = 58; writer.offset += 1
-        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(nr))
+        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(n_total))
         writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
 
     # RETURN's entries, resolved once: the token naming the hash field, the
@@ -512,7 +763,7 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
 
     if resp3:
         _put_lit(writer, _FT_R3_TOTAL)
-        writer.append_int_response(Int64(nr))
+        writer.append_int_response(Int64(n_total))
         _put_lit(writer, _FT_R3_TAIL)
 
 
@@ -537,18 +788,32 @@ def _bytes_str(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int, cap: Int = 6
     return s
 
 
-def _parse_bound(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int, mut out_v: Float32) -> Bool:
-    """One NUMERIC bound: a float, or inf / +inf / -inf. Exclusive `(` bounds
-    are refused by the caller rather than silently read as inclusive."""
-    if n == 3 and (p[0] | 0x20) == 105 and (p[1] | 0x20) == 110 and (p[2] | 0x20) == 102:
-        out_v = Float32(3.0e38); return True
-    if n == 4 and (p[1] | 0x20) == 105 and (p[2] | 0x20) == 110 and (p[3] | 0x20) == 102:
-        if p[0] == 43: out_v = Float32(3.0e38); return True
-        if p[0] == 45: out_v = Float32(-3.0e38); return True
-    if not is_valid_float_arg(p, n):
+def _parse_bound(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int, mut out_v: Float64,
+                 mut excl: Bool) -> Bool:
+    """One NUMERIC bound, as RediSearch reads it: a number (strtod's, so
+    1e400 is infinity), inf / +inf / -inf, and a leading `(` for an exclusive
+    bound. `(` used to be refused; the value used to be a Float32, which
+    cannot tell 1700000014 from 1700000000 (a timestamp range matched
+    documents up to 128 s outside it)."""
+    excl = False
+    var q = p
+    var m = n
+    if m > 0 and q[0] == 40:                  # '('
+        excl = True
+        q = q + 1
+        m -= 1
+    if m == 0:
         return False
-    out_v = Float32(parse_float64(p, n))
+    var pf = parse_redis_double(q, m, DOUBLE_RANGE)
+    if not pf.ok:
+        return False
+    out_v = pf.value
     return True
+
+
+@always_inline
+def _ascii_fold(c: UInt8) -> UInt8:
+    return c | 0x20 if c >= 65 and c <= 90 else c
 
 
 struct FtFilters(Movable):
@@ -559,17 +824,27 @@ struct FtFilters(Movable):
     that only knew `name=value` and `name [lo hi]`, fell through it, and the
     query ran UNFILTERED with no error — a tenant/date/category filter that
     returns rows outside its range while looking applied. Every form is now
-    either parsed or refused (`error` is set and the query is not run)."""
+    either parsed or refused (`error` is set and the query is not run).
+
+    With the index's schema known (FT.CREATE, or an index file that saved
+    it), a clause's field must be in it and of its kind: a range on a NUMERIC
+    field, a tag set on a TAG field, as RediSearch requires. A clause on a
+    field that is not there used to read the hash anyway, and a range on a
+    TAG field read "a" as 0.0."""
     var count: Int
     var types: Array[UInt8, 4]
     var field_lens: Array[UInt8, 4]
     var field_names: Array[Array[UInt8, 32], 4]
     var str_ptrs: Array[UnsafePointer[UInt8, MutUntrackedOrigin], 4]
     var str_lens: Array[UInt8, 4]
-    var lo: Array[Float32, 4]
-    var hi: Array[Float32, 4]
+    var lo: Array[Float64, 4]
+    var hi: Array[Float64, 4]
+    var lo_excl: Array[Bool, 4]
+    var hi_excl: Array[Bool, 4]
     var slots: Array[Int, 4]
-    var tag_hashes: Array[UInt32, 4]
+    var seps: Array[UInt8, 4]        # a TAG field's SEPARATOR
+    var fold: Array[Bool, 4]         # a TAG field without CASESENSITIVE
+    var noindex: Array[Bool, 4]      # a NOINDEX field: matches nothing
     var error: String
 
     def __init__(out self):
@@ -579,10 +854,14 @@ struct FtFilters(Movable):
         self.field_names = Array[Array[UInt8, 32], 4](uninitialized=True)
         self.str_ptrs = Array[UnsafePointer[UInt8, MutUntrackedOrigin], 4](uninitialized=True)
         self.str_lens = Array[UInt8, 4](uninitialized=True)
-        self.lo = Array[Float32, 4](uninitialized=True)
-        self.hi = Array[Float32, 4](uninitialized=True)
+        self.lo = Array[Float64, 4](uninitialized=True)
+        self.hi = Array[Float64, 4](uninitialized=True)
+        self.lo_excl = Array[Bool, 4](uninitialized=True)
+        self.hi_excl = Array[Bool, 4](uninitialized=True)
         self.slots = Array[Int, 4](uninitialized=True)
-        self.tag_hashes = Array[UInt32, 4](uninitialized=True)
+        self.seps = Array[UInt8, 4](uninitialized=True)
+        self.fold = Array[Bool, 4](uninitialized=True)
+        self.noindex = Array[Bool, 4](uninitialized=True)
         for i in range(4):
             self.types[i] = 0
             self.field_lens[i] = 0
@@ -590,8 +869,12 @@ struct FtFilters(Movable):
             self.str_lens[i] = 0
             self.lo[i] = 0.0
             self.hi[i] = 0.0
+            self.lo_excl[i] = False
+            self.hi_excl[i] = False
             self.slots[i] = -1
-            self.tag_hashes[i] = 0
+            self.seps[i] = 44
+            self.fold[i] = True
+            self.noindex[i] = False
         self.error = String("")
 
     def failed(self) -> Bool:
@@ -602,18 +885,12 @@ struct FtFilters(Movable):
             self.error = msg
         return False
 
-    def fast_meta_ok(self) -> Bool:
-        """The per-node metadata arrays hold one tag hash per field, so a
-        TAG_ANY clause must take the keyspace path."""
-        for i in range(self.count):
-            if self.types[i] == FT_FILTER_TAG_ANY:
-                return False
-        return True
-
     def _begin(mut self, name: UnsafePointer[UInt8, MutUntrackedOrigin], name_len: Int,
-               shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> Bool:
-        """Claim the next slot for field `name`; the field must be a TAG or
-        NUMERIC field of the index schema, or the filter could never match."""
+               shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], want: UInt8,
+               legacy: Bool) -> Bool:
+        """Claim the next slot for field `name`, which must be a `want` field
+        of the index schema when the schema is known. `legacy`: the FILTER
+        argument form, whose errors RediSearch words differently."""
         if self.count >= FT_MAX_FILTERS:
             return self.fail("ERR FT.SEARCH supports at most 4 filter clauses")
         if name_len == 0 or name_len > 32:
@@ -622,36 +899,54 @@ struct FtFilters(Movable):
         self.field_lens[fi] = UInt8(name_len)
         for b in range(name_len):
             self.field_names[fi][b] = name[b]
-        var slot = -1
-        if is_not_null(shared):
-            for si in range(shared[].schema_field_count):
-                if Int(shared[].schema_field_name_lens[si]) != name_len: continue
-                var same = True
-                for b in range(name_len):
-                    if shared[].schema_field_names[si][b] != name[b]:
-                        same = False; break
-                if same:
-                    slot = si; break
+        var slot = _schema_slot(shared, name, name_len)
+        if is_not_null(shared) and shared[].schema_known:
+            if slot < 0:
+                if legacy:
+                    return self.fail("Unknown Field '" + _bytes_str(name, name_len) + "'")
+                return self.fail("Unknown field `" + _bytes_str(name, name_len) + "`")
+            var ty = shared[].schema_field_types[slot]
+            if ty != want:
+                if want == FT_FIELD_NUMERIC:
+                    if legacy:
+                        return self.fail("Field is not a numeric field, field: " + _bytes_str(name, name_len))
+                    return self.fail("Expected a NUMERIC field near " + _bytes_str(name, name_len))
+                return self.fail("Expected a TAG field near " + _bytes_str(name, name_len))
+        if slot >= 0:
+            self.seps[fi] = shared[].schema_field_seps[slot]
+            var fl = shared[].schema_field_flags[slot]
+            self.fold[fi] = (fl & FT_FLAG_CASESENSITIVE) == 0
+            self.noindex[fi] = (fl & FT_FLAG_NOINDEX) != 0
         self.slots[fi] = slot
         return True
 
     def add_numeric(mut self, name: UnsafePointer[UInt8, MutUntrackedOrigin], name_len: Int,
                     lo_p: UnsafePointer[UInt8, MutUntrackedOrigin], lo_n: Int,
                     hi_p: UnsafePointer[UInt8, MutUntrackedOrigin], hi_n: Int,
-                    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> Bool:
-        if (lo_n > 0 and lo_p[0] == 40) or (hi_n > 0 and hi_p[0] == 40):
-            return self.fail("ERR exclusive '(' range bounds are not supported in FT.SEARCH filters")
-        var lo = Float32(0.0)
-        var hi = Float32(0.0)
-        if not _parse_bound(lo_p, lo_n, lo) or not _parse_bound(hi_p, hi_n, hi):
+                    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                    legacy: Bool = False) -> Bool:
+        var lo = Float64(0.0)
+        var hi = Float64(0.0)
+        var lo_x = False
+        var hi_x = False
+        if not _parse_bound(lo_p, lo_n, lo, lo_x):
+            if legacy:
+                return self.fail("Bad lower range: " + _bytes_str(lo_p, lo_n))
             return self.fail("ERR invalid numeric filter range for '" + _bytes_str(name, name_len)
                              + "': '" + _bytes_str(lo_p, lo_n) + "' '" + _bytes_str(hi_p, hi_n) + "'")
-        if not self._begin(name, name_len, shared):
+        if not _parse_bound(hi_p, hi_n, hi, hi_x):
+            if legacy:
+                return self.fail("Bad upper range: " + _bytes_str(hi_p, hi_n))
+            return self.fail("ERR invalid numeric filter range for '" + _bytes_str(name, name_len)
+                             + "': '" + _bytes_str(lo_p, lo_n) + "' '" + _bytes_str(hi_p, hi_n) + "'")
+        if not self._begin(name, name_len, shared, FT_FIELD_NUMERIC, legacy):
             return False
         var fi = self.count
         self.types[fi] = FT_FILTER_NUMERIC
         self.lo[fi] = lo
         self.hi[fi] = hi
+        self.lo_excl[fi] = lo_x
+        self.hi_excl[fi] = hi_x
         self.count += 1
         return True
 
@@ -660,7 +955,7 @@ struct FtFilters(Movable):
                 shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> Bool:
         if val_len == 0 or val_len > 254:
             return self.fail("ERR invalid tag filter value for '" + _bytes_str(name, name_len) + "'")
-        if not self._begin(name, name_len, shared):
+        if not self._begin(name, name_len, shared, FT_FIELD_TAG, False):
             return False
         var fi = self.count
         var any = False
@@ -669,10 +964,6 @@ struct FtFilters(Movable):
         self.types[fi] = FT_FILTER_TAG_ANY if any else FT_FILTER_TAG_EQ
         self.str_ptrs[fi] = val
         self.str_lens[fi] = UInt8(val_len)
-        var h: UInt32 = 2166136261
-        for b in range(val_len):
-            h = (h ^ UInt32(val[b])) * 16777619
-        self.tag_hashes[fi] = h
         self.count += 1
         return True
 
@@ -743,10 +1034,10 @@ struct FtFilters(Movable):
                          shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> Int:
         """The arguments after a FILTER keyword at token `j`. Returns how many
         tokens were used after FILTER, or -1 with `error` set. Forms:
-          FILTER @f:[lo hi] | @f:{tag}   (documented, RediSearch clause syntax)
-          FILTER f=value                 (TAG equality)
-          FILTER f [lo hi]               (NUMERIC, range as one token)
-          FILTER f lo hi                 (RediSearch legacy numeric filter)"""
+          FILTER f lo hi                 (RediSearch's numeric filter)
+          FILTER @f:[lo hi] | @f:{tag}   (Pion: RediSearch clause syntax)
+          FILTER f=value                 (Pion: TAG equality)
+          FILTER f [lo hi]               (Pion: NUMERIC, range as one token)"""
         if j + 1 >= num_tokens:
             _ = self.fail("ERR FILTER needs an argument")
             return -1
@@ -779,9 +1070,9 @@ struct FtFilters(Movable):
             return 2 if self.add_numeric(tp, tl, rp + a, a_end - a, rp + b, b_end - b, shared) else -1
         if j + 3 < num_tokens:
             return 3 if self.add_numeric(tp, tl, tokens[j + 2].ptr, tokens[j + 2].length,
-                                         tokens[j + 3].ptr, tokens[j + 3].length, shared) else -1
+                                         tokens[j + 3].ptr, tokens[j + 3].length, shared, True) else -1
         _ = self.fail("ERR unsupported FILTER argument '" + _bytes_str(tp, tl)
-                      + "' - use @field:[lo hi], @field:{tag}, field=value or field lo hi")
+                      + "' - use field lo hi, @field:[lo hi], @field:{tag} or field=value")
         return -1
 
 
@@ -802,119 +1093,114 @@ def _rescore_knn(mut hnsw: HNSWGraph, query: UnsafePointer[Float32, MutUntracked
             b -= 1
 
 
-@always_inline
-def passes_filters(
-    external_id: Int,
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-    filter_count: Int,
-    filter_types: Array[UInt8, 4],
-    filter_field_lens: Array[UInt8, 4],
-    filter_field_names: Array[Array[UInt8, 32], 4],
-    filter_str_ptrs: Array[UnsafePointer[UInt8, MutUntrackedOrigin], 4],
-    filter_str_lens: Array[UInt8, 4],
-    filter_lo: Array[Float32, 4],
-    filter_hi: Array[Float32, 4],
-) -> Bool:
-    """Check whether the doc at external_id passes all accumulated filter specs.
+def _tag_matches(fv: UnsafePointer[UInt8, MutUntrackedOrigin], fl: Int, sep: UInt8, fold: Bool,
+                 q: UnsafePointer[UInt8, MutUntrackedOrigin], ql: Int, any: Bool) -> Bool:
+    """A TAG field's value against a clause, as RediSearch indexes it: the
+    value is a list split at the field's SEPARATOR (',' by default), each tag
+    trimmed of spaces, and compared case-insensitively unless the field is
+    CASESENSITIVE (ASCII letters; RediSearch also folds the rest of UTF-8).
+    `any`: the clause's `a|b` alternatives, any one matching. The whole value
+    was compared byte for byte before, so "a,b" matched neither {a} nor {b},
+    and {A} matched nothing stored as "a"."""
+    var t0 = 0
+    while t0 <= fl:
+        var t1 = t0
+        while t1 < fl and fv[t1] != sep:
+            t1 += 1
+        var s0 = t0
+        var s1 = t1
+        while s0 < s1 and fv[s0] == 32: s0 += 1
+        while s1 > s0 and fv[s1 - 1] == 32: s1 -= 1
+        var a0 = 0
+        while a0 <= ql:
+            var a1 = a0
+            while a1 < ql and (not any or q[a1] != 124):
+                a1 += 1
+            var b0 = a0
+            var b1 = a1
+            if any:
+                while b0 < b1 and q[b0] == 32: b0 += 1
+                while b1 > b0 and q[b1 - 1] == 32: b1 -= 1
+            if s1 - s0 == b1 - b0 and s1 > s0:
+                var same = True
+                for k in range(s1 - s0):
+                    var x = fv[s0 + k]
+                    var y = q[b0 + k]
+                    if fold:
+                        x = _ascii_fold(x)
+                        y = _ascii_fold(y)
+                    if x != y:
+                        same = False
+                        break
+                if same:
+                    return True
+            a0 = a1 + 1
+        t0 = t1 + 1
+    return False
 
-    Reconstructs the doc key as the decimal string of external_id, looks it up in the
-    keyspace, then checks each filter against the corresponding HASH field value.
 
-    TAG_EQ (type=0): field value string must match filter_str byte-for-byte.
-    NUMERIC_RANGE (type=1): field value parsed as float, must be in [lo, hi].
+def passes_filters(slot: Int, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                   keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                   filters: FtFilters) -> Bool:
+    """Whether the document at ingest slot `slot` passes every clause, read
+    from its hash on this worker (a document another worker holds fails:
+    the keyspace is per worker, gh #253).
 
-    Returns True when all filters pass (or filter_count == 0).
-    """
-    if filter_count == 0: return True
-
-    # Look up __hk__<external_id> → original hash key, then get HASH from keyspace
-    var hk_buf = alloc[UInt8](30)
-    hk_buf[0]=95;hk_buf[1]=95;hk_buf[2]=104;hk_buf[3]=107;hk_buf[4]=95;hk_buf[5]=95 # __hk__
-    var hk_end = format_int_to_buf(hk_buf, 6, Int64(external_id))
-    var hk_key = GenericValue.from_ptr(hk_buf, hk_end)
-    hk_buf.free()
-    var hk_val = keyspace[].get(hk_key)
-
-    var doc_val: GenericValue
-    if not hk_val.is_none():
-        doc_val = keyspace[].get(hk_val)
-    else:
-        # Fallback: try numeric key directly
-        var key_buf = alloc[UInt8](24)
-        var key_len: Int
-        var tmp = external_id
-        if tmp == 0:
-            key_buf[0] = 48; key_len = 1
-        else:
-            var digits = alloc[UInt8](20)
-            var nd = 0
-            while tmp > 0:
-                digits[nd] = UInt8(tmp % 10) + 48; nd += 1; tmp //= 10
-            for di in range(nd): key_buf[di] = digits[nd - 1 - di]
-            key_len = nd
-            digits.free()
-        doc_val = keyspace[].get(GenericValue.borrow(key_buf, key_len))
-        key_buf.free()
-
-    if doc_val.is_none(): return False
-    if doc_val.type.value != ValueType.HASH: return False
-    var hash_ptr = doc_val.as_hash().bitcast[SlabHashMap]()
+    TAG: _tag_matches. NUMERIC: the value parsed as a double, inside the
+    bounds (`(` excludes one); a value that is not a number fails, where
+    RediSearch does not index the document at all. A NOINDEX field matches
+    nothing, as in RediSearch. The per-node TAG hash and Float32 copies
+    taken at build time are gone: they went stale when a field changed after
+    the build (HSET doc cat x, then {x} did not find it)."""
+    if filters.count == 0: return True
+    var hash_ptr = _slot_hash(shared, keyspace, slot)
     if is_null(hash_ptr): return False
-
-    for fi in range(filter_count):
-        var flen = Int(filter_field_lens[fi])
+    for fi in range(filters.count):
+        if filters.noindex[fi]:
+            return False
+        var flen = Int(filters.field_lens[fi])
         if flen == 0: continue
-        # Build field key (lowercased)
+        # the field name, as a lookup key: a heap copy (a stack buffer must not
+        # reach an out-of-line callee, gh #349)
         var fk_buf = alloc[UInt8](32)
-        for bi in range(flen): fk_buf[bi] = filter_field_names[fi][bi]
-        var field_key = GenericValue.from_ptr(fk_buf, flen)
+        for bi in range(flen): fk_buf[bi] = filters.field_names[fi][bi]
+        var field_val = hash_ptr[].get(GenericValue.borrow(fk_buf, flen))
         fk_buf.free()
-        var field_val = hash_ptr[].get(field_key)
-        field_key.free_str_payload()   # gh #394: per candidate, a >23 B field name leaked
         if field_val.is_none(): return False
-
-        var ftype = filter_types[fi]
+        var ftype = filters.types[fi]
         if ftype == FT_FILTER_TAG_EQ or ftype == FT_FILTER_TAG_ANY:
-            # TAG_EQ: the value byte-for-byte. TAG_ANY (gh #367, `{a|b}`): equal
-            # to any one of the '|'-separated alternatives.
-            var vl = Int(filter_str_lens[fi])
-            var vp = filter_str_ptrs[fi]
+            var vp = filters.str_ptrs[fi]
             if is_null(vp): return False
             var fv_len = field_val.string_len()
             var fv_buf = alloc[UInt8](fv_len + 1)
             field_val.copy_to(fv_buf)
-            var matched = False
-            var a0 = 0
-            while a0 <= vl and not matched:
-                var a1 = a0
-                while a1 < vl and (ftype == FT_FILTER_TAG_EQ or vp[a1] != 124):
-                    a1 += 1
-                var s0 = a0
-                var s1 = a1
-                if ftype == FT_FILTER_TAG_ANY:
-                    while s0 < s1 and vp[s0] == 32: s0 += 1
-                    while s1 > s0 and vp[s1 - 1] == 32: s1 -= 1
-                if s1 - s0 == fv_len:
-                    var same = True
-                    for bi in range(fv_len):
-                        if fv_buf[bi] != vp[s0 + bi]: same = False; break
-                    matched = same
-                a0 = a1 + 1
+            var ok = _tag_matches(fv_buf, fv_len, filters.seps[fi], filters.fold[fi],
+                                  vp, Int(filters.str_lens[fi]), ftype == FT_FILTER_TAG_ANY)
             fv_buf.free()
-            if not matched: return False
-        elif ftype == 1:  # NUMERIC_RANGE
-            var num_val: Float32
+            if not ok: return False
+        elif ftype == FT_FILTER_NUMERIC:
+            var x: Float64
             if field_val.type.value == ValueType.INT:
-                num_val = Float32(field_val.as_int())
+                x = Float64(field_val.as_int())
             elif field_val.type.value == ValueType.FLOAT:
-                num_val = Float32(field_val.as_float())
+                x = Float64(field_val.as_float())
             else:
                 var fv_len2 = field_val.string_len()
-                var fv_buf2 = alloc[UInt8](fv_len2 + 1)
-                field_val.copy_to(fv_buf2)
-                num_val = parse_filter_float(fv_buf2, fv_len2)
-                fv_buf2.free()
-            if num_val < filter_lo[fi] or num_val > filter_hi[fi]: return False
+                if fv_len2 <= 0 or fv_len2 > 64: return False
+                var vbuf = alloc[UInt8](fv_len2 + 1)
+                field_val.copy_to(vbuf)
+                var pf = parse_redis_double(vbuf, fv_len2, DOUBLE_VALUE)
+                vbuf.free()
+                if not pf.ok: return False
+                x = pf.value
+            var lo = filters.lo[fi]
+            var hi = filters.hi[fi]
+            if filters.lo_excl[fi]:
+                if not (x > lo): return False
+            elif not (x >= lo): return False
+            if filters.hi_excl[fi]:
+                if not (x < hi): return False
+            elif not (x <= hi): return False
     return True
 
 
@@ -967,6 +1253,7 @@ def exact_knn(
     var hi_ = alloc[Int](cap)
     var hn = 0
     var any_dead = shared[].any_dead()
+    var ttls = _ttl_any(keyspace)
     var b0 = lo
     while b0 < hi:
         var nb = EXACT_BLOCK if hi - b0 > EXACT_BLOCK else hi - b0
@@ -997,10 +1284,9 @@ def exact_knn(
             if hn == cap and not (sc < hs[0]):
                 continue
             var slot = b0 + r
-            if filters.count > 0 and not passes_filters(
-                    slot, keyspace, filters.count, filters.types, filters.field_lens,
-                    filters.field_names, filters.str_ptrs, filters.str_lens,
-                    filters.lo, filters.hi):
+            if ttls and _slot_expired(shared, keyspace, slot):
+                continue
+            if filters.count > 0 and not passes_filters(slot, shared, keyspace, filters):
                 continue
             if hn < cap:
                 var c = hn                     # sift up
@@ -1081,6 +1367,11 @@ def merge_delta(
     ascending, k kept. Nothing to do after FT.OPTIMIZE, which frees the buffer."""
     if is_null(shared) or is_null(shared[].ingest_fp32) or built <= 0:
         return
+    # The scores are exact whenever the FP32 rows are held (an automatic
+    # build keeps them), with a delta or not. Without a delta the reply used
+    # to carry the INT8 codes' distances, which RediSearch never reports:
+    # +1.3% on squared L2 at DIM 8, about +0.1 of `1 - cos` on 1536-d.
+    _exact_rescore(shared, query, built, ids, scores)
     var rows = shared[].ingested()
     if rows <= built:
         return
@@ -1089,7 +1380,6 @@ def merge_delta(
     exact_knn(shared, query, k, built, rows, d_ids, d_scores, filters, keyspace)
     if len(d_ids) == 0:
         return
-    _exact_rescore(shared, query, built, ids, scores)
     var n_a = len(ids) if len(ids) < len(scores) else len(scores)
     var out_ids = List[Int](capacity=k)
     var out_scores = List[Float32](capacity=k)
@@ -1191,100 +1481,10 @@ def populate_hnsw_metadata(
     shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
 ):
-    """Post-FT.OPTIMIZE index build: per-node filter metadata, then BM25.
-
-    gh #139: the two phases are sequenced here rather than nested because the
-    metadata pass bails on `num_nodes == 0` while BM25 must still run — an
-    FT.ADDTEXT-only corpus has text but no vectors, hence no nodes."""
-    _populate_node_meta(hnsw, shared, keyspace)
-    # Phase 3.2: build BM25 inverted index from TEXT fields
+    """Post-FT.OPTIMIZE index build: BM25 over the TEXT fields. The per-node
+    TAG/NUMERIC copies it also took went stale when a field changed after the
+    build, and filters read the hash now (passes_filters)."""
     build_bm25(hnsw, shared, keyspace)
-
-
-def _populate_node_meta(
-    mut hnsw: HNSWGraph,
-    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-):
-    """Phase 3.1: Build per-node metadata arrays for O(1) filter checks.
-    Called after FT.OPTIMIZE. For each node, look up its HASH in keyspace and
-    extract TAG (FNV-1a hash) and NUMERIC (Float32) field values."""
-    if is_null(shared): return
-    var sc = shared[].schema_field_count
-    if sc == 0 or hnsw.num_nodes == 0 or is_null(keyspace): return
-    var n = hnsw.num_nodes
-    if is_not_null(hnsw.node_meta_tag_hashes): hnsw.node_meta_tag_hashes.free()
-    if is_not_null(hnsw.node_meta_numerics):   hnsw.node_meta_numerics.free()
-    if is_not_null(hnsw.node_meta_field_set):  hnsw.node_meta_field_set.free()
-    hnsw.node_meta_tag_hashes = alloc[UInt32](n * 8)
-    hnsw.node_meta_numerics   = alloc[Float32](n * 8)
-    hnsw.node_meta_field_set  = alloc[UInt8](n * 8)
-    unsafe_memset(hnsw.node_meta_tag_hashes.bitcast[UInt8](), 0, n * 8 * 4)
-    unsafe_memset(hnsw.node_meta_numerics.bitcast[UInt8](), 0, n * 8 * 4)
-    unsafe_memset(hnsw.node_meta_field_set, 0, n * 8)
-    # Scratch buffers — reused per node
-    var key_buf  = alloc[UInt8](24)
-    var rev_buf  = alloc[UInt8](20)
-    var fk_buf   = alloc[UInt8](32)
-    var fv_buf   = alloc[UInt8](256)
-    for nidx in range(n):
-        var ext_id = hnsw.nodes[nidx].id
-        # Look up __hk__<ext_id> → original key → HASH
-        key_buf[0]=95;key_buf[1]=95;key_buf[2]=104;key_buf[3]=107;key_buf[4]=95;key_buf[5]=95 # __hk__
-        var hk_end = format_int_to_buf(key_buf, 6, Int64(ext_id))
-        var hk_key = GenericValue.from_ptr(key_buf, hk_end)
-        var hk_val = keyspace[].get(hk_key)
-        var doc_val: GenericValue
-        if not hk_val.is_none():
-            doc_val = keyspace[].get(hk_val)
-        else:
-            # Fallback: numeric key
-            var key_len: Int
-            var tmp = ext_id
-            if tmp == 0:
-                key_buf[0] = 48; key_len = 1
-            else:
-                var nd = 0
-                while tmp > 0:
-                    rev_buf[nd] = UInt8(tmp % 10) + 48; nd += 1; tmp //= 10
-                for di in range(nd): key_buf[di] = rev_buf[nd - 1 - di]
-                key_len = nd
-            doc_val = keyspace[].get(GenericValue.borrow(key_buf, key_len))
-        if doc_val.is_none() or doc_val.type.value != ValueType.HASH: continue
-        var hash_ptr = doc_val.as_hash().bitcast[SlabHashMap]()
-        if is_null(hash_ptr): continue
-        for si in range(sc):
-            if si >= 8: break
-            var stype = Int(shared[].schema_field_types[si])
-            if stype != 2 and stype != 3: continue  # only TAG(2) and NUMERIC(3)
-            var slen = Int(shared[].schema_field_name_lens[si])
-            if slen == 0 or slen > 32: continue
-            for bi in range(slen): fk_buf[bi] = shared[].schema_field_names[si][bi]
-            var field_key = GenericValue.from_ptr(fk_buf, slen)
-            var field_val = hash_ptr[].get(field_key)
-            field_key.free_str_payload()   # gh #394
-            if field_val.is_none(): continue
-            var meta_idx = nidx * 8 + si
-            if stype == 2:  # TAG — store FNV-1a hash
-                # gh #139: clamped copy — copy_to() writes string_len() bytes
-                # regardless, so a TAG value over 256B used to run off fv_buf.
-                var vlen = _copy_value_clamped(field_val, fv_buf, 256)
-                var h: UInt32 = 2166136261
-                for bi in range(vlen): h = (h ^ UInt32(fv_buf[bi])) * 16777619
-                hnsw.node_meta_tag_hashes[meta_idx] = h
-                hnsw.node_meta_field_set[meta_idx] = 1
-            else:  # NUMERIC — store Float32
-                var num_val: Float32
-                if field_val.type.value == ValueType.INT:
-                    num_val = Float32(field_val.as_int())
-                elif field_val.type.value == ValueType.FLOAT:
-                    num_val = Float32(field_val.as_float())
-                else:
-                    var vlen2 = _copy_value_clamped(field_val, fv_buf, 256)
-                    num_val = parse_filter_float(fv_buf, vlen2)
-                hnsw.node_meta_numerics[meta_idx] = num_val
-                hnsw.node_meta_field_set[meta_idx] = 3
-    key_buf.free(); rev_buf.free(); fk_buf.free(); fv_buf.free()
 
 
 def build_bm25(
@@ -1784,6 +1984,13 @@ def handle_ft_info(
     # after an automatic one) are documents of the index too.
     if is_not_null(shared_hnsw) and shared_hnsw[].ingested() > num_docs:
         num_docs = shared_hnsw[].ingested()
+    # A slot is not a document: one whose document left (DEL, expiry, a new
+    # vector, RENAME, FLUSHALL: #46's dead slots) is not counted. num_docs
+    # used to count every slot ever written, so it only grew: 40 documents,
+    # two of them deleted and one updated, read 41.
+    if is_not_null(shared_hnsw) and shared_hnsw[].any_dead():
+        var dead = Int(shared_hnsw[].vec_dead_count[])
+        num_docs = num_docs - dead if num_docs > dead else 0
     if writer.proto == 3:
         # RediSearch answers FT.INFO with a map on RESP3, and redis-py 8 parses
         # it as one. Same two fields as RESP2; num_docs is an integer there.
@@ -1936,7 +2143,6 @@ def retire_index(
     _ = external_call["unlink", Int32](_ip.as_c_string_slice())
 
 
-@always_inline
 def handle_ft_dropindex(
     tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
@@ -1944,23 +2150,42 @@ def handle_ft_dropindex(
     mut hnsw: HNSWGraph,
     shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     mut writer: ResponseWriter,
-    worker_id: Int = 0,
+    worker_id: Int,
+    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    num_workers: Int,
+    mut dd_keys: List[UInt8],
+    mut dd_ends: List[Int],
 ) -> Int:
-    """FT.DROPINDEX <index_name> — reset the HNSW index.
+    """FT.DROPINDEX <index_name> [DD] — reset the HNSW index.
     Returns the new token index after consuming arguments.
 
     gh #403: the name is checked. This server holds one index, and a drop
     used to reset it whatever name was given — `FT.DROPINDEX b` destroyed a
     serving index `a` (the gh #145 cross-index clobber, by the delete route).
-    An unknown name is refused and nothing is touched, as in RediSearch."""
+    An unknown name is refused and nothing is touched, as in RediSearch.
+
+    DD deletes the index's documents too, as in RediSearch: their keys come
+    back in `dd_keys` (the bytes, each key ending at its `dd_ends` entry,
+    with each document's `__hk__<slot>` link), and the caller deletes them
+    the way DEL does. DD was read and dropped, so the
+    documents stayed; any other argument is refused (it dropped the index).
+    Under -w N each worker holds its own documents (gh #253), and one worker
+    cannot delete another's: DD is refused there."""
     if i + 1 >= num_tokens:
         writer.append_error_response("ERR wrong number of arguments for 'ft.dropindex' command")
         return i
+    var dd = False
+    if i + 2 < num_tokens:
+        if i + 3 < num_tokens or not arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "dd"):
+            var bad = i + 3 if i + 3 < num_tokens and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "dd") else i + 2
+            writer.append_error_response("Unknown argument `" + _bytes_str(tokens[bad].ptr, tokens[bad].length) + "`")
+            return num_tokens - 1
+        dd = True
     var np = tokens[i + 1].ptr
     var nlen = tokens[i + 1].length
     var known: Bool
+    var ready: UInt64 = 0
     if is_not_null(shared_hnsw):
-        var ready: UInt64 = 0
         if is_not_null(shared_hnsw[].ready_atomic):
             ready = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
                 shared_hnsw[].ready_atomic, UInt64(0))
@@ -1970,7 +2195,40 @@ def handle_ft_dropindex(
         known = _local_index_name_is(hnsw, np, nlen)
     if not known:
         writer.append_error_response("Unknown index name")
-        return i + 1
+        return num_tokens - 1
+    if dd and num_workers > 1:
+        writer.append_error_response(
+            "ERR FT.DROPINDEX DD needs -w 1: with --independent-workers each worker holds its own documents")
+        return num_tokens - 1
+    if dd and is_not_null(shared_hnsw):
+        # The documents, before the slots start over: every live slot's key.
+        var rows = shared_hnsw[].ingested()
+        if shared_hnsw[].num_nodes > rows:
+            rows = shared_hnsw[].num_nodes
+        if rows > shared_hnsw[].hk_max_elements:
+            rows = shared_hnsw[].hk_max_elements
+        var kbuf = alloc[UInt8](24)
+        var hk = alloc[UInt8](32)
+        hk[0]=95;hk[1]=95;hk[2]=104;hk[3]=107;hk[4]=95;hk[5]=95 # __hk__
+        for s in range(rows):
+            if shared_hnsw[].slot_dead(s):
+                continue
+            var owned = False
+            var key = _slot_key(shared_hnsw, keyspace, s, owned)
+            if key.is_none():
+                continue
+            var kl = key.string_len()
+            var kp = key.as_string_safe(kbuf)
+            for b in range(kl):
+                dd_keys.append(kp[b])
+            dd_ends.append(len(dd_keys))
+            if owned: key.free_str_payload()
+            var he = format_int_to_buf(hk, 6, Int64(s))
+            for b in range(he):
+                dd_keys.append(hk[b])
+            dd_ends.append(len(dd_keys))
+        kbuf.free()
+        hk.free()
     retire_index(hnsw, shared_hnsw, worker_id)
     # The name leaves the registry, so FT.INFO on EVERY worker now says
     # "Unknown index name" — a borrower's stale local name must not keep a
@@ -1982,7 +2240,7 @@ def handle_ft_dropindex(
     # — VectorDBBench reuses the FT.CREATE config across DROP/re-INSERT cycles
     # without re-issuing FT.CREATE.
     writer.append_ok_response()
-    return i + 1
+    return num_tokens - 1
 
 
 # ---------------------------------------------------------------------------
@@ -2021,10 +2279,11 @@ def adopt_index_config(
     hnsw.distance_metric = shared_hnsw[].pre_distance_metric
     if shared_hnsw[].pre_ef_construction > 0:
         hnsw.ef_construction = shared_hnsw[].pre_ef_construction
-    # FT.CREATE's PREFIX list, which the build saves with the index
+    # FT.CREATE's PREFIX list and schema, which the build saves with the index
     if is_not_null(shared_hnsw[].pre_prefixes):
         hnsw.prefix_count = shared_hnsw[].pre_prefix_count
         unsafe_memcpy(dest=hnsw.prefixes, src=shared_hnsw[].pre_prefixes, count=PREFIX_MAX * PREFIX_SLOT)
+    hnsw.adopt_schema(shared_hnsw)
 
 
 def _close_ingest(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
@@ -2243,6 +2502,299 @@ def handle_ft_optimize(
 # FT.CREATE command handler
 # ---------------------------------------------------------------------------
 
+struct FtCreateSpec(Movable):
+    """FT.CREATE, parsed and checked before any state is written (_parse_ft_create).
+    Fields are token positions in the command, read by the handler after."""
+    var nfields: Int
+    var f_name: Array[Int, 16]
+    var f_type: Array[UInt8, 16]
+    var f_flags: Array[UInt8, 16]
+    var f_sep: Array[UInt8, 16]
+    var vec_at: Int          # the VECTOR field's name token, -1 without one
+    var dim: Int
+    var metric: Int          # 0 = L2, 1 = COSINE
+    var ef_construction: Int # 0: the configured default
+    var skip_initial_scan: Bool
+
+    def __init__(out self):
+        self.nfields = 0
+        self.f_name = Array[Int, 16](fill=0)
+        self.f_type = Array[UInt8, 16](fill=UInt8(0))
+        self.f_flags = Array[UInt8, 16](fill=UInt8(0))
+        self.f_sep = Array[UInt8, 16](fill=UInt8(44))
+        self.vec_at = -1
+        self.dim = 0
+        self.metric = 0
+        self.ef_construction = 0
+        self.skip_initial_scan = False
+
+
+def _strict_count(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], j: Int, n: Int) -> Int:
+    """Token j as a count (an integer >= 0), or -1."""
+    if j >= n:
+        return -1
+    var v = parse_int64_strict(tokens[j].ptr, tokens[j].length)
+    if not v.ok or v.value < 0 or v.value > 1000000000:
+        return -1
+    return Int(v.value)
+
+
+def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, n: Int,
+                     max_dim: Int, mut spec: FtCreateSpec) -> String:
+    """FT.CREATE's grammar, RediSearch's, checked whole: "" when the command is
+    well formed and Pion applies every part of it, else the error to reply.
+
+    The handler used to walk the tokens picking out what it knew and taking
+    any other word for a field name, so every option it did not know answered
+    +OK and changed nothing: ON JSON (indexed the hashes), FILTER, TEMPORARY,
+    AS aliases (the alias was taken as the field: nothing indexed), TYPE
+    FLOAT16/INT8/FLOAT64 (read as FLOAT32), a second VECTOR field (the first
+    one dropped), a missing SCHEMA, TYPE or DIM, DIM 0, a vector attribute
+    count that did not match. Each is now applied or refused.
+    Options that change only RediSearch's full-text index (LANGUAGE, SCORE,
+    STOPWORDS, NOOFFSETS, ...) are accepted: Pion runs no text query they
+    could change. GEO and GEOSHAPE fields are accepted; their queries are
+    refused. The errors are RediSearch's words where it has some."""
+    if i + 1 >= n:
+        return "ERR wrong number of arguments for 'FT.CREATE' command"
+    var j = i + 2
+    var saw_schema = False
+    while j < n:
+        var tp = tokens[j].ptr
+        var tl = tokens[j].length
+        if arg_eq(tp, tl, "schema"):
+            saw_schema = True
+            j += 1
+            break
+        elif arg_eq(tp, tl, "on"):
+            if j + 1 >= n:
+                return "Bad arguments for ON: Expected an argument"
+            if arg_eq(tokens[j + 1].ptr, tokens[j + 1].length, "json"):
+                return "ERR FT.CREATE ON JSON is not supported: Pion indexes hashes (ON HASH)"
+            if not arg_eq(tokens[j + 1].ptr, tokens[j + 1].length, "hash"):
+                return "Invalid rule type: " + _bytes_str(tokens[j + 1].ptr, tokens[j + 1].length)
+            j += 2
+        elif arg_eq(tp, tl, "prefix"):
+            var pn = _strict_count(tokens, j + 1, n)
+            if pn < 0:
+                return "ERR Bad arguments for PREFIX: Could not convert argument to expected type"
+            if pn > PREFIX_MAX:
+                return "ERR PREFIX: at most " + String(PREFIX_MAX) + " prefixes are supported"
+            if j + 1 + pn >= n:
+                return "ERR Bad arguments for PREFIX: fewer prefixes than its count"
+            for k in range(pn):
+                var t = tokens[j + 2 + k]
+                if arg_eq(t.ptr, t.length, "schema"):
+                    return "ERR Bad arguments for PREFIX: fewer prefixes than its count"
+                if t.length >= PREFIX_SLOT:
+                    return "ERR PREFIX: a prefix of more than " + String(PREFIX_SLOT - 1) + " bytes is not supported"
+            j += 2 + pn
+        elif arg_eq(tp, tl, "filter"):
+            return "ERR FT.CREATE FILTER is not supported (PREFIX is)"
+        elif arg_eq(tp, tl, "temporary"):
+            return "ERR FT.CREATE TEMPORARY is not supported"
+        elif arg_eq(tp, tl, "language") or arg_eq(tp, tl, "language_field") or arg_eq(tp, tl, "score") \
+                or arg_eq(tp, tl, "score_field") or arg_eq(tp, tl, "payload_field"):
+            if j + 1 >= n:
+                return "Bad arguments for " + _bytes_str(tp, tl) + ": Expected an argument"
+            j += 2
+        elif arg_eq(tp, tl, "maxtextfields") or arg_eq(tp, tl, "nooffsets") or arg_eq(tp, tl, "nohl") \
+                or arg_eq(tp, tl, "nofields") or arg_eq(tp, tl, "nofreqs"):
+            j += 1
+        elif arg_eq(tp, tl, "skipinitialscan"):
+            spec.skip_initial_scan = True
+            j += 1
+        elif arg_eq(tp, tl, "stopwords"):
+            var sn = _strict_count(tokens, j + 1, n)
+            if sn < 0 or j + 1 + sn >= n:
+                return "Bad arguments for STOPWORDS: Could not convert argument to expected type"
+            j += 2 + sn
+        else:
+            return "Unknown argument `" + _bytes_str(tp, tl) + "`"
+    if not saw_schema:
+        return "No schema found"
+    if j >= n:
+        return "Fields arguments are missing"
+    while j < n:
+        var name_at = j
+        var name_p = tokens[j].ptr
+        var name_l = tokens[j].length
+        j += 1
+        if j >= n:
+            return "Field `" + _bytes_str(name_p, name_l) + "` has no type"
+        if arg_eq(tokens[j].ptr, tokens[j].length, "as"):
+            return "ERR FT.CREATE: AS aliases are not supported (name the hash field itself)"
+        var ty_p = tokens[j].ptr
+        var ty_l = tokens[j].length
+        j += 1
+        # a field named twice
+        if spec.vec_at >= 0 and tokens[spec.vec_at].length == name_l:
+            var dup = True
+            for b in range(name_l):
+                if tokens[spec.vec_at].ptr[b] != name_p[b]: dup = False; break
+            if dup:
+                return "Duplicate field in schema - " + _bytes_str(name_p, name_l)
+        for f in range(spec.nfields):
+            var ft = tokens[spec.f_name[f]]
+            if ft.length != name_l: continue
+            var dup2 = True
+            for b in range(name_l):
+                if ft.ptr[b] != name_p[b]: dup2 = False; break
+            if dup2:
+                return "Duplicate field in schema - " + _bytes_str(name_p, name_l)
+        if arg_eq(ty_p, ty_l, "vector"):
+            if spec.vec_at >= 0:
+                return "ERR Pion indexes one VECTOR field per index"
+            if name_l > SCHEMA_NAME_MAX:
+                return "ERR FT.CREATE: a field name of more than " + String(SCHEMA_NAME_MAX) + " bytes is not supported"
+            if j >= n:
+                return "Bad arguments for vector similarity algorithm: Expected an argument"
+            var algo_p = tokens[j].ptr
+            var algo_l = tokens[j].length
+            if not (arg_eq(algo_p, algo_l, "hnsw") or arg_eq(algo_p, algo_l, "flat")
+                    or arg_eq(algo_p, algo_l, "svs-vamana")):
+                return "Bad arguments for vector similarity algorithm: Unknown argument"
+            var na = _strict_count(tokens, j + 1, n)
+            if na < 0:
+                return "Bad arguments for vector similarity number of parameters: Could not convert argument to expected type"
+            if na % 2 != 0:
+                return "Bad number of arguments for vector similarity index: got " + String(na) \
+                    + " but expected even number"
+            if j + 2 + na > n:
+                return "Expected " + String(na) + " parameters but got " + String(n - j - 2)
+            var a = j + 2
+            var a_end = j + 2 + na
+            var got_type = False
+            var got_dim = False
+            var got_metric = False
+            while a < a_end:
+                var kp = tokens[a].ptr
+                var kl = tokens[a].length
+                var vp = tokens[a + 1].ptr
+                var vl = tokens[a + 1].length
+                if arg_eq(kp, kl, "type"):
+                    got_type = True
+                    if not arg_eq(vp, vl, "float32"):
+                        if arg_eq(vp, vl, "float64") or arg_eq(vp, vl, "float16") or arg_eq(vp, vl, "bfloat16") \
+                                or arg_eq(vp, vl, "int8") or arg_eq(vp, vl, "uint8"):
+                            return "ERR vector TYPE " + _bytes_str(vp, vl) + " is not supported (FLOAT32 is)"
+                        return "Bad arguments for vector similarity " + _bytes_str(algo_p, algo_l) + " index type"
+                elif arg_eq(kp, kl, "dim"):
+                    got_dim = True
+                    var dv = parse_int64_strict(vp, vl)
+                    if not dv.ok:
+                        return "Bad arguments for vector similarity " + _bytes_str(algo_p, algo_l) \
+                            + " index `DIM`: Could not convert argument to expected type"
+                    if dv.value <= 0 or dv.value > 1000000:
+                        return "Bad arguments for vector similarity " + _bytes_str(algo_p, algo_l) \
+                            + " index `DIM`: Value is outside acceptable bounds"
+                    if Int(dv.value) > max_dim:
+                        return "ERR DIM " + String(dv.value) + " exceeds this server's vector dimension " \
+                            + String(max_dim) + " (start it with --dim " + String(dv.value) + ")"
+                    spec.dim = Int(dv.value)
+                elif arg_eq(kp, kl, "distance_metric"):
+                    got_metric = True
+                    if arg_eq(vp, vl, "l2"):
+                        spec.metric = 0
+                    elif arg_eq(vp, vl, "cosine"):
+                        spec.metric = 1
+                    else:
+                        # IP is the realistic case and it is NOT reducible to this
+                        # search: the quantizer is affine with an offset, which
+                        # cancels in a difference but not in a dot product (gh #271).
+                        return "ERR unsupported DISTANCE_METRIC (supported: L2, COSINE)"
+                elif arg_eq(kp, kl, "ef_construction") or arg_eq(kp, kl, "m") or arg_eq(kp, kl, "ef_runtime") \
+                        or arg_eq(kp, kl, "initial_cap") or arg_eq(kp, kl, "block_size") \
+                        or arg_eq(kp, kl, "construction_window_size") or arg_eq(kp, kl, "graph_max_degree") \
+                        or arg_eq(kp, kl, "search_window_size") or arg_eq(kp, kl, "training_threshold") \
+                        or arg_eq(kp, kl, "leanvec_dim"):
+                    var iv = parse_int64_strict(vp, vl)
+                    if not iv.ok or iv.value < 0:
+                        return "Bad arguments for vector similarity " + _bytes_str(algo_p, algo_l) + " index `" \
+                            + _bytes_str(kp, kl) + "`: Could not convert argument to expected type"
+                    if arg_eq(kp, kl, "ef_construction") and iv.value > 0:
+                        spec.ef_construction = Int(iv.value)
+                elif arg_eq(kp, kl, "epsilon") or arg_eq(kp, kl, "reduce"):
+                    if not parse_redis_double(vp, vl, DOUBLE_VALUE).ok:
+                        return "Bad arguments for vector similarity " + _bytes_str(algo_p, algo_l) + " index `" \
+                            + _bytes_str(kp, kl) + "`: Could not convert argument to expected type"
+                elif arg_eq(kp, kl, "compression"):
+                    pass
+                else:
+                    return "Bad arguments for algorithm " + _bytes_str(algo_p, algo_l) + ": " + _bytes_str(kp, kl)
+                a += 2
+            # DISTANCE_METRIC may be left out: it is L2 then, as Pion has
+            # always documented. RediSearch requires it.
+            _ = got_metric
+            var what = String("")
+            if not got_type: what = "TYPE"
+            elif not got_dim: what = "DIM"
+            if what.byte_length() > 0:
+                return "Missing mandatory parameter: cannot create " + _bytes_str(algo_p, algo_l) \
+                    + " index without specifying " + what + " argument"
+            spec.vec_at = name_at
+            j = a_end
+            while j < n and arg_eq(tokens[j].ptr, tokens[j].length, "indexmissing"):
+                j += 1
+            continue
+        var ftype = UInt8(0)
+        if arg_eq(ty_p, ty_l, "text"): ftype = FT_FIELD_TEXT
+        elif arg_eq(ty_p, ty_l, "tag"): ftype = FT_FIELD_TAG
+        elif arg_eq(ty_p, ty_l, "numeric"): ftype = FT_FIELD_NUMERIC
+        elif arg_eq(ty_p, ty_l, "geo"): ftype = FT_FIELD_GEO
+        elif arg_eq(ty_p, ty_l, "geoshape"): ftype = FT_FIELD_GEOSHAPE
+        else:
+            return "Invalid field type for field `" + _bytes_str(name_p, name_l) + "`"
+        if spec.nfields >= SCHEMA_MAX:
+            return "ERR Pion indexes at most " + String(SCHEMA_MAX) + " fields besides the vector"
+        if name_l == 0 or name_l > SCHEMA_NAME_MAX:
+            return "ERR FT.CREATE: a field name of more than " + String(SCHEMA_NAME_MAX) + " bytes is not supported"
+        var flags = UInt8(0)
+        var sep = UInt8(44)
+        # the field's options; any other word starts the next field (as in RediSearch)
+        while j < n:
+            var op = tokens[j].ptr
+            var ol = tokens[j].length
+            if arg_eq(op, ol, "sortable"):
+                flags |= FT_FLAG_SORTABLE
+                j += 1
+                if j < n and arg_eq(tokens[j].ptr, tokens[j].length, "unf"):
+                    flags |= FT_FLAG_UNF
+                    j += 1
+            elif arg_eq(op, ol, "noindex"):
+                flags |= FT_FLAG_NOINDEX
+                j += 1
+            elif arg_eq(op, ol, "indexmissing") or arg_eq(op, ol, "indexempty") \
+                    or arg_eq(op, ol, "withsuffixtrie"):
+                j += 1
+            elif ftype == FT_FIELD_TAG and arg_eq(op, ol, "separator"):
+                if j + 1 >= n or tokens[j + 1].length != 1:
+                    return "Tag separator must be a single character. Got `" \
+                        + (_bytes_str(tokens[j + 1].ptr, tokens[j + 1].length) if j + 1 < n else String("")) + "`"
+                sep = tokens[j + 1].ptr[0]
+                j += 2
+            elif ftype == FT_FIELD_TAG and arg_eq(op, ol, "casesensitive"):
+                flags |= FT_FLAG_CASESENSITIVE
+                j += 1
+            elif ftype == FT_FIELD_TEXT and (arg_eq(op, ol, "weight") or arg_eq(op, ol, "phonetic")):
+                if j + 1 >= n:
+                    return "Bad arguments for " + _bytes_str(op, ol) + ": Expected an argument"
+                j += 2
+            elif ftype == FT_FIELD_TEXT and arg_eq(op, ol, "nostem"):
+                j += 1
+            elif ftype == FT_FIELD_GEOSHAPE and (arg_eq(op, ol, "flat") or arg_eq(op, ol, "spherical")):
+                j += 1
+            else:
+                break
+        var f = spec.nfields
+        spec.f_name[f] = name_at
+        spec.f_type[f] = ftype
+        spec.f_flags[f] = flags
+        spec.f_sep[f] = sep
+        spec.nfields = f + 1
+    return String("")
+
+
 @always_inline
 def handle_ft_create(
     tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
@@ -2266,58 +2818,17 @@ def handle_ft_create(
     and changes nothing."""
     var ci = i
     backfill = False
-    # SKIPINITIALSCAN (RediSearch): do not index the hashes already in the
-    # keyspace. An option, so it is read only before SCHEMA, where a field of
-    # that name would be a field.
-    var skip_initial_scan = False
-    var sk = ci + 2
-    while sk < num_tokens:
-        if arg_eq(tokens[sk].ptr, tokens[sk].length, "schema"):
-            break
-        if arg_eq(tokens[sk].ptr, tokens[sk].length, "skipinitialscan"):
-            skip_initial_scan = True
-        sk += 1
-    # gh #271 — DISTANCE_METRIC, resolved in a PRE-SCAN, before a single byte of
-    # index state is written. Until this landed the keyword fell through to the
-    # field-name catch-all below and was silently dropped, so `L2` and `COSINE`
-    # built and queried byte-identical indexes: a caller who asked for one
-    # metric got the other with nothing to indicate it (gh #229 / #257 / #260
-    # class). The engine computes squared L2 over affinely-quantized codes, so
-    # L2 was the one that happened to be right and COSINE the one that was
-    # wrong — the reverse of what this issue originally claimed.
-    #
-    # The scan is separate from the main loop on purpose: an unsupported metric
-    # must leave the server exactly as it found it, and the main loop overwrites
-    # the index name, the vector field name and the shared schema table as it
-    # goes. Refusing after that would be a refusal with side effects (gh #232).
-    # It costs one extra pass over ~15 tokens, at FT.CREATE time only.
-    var metric = 0          # 0 = L2 (default: what an index without the keyword has always been)
-    var mj = ci + 1
-    while mj + 1 < num_tokens:
-        var mkl = tokens[mj].length; var mkp = tokens[mj].ptr
-        # Whole-name match (gh #225). EF_CONSTRUCTION is also 15 bytes, so a
-        # length-plus-prefix test would collide with it.
-        if mkl == 15 and (mkp[0]|0x20)==100 and (mkp[1]|0x20)==105 and (mkp[2]|0x20)==115 \
-           and (mkp[3]|0x20)==116 and (mkp[4]|0x20)==97 and (mkp[5]|0x20)==110 \
-           and (mkp[6]|0x20)==99 and (mkp[7]|0x20)==101 and mkp[8]==95 \
-           and (mkp[9]|0x20)==109 and (mkp[10]|0x20)==101 and (mkp[11]|0x20)==116 \
-           and (mkp[12]|0x20)==114 and (mkp[13]|0x20)==105 and (mkp[14]|0x20)==99:
-            var mp = tokens[mj+1].ptr; var ml = tokens[mj+1].length
-            if ml == 2 and (mp[0]|0x20)==108 and mp[1]==50:                          # L2
-                metric = 0
-            elif ml == 6 and (mp[0]|0x20)==99 and (mp[1]|0x20)==111 and (mp[2]|0x20)==115 \
-                 and (mp[3]|0x20)==105 and (mp[4]|0x20)==110 and (mp[5]|0x20)==101:  # COSINE
-                metric = 1
-            else:
-                # Refuse rather than acknowledge. IP is the realistic case and
-                # it is NOT reducible to this search: the quantizer is affine
-                # with an offset, which cancels in a difference but not in a
-                # dot product, so there is no honest way to answer it here.
-                writer.append_error_response(
-                    "ERR unsupported DISTANCE_METRIC (supported: L2, COSINE)")
-                return num_tokens - 1
-            break
-        mj += 1
+    # The whole command is parsed and checked first (_parse_ft_create), before
+    # a byte of index state is written: a refusal must leave the server as it
+    # found it, and the loop below overwrites the index name, the vector field
+    # and the shared schema as it goes (gh #232's rule, gh #271's pre-scan).
+    var spec = FtCreateSpec()
+    var perr = _parse_ft_create(tokens, ci, num_tokens, config.vector.dimensions, spec)
+    if perr.byte_length() > 0:
+        writer.append_error_response(perr)
+        return num_tokens - 1
+    var skip_initial_scan = spec.skip_initial_scan
+    var metric = spec.metric   # 0 = L2 (default: what an index without the keyword has always been)
     # A different index (name or DIM) replacing one that is built or has
     # vectors queued for ingest RETIRES it first, exactly as FT.DROPINDEX
     # would. This used to overwrite the live graph's name and `dim` in place:
@@ -2328,27 +2839,10 @@ def handle_ft_create(
     # into the DIM-384 graph. Re-issuing FT.CREATE for the index already
     # being served (same name, same DIM) is left alone: clients do that
     # defensively. tests/test_ft_create_redimension.py.
-    var new_dim = 0
-    var dj = ci + 1
-    while dj + 1 < num_tokens:
-        var dkl = tokens[dj].length; var dkp = tokens[dj].ptr
-        if dkl == 3 and (dkp[0]|0x20)==100 and (dkp[1]|0x20)==105 and (dkp[2]|0x20)==109:
-            var dvp = tokens[dj+1].ptr
-            for dvi in range(tokens[dj+1].length):
-                var dvc = Int(dvp[dvi])
-                if dvc >= 48 and dvc <= 57: new_dim = new_dim * 10 + (dvc - 48)
-            break
-        dj += 1
     # gh #407 review: every graph's vector slabs and query scratch are sized
-    # for the server's startup --dim and never grow. A larger DIM wrote
-    # new_dim bytes into each dim-byte slab item (overwriting the next node's
-    # vector) on whichever worker built it — FT.OPTIMIZE now adopts DIM on
-    # every worker, so refuse it here, before any state is touched.
-    if new_dim < 0 or new_dim > config.vector.dimensions:
-        writer.append_error_response(
-            "ERR DIM " + String(new_dim) + " exceeds this server's vector dimension "
-            + String(config.vector.dimensions) + " (start it with --dim " + String(new_dim) + ")")
-        return num_tokens - 1
+    # for the server's startup --dim and never grow; the parser refused a
+    # larger DIM.
+    var new_dim = spec.dim
     # PREFIX <n> <p1> ... <pn> (RediSearch): only a hash whose key starts with
     # one of them is indexed, byte for byte. It was accepted and never applied,
     # so an index took every hash with its vector field, and FT.CREATE's
@@ -2470,77 +2964,27 @@ def handle_ft_create(
     # default, not whatever an earlier FT.CREATE left on this worker — the
     # value is published below, and a stale one would travel with it.
     hnsw.ef_construction = config.vector.ef_construction
-    # Scan tokens for VECTOR field name, EF_CONSTRUCTION, and schema fields
-    var j = ci + 1
-    var last_field_name_ptr = null_ptr[UInt8, MutUntrackedOrigin]()
-    var last_field_name_len = 0
-    var schema_count = 0
-    var seen_schema = False
-    while j < num_tokens:
-        var jlen = tokens[j].length; var jptr = tokens[j].ptr
-        # Detect SCHEMA keyword — only track field names after this point
-        if jlen == 6 and (jptr[0]|0x20)==115 and (jptr[1]|0x20)==99 and (jptr[2]|0x20)==104 and (jptr[3]|0x20)==101 and (jptr[4]|0x20)==109 and (jptr[5]|0x20)==97:
-            seen_schema = True
-            j += 1
-            continue
-        # Detect "VECTOR" keyword (6 bytes: v,e,c,t,o,r)
-        if seen_schema and jlen == 6 and (jptr[0]|0x20)==118 and (jptr[1]|0x20)==101 and (jptr[2]|0x20)==99 and (jptr[3]|0x20)==116 and (jptr[4]|0x20)==111 and (jptr[5]|0x20)==114 and last_field_name_len > 0:
-            if last_field_name_len > 0 and last_field_name_len <= 32:
-                hnsw.vector_field_len = last_field_name_len
-                for bi in range(last_field_name_len): hnsw.vector_field_name[bi] = last_field_name_ptr[bi] | 0x20
-            last_field_name_ptr = null_ptr[UInt8, MutUntrackedOrigin]()
-            last_field_name_len = 0
-        # Detect "TEXT" keyword (4 bytes)
-        elif jlen == 4 and (jptr[0]|0x20)==116 and (jptr[1]|0x20)==101 and (jptr[2]|0x20)==120 and (jptr[3]|0x20)==116:
-            if last_field_name_len > 0 and schema_count < 16:
-                var sl = last_field_name_len if last_field_name_len < 32 else 32
-                shared_hnsw[].schema_field_types[schema_count] = 1  # TEXT
-                shared_hnsw[].schema_field_name_lens[schema_count] = UInt8(sl)
-                for bi in range(sl): shared_hnsw[].schema_field_names[schema_count][bi] = last_field_name_ptr[bi]   # gh #367: verbatim — `| 0x20` made `a_b` unmatchable
-                schema_count += 1
-            last_field_name_ptr = null_ptr[UInt8, MutUntrackedOrigin]()
-            last_field_name_len = 0
-        # Detect "TAG" keyword (3 bytes)
-        elif jlen == 3 and (jptr[0]|0x20)==116 and (jptr[1]|0x20)==97 and (jptr[2]|0x20)==103:
-            if last_field_name_len > 0 and schema_count < 16:
-                var sl = last_field_name_len if last_field_name_len < 32 else 32
-                shared_hnsw[].schema_field_types[schema_count] = 2  # TAG
-                shared_hnsw[].schema_field_name_lens[schema_count] = UInt8(sl)
-                for bi in range(sl): shared_hnsw[].schema_field_names[schema_count][bi] = last_field_name_ptr[bi]   # gh #367: verbatim — `| 0x20` made `a_b` unmatchable
-                schema_count += 1
-            last_field_name_ptr = null_ptr[UInt8, MutUntrackedOrigin]()
-            last_field_name_len = 0
-        # Detect "NUMERIC" keyword (7 bytes)
-        elif jlen == 7 and (jptr[0]|0x20)==110 and (jptr[1]|0x20)==117 and (jptr[2]|0x20)==109 and (jptr[3]|0x20)==101 and (jptr[4]|0x20)==114 and (jptr[5]|0x20)==105 and (jptr[6]|0x20)==99:
-            if last_field_name_len > 0 and schema_count < 16:
-                var sl = last_field_name_len if last_field_name_len < 32 else 32
-                shared_hnsw[].schema_field_types[schema_count] = 3  # NUMERIC
-                shared_hnsw[].schema_field_name_lens[schema_count] = UInt8(sl)
-                for bi in range(sl): shared_hnsw[].schema_field_names[schema_count][bi] = last_field_name_ptr[bi]   # gh #367: verbatim — `| 0x20` made `a_b` unmatchable
-                schema_count += 1
-            last_field_name_ptr = null_ptr[UInt8, MutUntrackedOrigin]()
-            last_field_name_len = 0
-        # Detect "EF_CONSTRUCTION" (15 bytes: e,f,_,c,...)
-        elif jlen == 15 and (jptr[0]|0x20)==101 and (jptr[1]|0x20)==102 and jptr[2]==95 and j+1 < num_tokens:
-            var ep = tokens[j+1].ptr; var new_ef = 0
-            for ei in range(tokens[j+1].length):
-                var ec = Int(ep[ei])
-                if ec >= 48 and ec <= 57: new_ef = new_ef * 10 + (ec - 48)
-            if new_ef > 0: hnsw.ef_construction = new_ef
-        # Detect "DIM" (3 bytes: d=100,i=105,m=109) — vector dimensionality override
-        elif jlen == 3 and (jptr[0]|0x20)==100 and (jptr[1]|0x20)==105 and (jptr[2]|0x20)==109 and j+1 < num_tokens:
-            var dp = tokens[j+1].ptr; var new_dim = 0
-            for di in range(tokens[j+1].length):
-                var dc = Int(dp[di])
-                if dc >= 48 and dc <= 57: new_dim = new_dim * 10 + (dc - 48)
-            if new_dim > 0 and new_dim != hnsw.dim:
-                hnsw.dim = new_dim
-        elif seen_schema:
-            # Potential field name token (not a keyword) — track as candidate
-            # Only after SCHEMA so ON/HASH/PREFIX/etc. don't pollute last_field_name
-            last_field_name_ptr = jptr
-            last_field_name_len = jlen
-        j += 1
+    # The vector field, EF_CONSTRUCTION and DIM, and the schema, as parsed.
+    if spec.vec_at >= 0:
+        var vt = tokens[spec.vec_at]
+        hnsw.vector_field_len = vt.length
+        for bi in range(vt.length): hnsw.vector_field_name[bi] = vt.ptr[bi] | 0x20
+    if spec.ef_construction > 0:
+        hnsw.ef_construction = spec.ef_construction
+    if new_dim > 0 and new_dim != hnsw.dim:
+        hnsw.dim = new_dim
+    var schema_count = spec.nfields
+    if is_not_null(shared_hnsw):
+        for f in range(spec.nfields):
+            var ft = tokens[spec.f_name[f]]
+            shared_hnsw[].schema_field_types[f] = spec.f_type[f]
+            shared_hnsw[].schema_field_flags[f] = spec.f_flags[f]
+            shared_hnsw[].schema_field_seps[f] = spec.f_sep[f]
+            shared_hnsw[].schema_field_name_lens[f] = UInt8(ft.length)
+            # gh #367: verbatim — `| 0x20` made `a_b` unmatchable
+            for bi in range(ft.length): shared_hnsw[].schema_field_names[f][bi] = ft.ptr[bi]
+        shared_hnsw[].schema_known = True
+    var j = num_tokens
     if is_not_null(shared_hnsw):
         shared_hnsw[].schema_field_count = schema_count
     # gh #271: publish the metric to BOTH the local graph (which quantizes the
@@ -3213,17 +3657,23 @@ def handle_ft_search(
         # gh #138: no index exists anywhere → error, not an empty array.
         # A client cannot otherwise distinguish "the store lost its index"
         # (process restarted, WAL replayed keys but no FT.CREATE) from
-        # "the query genuinely matched nothing" — both used to be `*0`, so a
-        # dead/unready store silently looked like a retrieval miss. Only fires
-        # when this worker has never seen an index AND the shared view has
-        # none either; a created-but-empty index still returns `*0`.
-        var _idx_local = hnsw.index_ready or hnsw.index_name_len > 0 or hnsw.num_nodes > 0
-        var _idx_shared = False
+        # "the query genuinely matched nothing" — both used to be `*0`.
+        # The index must be REGISTERED (FT.CREATE or FT.OPTIMIZE names it, in
+        # the shared view, for every worker; FT.DROPINDEX removes it), as
+        # FT.INFO checks. "Defined somewhere" used to be enough: after
+        # FT.DROPINDEX, or an FT.CREATE that was refused, the dropped
+        # config kept routing HSETs into the ingest buffer, FT.INFO said
+        # "Unknown index name" and FT.SEARCH answered from those vectors.
+        # Another index being served is gh #145's error, below.
+        var _known: Bool
         if is_not_null(shared_hnsw):
-            _idx_shared = (shared_hnsw[].pre_index_ready
-                           or shared_hnsw[].index_name_len > 0
-                           or _ready_a > 0)
-        if not _idx_local and not _idx_shared:
+            _known = _shared_index_name_is(shared_hnsw, idx_name_tok_ptr, idx_name_tok_len) \
+                     or _unnamed_live_index(hnsw, shared_hnsw, _ready_a)
+        else:
+            _known = _local_index_name_is(hnsw, idx_name_tok_ptr, idx_name_tok_len) \
+                     or (hnsw.index_name_len == 0 and hnsw.index_ready)
+        var _other = is_not_null(shared_hnsw) and shared_hnsw[].index_name_len > 0
+        if not _known and not _other:
             var _nomsg = String("ERR no such index '")
             # Cap at 64 — the same limit FT.CREATE stores, and it keeps an
             # attacker-supplied name from inflating the error response.
@@ -3543,17 +3993,24 @@ def handle_ft_search(
             var scaled_ef = Int(150.0 * sqrt(sqrt(scale_ratio)))
             if scaled_ef > ef_query:
                 ef_query = scaled_ef
-        # Scan the remaining tokens: PARAMS, FILTER, LIMIT, RETURN, NOCONTENT,
-        # WITHSCORES. SORTBY, DIALECT and TIMEOUT have their arguments skipped,
-        # so a field named like an option is never read as one; anything else
-        # is skipped a token at a time.
+        # The remaining tokens, every one of them an option: PARAMS, FILTER,
+        # LIMIT, RETURN, NOCONTENT, WITHSCORES, SORTBY, and the options that
+        # change nothing a KNN query answers (DIALECT, TIMEOUT, and the text
+        # query's: VERBATIM, NOSTOPWORDS, INORDER, SLOP, LANGUAGE, SCORER,
+        # EXPANDER, PAYLOAD, INFIELDS, SUMMARIZE, HIGHLIGHT). Anything else is
+        # refused. The loop used to step over a token it did not know, so
+        # INKEYS, GEOFILTER, WITHPAYLOADS, a typo... answered as if absent.
         var blob_ptr = null_ptr[Float32, MutUntrackedOrigin]()
         var blob_set = False
         var params_at = -1
         var params_n = 0
-        var limit_k = -1
+        var limit_off = 0
+        # Without LIMIT, every hit: KNN k returns k rows, as Pion always did.
+        # RediSearch pages 10 by default (its clients send LIMIT).
+        var limit_cnt = -1
+        var sort = FtSort()
         var j2 = ci + 1
-        while j2 < num_tokens and not filters.failed():
+        while j2 < num_tokens and not filters.failed() and q_err.byte_length() == 0:
             var jl2 = tokens[j2].length; var jp2 = tokens[j2].ptr
             if jl2 == 6 and arg_eq(jp2, 6, "filter"):
                 # gh #367: every documented form parses, anything else refuses.
@@ -3575,15 +4032,26 @@ def handle_ft_search(
                     params_at = j2 + 2
                     params_n = cnt2 // 2
                     j2 += 1 + cnt2
+                else:
+                    q_err = "ERR PARAMS needs an even count followed by that many name/value arguments"
+                    break
             elif jl2 == 5 and arg_eq(jp2, 5, "limit"):
-                if j2 + 2 < num_tokens:
-                    var lp = tokens[j2 + 2].ptr
-                    var lv = 0
-                    for li in range(tokens[j2 + 2].length):
-                        var lc = Int(lp[li])
-                        if lc >= 48 and lc <= 57: lv = lv * 10 + (lc - 48)
-                    limit_k = lv
-                    j2 += 2
+                # LIMIT <offset> <num>: two integers >= 0 (RediSearch's check
+                # and words). It used to read <num> digit by digit, skipping
+                # anything else, and ignore <offset>.
+                var lo_ok = j2 + 2 < num_tokens
+                var lo_v = ParsedInt(0, False)
+                var ln_v = ParsedInt(0, False)
+                if lo_ok:
+                    lo_v = parse_int64_strict(tokens[j2 + 1].ptr, tokens[j2 + 1].length)
+                    ln_v = parse_int64_strict(tokens[j2 + 2].ptr, tokens[j2 + 2].length)
+                if not lo_ok or not lo_v.ok or not ln_v.ok or lo_v.value < 0 or ln_v.value < 0 \
+                        or lo_v.value > 1000000000 or ln_v.value > 1000000000:
+                    q_err = "LIMIT needs two numeric arguments"
+                    break
+                limit_off = Int(lo_v.value)
+                limit_cnt = Int(ln_v.value)
+                j2 += 2
             elif jl2 == 6 and arg_eq(jp2, 6, "return"):
                 # RETURN <n> <field> [AS <name>] ...: n counts every token after
                 # it, AS and the name included. RETURN 0 is NOCONTENT. The
@@ -3613,16 +4081,80 @@ def handle_ft_search(
             elif jl2 == 10 and arg_eq(jp2, 10, "withscores"):
                 opts.with_scores = True
             elif jl2 == 6 and arg_eq(jp2, 6, "sortby"):
-                if j2 + 1 < num_tokens:
-                    j2 += 1
+                # SORTBY <field> [ASC|DESC]: applied below, before LIMIT.
+                if j2 + 1 >= num_tokens:
+                    q_err = "SORTBY needs a field name"
+                    break
+                sort.p = tokens[j2 + 1].ptr
+                sort.l = tokens[j2 + 1].length
+                sort.set = True
+                j2 += 1
                 if j2 + 1 < num_tokens:
                     var sl = tokens[j2 + 1].length
-                    if (sl == 3 and arg_eq(tokens[j2 + 1].ptr, 3, "asc")) \
-                       or (sl == 4 and arg_eq(tokens[j2 + 1].ptr, 4, "desc")):
+                    if sl == 3 and arg_eq(tokens[j2 + 1].ptr, 3, "asc"):
                         j2 += 1
-            elif jl2 == 7 and (arg_eq(jp2, 7, "dialect") or arg_eq(jp2, 7, "timeout")):
+                    elif sl == 4 and arg_eq(tokens[j2 + 1].ptr, 4, "desc"):
+                        sort.desc = True
+                        j2 += 1
+            elif arg_eq(jp2, jl2, "dialect") or arg_eq(jp2, jl2, "timeout") or arg_eq(jp2, jl2, "slop") \
+                    or arg_eq(jp2, jl2, "language") or arg_eq(jp2, jl2, "scorer") \
+                    or arg_eq(jp2, jl2, "expander") or arg_eq(jp2, jl2, "payload"):
+                # one argument; none of them changes a KNN answer
+                if j2 + 1 >= num_tokens:
+                    q_err = _bytes_str(jp2, jl2) + " needs an argument"
+                    break
+                j2 += 1
+            elif arg_eq(jp2, jl2, "verbatim") or arg_eq(jp2, jl2, "nostopwords") or arg_eq(jp2, jl2, "inorder"):
+                pass                         # text-query flags, no argument
+            elif arg_eq(jp2, jl2, "infields"):
+                # INFIELDS <n> <field>...: which TEXT fields a text term searches
+                var nf = ParsedInt(0, False)
                 if j2 + 1 < num_tokens:
-                    j2 += 1
+                    nf = parse_int64_strict(tokens[j2 + 1].ptr, tokens[j2 + 1].length)
+                if not nf.ok or nf.value < 0 or j2 + 1 + Int(nf.value) >= num_tokens:
+                    q_err = "Bad arguments for INFIELDS: Could not convert argument to expected type"
+                    break
+                j2 += 1 + Int(nf.value)
+            elif arg_eq(jp2, jl2, "summarize") or arg_eq(jp2, jl2, "highlight"):
+                # SUMMARIZE [FIELDS n f...] [FRAGS n] [LEN n] [SEPARATOR s] /
+                # HIGHLIGHT [FIELDS n f...] [TAGS open close]: they rewrite the
+                # TEXT a text term matched, and a KNN query matches no term.
+                var sub_ok = True
+                while j2 + 1 < num_tokens:
+                    var sp = tokens[j2 + 1].ptr
+                    var sl2 = tokens[j2 + 1].length
+                    if arg_eq(sp, sl2, "fields"):
+                        var nfs = ParsedInt(0, False)
+                        if j2 + 2 < num_tokens:
+                            nfs = parse_int64_strict(tokens[j2 + 2].ptr, tokens[j2 + 2].length)
+                        if not nfs.ok or nfs.value < 0 or j2 + 2 + Int(nfs.value) >= num_tokens:
+                            sub_ok = False
+                            break
+                        j2 += 2 + Int(nfs.value)
+                    elif arg_eq(sp, sl2, "frags") or arg_eq(sp, sl2, "len") or arg_eq(sp, sl2, "separator"):
+                        if j2 + 2 >= num_tokens:
+                            sub_ok = False
+                            break
+                        j2 += 2
+                    elif arg_eq(sp, sl2, "tags"):
+                        if j2 + 3 >= num_tokens:
+                            sub_ok = False
+                            break
+                        j2 += 3
+                    else:
+                        break
+                if not sub_ok:
+                    q_err = "Bad arguments for " + _bytes_str(jp2, jl2)
+                    break
+            elif arg_eq(jp2, jl2, "inkeys") or arg_eq(jp2, jl2, "geofilter") \
+                    or arg_eq(jp2, jl2, "withpayloads") or arg_eq(jp2, jl2, "withsortkeys") \
+                    or arg_eq(jp2, jl2, "explainscore"):
+                q_err = "ERR FT.SEARCH " + _bytes_str(jp2, jl2) + " is not supported"
+                break
+            else:
+                q_err = "Unknown argument `" + _bytes_str(jp2, jl2) + "` at position " \
+                    + String(j2 - i - 2) + " for <main>"
+                break
             j2 += 1
         ci = j2 - 1
         if filters.failed() and q_err.byte_length() == 0:
@@ -3673,7 +4205,6 @@ def handle_ft_search(
                         break
             if not ef_found:
                 q_err = "ERR query parameter $" + _bytes_str(ef_param_p, ef_param_l) + " is not in PARAMS"
-        if limit_k > 0 and limit_k < k: k = limit_k
         # Check index name if we have one stored
         var idx_ok = True
         if hnsw.index_name_len > 0:
@@ -3708,7 +4239,9 @@ def handle_ft_search(
         elif k == 0 or not blob_set or (not _live and _rows == 0):
             # KNN 0, or a defined index with no vectors yet: a well-formed empty
             # reply, `[0]` — `[]` is not an FT.SEARCH reply shape (gh #361).
-            write_ft_search_response(writer, List[Int](), List[Float32](), keyspace, shared_hnsw, opts)
+            var _e_ids = List[Int]()
+            var _e_scores = List[Float32]()
+            _ft_knn_reply(writer, _e_ids, _e_scores, keyspace, shared_hnsw, opts, sort, limit_off, limit_cnt)
         elif not _live:
             # Drop-in: vectors are in, no built index serves them (none built
             # yet, or this worker's owner is rebuilding it). Exact, in metric
@@ -3716,7 +4249,7 @@ def handle_ft_search(
             var _x_ids = List[Int]()
             var _x_scores = List[Float32]()
             exact_knn(shared_hnsw, blob_ptr, k, 0, _rows, _x_ids, _x_scores, filters, keyspace)
-            write_ft_search_response(writer, _x_ids, _x_scores, keyspace, shared_hnsw, opts)
+            _ft_knn_reply(writer, _x_ids, _x_scores, keyspace, shared_hnsw, opts, sort, limit_off, limit_cnt)
         else:
             var n_shards2 = 1
             if is_not_null(shared_hnsw): n_shards2 = shared_hnsw[].num_shards
@@ -3874,7 +4407,10 @@ def handle_ft_search(
                 # _try_gpu_rerank() inside hnsw.search.
                 # #46: dead slots are filtered like a metadata filter (below),
                 # through the HNSW path that widens its candidates
-                var _dead = is_not_null(shared_hnsw) and shared_hnsw[].any_dead()
+                # An expired document is gone too (_slot_expired): when this
+                # worker has TTLs, widen like for dead slots, so k live remain.
+                var _ttls = _ttl_any(keyspace)
+                var _dead = (is_not_null(shared_hnsw) and shared_hnsw[].any_dead()) or _ttls
                 if hnsw.has_gpu and is_not_null(hnsw.compact_buffer) and filters.count == 0 and not _dead \
                    and not (hnsw.polarquant or hnsw.turboquant or hnsw.nanoquant):
                     comptime if CompilationTarget.is_macos():
@@ -3886,12 +4422,8 @@ def handle_ft_search(
                     # or the whole index has been searched. The old path took
                     # k*2 candidates once, so a selective filter returned a
                     # handful of rows (or none) while matching documents existed.
-                    # The per-node metadata only covers schema TAG/NUMERIC slots
-                    # 0-7 with one tag hash each; anything else reads the hash.
-                    var _use_fast_meta = is_not_null(hnsw.node_meta_field_set) and filters.fast_meta_ok()
-                    for _fsi in range(filters.count):
-                        if filters.slots[_fsi] < 0 or filters.slots[_fsi] >= 8:
-                            _use_fast_meta = False
+                    # Each candidate's fields are read from its hash
+                    # (passes_filters), so a field changed after the build counts.
                     var filtered_ids = List[Int]()
                     var filtered_scores = List[Float32]()
                     var n_total = hnsw.num_nodes
@@ -3909,27 +4441,14 @@ def handle_ft_search(
                         for ri3 in range(len(results2)):
                             if len(filtered_ids) >= k: break
                             var _ext_id = results2[ri3]
-                            if _dead and shared_hnsw[].slot_dead(_ext_id):
+                            if _dead and (shared_hnsw[].slot_dead(_ext_id)
+                                          or (_ttls and _slot_expired(shared_hnsw, keyspace, _ext_id))):
                                 continue                       # #46: the document is gone
                             if filters.count == 0:
                                 filtered_ids.append(_ext_id)
                                 filtered_scores.append(scratch_dists[ri3])
                                 continue
-                            var _passes: Bool
-                            var _nidx = -1
-                            if _use_fast_meta and _ext_id >= 0 and _ext_id < hnsw.max_elements:
-                                _nidx = hnsw.node_map[_ext_id]
-                            if _nidx >= 0:
-                                _passes = hnsw._fast_passes_filters(
-                                    _nidx, filters.count, filters.slots,
-                                    filters.types, filters.tag_hashes,
-                                    filters.lo, filters.hi)
-                            else:
-                                _passes = passes_filters(
-                                    _ext_id, keyspace, filters.count, filters.types,
-                                    filters.field_lens, filters.field_names,
-                                    filters.str_ptrs, filters.str_lens, filters.lo, filters.hi)
-                            if _passes:
+                            if passes_filters(_ext_id, shared_hnsw, keyspace, filters):
                                 filtered_ids.append(_ext_id)
                                 filtered_scores.append(scratch_dists[ri3])
                         if len(filtered_ids) >= k or sk >= n_total or sk >= FT_FILTER_MAX_CANDIDATES:
@@ -3940,7 +4459,8 @@ def handle_ft_search(
                     _rescore_knn(hnsw, blob_ptr, filtered_ids, filtered_scores)
                     merge_delta(shared_hnsw, hnsw.num_nodes, blob_ptr, k, filters, keyspace,
                                 filtered_ids, filtered_scores)          # drop-in
-                    write_ft_search_response(writer, filtered_ids, filtered_scores, keyspace, shared_hnsw, opts)
+                    _ft_knn_reply(writer, filtered_ids, filtered_scores, keyspace, shared_hnsw, opts,
+                                  sort, limit_off, limit_cnt)
                 else:
                     if use_gpu_search:
                         # §7v2: Metal FFI path (async dispatch_semaphore, proven).
@@ -3958,7 +4478,8 @@ def handle_ft_search(
                     _rescore_knn(hnsw, blob_ptr, results2, scratch_dists)
                     merge_delta(shared_hnsw, hnsw.num_nodes, blob_ptr, k, filters, keyspace,
                                 results2, scratch_dists)                # drop-in
-                    write_ft_search_response(writer, results2, scratch_dists, keyspace, shared_hnsw, opts)
+                    _ft_knn_reply(writer, results2, scratch_dists, keyspace, shared_hnsw, opts,
+                                  sort, limit_off, limit_cnt)
     else:
         # gh #361: `FT.SEARCH <index>` with no query is an arity error, not `[]`.
         writer.append_error_response("ERR wrong number of arguments for 'FT.SEARCH' command")

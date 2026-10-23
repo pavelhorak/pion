@@ -421,6 +421,8 @@ def reopen_after_load(hnsw: HNSWGraph,
     if is_not_null(shared[].pre_prefixes):
         unsafe_memcpy(dest=shared[].pre_prefixes, src=hnsw.prefixes, count=PREFIX_MAX * PREFIX_SLOT)
         shared[].pre_prefix_count = hnsw.prefix_count
+    # The schema, the same way (a file from before 1.0.4 has none: unknown)
+    hnsw.publish_schema(shared)
     shared[].pre_dim = hnsw.dim
     shared[].pre_ef_construction = hnsw.ef_construction
     shared[].pre_distance_metric = hnsw.distance_metric

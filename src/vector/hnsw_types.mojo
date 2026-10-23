@@ -14,6 +14,22 @@ from std.collections import Array
 comptime PREFIX_MAX = 16
 comptime PREFIX_SLOT = 64
 
+# FT.CREATE's schema fields besides the vector (SharedHNSWView.schema_field_*).
+comptime SCHEMA_MAX = 16
+comptime SCHEMA_NAME_MAX = 32
+comptime FT_FIELD_TEXT = UInt8(1)
+comptime FT_FIELD_TAG = UInt8(2)
+comptime FT_FIELD_NUMERIC = UInt8(3)
+comptime FT_FIELD_GEO = UInt8(4)
+comptime FT_FIELD_GEOSHAPE = UInt8(5)
+comptime FT_FLAG_SORTABLE = UInt8(1)
+comptime FT_FLAG_UNF = UInt8(2)
+comptime FT_FLAG_NOINDEX = UInt8(4)
+comptime FT_FLAG_CASESENSITIVE = UInt8(8)
+# A schema field in the index file (word 25 bit 10): type, flags, separator,
+# name length, then the name.
+comptime SCHEMA_REC = 4 + SCHEMA_NAME_MAX
+
 
 # gh #5 / #87.2: HNSW multi-worker sharded ingest is force-disabled. Until
 # the merge-path SIGSEGV / recall ≈ 0 at 500K+ on Linux multi-worker is
@@ -180,7 +196,8 @@ struct SharedHNSWView(Movable):
     var qjl_random_signs: Pointer[UInt64, MutUntrackedOrigin]
     # Phase 3.1: Index schema — up to 16 non-vector fields, stored inline (zero heap).
     # Written at FT.CREATE time, read-only by all workers during FT.SEARCH filtering.
-    # Field types: 0=NONE, 1=TEXT, 2=TAG, 3=NUMERIC
+    # Field types: 0=NONE, 1=TEXT, 2=TAG, 3=NUMERIC, 4=GEO, 5=GEOSHAPE (GEO and
+    # GEOSHAPE are accepted and not searchable: Pion refuses their queries).
     var schema_field_count: Int
     var schema_field_types: Array[UInt8, 16]
     var schema_field_name_lens: Array[UInt8, 16]
@@ -273,6 +290,14 @@ struct SharedHNSWView(Movable):
     # out readers first, or startup before any serves).
     var pre_prefix_count: Int
     var pre_prefixes: Pointer[UInt8, MutUntrackedOrigin]
+    # The schema fields' options (FT.CREATE, saved with the index from
+    # 1.0.4): FT_FLAG_* bits, and a TAG field's SEPARATOR (default ',').
+    # `schema_known`: the schema is the index's own (FT.CREATE, or a file that
+    # saved it). False for an index loaded from an older file, whose schema
+    # is not known: its filters then read any hash field, as before.
+    var schema_field_flags: Array[UInt8, 16]
+    var schema_field_seps: Array[UInt8, 16]
+    var schema_known: Bool
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -322,6 +347,9 @@ struct SharedHNSWView(Movable):
         self.restart_refill = null_ptr[UInt64, MutUntrackedOrigin]()
         self.pre_prefix_count = 0
         self.pre_prefixes = null_ptr[UInt8, MutUntrackedOrigin]()
+        self.schema_field_flags = Array[UInt8, 16](fill=UInt8(0))
+        self.schema_field_seps = Array[UInt8, 16](fill=UInt8(44))
+        self.schema_known = False
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -454,6 +482,12 @@ struct SharedHNSWView(Movable):
         self.restart_refill = take.restart_refill
         self.pre_prefix_count = take.pre_prefix_count
         self.pre_prefixes = take.pre_prefixes
+        self.schema_field_flags = Array[UInt8, 16](uninitialized=True)
+        self.schema_field_seps = Array[UInt8, 16](uninitialized=True)
+        for _bi in range(16):
+            self.schema_field_flags[_bi] = take.schema_field_flags[_bi]
+            self.schema_field_seps[_bi] = take.schema_field_seps[_bi]
+        self.schema_known = take.schema_known
 
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:

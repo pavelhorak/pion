@@ -12,7 +12,7 @@ from src.network.dispatcher import CommandDispatcher
 from src.network.server import TCPServer
 from src.network.response_writer import ResponseWriter
 from src.network.fast_path import cmd_matches_3, cmd_matches_4, cmd_matches_5, cmd_matches_6, cmd_matches_7, cmd_matches_8, cmd_eq, _get_now_ns
-from src.common.container_free import remove_and_free, hash_get_live
+from src.common.container_free import remove_and_free, hash_get_live, free_container
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.skip_list import SlabSkipList
 from src.common.list import SlabList
@@ -3221,8 +3221,25 @@ struct SlowPathHandler:
                         elif cmd_eq(tp, tl, "ft.dropindex"): # FT.DROPINDEX
                             vector_auto_hold(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
                                              self.vec_tomb, self.worker_id, self.vauto)
-                            _ = handle_ft_dropindex(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, writer, self.worker_id)
+                            var _dd_keys = List[UInt8]()
+                            var _dd_ends = List[Int]()
+                            _ = handle_ft_dropindex(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, writer,
+                                                    self.worker_id, self.keyspace, self.num_workers,
+                                                    _dd_keys, _dd_ends)
                             vector_auto_release(self.shared_hnsw, self.worker_id)
+                            # DD: the documents go as with DEL (WAL record, WATCH)
+                            var _dd_at = 0
+                            var _dd_p = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_dd_keys.unsafe_ptr()))
+                            for _dk in range(len(_dd_ends)):
+                                var _kp = _dd_p + _dd_at
+                                var _kl = _dd_ends[_dk] - _dd_at
+                                var _taken = GenericValue()
+                                if self.keyspace[].remove_generic_taking(GenericValue.borrow(_kp, _kl), _taken):
+                                    free_container(_taken)
+                                    _ = self.dispatcher.wal[].append(2, _kp, _kl)
+                                    self.tx_state.bump_key_version(_kp, _kl)
+                                _dd_at = _dd_ends[_dk]
+                            _ = _dd_keys^       # _dd_p reads it: alive to here (the erased-origin rule)
                             i = cmd_end_tok - 1
                         elif cmd_eq(tp, tl, "ft.optimize"): # FT.OPTIMIZE
                             vector_auto_hold(hnsw, self.shared_hnsw, self.keyspace, self.dispatcher,
@@ -3292,6 +3309,31 @@ struct SlowPathHandler:
                                 fd, writer, server, kq, consumed_bytes,
                             )
                             i = cmd_end_tok - 1  # -1 because i += 1 at loop bottom
+                        elif cmd_eq(tp, tl, "ft._list"): # FT._LIST
+                            # The registered index (this server holds one), as
+                            # RediSearch lists its indexes. RedisVL calls it to
+                            # check an index exists before FT.CREATE.
+                            if is_not_null(self.shared_hnsw) and self.shared_hnsw[].index_name_len > 0:
+                                # a simple string, as RediSearch sends the names (a
+                                # name with CR or LF goes as a bulk string)
+                                writer.append_array_header(1)
+                                var _ln_p = self.shared_hnsw[].index_name.unsafe_ptr()
+                                var _ln_l = self.shared_hnsw[].index_name_len
+                                var _ln_crlf = False
+                                for _lb in range(_ln_l):
+                                    if _ln_p[_lb] == 13 or _ln_p[_lb] == 10:
+                                        _ln_crlf = True
+                                if _ln_crlf:
+                                    writer.append_bulk_string_response(_ln_p, _ln_l)
+                                else:
+                                    comptime _PLUS = "+"
+                                    comptime _CRLF = "\r\n"
+                                    writer.append_to_response(rebind[Pointer[UInt8, MutUntrackedOrigin]](_PLUS.unsafe_ptr()), 1)
+                                    writer.append_to_response(_ln_p, _ln_l)
+                                    writer.append_to_response(rebind[Pointer[UInt8, MutUntrackedOrigin]](_CRLF.unsafe_ptr()), 2)
+                            else:
+                                writer.append_array_header(0)
+                            i = cmd_end_tok - 1
                         else:
                             writer.append_error_response("ERR unknown FT.* subcommand")
                     # ── AI.CHAT ──

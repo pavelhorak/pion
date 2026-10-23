@@ -125,7 +125,24 @@ def requirement_met(req: str) -> tuple[bool, str]:
         return os.path.exists(os.path.join(REPO, arg)), f"needs {arg}"
     if kind == "env":
         return bool(os.environ.get(arg)), f"needs ${arg}"
+    if kind == "redisearch":
+        return _redisearch_module() is not None, \
+            "needs a RediSearch module (Homebrew redis 8, or $PION_REDISEARCH_SO)"
     return False, f"unknown requirement {req!r}"
+
+
+def _redisearch_module():
+    """The oracle module tests/test_ft_differential.py loads (same search)."""
+    p = os.environ.get("PION_REDISEARCH_SO")
+    if p:
+        return p if os.path.exists(p) else None
+    for pat in ("/opt/homebrew/Cellar/redis/*/lib/redis/modules/redisearch.so",
+                "/usr/local/Cellar/redis/*/lib/redis/modules/redisearch.so",
+                "/usr/lib/redis/modules/redisearch.so", "/usr/local/lib/redis/modules/redisearch.so"):
+        hits = glob.glob(pat)
+        if hits:
+            return sorted(hits)[-1]
+    return None
 
 
 # ── server lifecycle ────────────────────────────────────────────────────────

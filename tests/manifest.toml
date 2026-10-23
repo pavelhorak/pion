@@ -1241,6 +1241,25 @@ tier = "gate"
 requires = ["bin:redis-server"]
 
 [[test]]
+file = "tests/test_ft_schema_restart.py"
+# The schema (fields, kinds, SEPARATOR / CASESENSITIVE / NOINDEX) is saved
+# with the index and survives a restart; a file without it (pre-1.0.4) loads
+# and filters as before.
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
+file = "tests/test_ft_differential.py"
+# FT.* option by option against RediSearch (Redis 8's search + JSON modules):
+# every FT.CREATE / FT.SEARCH / FT.DROPINDEX option either agrees, or is
+# refused as documented (tests/ft_differential_known.tsv).
+server = "-w 1"
+args = "--start-oracle --oracle-port 6419"
+tier = "gate"
+requires = ["bin:redis-server", "redisearch"]
+
+[[test]]
 file = "tests/test_pipeline_option_bleed.py"
 server = "-w 1"
 args = "--start-redis --redis-port 6421"
