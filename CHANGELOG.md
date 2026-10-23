@@ -4,6 +4,35 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Fixed
+
+- **`FT.CREATE ... PREFIX` is applied.** It was accepted and never applied, so
+  an index on `PREFIX 1 doc:` took every hash with its vector field and `DIM`,
+  whatever its key. From 1.0.1, `FT.CREATE`'s backfill took all of them at
+  once. A search could answer with documents that were never part of the
+  index. Now only a hash whose key starts with one of the prefixes is indexed,
+  as in RediSearch:
+  - The match is byte for byte and case-sensitive, and several prefixes are
+    ORed.
+  - `PREFIX 0`, an empty prefix, or no `PREFIX` means every key.
+  - A hash renamed out of the prefixes leaves the index, and one renamed in
+    joins it.
+  - A write outside the prefixes is not counted in `vector_unindexed_writes`.
+  - The list is saved in the index file, so a restart keeps it.
+  - `FT.CREATE` with a different list replaces the index, as a different name
+    or `DIM` does.
+
+  At most 16 prefixes of up to 63 bytes are supported. More is refused, never
+  cut short. An index file written before this release holds no list, so it
+  keeps answering for every key until `FT.DROPINDEX` and `FT.CREATE`. A client
+  that re-creates its index at startup with a `PREFIX` replaces it once, and
+  the new index is built from the hashes under the prefix. Test:
+  `tests/test_ft_create_prefix.py` (gate tier; 26 failures on 1.0.2). Its
+  `--oracle PORT` runs the shared cases against a live RediSearch, which gives
+  the same answers.
+
 ## [1.0.2] — 2026-10-22
 
 After a restart, a vector index that built itself keeps indexing what is

@@ -151,10 +151,30 @@ FT.CREATE <index> ON HASH SCHEMA … <field> VECTOR HNSW 6
   Re-issuing `FT.CREATE` for the index being built adds nothing, since a hash
   already in it is skipped. Over a large keyspace this blocks the worker
   while it runs, as `FT.OPTIMIZE` does.
-- **`PREFIX` is accepted and not applied.** Every hash with the index's
-  vector field and `DIM` is indexed, whatever its key, whether it was written
-  before `FT.CREATE` or after. RediSearch indexes only the keys under the
-  prefixes.
+- **`PREFIX <n> <prefix> …`** (from 1.0.3). Only a hash whose key starts with one of
+  the prefixes is indexed, as in RediSearch, whether it was written before
+  `FT.CREATE` or after:
+  - The match is byte for byte and case-sensitive, and a key equal to a prefix
+    matches. Several prefixes are ORed.
+  - `PREFIX 0`, an empty prefix, or no `PREFIX` at all means every key.
+  - A hash renamed out of the prefixes leaves the index, and one renamed in
+    joins it.
+  - A write outside the prefixes is not this index's, so it is not counted in
+    `vector_unindexed_writes` either.
+  - The list is saved in the index file, so a restart keeps it.
+  - At most 16 prefixes of up to 63 bytes each. A longer list, a longer
+    prefix, or a count that is not a number is refused, and the `FT.CREATE`
+    changes nothing.
+  - `FT.CREATE` with a different prefix list replaces the index, as a
+    different name or `DIM` does. The new index then takes the hashes its list
+    covers. Re-issuing the same list changes nothing.
+
+  Before 1.0.3, `PREFIX` was accepted and not applied, so an index took every
+  hash with its vector field and `DIM`. An index file written before 1.0.3
+  holds no list, so it keeps answering for every key until `FT.DROPINDEX`
+  followed by `FT.CREATE`. A client that re-creates its index at startup with
+  a `PREFIX` replaces it once, and the new index is built from the hashes
+  under the prefix.
 
   Before 1.0.1, `FT.CREATE` indexed only what was written after it, so an index
   created over existing documents answered `[0]`. That included the restart
