@@ -8,6 +8,12 @@ from src.common.lock_free import ShardQueryBus
 # gh #87.1: ivf_pq module deleted.
 from std.collections import Array
 
+# FT.CREATE ... PREFIX <n> <p>...: how many key prefixes an index keeps, and
+# the bytes each takes ([length][up to 63 bytes]). More, or a longer one, is
+# refused at FT.CREATE, never cut short.
+comptime PREFIX_MAX = 16
+comptime PREFIX_SLOT = 64
+
 
 # gh #5 / #87.2: HNSW multi-worker sharded ingest is force-disabled. Until
 # the merge-path SIGSEGV / recall ≈ 0 at 500K+ on Linux multi-worker is
@@ -260,6 +266,13 @@ struct SharedHNSWView(Movable):
     # reopen_after_load), and every worker refills the rows of its own hashes
     # before any serves: [0] workers still refilling, [1] 1 while they do.
     var restart_refill: Pointer[UInt64, MutUntrackedOrigin]
+    # FT.CREATE's PREFIX list: only a hash whose key starts with one of them
+    # is indexed (0 = every key, as without PREFIX). PREFIX_MAX slots of
+    # PREFIX_SLOT bytes, allocated once by main(); written only while no
+    # worker routes HSETs by it (FT.CREATE clears pre_index_ready and waits
+    # out readers first, or startup before any serves).
+    var pre_prefix_count: Int
+    var pre_prefixes: Pointer[UInt8, MutUntrackedOrigin]
 
     def __init__(out self):
         self.nodes = null_ptr[HNSWNode, MutUntrackedOrigin]()
@@ -307,6 +320,8 @@ struct SharedHNSWView(Movable):
         self.vec_stats = null_ptr[UInt64, MutUntrackedOrigin]()
         self.backfill_gen = null_ptr[UInt64, MutUntrackedOrigin]()
         self.restart_refill = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.pre_prefix_count = 0
+        self.pre_prefixes = null_ptr[UInt8, MutUntrackedOrigin]()
         self.ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
         self.ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.ingest_count = null_ptr[UInt64, MutUntrackedOrigin]()
@@ -437,6 +452,8 @@ struct SharedHNSWView(Movable):
         self.vec_stats = take.vec_stats
         self.backfill_gen = take.backfill_gen
         self.restart_refill = take.restart_refill
+        self.pre_prefix_count = take.pre_prefix_count
+        self.pre_prefixes = take.pre_prefixes
 
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:
@@ -469,6 +486,26 @@ struct SharedHNSWView(Movable):
         # Drop-in: no slot is written yet, so the exact scan sees none
         if Int(self.ingest_ids) != 0 and self.hk_max_elements > 0:
             unsafe_memset(self.ingest_ids.bitcast[UInt8](), 0xFF, self.hk_max_elements * 4)
+
+    def key_in_prefixes(self, key: Pointer[UInt8, MutUntrackedOrigin], klen: Int) -> Bool:
+        """The index's PREFIX list takes `key`: it starts with one of them
+        (byte for byte, as RediSearch matches), or there is no list."""
+        var n = self.pre_prefix_count
+        if n <= 0 or Int(self.pre_prefixes) == 0:
+            return True
+        for p in range(n):
+            var slot = self.pre_prefixes + p * PREFIX_SLOT
+            var pl = Int(slot[0])
+            if pl > klen:
+                continue
+            var ok = True
+            for b in range(pl):
+                if key[b] != slot[1 + b]:
+                    ok = False
+                    break
+            if ok:
+                return True
+        return False
 
     def open_ingest(mut self, cap: Int, dim: Int):
         """Allocate the ingest buffer for `cap` rows of `dim` floats. Ids double

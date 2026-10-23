@@ -55,7 +55,7 @@ worker during a build, so a wait cannot deadlock: it ends at the building
 worker's next housekeeping tick after the thread is done.
 """
 
-from std.memory import alloc
+from std.memory import alloc, unsafe_memcpy
 from std.memory.unsafe_pointer import UnsafePointer
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
@@ -64,6 +64,7 @@ from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.hash_map import StripedHashMap
 from src.common.vec_tomb import VecTomb
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
+from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT
 from src.network.dispatcher import CommandDispatcher
 from src.io.wal import WAL
 from src.network.vector_ingest import record_all_dead, backfill_index
@@ -414,6 +415,12 @@ def reopen_after_load(hnsw: HNSWGraph,
     says so: a restart used to look like this from the outside with no sign."""
     if is_null(shared) or is_null(shared[].ingest_count) or is_not_null(shared[].ingest_fp32):
         return
+    # The index's PREFIX list (the file's; none for a file from before 1.0.3).
+    # Written here, before any worker serves, and otherwise only by FT.CREATE,
+    # which stops HSET routing first: every worker's ingest reads it.
+    if is_not_null(shared[].pre_prefixes):
+        unsafe_memcpy(dest=shared[].pre_prefixes, src=hnsw.prefixes, count=PREFIX_MAX * PREFIX_SLOT)
+        shared[].pre_prefix_count = hnsw.prefix_count
     shared[].pre_dim = hnsw.dim
     shared[].pre_ef_construction = hnsw.ef_construction
     shared[].pre_distance_metric = hnsw.distance_metric

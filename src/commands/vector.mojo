@@ -19,6 +19,7 @@ from src.common.config import PionConfig
 from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_len, parse_filter_float, is_valid_float_arg, parse_float64, arg_eq
 from src.common.lock_free import ShardQueryBus
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
+from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT
 from src.vector.fp32_scan import scan_dot_f32, l2sq_f32_4chain, dot_f32_4chain
 # gh #87.1: src/vector/ivf_pq.mojo deleted (a measured dead end).
 from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_name
@@ -2020,6 +2021,10 @@ def adopt_index_config(
     hnsw.distance_metric = shared_hnsw[].pre_distance_metric
     if shared_hnsw[].pre_ef_construction > 0:
         hnsw.ef_construction = shared_hnsw[].pre_ef_construction
+    # FT.CREATE's PREFIX list, which the build saves with the index
+    if is_not_null(shared_hnsw[].pre_prefixes):
+        hnsw.prefix_count = shared_hnsw[].pre_prefix_count
+        unsafe_memcpy(dest=hnsw.prefixes, src=shared_hnsw[].pre_prefixes, count=PREFIX_MAX * PREFIX_SLOT)
 
 
 def _close_ingest(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
@@ -2344,6 +2349,73 @@ def handle_ft_create(
             "ERR DIM " + String(new_dim) + " exceeds this server's vector dimension "
             + String(config.vector.dimensions) + " (start it with --dim " + String(new_dim) + ")")
         return num_tokens - 1
+    # PREFIX <n> <p1> ... <pn> (RediSearch): only a hash whose key starts with
+    # one of them is indexed, byte for byte. It was accepted and never applied,
+    # so an index took every hash with its vector field, and FT.CREATE's
+    # backfill (1.0.1) took them all at once. Resolved here, before any state
+    # is written, so a refused list changes nothing. n = 0, or an empty
+    # prefix, is every key, as in RediSearch.
+    var new_prefixes = alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
+    unsafe_memset(new_prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
+    var new_prefix_count = 0
+    var prefix_err = String("")
+    var pj = ci + 2
+    while pj < num_tokens:
+        if arg_eq(tokens[pj].ptr, tokens[pj].length, "schema"):
+            break
+        if arg_eq(tokens[pj].ptr, tokens[pj].length, "prefix"):
+            var pn = -1
+            if pj + 1 < num_tokens and tokens[pj + 1].length > 0 and tokens[pj + 1].length <= 9:
+                pn = 0
+                for b in range(tokens[pj + 1].length):
+                    var c = Int(tokens[pj + 1].ptr[b])
+                    if c < 48 or c > 57:
+                        pn = -1
+                        break
+                    pn = pn * 10 + (c - 48)
+            if pn < 0:
+                prefix_err = "ERR Bad arguments for PREFIX: Could not convert argument to expected type"
+            elif pn > PREFIX_MAX:
+                prefix_err = "ERR PREFIX: at most " + String(PREFIX_MAX) + " prefixes are supported"
+            elif pj + 1 + pn >= num_tokens:
+                prefix_err = "ERR Bad arguments for PREFIX: fewer prefixes than its count"
+            else:
+                var every_key = pn == 0
+                for k in range(pn):
+                    var t = tokens[pj + 2 + k]
+                    if arg_eq(t.ptr, t.length, "schema"):
+                        # the count ran into the schema (RediSearch fails too)
+                        prefix_err = "ERR Bad arguments for PREFIX: fewer prefixes than its count"
+                        break
+                    if t.length >= PREFIX_SLOT:
+                        prefix_err = "ERR PREFIX: a prefix of more than " + String(PREFIX_SLOT - 1) \
+                            + " bytes is not supported"
+                        break
+                    if t.length == 0:
+                        every_key = True
+                        continue
+                    var dst = new_prefixes + new_prefix_count * PREFIX_SLOT
+                    dst[0] = UInt8(t.length)
+                    unsafe_memcpy(dest=dst + 1, src=t.ptr, count=t.length)
+                    new_prefix_count += 1
+                if every_key:
+                    unsafe_memset(new_prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
+                    new_prefix_count = 0
+            break
+        pj += 1
+    if prefix_err.byte_length() > 0:
+        new_prefixes.free()
+        writer.append_error_response(prefix_err)
+        return num_tokens - 1
+    var prefix_differs = False
+    if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].pre_prefixes):
+        if new_prefix_count != shared_hnsw[].pre_prefix_count:
+            prefix_differs = True
+        else:
+            for b in range(new_prefix_count * PREFIX_SLOT):
+                if new_prefixes[b] != shared_hnsw[].pre_prefixes[b]:
+                    prefix_differs = True
+                    break
     var name_differs = False
     if ci + 1 < num_tokens:
         var tnl = tokens[ci+1].length if tokens[ci+1].length < 64 else 64
@@ -2359,7 +2431,9 @@ def handle_ft_create(
         if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
                 shared_hnsw[].ingest_count, UInt64(0)) > UInt64(0):
             has_state = True
-    if has_state and (name_differs or (new_dim > 0 and new_dim != hnsw.dim)):
+    # Another PREFIX list is another index too: the served one holds documents
+    # the new list leaves out.
+    if has_state and (name_differs or prefix_differs or (new_dim > 0 and new_dim != hnsw.dim)):
         # Stop routing HSET vectors into the old-DIM ingest buffer before the
         # epoch wait, then free it once no batch can hold it; the tail of this
         # handler allocates one sized for the new DIM and re-enables routing
@@ -2374,6 +2448,18 @@ def handle_ft_create(
             if is_not_null(shared_hnsw[].ingest_ids):
                 shared_hnsw[].ingest_ids.free()
                 shared_hnsw[].ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
+    if prefix_differs:
+        # Every worker's HSET reads the list to route a vector: stop routing
+        # and wait out the batches that may be reading it before rewriting it
+        # (the retire above already did both). pre_index_ready is set again
+        # below, after the fence.
+        if shared_hnsw[].pre_index_ready:
+            shared_hnsw[].pre_index_ready = False
+            wait_for_readers(shared_hnsw, worker_id)
+        unsafe_memcpy(dest=shared_hnsw[].pre_prefixes, src=new_prefixes, count=PREFIX_MAX * PREFIX_SLOT)
+        shared_hnsw[].pre_prefix_count = new_prefix_count
+        external_call["pion_full_fence", NoneType]()
+    new_prefixes.free()
     # Store index name (token immediately after FT.CREATE)
     if ci + 1 < num_tokens:
         var nm_ptr = tokens[ci+1].ptr

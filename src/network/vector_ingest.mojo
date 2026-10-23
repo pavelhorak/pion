@@ -73,6 +73,12 @@ def ingest_hash_vector(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
         return False
     if vlen != shared[].pre_dim * 4 or not _is_vector_field(shared, field, flen):
         return False
+    # FT.CREATE ... PREFIX: a key outside the list is not this index's
+    # document, so it is neither indexed nor counted as unindexed. Every route
+    # in comes through here (HSET, COPY/RENAME/RESTORE, FT.CREATE's backfill,
+    # a restart's refill).
+    if not shared[].key_in_prefixes(key, klen):
+        return False
     var hv = keyspace[].get(GenericValue.borrow(key, klen))
     if hv.type.value != ValueType.HASH:
         return False

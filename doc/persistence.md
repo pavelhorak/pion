@@ -116,7 +116,11 @@ Word 25 bit 8 (from 1.0.2) marks an automatic build, whose ingest stays open:
 a warm load of it reopens ingest, and every worker puts back the FP32 rows of
 its own hashes before any serves (`doc/vector_engine.md`, "Searching without
 FT.OPTIMIZE"). `FT.OPTIMIZE` writes the bit clear, or clears it in place when
-it only ends ingest over an automatic build. Warm restore only exists for the server's startup
+it only ends ingest over an automatic build.
+Word 25 bit 9 (from 1.0.3) means a section after the quantized-index sections
+holds the index's `PREFIX` list: a count, then 64 bytes for each prefix (its
+length, then its bytes). An older loader stops reading before that section,
+and serves the index without the list. Warm restore only exists for the server's startup
 dimension; a config-mismatch file is refused rather than loaded.
 
 ---

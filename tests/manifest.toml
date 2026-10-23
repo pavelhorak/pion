@@ -327,6 +327,15 @@ tier = "gate"
 timeout = 300
 
 [[test]]
+file = "tests/test_ft_create_prefix.py"
+# FT.CREATE ... PREFIX is applied, as RediSearch applies it (--oracle PORT runs
+# the shared cases against a live RediSearch): HSET, backfill, RENAME, refused
+# lists, unindexed counting, restart, re-create, -w 4.
+server = "self"
+tier = "gate"
+timeout = 300
+
+[[test]]
 file = "tests/test_vector_restart_ingest.py"
 # A restart leaves a vector index as its build left it: an automatic build's
 # keeps indexing (rows refilled from the hashes, the delta back), an
