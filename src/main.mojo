@@ -17,6 +17,7 @@ from src.memory.slab_allocator import SlabAllocator
 
 from src.engine.state import Pion
 from src.vector.hnsw import SharedHNSWView, HNSWGraph
+from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT
 from src.network.server import create_listen_socket
 from src.common.lock_free import ShardQueryBus
 from src.network.cluster import ClusterState
@@ -1277,6 +1278,10 @@ def main():
     # of their hashes, [1] 1 while they do (vector_auto.mojo, restart refill)
     auto_cells[unsafe_offset=6] = UInt64(n_workers)
     shared_hnsw_ptr[].restart_refill = auto_cells + 6
+    # FT.CREATE's PREFIX list (0 prefixes = every key)
+    var prefix_cells = alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
+    unsafe_memset(prefix_cells, 0, PREFIX_MAX * PREFIX_SLOT)
+    shared_hnsw_ptr[].pre_prefixes = prefix_cells
 
     # #19: count the persisted indexes the workers are about to load. Each is
     # pion.hnsw.<worker that built it>, loaded by that worker alone; the others

@@ -6,7 +6,7 @@ from std.memory import unsafe_memcpy, unsafe_memset
 from src.common.heap import HeapNode, MinHeap, MaxHeap, LinearPool
 from std.atomic import Atomic, Ordering
 from src.common.lock_free import ShardQueryBus
-from .hnsw_types import HNSWNode, SharedHNSWView, HNSW_SHARDED_INGEST_ENABLED
+from .hnsw_types import HNSWNode, SharedHNSWView, HNSW_SHARDED_INGEST_ENABLED, PREFIX_MAX, PREFIX_SLOT
 from .beam_view import BeamView1536
 from .vector_abi import beam_search_1536, quant_beam_search_1536
 from .quant_beam_view import QuantBeamView1536, QUANT_KIND_POLAR, QUANT_KIND_NANO, QUANT_KIND_TURBO
@@ -315,6 +315,13 @@ struct HNSWGraph(Movable):
     # FT.OPTIMIZE build is False: ingest is over, as that command says, after a
     # restart too. At END per the field rule.
     var auto_built: Bool
+    # FT.CREATE's PREFIX list: adopted from the shared view by the build
+    # (adopt_index_config), saved in the index file (word 25, bit 9), and put
+    # back in the shared view by a warm load (reopen_after_load) — never by
+    # publish_to_shared, which runs while workers route HSETs by the list.
+    # PREFIX_MAX slots of PREFIX_SLOT bytes; 0 = every key. At END.
+    var prefix_count: Int
+    var prefixes: UnsafePointer[UInt8, MutUntrackedOrigin]
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
@@ -420,6 +427,9 @@ struct HNSWGraph(Movable):
         self.residual_scratch_cap = 0
         self.build_id = 0
         self.auto_built = False
+        self.prefix_count = 0
+        self.prefixes = alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
+        unsafe_memset(self.prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
         self.own_nodes = self.nodes
         self.own_node_map = self.node_map
         self.own_neighbor_pool = self.neighbor_pool
@@ -1218,6 +1228,10 @@ struct HNSWGraph(Movable):
         # that predates it tests bits 0 and 1 only, and a file that predates it
         # reads 0: it loads with ingest closed, as every warm load used to.
         if self.auto_built: _qsec |= 256
+        # Bit 9: a PREFIX section follows the quant sections ([count] then
+        # PREFIX_SLOT bytes a prefix). A loader that predates it stops reading
+        # before it, and serves the index as it was built.
+        if self.prefix_count > 0: _qsec |= 512
         hdr[25] = _qsec
         # gh #407: the vector field name — word 26 = length, bytes 216-247 (words
         # 27-30) = up to 32 bytes. Same no-bump reasoning as words 24/25: an
@@ -1338,6 +1352,12 @@ struct HNSWGraph(Movable):
                                  self.num_nodes * QJL_BYTES_1536)
             self._pion_write_all(fd, self.qjl_res_norms.bitcast[UInt8](),
                                  self.num_nodes * 4)
+        if _qsec & 512:
+            var pc = alloc[UInt64](1)
+            pc[0] = UInt64(self.prefix_count)
+            self._pion_write_all(fd, pc.bitcast[UInt8](), 8)
+            pc.free()
+            self._pion_write_all(fd, self.prefixes, self.prefix_count * PREFIX_SLOT)
 
         print("HNSW saved: " + String(self.num_nodes) + " nodes → pion.hnsw.0")
 
@@ -1590,6 +1610,18 @@ struct HNSWGraph(Movable):
             if not self._pion_read_all(fd, self.qjl_res_norms.bitcast[UInt8](),
                                        saved_num_nodes * 4):
                 return False
+        unsafe_memset(self.prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
+        self.prefix_count = 0
+        if saved_qsec & 512:
+            var pc = alloc[UInt64](1)
+            if not self._pion_read_all(fd, pc.bitcast[UInt8](), 8):
+                pc.free()
+                return False
+            var npre = Int(pc[0])
+            pc.free()
+            if npre > PREFIX_MAX or not self._pion_read_all(fd, self.prefixes, npre * PREFIX_SLOT):
+                return False
+            self.prefix_count = npre
         # gh #350: the format word was CHECKED above but never applied, so a
         # warm PolarQuant server ran the INT8 beam over INT4 bytes (recall
         # ≈ 0.002 against its own fresh build). The search dispatch keys on
