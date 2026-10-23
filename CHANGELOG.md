@@ -4,7 +4,10 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.0.3] — 2026-10-23
+
+`FT.CREATE ... PREFIX` is applied: an index holds only the hashes under its
+prefixes, as in RediSearch.
 
 ### Fixed
 
