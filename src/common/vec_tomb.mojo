@@ -2,7 +2,7 @@
 leaves the search results.
 
 The vector index records a document's key when its vector is ingested (the
-`__hk__<slot>` map) and nothing updated that record afterwards: FT.SEARCH kept
+worker's slot map) and nothing updated that record afterwards: FT.SEARCH kept
 returning documents that were deleted, expired, flushed, renamed, or given a
 new vector. Now the hash that holds an indexed vector carries its slot and a
 pointer to its worker's VecTomb (SlabHashMap.vec_slot / vec_tomb), and the
@@ -20,7 +20,7 @@ unchanged — dead nodes still route the beam, as HNSW soft deletes do — and
 FT.SEARCH filters them out of the results, widening the candidate set so it
 still returns k live documents.
 
-The worker that killed a slot logs it (WAL record 38: the index's build id
+The worker that killed a slot logs it (WAL record 47: the index's build id
 and the slot) after the batch; replay applies the records of the index that
 loaded, so a restart neither revives a dead slot nor kills one of a later
 build. This module imports nothing from Pion, so hash_map.mojo can use it.

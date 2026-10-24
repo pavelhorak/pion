@@ -346,6 +346,16 @@ tier = "gate"
 timeout = 300
 
 [[test]]
+file = "tests/test_vector_slot_map.py"
+# The vector index's slot map and dead slots are not keys: DBSIZE / KEYS /
+# SCAN / RANDOMKEY see only the client's keys, a client's `__hk__7` stays its
+# own, and restarts (WAL, SAVE, BGREWRITEAOF), DD, -w 4, a replica and a data
+# directory an older server wrote all keep the index right.
+server = "self"
+tier = "gate"
+timeout = 600
+
+[[test]]
 file = "tests/test_ft_create_redimension.py"
 server = "self"
 tier = "gate"

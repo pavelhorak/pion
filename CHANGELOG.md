@@ -4,6 +4,40 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [1.0.5] — 2026-10-24
+
+The vector index's records are no longer keys. Each document the index
+ingests gets a slot, and the worker that ingested it kept the slot's key as a
+key of its own, `__hk__<slot>`, and the slots that died as a set,
+`__hk_dead__`. Clients saw them, and could break the index by deleting them.
+They are now tables beside the keyspace. `tests/test_vector_slot_map.py` (gate
+tier): 102 of its checks fail on 1.0.4, none now.
+
+### Fixed
+
+- **`DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY` and `INFO`'s key count see only the
+  client's keys.** 20 indexed documents read `DBSIZE` 40, and a replica's
+  keyspace held the same extra keys.
+- **Deleting those keys no longer breaks the index.** After `SCAN MATCH
+  __hk__*` and `DEL`, or any cleanup of keys a client did not write, a restart
+  left every document deleted afterwards in the `FT.SEARCH` results: nothing
+  linked its hash to its slot any more.
+- **A client's own key named `__hk__7` stays the client's.** Ingesting slot 7
+  overwrote it, `FT.DROPINDEX ... DD` deleted it, and a new build deleted a
+  client's set named `__hk_dead__`.
+
+### Changed
+
+- **The index file is version 5** (version 4's layout). 1.0.4 and earlier
+  refuse it with `HNSW snapshot version 5 unsupported (want 3 or 4)` and serve
+  no index; `FT.CREATE` there indexes the existing hashes again. They would
+  otherwise load it and answer wrongly with no error, because they read the
+  slot map from keys this release no longer writes. Upgrading needs nothing:
+  the `__hk__` keys a data directory from 1.0.4 or earlier holds are read into
+  the new tables. `doc/operations.md` §3c has both directions.
+- The slot map and dead slots are WAL records 46 to 48, and every snapshot and
+  `BGREWRITEAOF` writes them.
+
 ## [1.0.4] — 2026-10-23
 
 `FT.*` against RediSearch, option by option. 1.0.1 to 1.0.3 each fixed one

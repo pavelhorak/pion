@@ -1313,7 +1313,7 @@ def main():
     # hk_keys_buf: cross-worker slot → original-hash-key map. Each slot is 32 bytes
     # (byte 0 = length, bytes 1..31 = key data). Without this, multi-worker FT.SEARCH
     # recall collapses to ~0 when the search worker isn't the same as the HSET worker
-    # (the local __hk__<slot> keyspace lookup misses for slots written by another
+    # (the local slot map lookup misses for slots written by another
     # worker, and the response falls back to the slot number — which doesn't match
     # the bench's hash key).
     var hk_max = config.vector.max_elements

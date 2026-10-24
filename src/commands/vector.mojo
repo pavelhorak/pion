@@ -212,10 +212,10 @@ def _slot_key(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
               mut owned: Bool) -> GenericValue:
     """The key of the document at ingest slot `slot`, for a lookup: the shared
     slot->key map (a copy: `owned`, so the caller frees it with
-    free_str_payload; inline up to 23 bytes), else this worker's
-    `__hk__<slot>` entry (the map's own value: not owned, never freed). NONE
-    when neither has it. Not a borrow: the shared map is no RESP token, and
-    gh #394's audit proves a borrowed key's bytes alive or refuses it."""
+    free_str_payload; inline up to 23 bytes), else this worker's slot map
+    (the map's own value: not owned, never freed). NONE when neither has it.
+    Not a borrow: the shared map is no RESP token, and gh #394's audit proves
+    a borrowed key's bytes alive or refuses it."""
     owned = False
     if is_not_null(shared) and is_not_null(shared[].hk_keys_buf) and slot >= 0 and slot < shared[].hk_max_elements:
         var p = shared[].hk_keys_buf + slot * 32
@@ -223,13 +223,9 @@ def _slot_key(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
         if l > 0 and l <= 31:
             owned = True
             return GenericValue.from_ptr(p + 1, l)
-    if is_null(keyspace) or slot < 0:
+    if is_null(keyspace):
         return GenericValue()
-    var hk = stack_allocation[30, UInt8]()
-    hk[0]=95;hk[1]=95;hk[2]=104;hk[3]=107;hk[4]=95;hk[5]=95 # __hk__
-    var e = format_int_to_buf(hk, 6, Int64(slot))
-    # 6 + at most 19 digits: borrow() packs it inline (SSO), no pointer to hk escapes
-    return keyspace[].get(GenericValue.borrow(hk, e))
+    return keyspace[].vec_key(slot)
 
 
 def _slot_hash(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
@@ -574,9 +570,9 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
     [id, <id-value>, score, <dist>] when the doc hash has an "id" field on THIS
     worker, else [score, <dist>].
     Key resolution order: shared slot→key map (one direct load — the
-    fast-path HSET writes it on every vector ingest), then the keyspace
-    __hk__<slot> probe (covers original keys >31B that don't fit the shared
-    map's 32B slots), then the numeric slot id.
+    fast-path HSET writes it on every vector ingest), then this worker's slot
+    map (covers original keys >31B that don't fit the shared map's 32B
+    slots), then the numeric slot id.
 
     gh #357: a missing "id" field is OMITTED, never substituted. It used to
     fall back to the key name, so under `-w N` a query answered by a worker
@@ -640,13 +636,8 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
                 key_ptr = _shp + 1
                 key_len = _kl
         if key_len == 0 and is_not_null(keyspace):
-            # __hk__<id> → original hash key (e.g. "doc:0"); keys >31B land here
-            var hk_buf = stack_allocation[30, UInt8]()
-            hk_buf[0]=95;hk_buf[1]=95;hk_buf[2]=104;hk_buf[3]=107;hk_buf[4]=95;hk_buf[5]=95 # __hk__
-            var hk_end = format_int_to_buf(hk_buf, 6, Int64(did))
-            var hk_val = keyspace[].get(GenericValue.borrow(hk_buf, hk_end))
-            if not hk_val.is_none():
-                result_key = hk_val
+            # the worker's slot map → original hash key (e.g. "doc:0"); keys >31B land here
+            result_key = keyspace[].vec_key(did)
 
         # The doc's hash, when this worker holds it: one keyspace probe with
         # the already-resolved key. NOCONTENT needs none.
@@ -1499,7 +1490,7 @@ def build_bm25(
     * **Doc set** is `union(HNSW nodes, FT.ADDTEXT registrations)`, not the node
       list. FT.ADDTEXT creates no node, so an ADDTEXT-only corpus used to build
       an empty index and `FT.SEARCH … BM25` returned `[0]` with no error.
-    * **Text lookup** tries `__hk__<ext_id>` → original key first (so
+    * **Text lookup** tries the slot map (`ext_id` → original key) first (so
       `HSET doc:7 body …` works) and falls back to the literal decimal key (so
       `FT.ADDTEXT idx 7 …` works). Only the latter used to be tried.
     * **No caps.** Vocabulary (was 32K terms) and per-doc unique terms (was 64)
@@ -1585,10 +1576,8 @@ def build_bm25(
         var ext_id = Int(doc_ids[didx])
         doc_fwd_start[didx] = UInt32(fwd_count)
         doc_fwd_len[didx]   = 0
-        # __hk__<ext_id> → original key → HASH, else the literal decimal key
-        key_buf[0]=95;key_buf[1]=95;key_buf[2]=104;key_buf[3]=107;key_buf[4]=95;key_buf[5]=95  # __hk__
-        var hk_end = format_int_to_buf(key_buf, 6, Int64(ext_id))
-        var hk_val = keyspace[].get(GenericValue.borrow(key_buf, hk_end))
+        # the slot map: ext_id → original key → HASH, else the literal decimal key
+        var hk_val = keyspace[].vec_key(ext_id)
         var doc_val: GenericValue
         if not hk_val.is_none():
             doc_val = keyspace[].get(hk_val)
@@ -2155,6 +2144,7 @@ def handle_ft_dropindex(
     num_workers: Int,
     mut dd_keys: List[UInt8],
     mut dd_ends: List[Int],
+    mut dropped: Bool,
 ) -> Int:
     """FT.DROPINDEX <index_name> [DD] — reset the HNSW index.
     Returns the new token index after consuming arguments.
@@ -2165,12 +2155,15 @@ def handle_ft_dropindex(
     An unknown name is refused and nothing is touched, as in RediSearch.
 
     DD deletes the index's documents too, as in RediSearch: their keys come
-    back in `dd_keys` (the bytes, each key ending at its `dd_ends` entry,
-    with each document's `__hk__<slot>` link), and the caller deletes them
-    the way DEL does. DD was read and dropped, so the
-    documents stayed; any other argument is refused (it dropped the index).
-    Under -w N each worker holds its own documents (gh #253), and one worker
-    cannot delete another's: DD is refused there."""
+    back in `dd_keys` (the bytes, each key ending at its `dd_ends` entry),
+    and the caller deletes them the way DEL does. DD was read and dropped, so
+    the documents stayed; any other argument is refused (it dropped the
+    index). Under -w N each worker holds its own documents (gh #253), and one
+    worker cannot delete another's: DD is refused there.
+
+    `dropped` is set when the index went, so the caller clears this worker's
+    slot map and dead slots, which describe it."""
+    dropped = False
     if i + 1 >= num_tokens:
         writer.append_error_response("ERR wrong number of arguments for 'ft.dropindex' command")
         return i
@@ -2208,8 +2201,6 @@ def handle_ft_dropindex(
         if rows > shared_hnsw[].hk_max_elements:
             rows = shared_hnsw[].hk_max_elements
         var kbuf = alloc[UInt8](24)
-        var hk = alloc[UInt8](32)
-        hk[0]=95;hk[1]=95;hk[2]=104;hk[3]=107;hk[4]=95;hk[5]=95 # __hk__
         for s in range(rows):
             if shared_hnsw[].slot_dead(s):
                 continue
@@ -2223,13 +2214,9 @@ def handle_ft_dropindex(
                 dd_keys.append(kp[b])
             dd_ends.append(len(dd_keys))
             if owned: key.free_str_payload()
-            var he = format_int_to_buf(hk, 6, Int64(s))
-            for b in range(he):
-                dd_keys.append(hk[b])
-            dd_ends.append(len(dd_keys))
         kbuf.free()
-        hk.free()
     retire_index(hnsw, shared_hnsw, worker_id)
+    dropped = True
     # The name leaves the registry, so FT.INFO on EVERY worker now says
     # "Unknown index name" — a borrower's stale local name must not keep a
     # dropped index alive (clients probe FT.INFO to decide whether to
@@ -3475,13 +3462,9 @@ def handle_ft_hybrid(
         if _tf_name_len > 0 and is_not_null(keyspace):
             for _ri in range(_select_n):
                 var _ext_id = _all_ids[_ri]
-                # Match write_ft_search_response's __hk__<id> → hash key lookup.
+                # Match write_ft_search_response's slot map → hash key lookup.
                 var _hash_ptr = null_ptr[SlabHashMap, MutUntrackedOrigin]()
-                var _hk_buf = stack_allocation[30, UInt8]()
-                _hk_buf[0]=95; _hk_buf[1]=95; _hk_buf[2]=104; _hk_buf[3]=107; _hk_buf[4]=95; _hk_buf[5]=95
-                var _hk_end = format_int_to_buf(_hk_buf, 6, Int64(_ext_id))
-                var _hk_key = GenericValue.from_ptr(_hk_buf, _hk_end)
-                var _hk_val = keyspace[].get(_hk_key)
+                var _hk_val = keyspace[].vec_key(_ext_id)
                 if not _hk_val.is_none():
                     var _doc_val = keyspace[].get(_hk_val)
                     if not _doc_val.is_none() and _doc_val.type.value == ValueType.HASH:

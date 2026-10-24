@@ -2,7 +2,7 @@ from src.common.ptr import null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
-from std.memory import unsafe_memset, unsafe_memcpy
+from std.memory import unsafe_memset, unsafe_memcpy, stack_allocation
 from std.sys.intrinsics import prefetch
 from std.bit import count_trailing_zeros
 from std.math import iota
@@ -10,6 +10,7 @@ from std.collections import List
 from src.common.value import GenericValue, ValueType, BLOB_TAG
 from src.common.prng import Xoshiro256PlusPlus
 from src.common.vec_tomb import VecTomb
+from src.common.utils import format_int_to_buf
 
 # Per-lane weights (1 << lane) for packing a 16-lane bool compare into a
 # movemask-style bitmask. Computed once at compile time.
@@ -961,6 +962,11 @@ struct SlabHashMap(Movable):
                 self.values[unsafe_offset=i].free_str_payload()  # gh #123: free value heap payloads
                 (self.values.unsafe_offset(i)).unsafe_deinit_pointee()
             self.values.unsafe_free()
+
+
+comptime VEC_KEY_SHARDS = 8
+
+
 struct StripedHashMap(Movable):
     """8-shard Swiss Table. Eliminates O(N) rehash pauses — each shard is 8x smaller.
     Each shard rehashes independently: worst-case pause = 1/8 of an equivalent single-map rehash.
@@ -999,6 +1005,16 @@ struct StripedHashMap(Movable):
     # #45: on a replica, a lookup reports an expired key missing without
     # removing it; the primary's DEL does that, as on a Redis replica.
     var expire_hides_only: Bool
+    # The vector index's records on this worker, kept beside the keyspace and
+    # not in it (they were the keys `__hk__<slot>` and `__hk_dead__`, which
+    # DBSIZE, KEYS and SCAN listed and a client could overwrite or delete).
+    # VEC_KEY_SHARDS + 1 maps in one allocation: the first map a slot to the
+    # key of the document ingested into it, chosen by `slot & 7` so that none
+    # rehashes the whole set at once (vec_keys_shard); the last holds the
+    # slots that died, as `<build id>:<slot>` (vec_dead_map). Null until the
+    # first vector is ingested (_vec_alloc). One field: an out-of-line call can
+    # pass this struct field by field (the #49 writer lesson).
+    var vec_maps: Pointer[SlabHashMap, MutUntrackedOrigin]
 
     def __init__(out self, initial_capacity: Int):
         var shard_cap = max(16, initial_capacity // 8)
@@ -1007,6 +1023,7 @@ struct StripedHashMap(Movable):
         self.expired_log = null_ptr[List[UInt8], MutUntrackedOrigin]()
         self.active_expire = True
         self.expire_hides_only = False
+        self.vec_maps = null_ptr[SlabHashMap, MutUntrackedOrigin]()
         self.graveyard = alloc[List[GenericValue]](1)
         self.graveyard.unsafe_write(List[GenericValue]())
         self.field_ttl_index = alloc[SlabHashMap](1)
@@ -1025,6 +1042,7 @@ struct StripedHashMap(Movable):
         self.expired_log = take.expired_log
         self.active_expire = take.active_expire
         self.expire_hides_only = take.expire_hides_only
+        self.vec_maps = take.vec_maps
 
     def __del__(deinit self):
         if Int(self.shards) != 0:
@@ -1040,6 +1058,10 @@ struct StripedHashMap(Movable):
         if Int(self.expired_log) != 0:
             self.expired_log.unsafe_deinit_pointee()
             self.expired_log.unsafe_free()
+        if Int(self.vec_maps) != 0:
+            for i in range(VEC_KEY_SHARDS + 1):
+                (self.vec_maps.unsafe_offset(i)).unsafe_deinit_pointee()
+            self.vec_maps.unsafe_free()
 
     @always_inline
     def _shard(self, h: UInt64) -> Int:
@@ -1247,6 +1269,88 @@ struct StripedHashMap(Movable):
         # flushed name expires at the old deadline.
         if Int(self.ttl_map) != 0:
             self.ttl_map[].reset()
+        # vec_maps stay: they are the vector index's, and FLUSHALL
+        # keeps the index. Its documents die with their hashes (#46), and the
+        # dead-slot records are what keep them dead after a restart.
+
+    # ── The vector index's slot map and dead slots ──────────────────────────
+
+    def _vec_alloc(mut self):
+        if Int(self.vec_maps) != 0:
+            return
+        self.vec_maps = alloc[SlabHashMap](VEC_KEY_SHARDS + 1)
+        for i in range(VEC_KEY_SHARDS + 1):
+            (self.vec_maps.unsafe_offset(i)).unsafe_write(SlabHashMap(16))
+
+    @always_inline
+    def has_vec(self) -> Bool:
+        return Int(self.vec_maps) != 0
+
+    @always_inline
+    def vec_keys_shard(self, i: Int) -> Pointer[SlabHashMap, MutUntrackedOrigin]:
+        """Slot-map shard `i` (0 to VEC_KEY_SHARDS - 1). has_vec() first."""
+        return self.vec_maps.unsafe_offset(i)
+
+    @always_inline
+    def vec_dead_map(self) -> Pointer[SlabHashMap, MutUntrackedOrigin]:
+        """The dead-slot set. has_vec() first."""
+        return self.vec_maps.unsafe_offset(VEC_KEY_SHARDS)
+
+    def vec_key(self, slot: Int) -> GenericValue:
+        """The key of the document this worker ingested into vector slot
+        `slot`: the map's own value (not owned, never freed), or NONE."""
+        if Int(self.vec_maps) == 0 or slot < 0:
+            return GenericValue()
+        var buf = stack_allocation[24, UInt8]()
+        var e = format_int_to_buf(buf, 0, Int64(slot))
+        # at most 19 digits: borrow() packs them inline, no pointer to buf escapes
+        return self.vec_maps[unsafe_offset=slot & (VEC_KEY_SHARDS - 1)].get(GenericValue.borrow(buf, e))
+
+    def set_vec_key(mut self, slot: Int, key: Pointer[UInt8, MutUntrackedOrigin], klen: Int):
+        """Slot `slot` holds the document at `key` (copied)."""
+        if slot < 0:
+            return
+        self._vec_alloc()
+        var buf = stack_allocation[24, UInt8]()
+        var e = format_int_to_buf(buf, 0, Int64(slot))
+        self.vec_maps[unsafe_offset=slot & (VEC_KEY_SHARDS - 1)].set(
+            GenericValue.borrow(buf, e), GenericValue.borrow(key, klen))
+
+    def remove_vec_key(mut self, slot: Int):
+        if Int(self.vec_maps) == 0 or slot < 0:
+            return
+        var buf = stack_allocation[24, UInt8]()
+        var e = format_int_to_buf(buf, 0, Int64(slot))
+        _ = self.vec_maps[unsafe_offset=slot & (VEC_KEY_SHARDS - 1)].remove_generic(GenericValue.borrow(buf, e))
+
+    def clear_vec_keys(mut self):
+        if Int(self.vec_maps) == 0:
+            return
+        for i in range(VEC_KEY_SHARDS):
+            self.vec_maps[unsafe_offset=i].reset()
+
+    def add_vec_dead(mut self, m: Pointer[UInt8, MutUntrackedOrigin], ml: Int) -> Bool:
+        """Record dead slot `m` (`<build id>:<slot>`). False when it already was."""
+        self._vec_alloc()
+        var d = self.vec_dead_map()
+        var k = GenericValue.borrow(m, ml)
+        if not d[].get(k).is_none():
+            return False
+        d[].set(k, GenericValue.from_int(1))
+        return True
+
+    def clear_vec_dead(mut self):
+        if Int(self.vec_maps) != 0:
+            self.vec_dead_map()[].reset()
+
+    def vec_record_count(self) -> Int:
+        """How many slot-map and dead-slot entries this worker holds."""
+        if Int(self.vec_maps) == 0:
+            return 0
+        var n = 0
+        for i in range(VEC_KEY_SHARDS + 1):
+            n += self.vec_maps[unsafe_offset=i].size
+        return n
 
     @always_inline
     def note_field_ttl(mut self, key: GenericValue):

@@ -7,7 +7,10 @@ File format (pion.wal.{worker_id}):
     [8B] tail_offset — byte offset from data-section start of next write
     [8B] worker_id
     [8B] seq — monotonic entry counter (incremented per append)
-    [32B] reserved
+    [8B] flags — bit 0: the vector slot map is in records 46-48 (1.0.5)
+    [8B] the offset records 46-48 start at (records below it are an older
+         server's; see "The vector index's slot map" below)
+    [16B] reserved
 
   Data section (byte 64 → file_size):
     Entries packed contiguously. No wrap.
@@ -95,6 +98,25 @@ element exactly as the live VREM does.
  29 = VREM     val = element name.
  30 = VSETATTR val = [4B name_len][name][4B attr_len][attr]; empty = none.
 
+The vector index's slot map and dead slots (StripedHashMap.vec_maps), which
+1.0.4 and earlier kept as the keyspace keys `__hk__<slot>` (cmd 1) and the
+set `__hk_dead__` (cmd 8):
+
+ 46 = VEC_KEY   key = the slot in decimal, val = the document's key; an empty
+                val removes the slot's entry.
+ 47 = VEC_DEAD  key = `<build id>:<slot>`, a slot that died. No val.
+ 48 = VEC_CLEAR key = [1B what]: bit 0 drops the dead slots (a new build
+                records them again under its id), bit 1 the slot map
+                (FT.DROPINDEX).
+
+Header word 4 bit 0 (WAL_HDR_VEC_KEYS) says the segment was written by a
+server that logs these; word 5 is the offset its records start at, which is
+the old tail when such a server opened a file an older one wrote. A record
+below it is an older server's, and replay reads its `__hk__` / `__hk_dead__`
+records into the maps (wal_apply_legacy_vec) instead of the keyspace. A
+record at or past it is not, so a client's own key named `__hk__7` stays a
+key.
+
 HLL PFMERGE logs its result as a cmd-17 image rather than a cmd-24 element:
 the merge output is a register-wise max over sources, which no element replay
 can reconstruct.
@@ -125,7 +147,7 @@ from std.memory import unsafe_memcpy, unsafe_memset, alloc
 from std.ffi import external_call
 from std.collections import List, Span
 
-from src.common.hash_map import StripedHashMap, SlabHashMap
+from src.common.hash_map import StripedHashMap, SlabHashMap, VEC_KEY_SHARDS
 from src.common.value import GenericValue, ValueType
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
@@ -147,6 +169,15 @@ comptime MS_SYNC          = Int32(2)
 # 32 x 256 MB = 8 GB of unsnapshotted delta — past that the operator wants a
 # SAVE/BGSAVE, not more disk.
 comptime WAL_MAX_SEGMENTS = 32
+# Header words 4 and 5: see "The vector index's slot map" above.
+comptime WAL_HDR_FLAGS     = 4
+comptime WAL_HDR_VEC_FROM  = 5
+comptime WAL_HDR_VEC_KEYS  = UInt64(1)
+comptime VEC_KEY_REC   = UInt8(46)
+comptime VEC_DEAD_REC  = UInt8(47)
+comptime VEC_CLEAR_REC = UInt8(48)
+comptime VEC_CLEAR_DEAD = 1
+comptime VEC_CLEAR_KEYS = 2
 # gh #149 perf: alignment grain for the delta msync in sync(). 16 KB is the
 # macOS ARM page size and a multiple of Linux's 4 KB, so a boundary aligned to
 # it satisfies msync's page-alignment requirement on both.
@@ -338,7 +369,97 @@ def wal_is_aggregate(cmd_id: UInt8) -> Bool:
     replayer and the snapshot loader, so a new record kind cannot reach one
     and be skipped by the other."""
     return (cmd_id >= 5 and cmd_id <= 24) or (cmd_id >= 27 and cmd_id <= 34) \
-        or (cmd_id >= 38 and cmd_id <= 45)      # #40: stream metadata and consumer groups
+        or (cmd_id >= 38 and cmd_id <= 45) \
+        or (cmd_id >= 46 and cmd_id <= 48)      # the vector slot map and dead slots
+
+
+def _dec_slot(p: Pointer[UInt8, MutUntrackedOrigin], l: Int) -> Int:
+    """`p[:l]` as a slot number: 1 to 18 decimal digits, else -1."""
+    if l < 1 or l > 18:
+        return -1
+    var v = 0
+    for i in range(l):
+        var c = Int(p[unsafe_offset=i])
+        if c < 48 or c > 57:
+            return -1
+        v = v * 10 + c - 48
+    return v
+
+
+def _apply_vec_record(cmd_id: UInt8,
+                      kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
+                      vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int,
+                      keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Bool:
+    """Records 46-48: the vector slot map and dead slots."""
+    if cmd_id == VEC_KEY_REC:
+        var slot = _dec_slot(kp, kl)
+        if slot < 0:
+            return False
+        if vl == 0:
+            keyspace[].remove_vec_key(slot)
+        else:
+            keyspace[].set_vec_key(slot, vp, vl)
+        return True
+    if cmd_id == VEC_DEAD_REC:
+        if kl == 0:
+            return False
+        _ = keyspace[].add_vec_dead(kp, kl)
+        return True
+    if kl != 1:
+        return False
+    var what = Int(kp[unsafe_offset=0])
+    if (what & VEC_CLEAR_DEAD) != 0:
+        keyspace[].clear_vec_dead()
+    if (what & VEC_CLEAR_KEYS) != 0:
+        keyspace[].clear_vec_keys()
+    return True
+
+
+def legacy_hk_slot(p: Pointer[UInt8, MutUntrackedOrigin], l: Int) -> Int:
+    """The slot of an older server's `__hk__<slot>` key, else -1."""
+    if l < 7 or p[unsafe_offset=0] != 95 or p[unsafe_offset=1] != 95 or p[unsafe_offset=2] != 104 \
+            or p[unsafe_offset=3] != 107 or p[unsafe_offset=4] != 95 or p[unsafe_offset=5] != 95:
+        return -1
+    return _dec_slot(p.unsafe_offset(6), l - 6)
+
+
+def is_legacy_hk_dead(p: Pointer[UInt8, MutUntrackedOrigin], l: Int) -> Bool:
+    """The key `__hk_dead__`."""
+    if l != 11:
+        return False
+    var b = SIMD[DType.uint8, 16](95, 95, 104, 107, 95, 100, 101, 97, 100, 95, 95, 0, 0, 0, 0, 0)
+    for i in range(11):
+        if p[unsafe_offset=i] != b[i]:
+            return False
+    return True
+
+
+def wal_apply_legacy_vec(cmd_id: UInt8,
+                         kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int,
+                         vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int,
+                         keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Bool:
+    """A record from a file an older server wrote, which kept the vector slot
+    map as keys: `SET __hk__<slot> <key>`, `DEL __hk__<slot>` (FT.DROPINDEX
+    DD), `SADD __hk_dead__ <member>` and `DEL __hk_dead__` (a new build). Read
+    it into the maps, and True; False for any other record. Only for records
+    the header marks as an older server's: in a newer file the same bytes are
+    a client's own key."""
+    if cmd_id == 1 or cmd_id == 2:
+        var slot = legacy_hk_slot(kp, kl)
+        if slot >= 0:
+            if cmd_id == 1:
+                keyspace[].set_vec_key(slot, vp, vl)
+            else:
+                keyspace[].remove_vec_key(slot)
+            return True
+        if cmd_id == 2 and is_legacy_hk_dead(kp, kl):
+            keyspace[].clear_vec_dead()
+            return True
+        return False
+    if cmd_id == 8 and is_legacy_hk_dead(kp, kl):
+        _ = keyspace[].add_vec_dead(vp, vl)
+        return True
+    return False
 
 
 def _replay_vset_field(vp: Pointer[UInt8, MutUntrackedOrigin], vl: Int,
@@ -411,6 +532,8 @@ def wal_apply_aggregate(cmd_id: UInt8,
     Semantics mirror the live execute path; malformed records are skipped."""
     if cmd_id == 31:     # MSET [varint kl][key][varint vl][val]...
         return wal_apply_mset(vp, vl, keyspace) > 0
+    if cmd_id >= 46 and cmd_id <= 48:
+        return _apply_vec_record(cmd_id, kp, kl, vp, vl, keyspace)
     # gh #394: borrowed — the record outlives this call, and every use below is
     # a map call (which copies what it keeps). A from_ptr copy leaked once per
     # replayed or replicated record whose key already existed.
@@ -986,10 +1109,17 @@ struct WAL(Movable):
             hdr[unsafe_offset=1] = 0                   # tail_offset
             hdr[unsafe_offset=2] = UInt64(worker_id)
             hdr[unsafe_offset=3] = 0                   # seq
+            hdr[unsafe_offset=WAL_HDR_FLAGS] = WAL_HDR_VEC_KEYS
+            hdr[unsafe_offset=WAL_HDR_VEC_FROM] = 0
         else:
             # Existing WAL — pick up where we left off
             self.tail_offset = hdr[unsafe_offset=1]
             self.seq = hdr[unsafe_offset=3]
+            if (hdr[unsafe_offset=WAL_HDR_FLAGS] & WAL_HDR_VEC_KEYS) == 0:
+                # An older server's file: its records so far keep the vector
+                # slot map as keys, the ones appended from here do not.
+                hdr[unsafe_offset=WAL_HDR_FLAGS] |= WAL_HDR_VEC_KEYS
+                hdr[unsafe_offset=WAL_HDR_VEC_FROM] = self.tail_offset
 
         self.current_size = Int(self.tail_offset)
 
@@ -1576,6 +1706,9 @@ struct WAL(Movable):
         hdr[unsafe_offset=0] = WAL_MAGIC
         hdr[unsafe_offset=1] = UInt64(tail)
         hdr[unsafe_offset=3] = seq
+        if tail == 0:                    # a fresh file (not the one a failed rename kept)
+            hdr[unsafe_offset=WAL_HDR_FLAGS] |= WAL_HDR_VEC_KEYS
+            hdr[unsafe_offset=WAL_HDR_VEC_FROM] = 0
         self.dirty = True
         return True
 
@@ -1792,6 +1925,11 @@ struct WAL(Movable):
         var replayed = 0
         var offset = UInt64(0)
         var data = map.unsafe_offset(WAL_HEADER_SIZE)
+        # Records below `vec_from` are an older server's: their `__hk__` keys
+        # are the vector slot map (wal_apply_legacy_vec).
+        var hw = map.unsafe_bitcast[UInt64]()
+        var vec_from = hw[unsafe_offset=WAL_HDR_VEC_FROM] \
+            if (hw[unsafe_offset=WAL_HDR_FLAGS] & WAL_HDR_VEC_KEYS) != 0 else UInt64.MAX
 
         while offset + 13 <= tail:   # min entry = 4+1+4+0+4+0 = 13 bytes
             var p = data.unsafe_offset(Int(offset))
@@ -1812,7 +1950,10 @@ struct WAL(Movable):
             if val_off + Int(vl) > Int(tail):
                 break
 
-            if cmd_id == 1:   # SET
+            if offset < vec_from and wal_apply_legacy_vec(cmd_id, data.unsafe_offset(key_off), Int(kl),
+                                                         data.unsafe_offset(val_off), Int(vl), keyspace):
+                replayed += 1
+            elif cmd_id == 1:   # SET
                 # gh #394: the key borrows the mapped log (set() copies it only
                 # if it inserts); a from_ptr copy leaked on every overwrite.
                 keyspace[].set(GenericValue.borrow(data.unsafe_offset(key_off), Int(kl)),
@@ -1892,6 +2033,8 @@ struct WAL(Movable):
         var hdr = self.map.unsafe_bitcast[UInt64]()
         hdr[unsafe_offset=1] = 0
         hdr[unsafe_offset=3] = 0
+        hdr[unsafe_offset=WAL_HDR_FLAGS] |= WAL_HDR_VEC_KEYS   # empty: no older server's records
+        hdr[unsafe_offset=WAL_HDR_VEC_FROM] = 0
         _ = external_call["pion_wal_msync", Int32](
             self.map, WAL_HEADER_SIZE, MS_ASYNC)
         self._repl_attach()
@@ -2069,7 +2212,40 @@ struct WAL(Movable):
                         _ = self.append_u64_val(25, kp, kl, UInt64(dl.as_int()),
                                                 null_ptr[UInt8, MutUntrackedOrigin](), 0)
         kbuf.unsafe_free()
+        self.append_vec_records(keyspace)
         self.sync()
+
+    def append_vec_records(mut self, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]):
+        """The vector slot map and dead slots, whole: a 48 that clears both,
+        then a 46 per slot and a 47 per dead slot. The snapshot writes the
+        same records."""
+        if is_null(self.map) or not keyspace[].has_vec():
+            return
+        var sbuf = alloc[UInt8](64)
+        var kbuf = alloc[UInt8](64)
+        sbuf[0] = UInt8(VEC_CLEAR_DEAD | VEC_CLEAR_KEYS)
+        _ = self.append(VEC_CLEAR_REC, sbuf, 1)
+        for si in range(VEC_KEY_SHARDS):
+            var mp = keyspace[].vec_keys_shard(si)
+            for i in range(mp[].capacity):
+                var m = mp[].metadata[unsafe_offset=i]
+                if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
+                    continue
+                var sl = 0
+                var sp = gv_bytes(mp[].keys[unsafe_offset=i], sbuf, sl)
+                var kl = 0
+                var kp = gv_bytes(mp[].values[unsafe_offset=i], kbuf, kl)
+                _ = self.append_kv(VEC_KEY_REC, sp, sl, kp, kl)
+        var dp = keyspace[].vec_dead_map()
+        for i in range(dp[].capacity):
+            var m = dp[].metadata[unsafe_offset=i]
+            if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
+                continue
+            var ml = 0
+            var mb = gv_bytes(dp[].keys[unsafe_offset=i], sbuf, ml)
+            _ = self.append(VEC_DEAD_REC, mb, ml)
+        sbuf.unsafe_free()
+        kbuf.unsafe_free()
 
     # ── Cleanup ─────────────────────────────────────────────────────────────
 

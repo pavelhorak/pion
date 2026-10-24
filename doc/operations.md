@@ -283,6 +283,29 @@ A file the server cannot use — an older format, or a quant format different
 from the server's current flags — is **refused with a log line** and the index
 is rebuilt cold (re-ingest + `FT.OPTIMIZE`).
 
+**From 1.0.5 the file is version 5**, with version 4's layout. The index's slot
+map moved out of the keyspace in 1.0.5 (`doc/vector_engine.md`, "The index's
+records are not keys"), and a server before it reads that map from keys this
+release no longer writes. So 1.0.4 and earlier refuse a version 5 file, with
+`HNSW snapshot version 5 unsupported (want 3 or 4)`, and serve no index:
+`FT.CREATE` there indexes the existing hashes again. Without the version they
+would load the file and answer wrongly, with no error. Measured with 1.0.4: an
+index `FT.OPTIMIZE` built answered with slot numbers for keys over 31 bytes,
+brought a deleted document back and ignored a `DEL`; an automatically built
+one left 167 of 302 documents unable to find themselves.
+
+Upgrading needs nothing. A data directory 1.0.4 or earlier wrote holds the map
+as keys, `__hk__<slot>` and `__hk_dead__`, and 1.0.5 reads them into the map
+instead of the keyspace. The WAL marks where its own records start (header
+word 4 bit 0, and word 5 the offset; a file it opens that an older server
+wrote gets the old tail there), and the snapshot header says the same (flags
+at byte 32, bit 0), so a client's own key named `__hk__7` written after the
+upgrade stays a key. Keys an older server writes after that, on the same data
+directory (a downgrade, an index created there, and back), are taken out of
+the keyspace at startup: a `__hk__<slot>` whose value names a hash or whose
+slot that server recorded dead, and a `__hk_dead__` whose members are all
+`<build id>:<slot>`. The log says how many.
+
 Verify: `python3 tests/test_gh211_warm_restart.py --quant {int8,polarquant,turboquant,nanoquant}`
 asserts the quantized build really ran, then compares recall against brute
 force before and after SIGTERM.

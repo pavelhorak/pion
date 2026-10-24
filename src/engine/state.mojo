@@ -16,7 +16,7 @@ from src.network.gossip import GossipManager
 from src.network.replication import PrimaryReplicator, ReplicaReceiver, apply_wal_entries
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.vec_tomb import VecTomb
-from src.network.vector_ingest import restore_index_state
+from src.network.vector_ingest import restore_index_state, adopt_legacy_slot_keys
 from src.network.vector_auto import reopen_after_load, vector_restart_refill
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
@@ -276,6 +276,8 @@ struct Pion:
                     break
         # #46: the index has loaded (or there is none): apply this worker's
         # recorded tombstones for its build and relink the hashes to their slots
+        # (first taking any slot-map keys an older server left in the keyspace)
+        _ = adopt_legacy_slot_keys(self.shared_hnsw, self.keyspace, self.wal)
         restore_index_state(self.shared_hnsw, self.keyspace, self.vec_tomb)
         # A reopened index: this worker's hashes the graph lacks are the delta,
         # and no worker serves until every worker has refilled its rows
