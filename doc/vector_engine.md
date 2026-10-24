@@ -295,8 +295,9 @@ On a RESP3 connection (`HELLO 3`, and redis-py 8 by default) the reply is RediSe
 
 This shape is emitted at every worker count. Doc-key resolution order:
 shared `hk_keys_buf` slot→key map (one direct load; written by the fast-path
-vector HSET), then the keyspace `__hk__<slot>` probe (keys >31B that don't fit
-the shared map's 32-byte slots), then the numeric slot id. Field values come
+vector HSET), then the answering worker's slot map (keys >31B that don't fit
+the shared map's 32-byte slots; see "The index's records are not keys"), then
+the numeric slot id. Field values come
 from the doc hash on the worker answering the query. Under `-w N` the keyspace
 is per worker, so a worker that does not hold a document's hash sends none of
 its fields, as Redis leaves out a field a document lacks: it never substitutes
@@ -334,8 +335,16 @@ Mechanics:
 - The hash records its slot. The slot dies with the hash, or with its vector field.
 - A dead slot is one byte in an array all workers share, so a search on any worker skips it at once.
 - The graph is not changed. Dead nodes still route the beam, as HNSW soft deletes do, and `FT.SEARCH` filters them out of the results. The KNN path widens its candidates until it has k live documents.
-- Each worker records the slots it killed as members `<build id>:<slot>` of an internal set, `__hk_dead__`. The WAL, snapshots and replication carry it like any set.
+- Each worker records the slots it killed as `<build id>:<slot>`, in a table beside the keyspace (WAL record 47). The WAL, snapshots and replication carry it.
 - A restart applies the members whose build id matches the loaded index. Each `FT.OPTIMIZE` draws a new build id, saved in index header word 31.
+
+### The index's records are not keys
+
+Each document the index ingests gets a slot, and the worker that ingested it keeps the slot's key in a slot map, beside the keyspace. The map resolves keys over 31 bytes in `FT.SEARCH` replies, and BM25, RERANK and `FT.DROPINDEX DD` read it. After a restart it links each hash back to its slot, which is what lets a `DEL` after the restart remove the document. The dead slots above live beside it.
+
+Until 1.0.5 both were keys: `__hk__<slot>` held the document's key, and the set `__hk_dead__` held the dead slots. So `DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY` and `INFO`'s key count saw twice the keys a client wrote, and a client's own key named `__hk__7` was overwritten when slot 7 was ingested. Deleting them, with `SCAN MATCH` and `DEL` or any cleanup of unknown keys, left every document deleted after the next restart in the results. `FLUSHALL` keeps both tables, as it keeps the index; its documents die with their hashes.
+
+Persistence: WAL records 46 (a slot's key), 47 (a dead slot) and 48 (clear the dead slots, or the whole map); every snapshot and `BGREWRITEAOF` writes them. A data directory an older server wrote loads as it is (see `doc/operations.md` §3c). `tests/test_vector_slot_map.py` checks the keyspace, a client's `__hk__7`, restarts through the WAL, `SAVE` and `BGREWRITEAOF`, `DD`, `-w 4`, a replica, and both upgrade paths.
 
 ### Searching without FT.OPTIMIZE
 
@@ -360,7 +369,7 @@ Only the worker whose graph holds the published index rebuilds it. `FT.CREATE`, 
 ```
 FT.DROPINDEX <index> [DD]
 ```
-`DD` also deletes the index's documents, as in RediSearch: each live document's key goes as with `DEL` (WAL record, `WATCH`), with Pion's own `__hk__<slot>` link. Before 1.0.4 `DD` was read and dropped, so the documents stayed. Under `-w N` each worker holds its own documents, and one worker cannot delete another's: `DD` is refused there. Any other argument is refused (it used to drop the index anyway).
+`DD` also deletes the index's documents, as in RediSearch: each live document's key goes as with `DEL` (WAL record, `WATCH`). Any drop also clears the worker's slot map and dead slots, which describe the dropped index. Before 1.0.4 `DD` was read and dropped, so the documents stayed. Under `-w N` each worker holds its own documents, and one worker cannot delete another's: `DD` is refused there. Any other argument is refused (it used to drop the index anyway).
 
 Calls `hnsw.reset_index()` — zeroes `num_nodes`, resets `entry_point_id = -1`, clears `node_map` and `visited_map`, resets `index_name_len = 0`, resets `global_min/max` to calibration defaults, sets `index_ready = False`. Returns `+OK`. It also deletes the index file, `pion.hnsw.0`, so a restart does not bring the dropped index back. Before 1.0.2 the file stayed, and after a restart `FT.INFO` and `FT.SEARCH` answered from the dropped index. An `FT.CREATE` that replaces an index of another name or `DIM` deletes its file the same way.
 
@@ -416,8 +425,8 @@ FT.CREATE idx SCHEMA body TEXT vec VECTOR HNSW 6 TYPE FLOAT32 DIM 512 DISTANCE_M
 # (a) text-only — no vector, no embedding sidecar needed
 FT.ADDTEXT idx 7 "the --fa-window flag caps the sliding attention span"
 
-# (b) alongside a vector — any key shape; the __hk__<slot> reverse map
-#     written by the vector HSET is what points BM25 at the text
+# (b) alongside a vector — any key shape; the slot map the vector HSET
+#     writes is what points BM25 at the text
 HSET doc:7 vec <512 float32 LE>
 HSET doc:7 body "the --fa-window flag caps the sliding attention span"
 
