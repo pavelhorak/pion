@@ -209,7 +209,7 @@ struct SharedHNSWView(Movable):
     # Cross-worker slot → original-hash-key mapping. Each slot is 32 bytes:
     # byte 0 = key length (0 = empty), bytes 1..31 = key data. Sized [max_elements * 32]
     # at startup and shared by all workers — fixes multi-worker recall=0 when HSETs
-    # land on one worker (storing __hk__<slot> in its local keyspace) but FT.SEARCH
+    # land on one worker (storing slot → key in its local slot map) but FT.SEARCH
     # runs on another worker and the local lookup misses.
     var hk_keys_buf: Pointer[UInt8, MutUntrackedOrigin]
     var hk_max_elements: Int
@@ -616,7 +616,7 @@ struct SharedHNSWView(Movable):
 
     def add_ingest_vector(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) -> Int:
         """Buffer a FP32 vector during load phase. Called from any worker's HSET handler.
-        Returns the slot index (used as the HNSW node ID for __hk__ key mapping),
+        Returns the slot index (used as the HNSW node ID for the slot → key map),
         or -1 if rejected (buffer not initialised OR ingest_fp32 capacity exhausted)."""
         var dim = self.pre_dim
         if dim <= 0 or is_null(self.ingest_fp32): return -1

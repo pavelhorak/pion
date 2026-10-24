@@ -8,7 +8,10 @@ Header (64 bytes, little-endian):
   [ 4B] worker_id
   [ 8B] kv_count: number of STRING KV entries in data section
   [ 8B] timestamp: Unix seconds at snapshot time
-  [32B] reserved
+  [ 4B] flags: bit 0 (SNAP_FLAG_VEC_KEYS) = the vector slot map is in records
+        46-48, not in `__hk__` keys (a file without it is an older server's,
+        and its `__hk__` / `__hk_dead__` records load into the map)
+  [28B] reserved
 
 Data section: WAL-compatible entries packed contiguously.
   Entry: [4B entry_len][1B cmd_id=1][4B key_len][key bytes][4B val_len][val bytes]
@@ -24,13 +27,14 @@ from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from std.memory import unsafe_memcpy, unsafe_memset, alloc
 
-from src.common.hash_map import StripedHashMap, SlabHashMap
+from src.common.hash_map import StripedHashMap, SlabHashMap, VEC_KEY_SHARDS
 from src.common.value import GenericValue, ValueType
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
 from src.common.hll import HLL_REGISTERS
 from src.io.blob_store import BlobStore
-from src.io.wal import wal_apply_aggregate, wal_apply_ttl, wal_is_aggregate, gv_bytes
+from src.io.wal import wal_apply_aggregate, wal_apply_ttl, wal_is_aggregate, gv_bytes, wal_apply_legacy_vec, \
+    VEC_KEY_REC, VEC_DEAD_REC, VEC_CLEAR_REC, VEC_CLEAR_DEAD, VEC_CLEAR_KEYS
 from src.common.vector_set import VectorSet
 from src.common.stream_data import StreamData, encode_meta_rec, encode_group_rec, encode_consumer_rec, encode_nack_rec
 
@@ -49,6 +53,7 @@ comptime SNAP_MAGIC   = UInt64(0x31504E4150534E50)
 # gh #378 adds vector sets (cmd 28 VADD / 30 VSETATTR) on the same terms.
 comptime SNAP_VERSION = UInt32(2)
 comptime SNAP_HDR_LEN = 64
+comptime SNAP_FLAG_VEC_KEYS = UInt32(1)
 
 
 @always_inline
@@ -466,6 +471,9 @@ struct SnapshotEngine(Movable):
         # #36: a FUNCTION FLUSH record, then one FUNCTION LOAD per library
         var n_libs = Int(external_call["pion_lua_tls_library_count", Int64]())
         kv_count += UInt64(1 + n_libs)
+        # The vector slot map: a clearing 48, then its 46 and 47 records
+        if keyspace[].has_vec():
+            kv_count += UInt64(1 + keyspace[].vec_record_count())
 
         var ts = external_call["pion_get_unix_time", Int64]()
 
@@ -489,6 +497,7 @@ struct SnapshotEngine(Movable):
         _snap_write_u32(hdr, 12, UInt32(worker_id))
         _snap_write_u64(hdr, 16, kv_count)
         _snap_write_u64(hdr, 24, UInt64(ts))
+        _snap_write_u32(hdr, 32, SNAP_FLAG_VEC_KEYS)
         _snap_write_all(fd, hdr, SNAP_HDR_LEN)
         hdr.unsafe_free()
 
@@ -540,6 +549,32 @@ struct SnapshotEngine(Movable):
                 sink.write(ehdr, 4)
                 scored.unsafe_bitcast[UInt64]()[unsafe_offset=0] = deadline
                 sink.write(scored, 8)
+
+        # The vector slot map and dead slots, as WAL.append_vec_records logs
+        # them. The clearing 48 first, so a replica loading this image (a
+        # FULLRESYNC) keeps no entry of its own: a FLUSH leaves the maps alone.
+        if keyspace[].has_vec():
+            scored[unsafe_offset=0] = UInt8(VEC_CLEAR_DEAD | VEC_CLEAR_KEYS)
+            _sink_record(sink, ehdr, VEC_CLEAR_REC, scored, 1, scored, 0)
+            for vsi in range(VEC_KEY_SHARDS):
+                var vm = keyspace[].vec_keys_shard(vsi)
+                for i in range(vm[].capacity):
+                    var m = vm[].metadata[unsafe_offset=i]
+                    if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
+                        continue
+                    var sl = 0
+                    var sp = gv_bytes(vm[].keys[unsafe_offset=i], sso_buf, sl)
+                    var dl = 0
+                    var dp = gv_bytes(vm[].values[unsafe_offset=i], vbuf, dl)
+                    _sink_record(sink, ehdr, VEC_KEY_REC, sp, sl, dp, dl)
+            var vd = keyspace[].vec_dead_map()
+            for i in range(vd[].capacity):
+                var m = vd[].metadata[unsafe_offset=i]
+                if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
+                    continue
+                var ml = 0
+                var mp = gv_bytes(vd[].keys[unsafe_offset=i], sso_buf, ml)
+                _sink_record(sink, ehdr, VEC_DEAD_REC, mp, ml, sso_buf, 0)
 
         # #36: the FUNCTION libraries. FLUSH first, so a replica loading this
         # image (a FULLRESYNC) also drops libraries the primary has deleted.
@@ -605,6 +640,8 @@ struct SnapshotEngine(Movable):
 
         var kv_count = Int(_snap_read_u64(hdr, 16))
         var ts       = Int64(_snap_read_u64(hdr, 24))
+        # An older server's file: its `__hk__` keys are the vector slot map
+        var legacy_vec = (_snap_read_u32(hdr, 32) & SNAP_FLAG_VEC_KEYS) == 0
         hdr.unsafe_free()
 
         # Read entries
@@ -646,7 +683,9 @@ struct SnapshotEngine(Movable):
                 val_buf.unsafe_free()
                 break
 
-            if cmd_id == 1:   # SET
+            if legacy_vec and wal_apply_legacy_vec(cmd_id, key_buf, kl, val_buf, vl, keyspace):
+                replayed += 1
+            elif cmd_id == 1:   # SET
                 var key_gv = GenericValue.from_ptr(key_buf, kl)
                 var val_gv = GenericValue.from_ptr(val_buf, vl)
                 keyspace[].set(key_gv, val_gv)

@@ -454,6 +454,14 @@ case("built.hdel_tag", setup=BUILT + [("HDEL", "doc:0", "cat")], steps=[("tag", 
 case("built.add", setup=BUILT + [hset("doc:100", dict(base_doc(5), vec=f32(QUERIES[1])))],
      steps=[("knn", ids(1, 41, extra=SC + ("LIMIT", "0", "3"))), ("info", INFO)])
 
+# The index adds no key: RediSearch keeps its records out of the keyspace, and
+# Pion has since 1.0.5 (they were `__hk__<slot>` and `__hk_dead__`)
+case("keyspace.dbsize", setup=BUILT + [("DEL", "doc:3")],
+     steps=[("dbsize", ("DBSIZE",)), ("hk", ("EXISTS", "__hk__0", "__hk__1", "__hk_dead__"))])
+case("keyspace.client_hk", before=[("SET", "__hk__1", "mine"), ("SADD", "__hk_dead__", "a")],
+     setup=BUILT + [("DEL", "doc:2")],
+     steps=[("get", ("GET", "__hk__1")), ("smembers", ("SMEMBERS", "__hk_dead__")), ("dbsize", ("DBSIZE",))])
+
 # FT.DROPINDEX and the rest of the module ---------------------------------------------
 case("drop.keepdocs", steps=[("drop", ("FT.DROPINDEX", "idx")), ("exists", ("EXISTS", "doc:1", "doc:2")),
                               ("info", INFO), ("search", ids())])

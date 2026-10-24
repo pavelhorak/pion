@@ -1210,7 +1210,11 @@ struct HNSWGraph(Movable):
         # resolution tier misses after restart and FT.SEARCH emits raw slot
         # numbers: the silent recall ≈ 0.002). v2 files are refused loudly —
         # they reproduce exactly that bug.
-        hdr[1] = UInt64(4)                   # version (v4: node_map and pool trimmed to the index)
+        # v5 (1.0.5) has v4's layout. It says the vector slot map is in WAL
+        # records 46-48, not in the keys `__hk__<slot>` an older server reads
+        # it from: a server before 1.0.5 refuses the file (it wants 3 or 4)
+        # rather than load it and answer with keys it cannot resolve.
+        hdr[1] = UInt64(5)                   # version (v4: node_map and pool trimmed to the index)
         hdr[2] = UInt64(self.num_nodes)
         hdr[3] = UInt64(self.dim)
         hdr[4] = UInt64(self.M)
@@ -1367,7 +1371,7 @@ struct HNSWGraph(Movable):
         # (byte 0 = key length, 0 = unknown/>31B; bytes 1..31 = key). Sourced
         # from the SharedHNSWView's cross-worker map, which any worker's HSET
         # ingest writes. Records for slots outside [0, hk_max) stay zero; the
-        # load-side resolver then falls through to the __hk__ keyspace probe
+        # load-side resolver then falls through to the worker's slot map
         # (rebuilt by WAL replay).
         var hk_section = alloc[UInt8](self.num_nodes * 32)
         unsafe_memset(hk_section, 0, self.num_nodes * 32)
@@ -1436,11 +1440,11 @@ struct HNSWGraph(Movable):
         if hdr[0] != UInt64(0x574E534E4F494E50):  # magic check
             hdr.free(); return False
         var version = Int(hdr[1])
-        if version != 3 and version != 4:  # v3 = group calibration + slot→key map; v4 = trimmed sections
+        if version < 3 or version > 5:  # v3 = group calibration + slot→key map; v4 = trimmed sections; v5 = v4
             # v1 files were tail-corrupt; v2 files lack the slot→key map, so a
             # warm restart serves recall ≈ 0.002 silently (gh #211) — refuse
             # both loudly rather than load an index that returns wrong keys.
-            print("HNSW snapshot version " + String(hdr[1]) + " unsupported (want 3 or 4) — cold rebuild (re-ingest + FT.OPTIMIZE)")
+            print("HNSW snapshot version " + String(hdr[1]) + " unsupported (want 3 to 5) — cold rebuild (re-ingest + FT.OPTIMIZE)")
             hdr.free(); return False
         var saved_stride = Int(hdr[20])
         var saved_slot_hdr = Int(hdr[21])
