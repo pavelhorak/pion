@@ -279,6 +279,14 @@ optional sections, flagged in header word 25: the FP32 re-rank buffer
 (`num_nodes × dim × 4` bytes — ~300 MB at 50K × 1536, so plan disk for it) and
 TurboQuant's QJL signs + residual norms. Plain INT8 files do not carry them.
 
+From 1.0.6 a file whose index has keys over 31 bytes carries one more
+optional section, after the schema (word 25 bit 11): those keys, which the
+32-byte slot → key records cannot hold. No version change: 1.0.5 stops
+reading before it and names those documents as it always did, from the slot
+map of the worker that holds them, so under `-w N` only that worker names
+them by key. A file 1.0.5 or earlier wrote has no such section, and 1.0.6
+fills those keys in at startup from each worker's own slot map.
+
 A file the server cannot use — an older format, or a quant format different
 from the server's current flags — is **refused with a log line** and the index
 is rebuilt cold (re-ingest + `FT.OPTIMIZE`).
