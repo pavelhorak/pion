@@ -1,7 +1,7 @@
 from src.common.ptr import is_null, null_ptr
 from std.memory.unsafe_pointer import Pointer
 from std.math import sqrt
-from std.memory import alloc, unsafe_memset
+from std.memory import alloc, unsafe_memset, unsafe_memcpy
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
 from src.common.lock_free import ShardQueryBus
@@ -29,6 +29,145 @@ comptime FT_FLAG_CASESENSITIVE = UInt8(8)
 # A schema field in the index file (word 25 bit 10): type, flags, separator,
 # name length, then the name.
 comptime SCHEMA_REC = 4 + SCHEMA_NAME_MAX
+
+# The slot -> key map every worker reads (SharedHNSWView.hk_keys_buf): one
+# HK_ENTRY-byte entry per ingest slot. Byte 0 is 0 (empty), the key's length
+# (1 to HK_INLINE_MAX, the key in bytes 1..31), or HK_LONG: bytes 8..15 then
+# hold the address of a heap copy of the key, [8-byte length][the key]. Until
+# 1.0.6 a longer key lived only in the slot map of the worker that ingested
+# it, so under -w N every other worker answered FT.SEARCH with the slot
+# number as the document's key (a LangChain key, `doc:<index>:<uuid hex>`, is
+# always longer). Two control words follow the entries (HK_CTL_BYTES): the
+# end of the highest entry that holds a copy (hk_clear frees below it) and a
+# lock for the restart's claims (hk_claim).
+comptime HK_ENTRY = 32
+comptime HK_INLINE_MAX = 31
+comptime HK_LONG = UInt8(0xFF)
+comptime HK_CTL_BYTES = 64
+
+
+def hk_buf_bytes(hk_max: Int) -> Int:
+    """What to allocate for a slot map of `hk_max` entries (zeroed)."""
+    return hk_max * HK_ENTRY + HK_CTL_BYTES
+
+
+@always_inline
+def _hk_ctl(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int) -> Pointer[UInt64, MutUntrackedOrigin]:
+    return (buf + hk_max * HK_ENTRY).bitcast[UInt64]()
+
+
+@always_inline
+def hk_get(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int, slot: Int,
+           mut kp: Pointer[UInt8, MutUntrackedOrigin], mut kl: Int) -> Bool:
+    """Slot `slot`'s key, its bytes in place (`kp`, `kl`), when the map has
+    one. Read only a slot of the current numbering that was committed
+    (commit_ingest, or the graph): its entry was written before, and nothing
+    frees a copy while such a slot can be read (hk_clear)."""
+    if is_null(buf) or slot < 0 or slot >= hk_max:
+        return False
+    var e = buf + slot * HK_ENTRY
+    var l = Int(e[0])
+    if l == 0:
+        return False
+    if l <= HK_INLINE_MAX:
+        kp = e + 1
+        kl = l
+        return True
+    if e[0] != HK_LONG:
+        return False
+    var a = Int((e + 8).bitcast[UInt64]()[0])
+    if a == 0:
+        return False
+    var blk = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=a)
+    kp = blk + 8
+    kl = Int(blk.bitcast[UInt64]()[0])
+    return True
+
+
+def _hk_release(e: Pointer[UInt8, MutUntrackedOrigin]):
+    """Entry `e` empty again; its key copy freed."""
+    if e[0] == HK_LONG:
+        var a = Int((e + 8).bitcast[UInt64]()[0])
+        if a != 0:
+            Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=a).free()
+        (e + 8).bitcast[UInt64]()[0] = 0
+    e[0] = 0
+
+
+def hk_put(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int, slot: Int,
+           key: Pointer[UInt8, MutUntrackedOrigin], klen: Int):
+    """Slot `slot` holds `key`. The ingest that took the slot writes it, before
+    commit_ingest publishes the slot; a warm load and the restart's claims
+    write theirs before any worker serves."""
+    if is_null(buf) or slot < 0 or slot >= hk_max:
+        return
+    var e = buf + slot * HK_ENTRY
+    _hk_release(e)
+    if klen <= HK_INLINE_MAX:
+        unsafe_memcpy(dest=e + 1, src=key, count=klen)
+        e[0] = UInt8(klen)
+        return
+    var blk = alloc[UInt8](8 + klen)
+    blk.bitcast[UInt64]()[0] = UInt64(klen)
+    unsafe_memcpy(dest=blk + 8, src=key, count=klen)
+    (e + 8).bitcast[UInt64]()[0] = UInt64(Int(blk))
+    e[0] = HK_LONG
+    var ctl = _hk_ctl(buf, hk_max)
+    var top = UInt64(slot + 1)
+    var cur = Atomic[Scalar[DType.uint64]].load[ordering=Ordering.RELAXED](ctl)
+    while cur < top:
+        if Atomic[Scalar[DType.uint64]].compare_exchange(ctl, cur, top):
+            break
+
+
+def hk_clear(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int):
+    """Free every key copy: the slot numbering starts again. Only while no
+    worker can read an entry or write one (retire_index, after its wait, with
+    ingest closed; FT.CREATE before it opens a new ingest buffer). An entry
+    that holds its key inline is left as it is: every slot of the new
+    numbering is written (hk_put) before it is committed, and nothing reads a
+    slot before that, so only the copies need going."""
+    if is_null(buf) or hk_max <= 0:
+        return
+    var ctl = _hk_ctl(buf, hk_max)
+    var top = Int(Atomic[Scalar[DType.uint64]].load[ordering=Ordering.ACQUIRE](ctl))
+    if top > hk_max:
+        top = hk_max
+    for s in range(top):
+        _hk_release(buf + s * HK_ENTRY)
+    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](ctl, UInt64(0))
+
+
+def hk_claim(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int, slot: Int,
+             key: Pointer[UInt8, MutUntrackedOrigin], klen: Int) -> Bool:
+    """Restart, on every worker at once, for a slot its own slot map holds:
+    put `key` in the shared entry when the entry is empty (an index file from
+    before 1.0.6 holds no key over 31 bytes), and say whether the entry now
+    names `key`. False means the worker's record is of an older numbering
+    (FT.DROPINDEX on another worker, then a crash before this worker dropped
+    its records): the slot is someone else's document."""
+    if is_null(buf) or slot < 0 or slot >= hk_max:
+        return True
+    var lock = _hk_ctl(buf, hk_max) + 1
+    while True:
+        var free = UInt64(0)
+        if Atomic[Scalar[DType.uint64]].compare_exchange(lock, free, UInt64(1)):
+            break
+    var same = True
+    var ep = null_ptr[UInt8, MutUntrackedOrigin]()
+    var el = 0
+    if not hk_get(buf, hk_max, slot, ep, el):
+        if klen > 0:
+            hk_put(buf, hk_max, slot, key, klen)
+    elif el != klen:
+        same = False
+    else:
+        for b in range(klen):
+            if ep[b] != key[b]:
+                same = False
+                break
+    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](lock, UInt64(0))
+    return same
 
 
 # gh #5 / #87.2: HNSW multi-worker sharded ingest is force-disabled. Until
@@ -206,9 +345,10 @@ struct SharedHNSWView(Movable):
     var group_qmins: Array[Float32, 48]     # max 48 groups (1536/32)
     var group_scales: Array[Float32, 48]
     var grouped_calibrated: Bool
-    # Cross-worker slot → original-hash-key mapping. Each slot is 32 bytes:
-    # byte 0 = key length (0 = empty), bytes 1..31 = key data. Sized [max_elements * 32]
-    # at startup and shared by all workers — fixes multi-worker recall=0 when HSETs
+    # Cross-worker slot → original-hash-key mapping, a 32-byte entry per slot
+    # (hk_get / hk_put above: a key of up to 31 bytes in the entry, a longer
+    # one in a heap copy it points to). Sized hk_buf_bytes(max_elements) at
+    # startup and shared by all workers — fixes multi-worker recall=0 when HSETs
     # land on one worker (storing slot → key in its local slot map) but FT.SEARCH
     # runs on another worker and the local lookup misses.
     var hk_keys_buf: Pointer[UInt8, MutUntrackedOrigin]
@@ -621,7 +761,12 @@ struct SharedHNSWView(Movable):
         var dim = self.pre_dim
         if dim <= 0 or is_null(self.ingest_fp32): return -1
 
-        var slot = Int(Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](
+        # ACQUIRE: a slot of a new numbering comes with that numbering's
+        # generation. Renumbering bumps vec_gen and THEN resets this count
+        # (release), with ingest closed (retire_index, FT.CREATE), so the
+        # worker that takes a slot sees the generation it belongs to and drops
+        # its records of the old one first (vector_ingest.sync_vector_records).
+        var slot = Int(Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
             self.ingest_count, UInt64(1)
         ))
         # Bounds check: ingest_fp32 was allocated for hk_max_elements slots

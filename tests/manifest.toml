@@ -356,6 +356,18 @@ tier = "gate"
 timeout = 600
 
 [[test]]
+file = "tests/test_vector_xworker_keys.py"
+# Every worker names every document by its key (1.0.6): a key over 31 bytes
+# was the slot number on every worker but the one that ingested it, and after
+# FT.DROPINDEX on one worker the others' slot maps named the new index's
+# slots (an old key in a reply; after a restart, deleting an old document
+# took a new one out of the results). -w 2 through the affinity ports, the
+# restart, a renumbering, -w 1; --legacy-binary loads a 1.0.5 index.
+server = "self"
+tier = "gate"
+timeout = 600
+
+[[test]]
 file = "tests/test_ft_create_redimension.py"
 server = "self"
 tier = "gate"

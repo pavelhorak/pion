@@ -6,7 +6,7 @@ from std.memory import unsafe_memcpy, unsafe_memset
 from src.common.heap import HeapNode, MinHeap, MaxHeap, LinearPool
 from std.atomic import Atomic, Ordering
 from src.common.lock_free import ShardQueryBus
-from .hnsw_types import HNSWNode, SharedHNSWView, HNSW_SHARDED_INGEST_ENABLED, PREFIX_MAX, PREFIX_SLOT, SCHEMA_MAX, SCHEMA_NAME_MAX, SCHEMA_REC
+from .hnsw_types import HNSWNode, SharedHNSWView, HNSW_SHARDED_INGEST_ENABLED, PREFIX_MAX, PREFIX_SLOT, SCHEMA_MAX, SCHEMA_NAME_MAX, SCHEMA_REC, HK_ENTRY, HK_INLINE_MAX, hk_get, hk_put
 from .beam_view import BeamView1536
 from .vector_abi import beam_search_1536, quant_beam_search_1536
 from .quant_beam_view import QuantBeamView1536, QUANT_KIND_POLAR, QUANT_KIND_NANO, QUANT_KIND_TURBO
@@ -1272,6 +1272,19 @@ struct HNSWGraph(Movable):
         # Bit 10: a schema section follows the PREFIX one ([count] then
         # SCHEMA_REC bytes a field). Older loaders stop before it.
         if self.schema_known: _qsec |= 1024
+        # Bit 11 (1.0.6): a long-key section follows the schema one ([count],
+        # then [external id][length][the key] a key): the keys over 31 bytes,
+        # which the 32-byte records below cannot hold. A loader that predates
+        # it stops before it, and names those documents from the slot map of
+        # the worker that holds them, as it always did.
+        var long_n = 0
+        if is_not_null(hk_keys):
+            for i in range(self.num_nodes):
+                var lkp = null_ptr[UInt8, MutUntrackedOrigin]()
+                var lkl = 0
+                if hk_get(hk_keys, hk_max, self.nodes[i].id, lkp, lkl) and lkl > HK_INLINE_MAX:
+                    long_n += 1
+        if long_n > 0: _qsec |= 2048
         hdr[25] = _qsec
         # gh #407: the vector field name — word 26 = length, bytes 216-247 (words
         # 27-30) = up to 32 bytes. Same no-bump reasoning as words 24/25: an
@@ -1373,13 +1386,17 @@ struct HNSWGraph(Movable):
         # ingest writes. Records for slots outside [0, hk_max) stay zero; the
         # load-side resolver then falls through to the worker's slot map
         # (rebuilt by WAL replay).
+        # A longer key's entry holds an address (hnsw_types.mojo): the record
+        # stays zero, and the key goes in the long-key section (bit 11).
         var hk_section = alloc[UInt8](self.num_nodes * 32)
         unsafe_memset(hk_section, 0, self.num_nodes * 32)
         if is_not_null(hk_keys):
             for i in range(self.num_nodes):
                 var ext_id = self.nodes[i].id
                 if ext_id >= 0 and ext_id < hk_max:
-                    unsafe_memcpy(dest=hk_section + i * 32, src=hk_keys + ext_id * 32, count=32)
+                    var ent = hk_keys + ext_id * HK_ENTRY
+                    if Int(ent[0]) <= HK_INLINE_MAX:
+                        unsafe_memcpy(dest=hk_section + i * 32, src=ent, count=32)
         self._pion_write_all(fd, hk_section, self.num_nodes * 32)
         hk_section.free()
 
@@ -1405,6 +1422,22 @@ struct HNSWGraph(Movable):
             sc.free()
             if self.schema_count > 0:
                 self._pion_write_all(fd, self.schema_rec, self.schema_count * SCHEMA_REC)
+        if _qsec & 2048:
+            var lw = alloc[UInt64](2)
+            lw[0] = UInt64(long_n)
+            self._pion_write_all(fd, lw.bitcast[UInt8](), 8)
+            var written = 0
+            for i in range(self.num_nodes):
+                var lkp = null_ptr[UInt8, MutUntrackedOrigin]()
+                var lkl = 0
+                if written < long_n and hk_get(hk_keys, hk_max, self.nodes[i].id, lkp, lkl) \
+                        and lkl > HK_INLINE_MAX:
+                    lw[0] = UInt64(self.nodes[i].id)
+                    lw[1] = UInt64(lkl)
+                    self._pion_write_all(fd, lw.bitcast[UInt8](), 16)
+                    self._pion_write_all(fd, lkp, lkl)
+                    written += 1
+            lw.free()
 
         print("HNSW saved: " + String(self.num_nodes) + " nodes → pion.hnsw.0")
 
@@ -1686,6 +1719,41 @@ struct HNSWGraph(Movable):
                     return False
             self.schema_count = nsc
             self.schema_known = True
+        # 1.0.6: the keys over 31 bytes (bit 11), into the shared map once the
+        # whole section has read: a file cut short leaves no copy behind.
+        if saved_qsec & 2048:
+            var lw = alloc[UInt64](2)
+            if not self._pion_read_all(fd, lw.bitcast[UInt8](), 8):
+                lw.free()
+                return False
+            var nlong = Int(lw[0])
+            var ids = List[Int]()
+            var lens = List[Int]()
+            var bufs = List[Int]()               # addresses, freed below
+            var ok = nlong >= 0 and nlong <= saved_num_nodes
+            for _li in range(nlong if ok else 0):
+                if not self._pion_read_all(fd, lw.bitcast[UInt8](), 16):
+                    ok = False
+                    break
+                var kl = Int(lw[1])
+                if kl <= HK_INLINE_MAX or kl > (1 << 30):
+                    ok = False
+                    break
+                var kb = alloc[UInt8](kl)
+                bufs.append(Int(kb))
+                ids.append(Int(lw[0]))
+                lens.append(kl)
+                if not self._pion_read_all(fd, kb, kl):
+                    ok = False
+                    break
+            lw.free()
+            for t in range(len(bufs)):
+                var kb = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=bufs[t])
+                if ok and is_not_null(hk_keys) and ids[t] >= 0 and ids[t] < hk_max:
+                    hk_put(hk_keys, hk_max, ids[t], kb, lens[t])
+                kb.free()
+            if not ok:
+                return False
         # gh #350: the format word was CHECKED above but never applied, so a
         # warm PolarQuant server ran the INT8 beam over INT4 bytes (recall
         # ≈ 0.002 against its own fresh build). The search dispatch keys on

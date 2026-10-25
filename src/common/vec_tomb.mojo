@@ -43,6 +43,11 @@ struct VecTomb(Movable):
     # one is ignored — or the hashes of a dropped index, deleted later, would
     # kill the new index's slots of the same numbers.
     var gen: Pointer[UInt64, MutUntrackedOrigin]
+    # The generation this worker's slot map and dead slots belong to. When
+    # `gen` has moved past it, they describe a numbering that is gone, and the
+    # worker drops them (vector_ingest.sync_vector_records): another worker's
+    # FT.DROPINDEX or FT.CREATE renumbered the slots.
+    var seen_gen: UInt64
 
     def __init__(out self, dead: Pointer[UInt8, MutUntrackedOrigin],
                  dead_count: Pointer[UInt64, MutUntrackedOrigin], n: Int,
@@ -52,6 +57,7 @@ struct VecTomb(Movable):
         self.n = n
         self.pending = List[Int]()
         self.gen = gen
+        self.seen_gen = gen[] if Int(gen) != 0 else UInt64(0)
 
     def __init__(out self, *, deinit take: Self):
         self.dead = take.dead
@@ -59,6 +65,7 @@ struct VecTomb(Movable):
         self.n = take.n
         self.pending = take.pending^
         self.gen = take.gen
+        self.seen_gen = take.seen_gen
 
     @always_inline
     def generation(self) -> UInt64:
