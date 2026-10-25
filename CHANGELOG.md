@@ -4,6 +4,48 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [1.0.6] — 2026-10-25
+
+Under `-w N`, every worker names every document of the vector index by its
+key. `tests/test_vector_xworker_keys.py` (gate tier): 14 of its checks
+fail on 1.0.5, none now.
+
+### Fixed
+
+- **A key over 31 bytes came back as the slot number from every worker but
+  the one that ingested it.** The slot → key map every worker shares held keys
+  of up to 31 bytes, and a longer key lived only in the ingesting worker's own
+  map, so `FT.SEARCH` on any other worker answered `0`, `17` and so on in its
+  place, with no error. LangChain's keys (`doc:<index>:<uuid hex>`) are always
+  longer, RedisVL's (`<index>:<ULID>`) nearly always; at `-w 10`, nine replies
+  in ten. The shared map now holds keys of any length, and the index file
+  carries them (an optional section, below). `-w 1` was not affected.
+- **After `FT.DROPINDEX` on one worker, the other workers' slot maps named
+  the new index's slots.** Only the worker that ran the drop (or an
+  `FT.CREATE` that replaced the index) dropped its records of the old slot
+  numbering. Another worker then answered a new long-key document with an
+  old document's key, and after a restart it linked its old hashes to the
+  new index's slots: deleting an old document took a new one out of the
+  results. Every worker now drops its own records when the numbering moves
+  on, before it records anything (WAL record 48), and a restart links a hash
+  only when the shared map names its key.
+- **The worker that built an index refused the next one after `FT.DROPINDEX`
+  on another worker.** It kept its graph, and with it the old name, so
+  `FT.SEARCH` of a new index answered `ERR index 'b' is not the index loaded
+  on this server ... currently serves 'a'` until the new index was built. It
+  now reads the registered name while its own graph serves nothing.
+
+### Changed
+
+- **The index file can carry one more optional section** (header word 25,
+  bit 11): the keys over 31 bytes. The version stays 5. 1.0.5 reads such a
+  file and stops before the section, naming those documents as before; a file
+  1.0.5 or earlier wrote loads in 1.0.6, which fills the keys in from each
+  worker's slot map at startup (`doc/operations.md` §3c).
+- `FT.DROPINDEX` pauses ingest while the slots start over: an `HSET` on
+  another worker meanwhile is stored, not indexed, as RediSearch has no index
+  then. An `FT.CREATE` that replaces an index already did.
+
 ## [1.0.5] — 2026-10-24
 
 The vector index's records are no longer keys. Each document the index

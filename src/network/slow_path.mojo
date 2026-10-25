@@ -68,7 +68,7 @@ from src.commands.client import (ClientRegistry, ClientView, client_line, client
 from src.commands.command_info import cmd_pause_write, cmd_is_container
 from src.commands.bitmap import handle_bitop, handle_bitpos, handle_bitcount, handle_pfmerge, handle_bitfield, handle_bitfield_ro, handle_pfselftest, handle_pfdebug
 from src.commands.monitor import MonitorRegistry, monitor_line
-from src.network.vector_ingest import ingest_hash_vector, record_all_dead, ingest_whole_hash, hash_addr, after_rename, clear_vector_records
+from src.network.vector_ingest import ingest_hash_vector, record_all_dead, ingest_whole_hash, hash_addr, after_rename, clear_vector_records, sync_vector_records
 from src.network.vector_auto import VectorAuto, vector_auto_await, vector_auto_hold, vector_auto_release, auto_building_here, auto_worker_of, vector_backfill_now
 from src.commands.replication_cmds import handle_role, handle_replicaof, handle_failover, handle_sync, handle_replconf
 from src.commands.key_mgmt import handle_type, handle_rename, handle_renamenx, handle_copy, handle_object, handle_sort, handle_sort_ro, handle_scan, handle_keys, handle_randomkey, handle_touch, handle_wait, handle_waitaof, ParkedWaits
@@ -3228,7 +3228,10 @@ struct SlowPathHandler:
                                                     self.worker_id, self.keyspace, self.num_workers,
                                                     _dd_keys, _dd_ends, _dropped)
                             vector_auto_release(self.shared_hnsw, self.worker_id)
-                            if _dropped:       # the index's slot map and dead slots go with it
+                            # the index's slot map and dead slots go with it; every
+                            # other worker drops its own when it sees the numbering move
+                            if _dropped and not sync_vector_records(self.keyspace, self.dispatcher.wal,
+                                                                    self.vec_tomb):
                                 clear_vector_records(self.keyspace, self.dispatcher.wal)
                             # DD: the documents go as with DEL (WAL record, WATCH)
                             var _dd_at = 0

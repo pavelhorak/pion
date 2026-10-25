@@ -11,9 +11,10 @@ there. Every route now calls ingest_hash_vector after the field is stored:
      the field is the index's vector field (its name folded, as before);
   2. the vector goes to the shared ingest buffer, which returns its slot;
   3. slot → key goes to this worker's slot map (StripedHashMap.vec_maps) and
-     to the WAL as record 46 (the only durable slot → key map for keys over 31
-     bytes, gh #211), and keys of up to 31 bytes also go to the shared map
-     every worker reads;
+     to the WAL as record 46 (what a restart reads it back from), and to the
+     shared map every worker reads (SharedHNSWView.hk_keys_buf, hk_put). Until
+     1.0.6 that one held keys of up to 31 bytes only, so under -w N a longer
+     key was the slot number on every worker but the one that ingested it;
   4. #46: the hash records the slot (SlabHashMap.index_vector), so the slot
      dies with the hash or with its vector field (src/common/vec_tomb.mojo).
 
@@ -32,6 +33,13 @@ deleting them (SCAN MATCH + DEL, any cleanup script) left a document that
 was deleted after the next restart in the results, because nothing linked
 its hash to its slot any more. A data directory an older server wrote is
 read into the maps (wal.wal_apply_legacy_vec).
+
+The slot map describes one slot numbering. FT.DROPINDEX, or an FT.CREATE that
+replaces the index, starts the numbering again on one worker; every worker
+drops its own records of the old one before it next records anything
+(sync_vector_records), and logs that it did (record 48). Before 1.0.6 only
+the worker that ran the command did, and a restart relinked the others'
+hashes to slots of the new index.
 """
 
 from std.memory import alloc, unsafe_memcpy
@@ -44,6 +52,7 @@ from src.common.value import GenericValue, ValueType
 from src.common.utils import format_int_to_buf
 from src.common.vec_tomb import VecTomb
 from src.vector.hnsw import SharedHNSWView
+from src.vector.hnsw_types import hk_put, hk_claim
 from src.io.wal import WAL, VEC_KEY_REC, VEC_DEAD_REC, VEC_CLEAR_REC, VEC_CLEAR_DEAD, VEC_CLEAR_KEYS, legacy_hk_slot, is_legacy_hk_dead
 from src.common.container_free import remove_and_free
 from src.network.dispatcher import CommandDispatcher
@@ -105,6 +114,9 @@ def ingest_hash_vector(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
         if is_null(shared[].ingest_fp32) and is_not_null(shared[].vec_stats):
             _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](shared[].vec_stats, UInt64(1))
         return False
+    # The slot may be of a numbering another worker started: this worker's
+    # records of the old one go first, or dropping them later takes this one.
+    _ = sync_vector_records(keyspace, wal, tomb)
     keyspace[].set_vec_key(slot, key, klen)
     if is_not_null(wal):
         # heap, not stack_allocation: it goes to the WAL appender, an out-of-line
@@ -113,17 +125,8 @@ def ingest_hash_vector(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
         var sd_end = format_int_to_buf(sd, 0, Int64(slot))
         _ = wal[].append_kv(VEC_KEY_REC, sd, sd_end, key, klen)
         sd.unsafe_free()
-    if is_not_null(shared[].hk_keys_buf) and slot < shared[].hk_max_elements:
-        var dst = shared[].hk_keys_buf + slot * 32
-        if klen <= 31:
-            dst[0] = UInt8(klen)
-            unsafe_memcpy(dest=dst + 1, src=key, count=klen)
-        else:
-            # The key resolves through the worker's slot map, read only when
-            # this map has nothing for the slot: a key an earlier numbering
-            # left here (FT.DROPINDEX, then FT.CREATE) would answer in this
-            # one's place.
-            dst[0] = 0
+    # Every worker names the document by this entry (any key length)
+    hk_put(shared[].hk_keys_buf, shared[].hk_max_elements, slot, key, klen)
     if is_not_null(tomb):
         hv.as_hash().bitcast[SlabHashMap]()[].index_vector(slot, _field_hash(field, flen), tomb)
     shared[].commit_ingest(slot)          # drop-in: the exact scan may read it now
@@ -266,6 +269,29 @@ def _record_dead(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
         _ = wal[].append(VEC_DEAD_REC, buf, n)
 
 
+def sync_vector_records(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                        wal: UnsafePointer[WAL, MutUntrackedOrigin],
+                        tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]) -> Bool:
+    """The slot numbering moved on (FT.DROPINDEX, or an FT.CREATE that replaced
+    the index, on any worker): this worker's slot map and dead slots describe
+    the old one, so they go, logged as record 48, and so do the slots it
+    killed but has not logged. Called before this worker records anything
+    (an ingest, its dead slots) and every housekeeping tick. Before 1.0.6 only
+    the worker that ran the command dropped its records: the others kept
+    theirs, and after a restart relinked their hashes to slots the new index
+    had given other documents. True when it dropped them."""
+    if is_null(tomb) or Int(tomb[].gen) == 0:
+        return False
+    var g = Atomic[Scalar[DType.uint64]].load[ordering=Ordering.ACQUIRE](tomb[].gen)
+    if g == tomb[].seen_gen:
+        return False
+    tomb[].seen_gen = g
+    tomb[].pending.clear()
+    if is_not_null(keyspace) and keyspace[].has_vec():
+        clear_vector_records(keyspace, wal)
+    return True
+
+
 def log_dead_slots(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
                    tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
                    mut dispatcher: CommandDispatcher):
@@ -273,6 +299,9 @@ def log_dead_slots(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     does not revive them. Before the first build there is nothing to record
     against (FT.OPTIMIZE records every dead slot under its new build)."""
     if is_null(tomb) or len(tomb[].pending) == 0:
+        return
+    _ = sync_vector_records(dispatcher.keyspace, dispatcher.wal, tomb)
+    if len(tomb[].pending) == 0:
         return
     if is_null(shared) or is_null(shared[].build_id) or is_null(shared[].ready_atomic) \
             or shared[].ready_atomic[] == 0:
@@ -291,6 +320,7 @@ def record_all_dead(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
                     mut dispatcher: CommandDispatcher):
     """#46, after FT.OPTIMIZE gave the index a new build id: the slots already
     dead (including the ones that died before the build) under that id."""
+    _ = sync_vector_records(dispatcher.keyspace, dispatcher.wal, tomb)
     var buf = alloc[UInt8](48)            # heap: it goes to the WAL appender (gh #349)
     dispatcher.keyspace[].clear_vec_dead()
     if is_not_null(dispatcher.wal):
@@ -485,6 +515,12 @@ def restore_index_state(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
     recorded dead for this build, then link each live slot's hash (this
     worker's slot map entries) back to its slot, which replay cannot.
 
+    Each entry also goes to the shared map when the index file left it empty
+    (a file from before 1.0.6 holds no key over 31 bytes, so the other workers
+    could not name the document), and a hash is linked only when the shared
+    map names its key (hk_claim): a record of an older numbering would link
+    a hash to a slot the new index gave another document.
+
     When the load reopened ingest (an automatic build's index,
     vector_auto.reopen_after_load), each relinked hash also puts its vector
     back in the slot's row, which the index file does not hold."""
@@ -536,7 +572,10 @@ def restore_index_state(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
         var kv = keyspace[].vec_key(s)
         if kv.is_none() or not kv.is_string():
             continue
-        var hv = keyspace[].get(GenericValue.borrow(kv.as_string_safe(kbuf), kv.string_len()))
+        var kvp = kv.as_string_safe(kbuf)
+        if not hk_claim(shared[].hk_keys_buf, shared[].hk_max_elements, s, kvp, kv.string_len()):
+            continue
+        var hv = keyspace[].get(GenericValue.borrow(kvp, kv.string_len()))
         if hv.type.value == ValueType.HASH:
             var hm = hv.as_hash().bitcast[SlabHashMap]()
             if refill:

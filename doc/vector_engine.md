@@ -293,11 +293,13 @@ FT.SEARCH <index> "<prefilter>=>[KNN <k> @<field> $blob [EF_RUNTIME <ef>] [AS sc
 
 On a RESP3 connection (`HELLO 3`, and redis-py 8 by default) the reply is RediSearch's map: `attributes` `*0`, `format` `+STRING`, `results` (one map per document: `id`, `score` with WITHSCORES as a double, `extra_attributes` with the fields above unless NOCONTENT, `values` `*0`), `total_results`, `warning` `*0`. The BM25 and HYBRID forms of FT.SEARCH, and FT.HYBRID, are Pion's own syntax: they ignore RETURN, NOCONTENT and WITHSCORES and send `id` (the doc hash's own `id` field, when it has one) and `score`.
 
-This shape is emitted at every worker count. Doc-key resolution order:
-shared `hk_keys_buf` slot→key map (one direct load; written by the fast-path
-vector HSET), then the answering worker's slot map (keys >31B that don't fit
-the shared map's 32-byte slots; see "The index's records are not keys"), then
-the numeric slot id. Field values come
+This shape is emitted at every worker count. Each document's key comes from
+the slot→key map every worker shares (`hk_keys_buf`, written by the ingest
+that took the slot), then the answering worker's own slot map (see "The
+index's records are not keys"), then the numeric slot id. Before 1.0.6 the
+shared map held keys of up to 31 bytes, so under `-w N` a longer key was the
+slot number (`0`, `17`) on every worker but the one that ingested it: every
+LangChain key (`doc:<index>:<uuid hex>`) and nearly every RedisVL key. Field values come
 from the doc hash on the worker answering the query. Under `-w N` the keyspace
 is per worker, so a worker that does not hold a document's hash sends none of
 its fields, as Redis leaves out a field a document lacks: it never substitutes
@@ -340,7 +342,9 @@ Mechanics:
 
 ### The index's records are not keys
 
-Each document the index ingests gets a slot, and the worker that ingested it keeps the slot's key in a slot map, beside the keyspace. The map resolves keys over 31 bytes in `FT.SEARCH` replies, and BM25, RERANK and `FT.DROPINDEX DD` read it. After a restart it links each hash back to its slot, which is what lets a `DEL` after the restart remove the document. The dead slots above live beside it.
+Each document the index ingests gets a slot, and the worker that ingested it keeps the slot's key in a slot map, beside the keyspace. BM25 and RERANK read it to find the document's hash on that worker. After a restart it links each hash back to its slot, which is what lets a `DEL` after the restart remove the document. The dead slots above live beside it. `FT.SEARCH` names documents from the map every worker shares, which holds keys of any length since 1.0.6 (a key over 31 bytes is a heap copy its 32-byte entry points to).
+
+A slot map describes one slot numbering. `FT.DROPINDEX`, or an `FT.CREATE` that replaces the index, starts the numbering again, and every worker drops its own map and dead slots before it next records anything (WAL record 48). Before 1.0.6 only the worker that ran the command did. Under `-w N` another worker's map then named slots of the new index: that worker answered a new long-key document with an old document's key, and after a restart it linked its old hashes to the new index's slots, so deleting an old document took a new one out of the results. A restart also links a hash only when the shared map names its key, so a record of an older numbering links nothing.
 
 Until 1.0.5 both were keys: `__hk__<slot>` held the document's key, and the set `__hk_dead__` held the dead slots. So `DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY` and `INFO`'s key count saw twice the keys a client wrote, and a client's own key named `__hk__7` was overwritten when slot 7 was ingested. Deleting them, with `SCAN MATCH` and `DEL` or any cleanup of unknown keys, left every document deleted after the next restart in the results. `FLUSHALL` keeps both tables, as it keeps the index; its documents die with their hashes.
 
@@ -369,7 +373,7 @@ Only the worker whose graph holds the published index rebuilds it. `FT.CREATE`, 
 ```
 FT.DROPINDEX <index> [DD]
 ```
-`DD` also deletes the index's documents, as in RediSearch: each live document's key goes as with `DEL` (WAL record, `WATCH`). Any drop also clears the worker's slot map and dead slots, which describe the dropped index. Before 1.0.4 `DD` was read and dropped, so the documents stayed. Under `-w N` each worker holds its own documents, and one worker cannot delete another's: `DD` is refused there. Any other argument is refused (it used to drop the index anyway).
+`DD` also deletes the index's documents, as in RediSearch: each live document's key goes as with `DEL` (WAL record, `WATCH`). Any drop also clears every worker's slot map and dead slots, which describe the dropped index (each worker clears its own; before 1.0.6 only the worker that ran the drop did). Ingest pauses for the drop: an `HSET` on another worker meanwhile is stored, not indexed, as RediSearch has no index then. Before 1.0.4 `DD` was read and dropped, so the documents stayed. Under `-w N` each worker holds its own documents, and one worker cannot delete another's: `DD` is refused there. Any other argument is refused (it used to drop the index anyway).
 
 Calls `hnsw.reset_index()` — zeroes `num_nodes`, resets `entry_point_id = -1`, clears `node_map` and `visited_map`, resets `index_name_len = 0`, resets `global_min/max` to calibration defaults, sets `index_ready = False`. Returns `+OK`. It also deletes the index file, `pion.hnsw.0`, so a restart does not bring the dropped index back. Before 1.0.2 the file stayed, and after a restart `FT.INFO` and `FT.SEARCH` answered from the dropped index. An `FT.CREATE` that replaces an index of another name or `DIM` deletes its file the same way.
 

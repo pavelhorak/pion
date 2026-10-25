@@ -17,7 +17,7 @@ from src.memory.slab_allocator import SlabAllocator
 
 from src.engine.state import Pion
 from src.vector.hnsw import SharedHNSWView, HNSWGraph
-from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT
+from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT, hk_buf_bytes
 from src.network.server import create_listen_socket
 from src.common.lock_free import ShardQueryBus
 from src.network.cluster import ClusterState
@@ -1310,15 +1310,15 @@ def main():
     shared_hnsw_ptr[].worker_epoch = worker_epoch_buf
     shared_hnsw_ptr[].worker_epoch_slots = n_workers
 
-    # hk_keys_buf: cross-worker slot → original-hash-key map. Each slot is 32 bytes
-    # (byte 0 = length, bytes 1..31 = key data). Without this, multi-worker FT.SEARCH
-    # recall collapses to ~0 when the search worker isn't the same as the HSET worker
-    # (the local slot map lookup misses for slots written by another
-    # worker, and the response falls back to the slot number — which doesn't match
-    # the bench's hash key).
+    # hk_keys_buf: cross-worker slot → original-hash-key map, a 32-byte entry per
+    # slot (hnsw_types.mojo hk_get / hk_put; a key over 31 bytes is a heap copy
+    # the entry points to). Without it, multi-worker FT.SEARCH answered with the
+    # slot number as the key whenever the search worker was not the HSET
+    # worker: recall ~0 for the bench's keys, and until 1.0.6 every key over
+    # 31 bytes, which this map could not hold.
     var hk_max = config.vector.max_elements
-    var hk_keys_buf = alloc[UInt8](hk_max * 32)
-    unsafe_memset(hk_keys_buf, 0, hk_max * 32)
+    var hk_keys_buf = alloc[UInt8](hk_buf_bytes(hk_max))
+    unsafe_memset(hk_keys_buf, 0, hk_buf_bytes(hk_max))
     shared_hnsw_ptr[].hk_keys_buf = hk_keys_buf
     shared_hnsw_ptr[].hk_max_elements = hk_max
     # #46: tombstones, a byte per slot, and the build id they belong to

@@ -19,7 +19,7 @@ from src.common.config import PionConfig
 from src.common.utils import format_int_to_buf, format_float_to_buf, int_string_len, parse_filter_float, is_valid_float_arg, parse_float64, arg_eq, parse_redis_double, DOUBLE_VALUE, DOUBLE_RANGE, parse_int64_strict, ParsedInt
 from src.common.lock_free import ShardQueryBus
 from src.vector.hnsw import HNSWGraph, SharedHNSWView
-from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT, SCHEMA_MAX, SCHEMA_NAME_MAX, SCHEMA_REC, FT_FIELD_TEXT, FT_FIELD_TAG, FT_FIELD_NUMERIC, FT_FIELD_GEO, FT_FIELD_GEOSHAPE, FT_FLAG_SORTABLE, FT_FLAG_UNF, FT_FLAG_NOINDEX, FT_FLAG_CASESENSITIVE
+from src.vector.hnsw_types import PREFIX_MAX, PREFIX_SLOT, SCHEMA_MAX, SCHEMA_NAME_MAX, SCHEMA_REC, FT_FIELD_TEXT, FT_FIELD_TAG, FT_FIELD_NUMERIC, FT_FIELD_GEO, FT_FIELD_GEOSHAPE, FT_FLAG_SORTABLE, FT_FLAG_UNF, FT_FLAG_NOINDEX, FT_FLAG_CASESENSITIVE, hk_get, hk_clear
 from src.vector.fp32_scan import scan_dot_f32, l2sq_f32_4chain, dot_f32_4chain
 # gh #87.1: src/vector/ivf_pq.mojo deleted (a measured dead end).
 from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_name
@@ -217,15 +217,27 @@ def _slot_key(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     Not a borrow: the shared map is no RESP token, and gh #394's audit proves
     a borrowed key's bytes alive or refuses it."""
     owned = False
-    if is_not_null(shared) and is_not_null(shared[].hk_keys_buf) and slot >= 0 and slot < shared[].hk_max_elements:
-        var p = shared[].hk_keys_buf + slot * 32
-        var l = Int(p[0])
-        if l > 0 and l <= 31:
+    if is_not_null(shared):
+        var kp = null_ptr[UInt8, MutUntrackedOrigin]()
+        var kl = 0
+        if hk_get(shared[].hk_keys_buf, shared[].hk_max_elements, slot, kp, kl):
             owned = True
-            return GenericValue.from_ptr(p + 1, l)
+            return GenericValue.from_ptr(kp, kl)
     if is_null(keyspace):
         return GenericValue()
     return keyspace[].vec_key(slot)
+
+
+def _hash_named(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                kp: UnsafePointer[UInt8, MutUntrackedOrigin], kl: Int) -> UnsafePointer[SlabHashMap, MutUntrackedOrigin]:
+    """The hash at key `kp[:kl]` on this worker, or null. The key is borrowed,
+    not copied: these are the shared slot map's bytes, alive while the slot
+    can be read (hk_get), and a copy per candidate or per reply row was a
+    heap round trip for every key over 23 bytes."""
+    var v = hash_get_live(keyspace, GenericValue.borrow(kp, kl))
+    if v.is_none() or v.type.value != ValueType.HASH:
+        return null_ptr[SlabHashMap, MutUntrackedOrigin]()
+    return v.as_hash().bitcast[SlabHashMap]()
 
 
 def _slot_hash(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
@@ -234,12 +246,14 @@ def _slot_hash(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     """The hash of the document at `slot` on this worker, or null."""
     if is_null(keyspace):
         return null_ptr[SlabHashMap, MutUntrackedOrigin]()
-    var owned = False
-    var key = _slot_key(shared, keyspace, slot, owned)
+    var kp = null_ptr[UInt8, MutUntrackedOrigin]()
+    var kl = 0
+    if is_not_null(shared) and hk_get(shared[].hk_keys_buf, shared[].hk_max_elements, slot, kp, kl):
+        return _hash_named(keyspace, kp, kl)
+    var key = keyspace[].vec_key(slot)         # the map's own value: never freed here
     if key.is_none():
         return null_ptr[SlabHashMap, MutUntrackedOrigin]()
     var v = hash_get_live(keyspace, key)
-    if owned: key.free_str_payload()
     if v.is_none() or v.type.value != ValueType.HASH:
         return null_ptr[SlabHashMap, MutUntrackedOrigin]()
     return v.as_hash().bitcast[SlabHashMap]()
@@ -260,15 +274,28 @@ def _slot_expired(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     return such a document until the active sweep reached it. Only this
     worker's TTLs are known; under -w N a key on another worker is that
     worker's sweep's."""
-    var owned = False
-    var key = _slot_key(shared, keyspace, slot, owned)
+    var kp = null_ptr[UInt8, MutUntrackedOrigin]()
+    var kl = 0
+    if is_not_null(shared) and hk_get(shared[].hk_keys_buf, shared[].hk_max_elements, slot, kp, kl):
+        return _key_expired(keyspace, kp, kl)
+    var key = keyspace[].vec_key(slot)         # the map's own value: never freed here
     if key.is_none():
         return False
     var d = keyspace[].deadline(key)
     var due = d >= 0 and d < keyspace[].clock_ns
     if due:
         _ = keyspace[].get(key)
-    if owned: key.free_str_payload()
+    return due
+
+
+def _key_expired(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                 kp: UnsafePointer[UInt8, MutUntrackedOrigin], kl: Int) -> Bool:
+    """_slot_expired for a key in the shared slot map, borrowed (_hash_named)."""
+    var key = GenericValue.borrow(kp, kl)
+    var d = keyspace[].deadline(key)
+    var due = d >= 0 and d < keyspace[].clock_ns
+    if due:
+        _ = keyspace[].get(key)
     return due
 
 
@@ -625,34 +652,26 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
         var did = results2[ri2]
         var dist = dist_scores[ri2]
 
-        # Resolve the original hash key: shared slot→key map first (single load).
+        # Resolve the original hash key: the shared slot→key map, which every
+        # worker reads and which holds keys of any length since 1.0.6.
         var key_ptr = null_ptr[UInt8, MutUntrackedOrigin]()
         var key_len = 0
         var result_key = GenericValue()
-        if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].hk_keys_buf) and did >= 0 and did < shared_hnsw[].hk_max_elements:
-            var _shp = shared_hnsw[].hk_keys_buf + did * 32
-            var _kl = Int(_shp[0])
-            if _kl > 0 and _kl <= 31:
-                key_ptr = _shp + 1
-                key_len = _kl
+        if is_not_null(shared_hnsw):
+            _ = hk_get(shared_hnsw[].hk_keys_buf, shared_hnsw[].hk_max_elements, did, key_ptr, key_len)
         if key_len == 0 and is_not_null(keyspace):
-            # the worker's slot map → original hash key (e.g. "doc:0"); keys >31B land here
+            # the worker's slot map → original hash key (e.g. "doc:0")
             result_key = keyspace[].vec_key(did)
 
         # The doc's hash, when this worker holds it: one keyspace probe with
         # the already-resolved key. NOCONTENT needs none.
         var doc_hash = null_ptr[SlabHashMap, MutUntrackedOrigin]()
         if content and is_not_null(keyspace):
-            var key_gv = result_key
-            var key_copied = False
             if key_len > 0:
-                key_gv = GenericValue.from_ptr(key_ptr, key_len)
-                key_copied = True
-            if not key_gv.is_none():
-                var doc_val = hash_get_live(keyspace, key_gv)
-                # gh #394: a key over 23 B is a heap copy made only for this
-                # lookup — one leak per FT.SEARCH result before.
-                if key_copied: key_gv.free_str_payload()
+                # the shared map's bytes, borrowed: no copy per result row
+                doc_hash = _hash_named(keyspace, key_ptr, key_len)
+            elif not result_key.is_none():
+                var doc_val = hash_get_live(keyspace, result_key)
                 if not doc_val.is_none() and doc_val.type.value == ValueType.HASH:
                     doc_hash = doc_val.as_hash().bitcast[SlabHashMap]()
 
@@ -2095,6 +2114,14 @@ def retire_index(
     Used by FT.DROPINDEX, and by FT.CREATE when it replaces a built or
     ingesting index with a different name or DIM. The reset keeps the index
     CONFIG (dim, vector field, ef_construction); FT.CREATE overwrites it next.
+
+    The caller has closed ingest (pre_index_ready False), so once the first
+    wait is over no batch is ingesting: then the slots start again from 0,
+    the generation before the count, so a worker that takes a slot of the new
+    numbering sees it (add_ingest_vector) and drops its records of the old
+    one first. A search that starts after the count reset finds no slot to
+    read; the second wait outlasts the ones that started before it, and only
+    then are the shared slot map's key copies freed (hk_clear).
     """
     # Order matters: clear shared ready_atomic FIRST so other workers'
     # FT.SEARCH borrow check sees not-ready BEFORE this worker frees the
@@ -2106,12 +2133,6 @@ def retire_index(
     # use of compact_buffer in the same FT.SEARCH call", which is small.
     # A proper RCU/epoch-based reclaim would close it entirely.
     if is_not_null(shared_hnsw):
-        if is_not_null(shared_hnsw[].ingest_count):
-            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
-                shared_hnsw[].ingest_count, UInt64(0)
-            )
-        # #46: slot numbering starts over, and so do the tombstones
-        shared_hnsw[].new_generation()
         shared_hnsw[].ready = False
         if is_not_null(shared_hnsw[].ready_atomic):
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
@@ -2124,6 +2145,15 @@ def retire_index(
                     shared_hnsw[].shard_ready + sri * 8, UInt64(0)
                 )
     wait_for_readers(shared_hnsw, worker_id)
+    if is_not_null(shared_hnsw):
+        # #46: slot numbering starts over, and so do the tombstones
+        shared_hnsw[].new_generation()
+        if is_not_null(shared_hnsw[].ingest_count):
+            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
+                shared_hnsw[].ingest_count, UInt64(0)
+            )
+        wait_for_readers(shared_hnsw, worker_id)
+        hk_clear(shared_hnsw[].hk_keys_buf, shared_hnsw[].hk_max_elements)
     hnsw.reset_index()
     # The index's file goes with it. It stayed, so a restart loaded the dropped
     # index back: FT.INFO knew it again and FT.SEARCH answered from it. Every
@@ -2215,7 +2245,16 @@ def handle_ft_dropindex(
             dd_ends.append(len(dd_keys))
             if owned: key.free_str_payload()
         kbuf.free()
+    # Ingest stays closed while the slots start over (retire_index): an HSET on
+    # another worker meanwhile is stored, not indexed, as RediSearch has no
+    # index then. Reopened after: VectorDBBench writes again without FT.CREATE.
+    var was_ingesting = is_not_null(shared_hnsw) and shared_hnsw[].pre_index_ready
+    if is_not_null(shared_hnsw):
+        shared_hnsw[].pre_index_ready = False
     retire_index(hnsw, shared_hnsw, worker_id)
+    if was_ingesting:
+        external_call["pion_full_fence", NoneType]()
+        shared_hnsw[].pre_index_ready = True
     dropped = True
     # The name leaves the registry, so FT.INFO on EVERY worker now says
     # "Unknown index name" — a borrower's stale local name must not keep a
@@ -3012,10 +3051,14 @@ def handle_ft_create(
             ordering=Ordering.ACQUIRE](shared_hnsw[].ready_atomic, UInt64(0)) != 0 and shared_hnsw[].num_nodes > 0
         if is_null(shared_hnsw[].ingest_fp32) and not _serving:
             var cap = hnsw.max_elements
+            # #46: slots start again from 0. No buffer, so no worker ingests or
+            # reads a slot until open_ingest; the generation moves before the
+            # count, as in retire_index.
+            shared_hnsw[].new_generation()
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                 shared_hnsw[].ingest_count, UInt64(0)
             )
-            shared_hnsw[].new_generation()      # #46: slots start again from 0
+            hk_clear(shared_hnsw[].hk_keys_buf, shared_hnsw[].hk_max_elements)
             shared_hnsw[].open_ingest(cap, hnsw.dim)
         backfill = not skip_initial_scan and is_not_null(shared_hnsw[].ingest_fp32)
 
@@ -4188,9 +4231,15 @@ def handle_ft_search(
                         break
             if not ef_found:
                 q_err = "ERR query parameter $" + _bytes_str(ef_param_p, ef_param_l) + " is not in PARAMS"
-        # Check index name if we have one stored
+        # Check index name if we have one stored. The graph's own name counts
+        # while it serves (`_live`); otherwise the registry's. The worker that
+        # built an index keeps its graph, name included, when FT.DROPINDEX runs
+        # on another worker, and it refused the next index by that name until
+        # the next build ("currently serves 'idx'").
         var idx_ok = True
-        if hnsw.index_name_len > 0:
+        var _by_local = hnsw.index_name_len > 0 and (_live or is_null(shared_hnsw) \
+            or shared_hnsw[].index_name_len == 0)
+        if _by_local:
             if idx_name_tok_len != hnsw.index_name_len: idx_ok = False
             else:
                 for ni in range(idx_name_tok_len):
@@ -4211,7 +4260,7 @@ def handle_ft_search(
             var _wlen = idx_name_tok_len if idx_name_tok_len < 64 else 64
             for _wi in range(_wlen): _wmsg += chr(Int(idx_name_tok_ptr[_wi]))
             _wmsg += "' is not the index loaded on this server - it holds one index at a time and currently serves '"
-            if hnsw.index_name_len > 0:
+            if _by_local:
                 for _wi in range(hnsw.index_name_len): _wmsg += chr(Int(hnsw.index_name[_wi]))
             else:
                 for _wi in range(shared_hnsw[].index_name_len): _wmsg += chr(Int(shared_hnsw[].index_name[_wi]))
