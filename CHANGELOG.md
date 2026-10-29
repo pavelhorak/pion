@@ -4,6 +4,27 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Fixed
+
+- **An automatic or `FT.OPTIMIZE` build could leave a region of level 0 that
+  a search could enter but not leave.** After a parallel build, every node the
+  entry point could not reach was linked in, but nothing checked the reverse:
+  a set of nodes whose level-0 links all point back into the set. A query whose
+  descent landed there returned that region's nodes at any `EF_RUNTIME`. One
+  such build (60 of 6,000 nodes) read recall 0.908 against 0.941, with 13 of
+  400 queries under 0.5. Seen only on x86, in 4 of 480 probe builds on GitHub's
+  runners; `tests/test_vector_auto_build.py` failed once at 0.856. A build now
+  also gives every node a level-0 path back to the entry point, logged as
+  `[HNSW] level-0 exits: N closed region(s) linked back to the graph`. In 360
+  probe builds after the fix it fired 7 times. Those 7 builds read 0.935–0.936,
+  and none of them had a query under 0.5. Gate: `tests/test_hnsw_l0_exits.mojo`.
+- **`tests/test_kvprefix_xworker.py` failed when every connection's accept
+  went to one worker.** It now reaches each worker through its affinity port
+  (`port + 2 + worker`), and its default port no longer puts an affinity port
+  on the Redis oracle's 6399.
+
 ## [1.0.6] — 2026-10-25
 
 Under `-w N`, every worker names every document of the vector index by its
