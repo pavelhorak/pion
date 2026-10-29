@@ -2323,6 +2323,138 @@ struct HNSWGraph(Movable):
                 reach[nb] = 1
                 queue.append(nb)
 
+    def _repair_l0(mut self) raises:
+        """Make level 0 strongly connected: every node reachable from the entry
+        point (gh #405) and every node able to get back to it. Each repair can
+        disturb the other (both may overwrite a full list's farthest link), so
+        they alternate until the exit pass has nothing to do (bounded)."""
+        var links = 0
+        var exits = 0
+        var e = 0
+        for _round in range(3):
+            links += self._repair_l0_reachability()
+            e = self._repair_l0_exits()
+            exits += e
+            if e == 0: break
+        if e > 0:
+            # the last exit pass overwrote links: the forward pass gets the
+            # final word, so no node ships unreachable (gh #405's defect)
+            links += self._repair_l0_reachability()
+        if links > 0:
+            print("[HNSW] level-0 reachability: " + String(links)
+                  + " unreachable node(s) linked into the graph")
+        if exits > 0:
+            print("[HNSW] level-0 exits: " + String(exits)
+                  + " closed region(s) linked back to the graph")
+
+    def _repair_l0_exits(mut self) raises -> Int:
+        """Link out every level-0 region a search can enter and never leave.
+
+        _repair_l0_reachability makes every node reachable FROM the entry
+        point, which is not enough: a set of nodes whose lists all point back
+        into the set is reachable and closed. A query whose upper-level descent
+        lands in it is trapped at any ef, and returns the region's nodes. One
+        parallel build in ~60 on x86 left a closed region of 60 nodes in 6,000
+        (recall 0.908 against 0.941, 13 of 400 queries under 0.5, unchanged at
+        EF_RUNTIME 1000); healthy builds are strongly connected.
+
+        `back[v]` = v reaches the entry point. It is a fixpoint over the lists,
+        swept in both index orders, so no reverse adjacency is allocated. For
+        the first node v that cannot reach it, link v -> r, r the closest node
+        that can: into a free slot, else over v's farthest link w when w keeps
+        another in-link. Everything that reaches v then reaches the entry too,
+        so one link opens a whole closed region. Deleted nodes are not walked
+        through, as in _mark_reachable_l0. Returns the number of links made."""
+        var n = self.num_nodes
+        if n <= 1 or self.entry_point_id < 0: return 0
+        var cap = 2 * self.M
+        var back = alloc[UInt8](n)
+        var indeg = alloc[Int32](n)
+        unsafe_memset(back, 0, n)
+        unsafe_memset(indeg.bitcast[UInt8](), 0, n * 4)
+        for i in range(n):
+            if self.is_deleted(i): continue
+            var c = self.nodes[i].get_neighbor_count(0)
+            for k in range(c):
+                var nb = self.nodes[i].get_neighbor(0, k)
+                if nb >= 0 and nb < n: indeg[nb] += 1
+        back[self.entry_point_id] = 1
+        var linked = 0
+        var gave_up = 0
+        var first = 0
+        while True:
+            var changed = True
+            while changed:
+                changed = False
+                for d in range(2):
+                    for j in range(n):
+                        var i = j if d == 0 else n - 1 - j
+                        if back[i] != 0 or self.is_deleted(i): continue
+                        var c = self.nodes[i].get_neighbor_count(0)
+                        for k in range(c):
+                            var nb = self.nodes[i].get_neighbor(0, k)
+                            if nb >= 0 and nb < n and back[nb] != 0 and not self.is_deleted(nb):
+                                back[i] = 1
+                                changed = True
+                                break
+            var v = -1
+            while first < n:
+                if back[first] == 0 and not self.is_deleted(first):
+                    v = first
+                    break
+                first += 1
+            if v < 0: break
+            back[v] = 1   # linked below, or given up on: either way not again
+            # r: the closest node that reaches the entry point. A search from
+            # the entry point usually finds one; it can itself be drawn into
+            # the closed region, so fall back to a scan.
+            self._search_layer(self.nodes[v].vector, self.entry_point_id, self.ef_construction, 0)
+            var r = -1
+            var r_d = Float32(0.0)
+            while len(self.results.data) > 0:
+                var h = self.results.pop()   # farthest first: the last kept wins
+                if h.id != v and h.id >= 0 and h.id < n and back[h.id] != 0 and not self.is_deleted(h.id):
+                    r = h.id
+            if r < 0:
+                for x in range(n):
+                    if x == v or back[x] == 0 or self.is_deleted(x): continue
+                    var dx = self._dist_int8_int8(self.nodes[v].vector, self.nodes[x].vector)
+                    if r < 0 or dx < r_d:
+                        r = x; r_d = dx
+            if r < 0:
+                gave_up += 1
+                continue
+            var v_ptr = self.nodes + v
+            var off = v_ptr[]._get_offset(0)
+            var nc = Int(v_ptr[].neighbor_counts[0])
+            if nc < cap:
+                v_ptr[].add_neighbor(0, r)
+            else:
+                # over the farthest link whose target keeps another in-link
+                var pos = -1
+                var pos_d = Float32(-1.0)
+                for ni in range(nc):
+                    var w = Int(v_ptr[].neighbors[off + ni])
+                    if w < 0 or w >= n or indeg[w] < 2: continue
+                    var dw = self._dist_int8_int8(v_ptr[].vector, self.nodes[w].vector)
+                    if dw > pos_d:
+                        pos_d = dw; pos = ni
+                if pos < 0:
+                    gave_up += 1
+                    continue
+                indeg[Int(v_ptr[].neighbors[off + pos])] -= 1
+                v_ptr[].neighbors[off + pos] = UInt32(r)
+            indeg[r] += 1
+            linked += 1
+        back.free()
+        indeg.free()
+        if gave_up > 0:
+            # back[v] was set for these, so the region they close looks open
+            # to this pass: say so rather than report a clean graph
+            print("[HNSW] level-0 exits: " + String(gave_up)
+                  + " closed region(s) left closed (no node to link to)")
+        return linked
+
     def _repair_l0_reachability(mut self) raises -> Int:
         """gh #405: link every level-0 node that the entry point cannot reach.
 
@@ -2531,10 +2663,7 @@ struct HNSWGraph(Movable):
                 print("[HNSW] parallel link: " + String(_drops)
                       + " contended link drops, " + String(_repaired)
                       + " under-linked nodes repaired")
-            var _l0_links = self._repair_l0_reachability()   # gh #405
-            if _l0_links > 0:
-                print("[HNSW] level-0 reachability: " + String(_l0_links)
-                      + " unreachable node(s) linked into the graph")
+            self._repair_l0()   # gh #405 + every node can get back out
         # §7v2 / M6: Borrow shared FP32 data for the GPU rerank buffer and for
         # every block quantizer. gh #350: TurboQuant and NanoQuant were missing
         # here, and both compactors are gated on `fp32_count > 0` — so on the
@@ -2596,10 +2725,7 @@ struct HNSWGraph(Movable):
             var id = Int(self.fp32_ids[buf_idx])
             var fp32_ptr = self.fp32_buffer + buf_idx * self.dim
             self._insert_to_graph(id, fp32_ptr)
-        var _l0_links = self._repair_l0_reachability()   # gh #405
-        if _l0_links > 0:
-            print("[HNSW] level-0 reachability: " + String(_l0_links)
-                  + " unreachable node(s) linked into the graph")
+        self._repair_l0()   # gh #405 + every node can get back out
         # V2.3: compaction (fp32_count kept alive so compact_vectors can build rerank buffer)
         self.compact_vectors()
         # Reset count after compact (keep buffer allocated for potential re-use)

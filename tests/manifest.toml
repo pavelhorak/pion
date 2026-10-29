@@ -764,6 +764,15 @@ file = "tests/test_hybrid_split_durability.py"
 server = "self"
 tier = "full"
 
+# Level 0 strongly connected: a hand-closed region (reachable, no way out)
+# is linked back by _repair_l0; the gh #405 reachability pass alone cannot.
+[[test]]
+file = "tests/test_hnsw_l0_exits.mojo"
+server = "none"
+cmd = "mkdir -p build && L= && if [ $(uname) = Darwin ]; then cc -c tests/metal_stubs.c -o build/metal_stubs.o && L='-Xlinker build/metal_stubs.o'; fi && pixi run mojo build -I . tests/test_hnsw_l0_exits.mojo $L -o build/test_hnsw_l0_exits && build/test_hnsw_l0_exits"
+tier = "gate"
+timeout = 900
+
 [[test]]
 file = "tests/test_int3_int2_dot_kernels.mojo"
 server = "none"
