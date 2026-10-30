@@ -4,7 +4,11 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.0.7] — 2026-10-30
+
+A vector index build always leaves level 0 strongly connected, so a search
+can never be trapped in one region of the graph.
+`tests/test_hnsw_l0_exits.mojo` (gate tier) checks it.
 
 ### Fixed
 
