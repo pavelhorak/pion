@@ -9,6 +9,10 @@ the post-fix behavior:
     to KV.PREFIX.LOOKUP from N fresh connections (each on a random worker).
   - V.STOREBATCH / V.FETCH on a non-owner worker return -ERR with the
     owner worker_id so clients can pin their connection.
+
+Every probe targets one worker through its affinity port (port + 2 + id), so
+each phase is deterministic; fresh connections on the shared port only add
+coverage of the accept() path in phase 2.
   - KV.PREFIX.INFO surfaces directory_entries / directory_enabled.
 
 Requires: ./pion-server --kvcache -w 4 --independent-workers   (≥2 workers — capped to 4 on macOS).
@@ -31,7 +35,7 @@ from pion_store import _RESPClient
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--port", type=int, default=6397)
+    p.add_argument("--port", type=int, default=7581)  # +1 binary lane, +2.. affinity
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--probes", type=int, default=12)
     return p.parse_args()
@@ -83,6 +87,34 @@ def info_dict(client: _RESPClient) -> dict:
     return out
 
 
+def affinity_port(port: int, worker: int) -> int:
+    """Only worker `worker` accepts on this port (main.mojo: port + 2 + id)."""
+    return port + 2 + worker
+
+
+def live_workers(port: int, wanted: int) -> list[int]:
+    """Workers whose affinity port answers. macOS caps -w at 4, so the server
+    may run fewer workers than asked for; ask the ports, not the flag."""
+    import socket as _s
+    out = []
+    for w in range(wanted):
+        try:
+            with _s.create_connection(("127.0.0.1", affinity_port(port, w)), timeout=1):
+                out.append(w)
+        except OSError:
+            pass
+    return out
+
+
+def owner_error(fn) -> str | None:
+    """Run fn(); return the error text if it raised, None if it succeeded."""
+    try:
+        fn()
+        return None
+    except Exception as e:  # _RESPClient raises on -ERR
+        return str(e)
+
+
 def main() -> int:
     args = parse_args()
     log = "/tmp/pion_kvprefix_xworker.log"
@@ -104,105 +136,81 @@ def main() -> int:
 
     try:
         proc = start_pion(args.port, args.workers, log)
+        workers = live_workers(args.port, args.workers)
+        assert len(workers) >= 2, f"need >= 2 workers, affinity ports answered for {workers}"
+        # Register on the LAST worker, so a reply that names worker 0 by
+        # default cannot pass for the right answer.
+        owner = workers[-1]
+        others = [w for w in workers if w != owner]
+        print(f"  workers {workers}, registering on worker {owner}")
 
-        # ── Phase 1: REGISTER on one connection (one worker) ─────────────────
-        with PionStore(port=args.port, vquant="fp16") as s:
+        # Every connection below goes to one worker's affinity port. The old
+        # version opened fresh connections on the shared port and hoped the
+        # accept() race would spread them; serially-opened connections tend
+        # to land on ONE worker, so 32 of them once all missed the owner.
+
+        # ── Phase 1: REGISTER on the owner ────────────────────────────────────
+        with PionStore(port=affinity_port(args.port, owner), vquant="fp16",
+                       auto_redirect=False) as s:
             s.register(NS, KV_DIM)
-            # Sanity: same connection sees HIT.
             assert s.lookup(NS), "same-connection lookup must HIT"
             info = s.info()
             assert info.get("directory_enabled") == 1, f"directory should be enabled; info={info}"
             assert info.get("directory_entries", 0) >= 2, f"REGISTER should publish 2 entries (pk+pv); info={info}"
             print(f"  phase1 same-connection HIT, directory_entries={info['directory_entries']}")
 
-        # ── Phase 2: N fresh connections each issue LOOKUP — every one HIT ──
-        hits = 0
-        misses = 0
+        # ── Phase 2: LOOKUP HITs on EVERY worker, and on the shared port ─────
+        for w in workers:
+            c = _RESPClient("127.0.0.1", affinity_port(args.port, w))
+            try:
+                resp = c.cmd("KV.PREFIX.LOOKUP", NS)
+            finally:
+                c.close()
+            assert resp == b"HIT", f"LOOKUP on worker {w} answered {resp!r}, want HIT"
         for _ in range(args.probes):
             c = _RESPClient("127.0.0.1", args.port)
             try:
                 resp = c.cmd("KV.PREFIX.LOOKUP", NS)
-                if isinstance(resp, (bytes, bytearray)) and resp == b"HIT":
-                    hits += 1
-                else:
-                    misses += 1
             finally:
                 c.close()
-        print(f"  phase2 cross-worker LOOKUP: {hits} HIT / {misses} MISS over {args.probes} fresh connections")
-        if misses > 0:
-            print("FAIL: at least one fresh connection MISSed — directory not actually cross-worker.")
-            print("(Pre-fix this would have been ~75% MISS at -w 4. Any miss = regression.)")
-            rc = 1
-            return rc
+            assert resp == b"HIT", f"LOOKUP on the shared port answered {resp!r}, want HIT"
+        print(f"  phase2 LOOKUP HIT on all {len(workers)} workers + {args.probes} shared-port connections")
 
-        # ── Phase 3: V.STOREBATCH on the right worker, then on fresh ones ──
-        # Connection A is the one that REGISTERed and OWNS the V buffers. Use
-        # PionStore against the same connection underlying — open a new
-        # PionStore that re-REGISTERs (idempotent, returns the slot from this
-        # worker) then STOREBATCHes on whatever worker we land on.
-        # We can't predict which worker that is, so we'll iterate fresh
-        # connections until V.STOREBATCH succeeds at least once and at least
-        # one returns the cross-worker -ERR. Both prove the directory routing.
+        # ── Phase 3: V.STOREBATCH works on the owner, names it everywhere else
         rng = np.random.default_rng(0xABCD)
         fp32 = rng.standard_normal((NUM_TOK, KV_DIM)).astype(np.float32)
-        observed_owner_err = False
-        observed_success = False
-        owner_worker_seen = None
-        for attempt in range(8 * args.workers):
-            c = _RESPClient("127.0.0.1", args.port)
-            try:
-                resp = c.cmd(
-                    "V.STOREBATCH", f"{NS}_pv", "0", "0", str(NUM_TOK),
-                    fp32.tobytes(),
-                )
-                if isinstance(resp, (bytes, bytearray)) and resp == b"OK":
-                    observed_success = True
-                else:
-                    print(f"   attempt {attempt}: unexpected V.STOREBATCH resp: {resp!r}")
-            except Exception as e:
-                msg = str(e)
-                if "lives on worker" in msg:
-                    observed_owner_err = True
-                    # Parse the worker_id out of the message.
-                    import re as _re
-                    m = _re.search(r"worker (\d+)", msg)
-                    if m:
-                        owner_worker_seen = int(m.group(1))
-                else:
-                    print(f"   attempt {attempt}: unexpected error: {msg}")
-            finally:
-                c.close()
-            if observed_success and observed_owner_err:
-                break
-        if not observed_success:
-            print("FAIL: V.STOREBATCH never succeeded — every fresh connection landed on a non-owner.")
-            rc = 1
-            return rc
-        if not observed_owner_err:
-            # If this is a single-worker server (-w 1), the cross-worker error
-            # path is unreachable — that's fine, but the test wants ≥2 workers.
-            print("WARN: never saw cross-worker error — increase --probes or --workers if -w >1.")
-        else:
-            print(f"  phase3 V.STOREBATCH cross-worker error path triggered (owner={owner_worker_seen}) ✓")
-        print(f"  phase3 V.STOREBATCH succeeded on the owner connection ✓")
 
-        # ── Phase 4: V.FETCH on a non-owner returns the same -ERR ──────────
-        observed_fetch_err = False
-        for attempt in range(8 * args.workers):
-            c = _RESPClient("127.0.0.1", args.port)
+        def storebatch(w):
+            c = _RESPClient("127.0.0.1", affinity_port(args.port, w))
             try:
-                _ = c.cmd("V.FETCH", f"{NS}_pv", "0", "RANGE", "0", str(NUM_TOK))
-                # If it succeeded we landed on the owner; loop tries again.
-            except Exception as e:
-                if "lives on worker" in str(e):
-                    observed_fetch_err = True
-                    break
+                resp = c.cmd("V.STOREBATCH", f"{NS}_pv", "0", "0", str(NUM_TOK), fp32.tobytes())
+                assert resp == b"OK", f"V.STOREBATCH on worker {w} answered {resp!r}"
             finally:
                 c.close()
-        if observed_fetch_err:
-            print(f"  phase4 V.FETCH cross-worker error path triggered ✓")
-        else:
-            print("WARN: V.FETCH always landed on owner; can't verify cross-worker error path.")
+
+        err = owner_error(lambda: storebatch(owner))
+        assert err is None, f"V.STOREBATCH on the owner (worker {owner}) failed: {err}"
+        for w in others:
+            err = owner_error(lambda: storebatch(w))
+            assert err is not None and f"lives on worker {owner}" in err, \
+                f"V.STOREBATCH on worker {w} must name owner {owner}; got {err!r}"
+        print(f"  phase3 V.STOREBATCH OK on worker {owner}, owner named by {others} ✓")
+
+        # ── Phase 4: V.FETCH likewise ────────────────────────────────────────
+        def fetch(w):
+            c = _RESPClient("127.0.0.1", affinity_port(args.port, w))
+            try:
+                return c.cmd("V.FETCH", f"{NS}_pv", "0", "RANGE", "0", str(NUM_TOK))
+            finally:
+                c.close()
+
+        err = owner_error(lambda: fetch(owner))
+        assert err is None, f"V.FETCH on the owner (worker {owner}) failed: {err}"
+        for w in others:
+            err = owner_error(lambda: fetch(w))
+            assert err is not None and f"lives on worker {owner}" in err, \
+                f"V.FETCH on worker {w} must name owner {owner}; got {err!r}"
+        print(f"  phase4 V.FETCH OK on worker {owner}, owner named by {others} ✓")
 
         print("\nPASS: cross-worker KV.PREFIX directory works.")
     except AssertionError as e:

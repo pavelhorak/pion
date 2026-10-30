@@ -36,6 +36,14 @@ The core index is an HNSW (Hierarchical Navigable Small Worlds) graph.
 3. Greedy descent from `max_level` down to `level+1` to find best entry point.
 4. For each level from `min(level, max_level)` down to 0: beam-search (`_search_layer`, ef = `ef_construction`), prune neighbors (heuristic), link bidirectionally.
 
+After a build links every node (`FT.OPTIMIZE` or the background build), level 0
+is made **strongly connected** before compaction: every node the entry point
+cannot reach is linked in, and every closed region (reachable, but with every
+list pointing back inside it) gets a link out. A search that enters a closed
+region cannot leave it at any `ef`, so a query whose upper-level descent lands
+there returns the region's nodes. The build log reports both repairs
+(`[HNSW] level-0 reachability: …`, `[HNSW] level-0 exits: …`).
+
 ### Search (`search_fp32`, `search_fp32_scored`)
 1. **Upper levels**: greedy traversal using `_dist_fp32_int8` (query FP32 × stored Int8).
 2. **Level 0**: beam search with `MinHeap` (candidates) + `MaxHeap` (results), ef-bounded.
