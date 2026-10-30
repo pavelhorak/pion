@@ -4,7 +4,10 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.0.8] — 2026-10-30
+
+Keys with TTLs no longer slow down pipelined GETs, and non-GET commands do
+less server work per command.
 
 ### Changed
 
