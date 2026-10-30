@@ -48,6 +48,7 @@ comptime MAX_BULK_LEN = 536870912   # 512 MB
 # case-insensitive command name, bytes 11-13 are `\r\n$`.
 comptime GET_HDR0 = UInt32(0x0A0D322A)   # '*' '2' '\r' '\n' (LE)
 comptime GET_HDR1 = UInt32(0x0A0D3324)   # '$' '3' '\r' '\n' (LE)
+comptime GET_HDR01 = UInt64(GET_HDR0) | (UInt64(GET_HDR1) << 32)   # `*2\r\n$3\r\n`
 # 16, not 32: A/B'd 2026-08-03 on pipeline_deep (P=30, t=4 c=30) — a 32-window
 # measured 2.506M mean vs 2.598M for 16 (interleaved ABBA). More in-flight
 # prefetches (~224 slots at 32×7 lines) thrash the fill buffers and stage-A
@@ -557,8 +558,9 @@ struct FastPathHandler(Movable):
     # prefetch, response emit — so the misses of up to GET_BURST_MAX
     # independent lookups overlap instead of queuing behind each other.
     #
-    # Preconditions (enforced by the caller): no cluster routing, no live
-    # TTLs. Keys >23B, wrong arity, or malformed frames stop the parse and
+    # Precondition (enforced by the caller): no cluster routing. While any
+    # key has a TTL, a found key past its deadline ends the burst before its
+    # frame. Keys >23B, wrong arity, or malformed frames stop the parse and
     # fall to the generic per-command arm, which handles everything.
     # @no_inline: runs once per batch, so call overhead is amortized ~10×,
     # and keeping ~150 lines out of process_data_plane preserves its I-cache
@@ -719,15 +721,18 @@ struct FastPathHandler(Movable):
         writer.append_ok_response()
         return it_pos
 
+    @staticmethod
     @no_inline
     def _get_burst(
-        mut self,
+        keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+        ttl_map: UnsafePointer[SlabHashMap, MutUntrackedOrigin],
         buffer: UnsafePointer[UInt8, MutUntrackedOrigin],
         n: Int,
         start_pos: Int,
         fd: Int32,
         mut writer: ResponseWriter,
     ) -> Int:
+        var frame_at = Array[Int32, GET_BURST_MAX](uninitialized=True)
         var key_off = Array[Int32, GET_BURST_MAX](uninitialized=True)
         var key_len_a = Array[Int32, GET_BURST_MAX](uninitialized=True)
         var h_a = Array[UInt64, GET_BURST_MAX](uninitialized=True)
@@ -756,6 +761,7 @@ struct FastPathHandler(Movable):
             if klen < 0 or klen > 23: break
             q += 2   # \r\n
             if q + klen + 2 > n: break   # incomplete frame: stop, don't consume
+            frame_at[k] = Int32(p)
             key_off[k] = Int32(q)
             key_len_a[k] = Int32(klen)
             k += 1
@@ -772,7 +778,7 @@ struct FastPathHandler(Movable):
             d0_a[i] = packed[1]
             d1_a[i] = packed[2]
             d2_a[i] = packed[3]
-            var shard = self.keyspace[].shards + Int(h & 7)
+            var shard = keyspace[].shards + Int(h & 7)
             var idx = Int(h >> 7) & (shard[].capacity - 1)
             prefetch(shard[].metadata + idx)
 
@@ -780,7 +786,7 @@ struct FastPathHandler(Movable):
         comptime width = 16
         for i in range(k):
             var h = h_a[i]
-            var shard = self.keyspace[].shards + Int(h & 7)
+            var shard = keyspace[].shards + Int(h & 7)
             var mask = shard[].capacity - 1
             var idx = Int(h >> 7) & mask
             var meta_chunk = (shard[].metadata + idx).load[width=width]()
@@ -800,7 +806,7 @@ struct FastPathHandler(Movable):
         # ── Stage C: compare keys, fetch values, prefetch value payloads ──
         for i in range(k):
             var h = h_a[i]
-            var shard = self.keyspace[].shards + Int(h & 7)
+            var shard = keyspace[].shards + Int(h & 7)
             var slot = slot_a[i]
             var val = GenericValue()
             if slot >= 0:
@@ -826,6 +832,27 @@ struct FastPathHandler(Movable):
                 while off < vl and off < 512:
                     prefetch(vp + off)
                     off += 64
+
+        # ── Lazy expiry (#45), while any key has a TTL ──
+        # A found key past its deadline ends the burst before its frame, and
+        # the generic GET arm expires it. The TTL map is small and hot, and
+        # stage A's hash is the one it was filled with (one hash function for
+        # every map). Before, any TTL in the keyspace turned the burst off.
+        var clock = keyspace[].clock_ns
+        if clock != 0:
+            for i in range(k):
+                if vals[i].type.value == ValueType.NONE:
+                    continue
+                var dv = ttl_map[].get_with_hash(
+                    GenericValue.borrow(buffer + Int(key_off[i]), Int(key_len_a[i])), h_a[i])
+                if dv.type.value != ValueType.NONE:
+                    var d = Int64(dv.as_int())
+                    if d >= 0 and d < clock:
+                        k = i
+                        p = Int(frame_at[i])
+                        break
+            if k == 0:
+                return start_pos
 
         # ── Stage D: emit responses in order ──
         for i in range(k):
@@ -925,12 +952,16 @@ struct FastPathHandler(Movable):
 
                 # gh #175: batched GET burst — overlap DRAM misses across the
                 # pipelined batch. Preconditions checked once here: no cluster
-                # routing (covers MOVED/ASK + replica gating) and no live TTLs
-                # (lazy-expiry check needs the per-key probe). Non-GET frames
-                # fail the first u32 compare inside (`*2` vs `*3`…) — one load.
-                if (not self.has_cluster) \
-                        and (not self.has_ttl or self.ttl_map[].size == 0):
-                    var burst_end = self._get_burst(buffer, n, it_pos, fd, writer)
+                # routing (covers MOVED/ASK + replica gating). Live TTLs are
+                # checked inside. Only a frame that opens like a GET's
+                # (`*2\r\n$3\r\n`, one load) makes the call, and the call takes
+                # two pointers: a `mut self` call for every frame cost each SET
+                # ~120 instructions and each INCR ~160 to learn it was not a
+                # GET (measured 2026-10-30, /usr/bin/time -l, 2M ops).
+                if (not self.has_cluster) and it_pos + 14 <= n \
+                        and (buffer + it_pos).bitcast[UInt64]()[0] == GET_HDR01:
+                    var burst_end = Self._get_burst(self.keyspace, self.ttl_map,
+                                                    buffer, n, it_pos, fd, writer)
                     if burst_end > it_pos:
                         it_pos = burst_end
                         consumed = it_pos
