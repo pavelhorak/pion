@@ -18,6 +18,10 @@ under the old deadline.
       skip expired keys. DBSIZE counts a key until it is removed, as Redis's
       does.
   [4] DEBUG: refused unless --enable-debug-command allows it, as Redis.
+  [5] pipelined GETs (the batched GET kernel, which used to switch itself
+      off while any key had a TTL): an expired key reads nil and is
+      removed wherever it sits in the batch; keys around it, and a key whose
+      TTL has not passed, read their values.
 
     python3 tests/test_lazy_expiry.py [--port 6506]
 """
@@ -282,6 +286,31 @@ def run_debug(work: str, port: int):
     s.stop()
 
 
+def run_get_burst(work: str, port: int):
+    print("[5] pipelined GETs with TTLs")
+    s = Server(work, port, ["--enable-debug-command", "local"], "burst")
+    c = s.start()
+    c.cmd("DEBUG", "SET-ACTIVE-EXPIRE", "0")
+    keys = [f"b:{i}" for i in range(16)]
+    c.cmd("MSET", *[x for k in keys for x in (k, f"val-{k}")])
+    c.cmd("EXPIRE", "b:8", "1000")              # a TTL that has not passed
+    dead = {0, 5, 6, 15}                         # first, middle, adjacent, last
+    for i in dead:
+        c.cmd("PEXPIRE", keys[i], "1")
+    time.sleep(0.02)
+    got = c.pipeline([("GET", k) for k in keys])   # one write: one batch
+    want = [None if i in dead else f"val-{k}".encode() for i, k in enumerate(keys)]
+    check("every GET in the batch answers right", got == want, repr(got))
+    check("...the expired keys are removed", c.cmd("DBSIZE") == 12 and
+          all(c.cmd("EXISTS", keys[i]) == 0 for i in dead))
+    check("...and the key whose TTL has not passed keeps it", 990 <= c.cmd("TTL", "b:8") <= 1000)
+    got = c.pipeline([("GET", k) for k in keys])
+    check("a second batch agrees", got == want, repr(got))
+    c.assert_in_sync()
+    c.close()
+    s.stop()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=6506)
@@ -313,6 +342,7 @@ def main() -> int:
         run_durability(work, a.port)
         run_scan(work, a.port)
         run_debug(work, a.port)
+        run_get_burst(work, a.port)
     finally:
         if redis:
             redis.send_signal(signal.SIGTERM)

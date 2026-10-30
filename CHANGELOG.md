@@ -4,6 +4,33 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Changed
+
+- **A key with a TTL no longer slows down every GET.** While any key in the
+  keyspace had a TTL, the batched GET path (pipelined GETs on short keys) was
+  switched off, and each GET paid about 200 more server instructions. That
+  path now checks deadlines itself: a GET past its key's deadline still reads
+  nil and removes the key. The TTL lookup also reuses the key's hash instead
+  of computing it again.
+- **SET, INCR, MSET and the other non-GET commands do less work per command.**
+  Each command made an out-of-line call to learn whether it began a run of
+  GETs, and the call copied the whole command handler in and out. Only a frame
+  that starts like a GET makes the call now, and the call takes two pointers.
+  Server instructions per command, 2M pipelined commands on an M-series Mac,
+  against 1.0.7:
+
+  | | no TTL in the keyspace | a TTL in the keyspace |
+  |---|---|---|
+  | GET | same | −187 (−16%) |
+  | SET | −120 (−7%) | same |
+  | INCR | −158 (−9%) | +14 |
+  | MSET (10 keys) | −191 | −416 |
+
+  The gain is in server CPU per command. `redis-benchmark` on the same machine
+  is client-bound at these depths, so its RPS barely moves.
+
 ## [1.0.7] — 2026-10-30
 
 A vector index build always leaves level 0 strongly connected, so a search

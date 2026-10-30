@@ -1109,8 +1109,18 @@ struct StripedHashMap(Movable):
     def _expire_if_due(self, key: GenericValue, h: UInt64) -> Bool:
         """Lazy expiry: remove `key` (just found) when it is past its deadline
         at the batch clock. True when it was removed. Redis's rule: expired
-        once the clock is past the deadline."""
-        var d = self.deadline(key)
+        once the clock is past the deadline.
+
+        Every found key pays this while any key has a TTL, so it probes the
+        TTL map with the hash the caller already has (one hash function for
+        both maps) instead of going through deadline(), which hashed the key
+        again and called the map's out-of-line get()."""
+        if Int(self.ttl_map) == 0 or self.ttl_map[].size == 0:
+            return False
+        var dv = self.ttl_map[].get_with_hash(key, h)
+        if dv.type.value == ValueType.NONE:
+            return False
+        var d = Int64(dv.as_int())
         if d < 0 or d >= self.clock_ns:
             return False
         if not self.expire_hides_only:
