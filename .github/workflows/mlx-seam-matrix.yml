@@ -42,8 +42,8 @@ on:
 
 jobs:
   seam:
-    # macos-14+ is Apple Silicon; mlx ships no wheels for anything else.
-    runs-on: macos-14
+    # macOS runners are Apple Silicon; mlx ships no wheels for anything else.
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
