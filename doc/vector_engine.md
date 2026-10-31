@@ -44,7 +44,10 @@ were inserted again. A search that enters a closed region cannot leave it at
 any `ef`, so a query whose upper-level descent lands there returns the region's
 nodes. One link out per region (1.0.7) made the graph strongly connected but
 left those builds at recall 0.935 against 0.941, because a beam rarely reaches
-the one member that leads out. The build log reports both repairs
+the one member that leads out. The closed regions are rebuilt before the
+unreachable nodes are linked in: linking an unreachable node from a member of a
+closed region can open the region through that one node, and the region then
+keeps the same one-way-out shape. The build log reports both repairs
 (`[HNSW] level-0 reachability: …`, `[HNSW] level-0 exits: …`).
 
 ### Search (`search_fp32`, `search_fp32_scored`)

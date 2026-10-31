@@ -2326,20 +2326,25 @@ struct HNSWGraph(Movable):
     def _repair_l0(mut self) raises:
         """Make level 0 strongly connected: every node reachable from the entry
         point (gh #405) and every node able to get back to it. Each repair can
-        disturb the other (both evict links from full lists), so
-        they alternate until the exit pass has nothing to do (bounded)."""
+        disturb the other (both evict links from full lists), so they
+        alternate until a round in which neither changes anything (bounded).
+
+        The exit pass runs FIRST. The reachability pass links each unreachable
+        node u from its closest reachable node r, and r can be a member of a
+        closed region: when u's own links lead out, that one edge opens the
+        region through u, and an exit pass run afterwards finds nothing
+        closed. The region then keeps the one-way-out shape that cost 1.0.7
+        recall (an x86 build read 0.936 with only the reachability line
+        logged). The forward pass still runs last, so no node ships
+        unreachable (gh #405's defect)."""
         var links = 0
         var exits = 0
-        var e = 0
         for _round in range(3):
-            links += self._repair_l0_reachability()
-            e = self._repair_l0_exits()
+            var e = self._repair_l0_exits()
             exits += e
-            if e == 0: break
-        if e > 0:
-            # the last exit pass overwrote links: the forward pass gets the
-            # final word, so no node ships unreachable (gh #405's defect)
-            links += self._repair_l0_reachability()
+            var l = self._repair_l0_reachability()
+            links += l
+            if e == 0 and l == 0: break
         if links > 0:
             print("[HNSW] level-0 reachability: " + String(links)
                   + " unreachable node(s) linked into the graph")

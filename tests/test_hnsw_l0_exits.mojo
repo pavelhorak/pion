@@ -15,6 +15,10 @@
 # reach it, that every member of the region got a link out of it, and that the
 # reachability pass alone did not.
 #
+# Second case: a closed region with an unreachable node beside it. The
+# reachability pass links that node from a region member, which opens the
+# region through one node; the exit pass must run before it.
+#
 #   cc -c tests/metal_stubs.c -o build/metal_stubs.o        # macOS only
 #   pixi run mojo build -I . tests/test_hnsw_l0_exits.mojo -Xlinker build/metal_stubs.o \
 #       -o build/t && build/t
@@ -71,11 +75,10 @@ def reach_entry(g: HNSWGraph) -> Int:
     return c
 
 
-def close_region(mut g: HNSWGraph, center: Int, size: Int) -> List[Int]:
+def close_region(mut g: HNSWGraph, center: Int, size: Int, cap: Int) -> List[Int]:
     """The `size` nodes nearest `center` (never the entry point), each list
-    rewritten to the other members, nearest first, up to the level-0 cap."""
+    rewritten to the other members, nearest first, up to `cap` links."""
     var n = g.num_nodes
-    var cap = 2 * g.M
     var d = List[Float32]()
     for i in range(n):
         d.append(g._dist_int8_int8(g.nodes[center].vector, g.nodes[i].vector))
@@ -112,10 +115,25 @@ def close_region(mut g: HNSWGraph, center: Int, size: Int) -> List[Int]:
     return members^
 
 
-def main() raises:
+def links_out(g: HNSWGraph, members: List[Int]) -> Int:
+    """How many members have at least one level-0 link out of the set."""
+    var n = g.num_nodes
+    var inside = alloc[UInt8](n)
+    unsafe_memset(inside, 0, n)
+    for x in members:
+        inside[x] = 1
+    var leave = 0
+    for x in members:
+        for k in range(g.nodes[x].get_neighbor_count(0)):
+            if inside[g.nodes[x].get_neighbor(0, k)] == 0:
+                leave += 1
+                break
+    inside.free()
+    return leave
+
+
+def built(n: Int, dim: Int) raises -> HNSWGraph:
     seed(405)
-    var n = 3000
-    var dim = 32
     var g = HNSWGraph(n, dim, M=8, ef_construction=64)
     var v = alloc[Float32](dim)
     for i in range(n):
@@ -124,6 +142,53 @@ def main() raises:
         g.add_vector(i, v)
     v.free()
     g.build_index()
+    return g^
+
+
+def strand_beside(mut g: HNSWGraph, center: Int, members: List[Int]) -> Int:
+    """Make the nearest non-member of `center` that links out of the region
+    unreachable: every level-0 link to it is removed. Its own list stays, so
+    it still reaches the entry point. Returns it."""
+    var n = g.num_nodes
+    var inside = alloc[UInt8](n)
+    unsafe_memset(inside, 0, n)
+    for x in members:
+        inside[x] = 1
+    var u = -1
+    var ud = Float32(0.0)
+    for i in range(n):
+        if inside[i] != 0 or i == g.entry_point_id:
+            continue
+        var out = False
+        for k in range(g.nodes[i].get_neighbor_count(0)):
+            if inside[g.nodes[i].get_neighbor(0, k)] == 0:
+                out = True
+        if not out:
+            continue
+        var di = g._dist_int8_int8(g.nodes[center].vector, g.nodes[i].vector)
+        if u < 0 or di < ud:
+            u = i
+            ud = di
+    inside.free()
+    for i in range(n):
+        if i == u:
+            continue
+        var off = g.nodes[i]._get_offset(0)
+        var c = g.nodes[i].get_neighbor_count(0)
+        var w = 0
+        for k in range(c):
+            var nb = g.nodes[i].get_neighbor(0, k)
+            if nb != u:
+                g.nodes[i].neighbors[off + w] = UInt32(nb)
+                w += 1
+        g.nodes[i].neighbor_counts[0] = UInt32(w)
+    return u
+
+
+def main() raises:
+    var n = 3000
+    var dim = 32
+    var g = built(n, dim)
     var fails = 0
 
     var r0 = reach_from_entry(g)
@@ -135,7 +200,7 @@ def main() raises:
 
     var center = (g.entry_point_id + n // 2) % n
     var size = 60
-    var members = close_region(g, center, size)
+    var members = close_region(g, center, size, 2 * g.M)
     var r1 = reach_from_entry(g)
     var b1 = reach_entry(g)
     print("closed a region of", size, ": reachable from entry", r1, "; reach the entry", b1)
@@ -167,23 +232,50 @@ def main() raises:
     # now, so nearly all have a link that leaves the region (59 of 60 here; a
     # member at the region's center can rightly keep only members, since the
     # region is the ball around it). One link would leave 1 of 60.
-    var inside = alloc[UInt8](n)
-    unsafe_memset(inside, 0, n)
-    for x in members:
-        inside[x] = 1
-    var leave = 0
-    for x in members:
-        for k in range(g.nodes[x].get_neighbor_count(0)):
-            if inside[g.nodes[x].get_neighbor(0, k)] == 0:
-                leave += 1
-                break
-    inside.free()
+    var leave = links_out(g, members)
     print("members with a link out of the region:", leave, "of", size)
     if leave < size * 3 // 4:
         print("FAIL: every member of a closed region must be re-linked, not just one")
         fails += 1
-
     _ = members^
+
+    # The reachability pass can open a closed region by accident (seen on x86:
+    # one build read 0.936 with only the reachability line logged). A node u
+    # beside the region is unreachable; its closest reachable node r is a
+    # member, so the pass links r -> u, and u's own links lead out. The region
+    # now has one way out, through u, and an exit pass run AFTER it finds
+    # nothing closed. Members keep free slots here so that r is a member.
+    for variant in range(2):
+        var h = built(n, dim)
+        var c2 = (h.entry_point_id + n // 3) % n
+        var m2 = close_region(h, c2, size, h.M)
+        var u = strand_beside(h, c2, m2)
+        var rf = reach_from_entry(h)
+        var re = reach_entry(h)
+        if variant == 0:
+            # The canary: the reachability pass alone must open the region
+            # through u, or this case is not exercised.
+            var l = h._repair_l0_reachability()
+            var lo = links_out(h, m2)
+            print("region beside a stranded node: reachable", rf, "; reach the entry", re,
+                  "; reachability pass alone: links", l, ", reach the entry", reach_entry(h),
+                  ", members with a link out", lo)
+            if rf != n - 1 or re != n - size or l == 0 or reach_entry(h) != n or lo > 2:
+                print("FAIL: expected the reachability pass to open the region through one node")
+                fails += 1
+        else:
+            h._repair_l0()
+            var lo = links_out(h, m2)
+            print("after _repair_l0: reachable", reach_from_entry(h), "; reach the entry",
+                  reach_entry(h), "; members with a link out", lo, "of", size)
+            if reach_from_entry(h) != n or reach_entry(h) != n:
+                print("FAIL: _repair_l0 must leave level 0 strongly connected")
+                fails += 1
+            if lo < size * 3 // 4:
+                print("FAIL: the exit pass must run before the reachability pass can open a region")
+                fails += 1
+        _ = m2^
+        _ = u
     if fails == 0:
         print("PASS: level 0 strongly connected after the exit repair")
     else:
