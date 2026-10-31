@@ -12,7 +12,8 @@
 # Builds a graph, closes a region by hand (every member's list rewritten to
 # point only at other members), checks the closure is real, then checks that
 # _repair_l0 leaves every node both reachable from the entry point and able to
-# reach it, and that the reachability pass alone did not.
+# reach it, that every member of the region got a link out of it, and that the
+# reachability pass alone did not.
 #
 #   cc -c tests/metal_stubs.c -o build/metal_stubs.o        # macOS only
 #   pixi run mojo build -I . tests/test_hnsw_l0_exits.mojo -Xlinker build/metal_stubs.o \
@@ -158,6 +159,28 @@ def main() raises:
     print("after _repair_l0: reachable from entry", r2, "; reach the entry", b2)
     if r2 != n or b2 != n:
         print("FAIL: _repair_l0 must leave level 0 strongly connected")
+        fails += 1
+
+    # Strongly connected is not enough for a beam. 1.0.7 linked ONE member
+    # out, and a search that landed in the region rarely reached it (builds
+    # where it fired: recall 0.935 against 0.941). Every member is re-linked
+    # now, so nearly all have a link that leaves the region (59 of 60 here; a
+    # member at the region's center can rightly keep only members, since the
+    # region is the ball around it). One link would leave 1 of 60.
+    var inside = alloc[UInt8](n)
+    unsafe_memset(inside, 0, n)
+    for x in members:
+        inside[x] = 1
+    var leave = 0
+    for x in members:
+        for k in range(g.nodes[x].get_neighbor_count(0)):
+            if inside[g.nodes[x].get_neighbor(0, k)] == 0:
+                leave += 1
+                break
+    inside.free()
+    print("members with a link out of the region:", leave, "of", size)
+    if leave < size * 3 // 4:
+        print("FAIL: every member of a closed region must be re-linked, not just one")
         fails += 1
 
     _ = members^

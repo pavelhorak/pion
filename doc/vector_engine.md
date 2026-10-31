@@ -38,10 +38,13 @@ The core index is an HNSW (Hierarchical Navigable Small Worlds) graph.
 
 After a build links every node (`FT.OPTIMIZE` or the background build), level 0
 is made **strongly connected** before compaction: every node the entry point
-cannot reach is linked in, and every closed region (reachable, but with every
-list pointing back inside it) gets a link out. A search that enters a closed
-region cannot leave it at any `ef`, so a query whose upper-level descent lands
-there returns the region's nodes. The build log reports both repairs
+cannot reach is linked in, and every node of a closed region (reachable, but
+with every list pointing back inside it) has its level-0 list rebuilt as if it
+were inserted again. A search that enters a closed region cannot leave it at
+any `ef`, so a query whose upper-level descent lands there returns the region's
+nodes. One link out per region (1.0.7) made the graph strongly connected but
+left those builds at recall 0.935 against 0.941, because a beam rarely reaches
+the one member that leads out. The build log reports both repairs
 (`[HNSW] level-0 reachability: …`, `[HNSW] level-0 exits: …`).
 
 ### Search (`search_fp32`, `search_fp32_scored`)
