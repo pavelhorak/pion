@@ -2326,29 +2326,34 @@ struct HNSWGraph(Movable):
     def _repair_l0(mut self) raises:
         """Make level 0 strongly connected: every node reachable from the entry
         point (gh #405) and every node able to get back to it. Each repair can
-        disturb the other (both may overwrite a full list's farthest link), so
-        they alternate until the exit pass has nothing to do (bounded)."""
+        disturb the other (both evict links from full lists), so they
+        alternate until a round in which neither changes anything (bounded).
+
+        The exit pass runs FIRST. The reachability pass links each unreachable
+        node u from its closest reachable node r, and r can be a member of a
+        closed region: when u's own links lead out, that one edge opens the
+        region through u, and an exit pass run afterwards finds nothing
+        closed. The region then keeps the one-way-out shape that cost 1.0.7
+        recall (an x86 build read 0.936 with only the reachability line
+        logged). The forward pass still runs last, so no node ships
+        unreachable (gh #405's defect)."""
         var links = 0
         var exits = 0
-        var e = 0
         for _round in range(3):
-            links += self._repair_l0_reachability()
-            e = self._repair_l0_exits()
+            var e = self._repair_l0_exits()
             exits += e
-            if e == 0: break
-        if e > 0:
-            # the last exit pass overwrote links: the forward pass gets the
-            # final word, so no node ships unreachable (gh #405's defect)
-            links += self._repair_l0_reachability()
+            var l = self._repair_l0_reachability()
+            links += l
+            if e == 0 and l == 0: break
         if links > 0:
             print("[HNSW] level-0 reachability: " + String(links)
                   + " unreachable node(s) linked into the graph")
         if exits > 0:
             print("[HNSW] level-0 exits: " + String(exits)
-                  + " closed region(s) linked back to the graph")
+                  + " node(s) that could not reach the entry re-linked")
 
     def _repair_l0_exits(mut self) raises -> Int:
-        """Link out every level-0 region a search can enter and never leave.
+        """Re-link every level-0 node that cannot get back to the entry point.
 
         _repair_l0_reachability makes every node reachable FROM the entry
         point, which is not enough: a set of nodes whose lists all point back
@@ -2359,101 +2364,57 @@ struct HNSWGraph(Movable):
         EF_RUNTIME 1000); healthy builds are strongly connected.
 
         `back[v]` = v reaches the entry point. It is a fixpoint over the lists,
-        swept in both index orders, so no reverse adjacency is allocated. For
-        the first node v that cannot reach it, link v -> r, r the closest node
-        that can: into a free slot, else over v's farthest link w when w keeps
-        another in-link. Everything that reaches v then reaches the entry too,
-        so one link opens a whole closed region. Deleted nodes are not walked
-        through, as in _mark_reachable_l0. Returns the number of links made."""
+        swept in both index orders, so no reverse adjacency is allocated. Every
+        node it leaves out has its level-0 list cleared and rebuilt by
+        _relink_node_l0: a search from the entry point, the build's prune, and
+        backlinks with the serial shrink, as if the node were inserted again.
+        1.0.7 added ONE link per closed region instead. That made the graph
+        strongly connected, but a beam rarely reaches the one member that leads
+        out, and the region's nodes kept lists of each other and few in-links:
+        builds where it fired measured 0.935 against 0.941. Re-linking every
+        member restores what a healthy build measures (simulated on the saved
+        x86 builds: 0.9555 against 0.954-0.956 healthy, 0.926 with one link).
+        The relink's evictions can strand or close other nodes, which is why
+        _repair_l0 alternates this with the reachability pass. Deleted nodes
+        are not walked through, as in _mark_reachable_l0. Returns the number
+        of nodes re-linked."""
         var n = self.num_nodes
         if n <= 1 or self.entry_point_id < 0: return 0
-        var cap = 2 * self.M
         var back = alloc[UInt8](n)
-        var indeg = alloc[Int32](n)
         unsafe_memset(back, 0, n)
-        unsafe_memset(indeg.bitcast[UInt8](), 0, n * 4)
-        for i in range(n):
-            if self.is_deleted(i): continue
-            var c = self.nodes[i].get_neighbor_count(0)
-            for k in range(c):
-                var nb = self.nodes[i].get_neighbor(0, k)
-                if nb >= 0 and nb < n: indeg[nb] += 1
         back[self.entry_point_id] = 1
-        var linked = 0
-        var gave_up = 0
-        var first = 0
-        while True:
-            var changed = True
-            while changed:
-                changed = False
-                for d in range(2):
-                    for j in range(n):
-                        var i = j if d == 0 else n - 1 - j
-                        if back[i] != 0 or self.is_deleted(i): continue
-                        var c = self.nodes[i].get_neighbor_count(0)
-                        for k in range(c):
-                            var nb = self.nodes[i].get_neighbor(0, k)
-                            if nb >= 0 and nb < n and back[nb] != 0 and not self.is_deleted(nb):
-                                back[i] = 1
-                                changed = True
-                                break
-            var v = -1
-            while first < n:
-                if back[first] == 0 and not self.is_deleted(first):
-                    v = first
-                    break
-                first += 1
-            if v < 0: break
-            back[v] = 1   # linked below, or given up on: either way not again
-            # r: the closest node that reaches the entry point. A search from
-            # the entry point usually finds one; it can itself be drawn into
-            # the closed region, so fall back to a scan.
-            self._search_layer(self.nodes[v].vector, self.entry_point_id, self.ef_construction, 0)
-            var r = -1
-            var r_d = Float32(0.0)
-            while len(self.results.data) > 0:
-                var h = self.results.pop()   # farthest first: the last kept wins
-                if h.id != v and h.id >= 0 and h.id < n and back[h.id] != 0 and not self.is_deleted(h.id):
-                    r = h.id
-            if r < 0:
-                for x in range(n):
-                    if x == v or back[x] == 0 or self.is_deleted(x): continue
-                    var dx = self._dist_int8_int8(self.nodes[v].vector, self.nodes[x].vector)
-                    if r < 0 or dx < r_d:
-                        r = x; r_d = dx
-            if r < 0:
-                gave_up += 1
-                continue
-            var v_ptr = self.nodes + v
-            var off = v_ptr[]._get_offset(0)
-            var nc = Int(v_ptr[].neighbor_counts[0])
-            if nc < cap:
-                v_ptr[].add_neighbor(0, r)
-            else:
-                # over the farthest link whose target keeps another in-link
-                var pos = -1
-                var pos_d = Float32(-1.0)
-                for ni in range(nc):
-                    var w = Int(v_ptr[].neighbors[off + ni])
-                    if w < 0 or w >= n or indeg[w] < 2: continue
-                    var dw = self._dist_int8_int8(v_ptr[].vector, self.nodes[w].vector)
-                    if dw > pos_d:
-                        pos_d = dw; pos = ni
-                if pos < 0:
-                    gave_up += 1
-                    continue
-                indeg[Int(v_ptr[].neighbors[off + pos])] -= 1
-                v_ptr[].neighbors[off + pos] = UInt32(r)
-            indeg[r] += 1
-            linked += 1
+        var changed = True
+        while changed:
+            changed = False
+            for d in range(2):
+                for j in range(n):
+                    var i = j if d == 0 else n - 1 - j
+                    if back[i] != 0 or self.is_deleted(i): continue
+                    var c = self.nodes[i].get_neighbor_count(0)
+                    for k in range(c):
+                        var nb = self.nodes[i].get_neighbor(0, k)
+                        if nb >= 0 and nb < n and back[nb] != 0 and not self.is_deleted(nb):
+                            back[i] = 1
+                            changed = True
+                            break
+        var closed = List[Int]()
+        for i in range(n):
+            if back[i] == 0 and not self.is_deleted(i):
+                closed.append(i)
         back.free()
-        indeg.free()
+        var relinked = 0
+        var gave_up = 0
+        for v in closed:
+            self.nodes[v].neighbor_counts[0] = UInt32(0)
+            self._relink_node_l0(v)
+            if self.nodes[v].get_neighbor_count(0) == 0:
+                gave_up += 1   # nothing to link to; the next round sees it again
+            else:
+                relinked += 1
         if gave_up > 0:
-            # back[v] was set for these, so the region they close looks open
-            # to this pass: say so rather than report a clean graph
             print("[HNSW] level-0 exits: " + String(gave_up)
-                  + " closed region(s) left closed (no node to link to)")
-        return linked
+                  + " node(s) left without a level-0 link (nothing to link to)")
+        return relinked
 
     def _repair_l0_reachability(mut self) raises -> Int:
         """gh #405: link every level-0 node that the entry point cannot reach.

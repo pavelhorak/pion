@@ -4,6 +4,27 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Fixed
+
+- **Builds where 1.0.7's level-0 exit repair fired lost a little recall.**
+  That repair gave each closed region (nodes a search could enter but not
+  leave) one link out, and a query that landed in the region rarely found it:
+  those builds read recall 0.935–0.936 against 0.941. Every node of a closed
+  region now has its level-0 list rebuilt the way the build links a new node:
+  a fresh search from the entry point, the usual neighbor selection, and
+  backlinks. The log line is now `[HNSW] level-0 exits: N node(s) that could
+  not reach the entry re-linked`. In 960 probe builds on GitHub's x86 runners
+  it fired 11 times, and all 11 builds read 0.941, with no query under 0.5.
+- **Linking in an unreachable node could open a closed region through that
+  one node,** leaving the same one-way-out shape. The node is linked from its
+  closest reachable node, which can be a member of the region. One of the 960
+  probe builds read 0.936 with only the reachability line logged. Closed
+  regions are now rebuilt before unreachable nodes are linked in.
+  `tests/test_hnsw_l0_exits.mojo` covers both cases, and now also checks that
+  most of a region's nodes link out of it (59 of 60; one link gave 1 of 60).
+
 ## [1.0.8] — 2026-10-30
 
 Keys with TTLs no longer slow down pipelined GETs, and non-GET commands do
