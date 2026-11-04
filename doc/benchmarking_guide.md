@@ -124,6 +124,14 @@ varies by a few tenths of a point between runs because the graph build is
 randomized, and an occasional single run dips further; check whether a low
 number reproduces before reading anything into it.
 
+Each run keeps the Pion server's output in
+`benchmarks/VectorDBBench/server_logs/pion-<timestamp>.log` (gitignored), and
+the results file names that log under the run's table. A dip is usually a bad
+build, not a slow search, and the build's own lines (`[HNSW] level-0 ...`, link
+drops, the quant mode that actually ran) are the only record of it. The harness
+prints those lines after the run. `PION_BENCH_SERVER_LOG=<path>` picks the file,
+and `PION_BENCH_SERVER_LOG=off` discards the output as before.
+
 ---
 
 ## Protocol parity

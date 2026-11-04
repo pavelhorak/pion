@@ -21,6 +21,7 @@ from bench_proc import kill_pion_servers, kill_inference_workers  # gh #347
 ZVEC_ROOT = os.path.join(os.path.dirname(PROJECT_ROOT), "zvec")
 VALKEY_ROOT = os.path.join(os.path.dirname(PROJECT_ROOT), "valkey")
 RESULTS_MD = os.path.join(SCRIPT_DIR, "benchmark_results.md")
+SERVER_LOG_DIR = os.path.join(SCRIPT_DIR, "server_logs")  # *.log, gitignored
 
 CASE = "Performance1536D50K"
 M = 16
@@ -116,15 +117,50 @@ def clean_pion_state():
             print(f"  [clean] WARNING: could not remove {os.path.basename(f)}: {e}")
 
 
-def start_server(cmd, name, port=PORT, startup_wait=3):
+def pion_server_log_path(run_timestamp):
+    """Where this run keeps the Pion server's own output.
+
+    On by default: a recall dip is a bad BUILD (gh #405), and the build's own
+    lines ([HNSW] level-0 reachability, link-drop accounting, the quant mode
+    that actually ran) are the only record of what that build did. The 1.0.8
+    gate had a 0.926 run whose output had been discarded, so it could not be
+    explained. PION_BENCH_SERVER_LOG=<path> picks the file;
+    PION_BENCH_SERVER_LOG=off (or 0, or empty) discards the output."""
+    env = os.environ.get("PION_BENCH_SERVER_LOG")
+    if env is not None:
+        return None if env.strip().lower() in ("", "0", "off", "none") else env
+    os.makedirs(SERVER_LOG_DIR, exist_ok=True)
+    stamp = run_timestamp.replace(" ", "_").replace(":", "")
+    return os.path.join(SERVER_LOG_DIR, f"pion-{stamp}.log")
+
+
+def print_build_lines(log_path, limit=40):
+    """Echo what the server logged about the index it built."""
+    try:
+        with open(log_path, errors="replace") as f:
+            lines = [l.rstrip() for l in f
+                     if l.lstrip().startswith(("[HNSW]", "[vector]", "[PolarQuant]",
+                                                   "[TurboQuant]", "[NanoQuant]"))]
+    except OSError:
+        return
+    print(f"[Pion] Build lines from {log_path}:")
+    for l in lines[:limit]:
+        print(f"    {l}")
+    if len(lines) > limit:
+        print(f"    ... {len(lines) - limit} more")
+    if not lines:
+        print("    (none)")
+
+
+def start_server(cmd, name, port=PORT, startup_wait=3, log_path=None):
     clear_port(port)
     print(f"[{name}] Starting: {cmd}")
-    # PION_BENCH_SERVER_LOG=<path>: keep the Pion server's own output (build
-    # link-drop accounting, warnings) instead of discarding it — the only way
-    # to read what the server said during a run that dipped.
-    log_path = os.environ.get("PION_BENCH_SERVER_LOG") if name == "Pion" else None
+    if log_path:
+        print(f"[{name}] Server log: {log_path}")
     sink = open(log_path, "a") if log_path else subprocess.DEVNULL
     proc = subprocess.Popen(cmd, shell=True, stdout=sink, stderr=subprocess.STDOUT if log_path else subprocess.DEVNULL)
+    if log_path:
+        sink.close()  # the child holds its own descriptor
     time.sleep(startup_wait)
     if proc.poll() is not None:
         print(f"[{name}] Server exited immediately — skipping.")
@@ -394,8 +430,9 @@ def main():
     if max_elements and max_elements > 600000: pion_cmd += f" --max-elements {max_elements}"
     # Scale startup wait: 30s base + 15s per million max_elements
     startup_wait = 30 + (max_elements // 1000000) * 15 if max_elements else 30
+    pion_log = pion_server_log_path(run_timestamp) if not args.valkey_only else None
     proc = start_server(
-        pion_cmd, "Pion", port=PION_PORT, startup_wait=startup_wait,
+        pion_cmd, "Pion", port=PION_PORT, startup_wait=startup_wait, log_path=pion_log,
     ) if not args.valkey_only else None
     if proc:
         # Check if we can skip load (index already populated from a previous run)
@@ -439,6 +476,7 @@ def main():
             gpu_tag = " GPU" if args.gpu else ""
             load_tag = "" if args.load_concurrency == 1 else f", load={args.load_concurrency}"
             res["name"] = f"Pion V27{gpu_tag} (ef={ef}, w={args.workers}{load_tag})"
+            res["server_log"] = pion_log
             bench_results.append(res)
         # Skip stop_server + cleanup when PION_BENCH_NO_CLEANUP=1 (leaves
         # server alive on PION_PORT for the caller to drive a follow-up bench
@@ -448,6 +486,8 @@ def main():
             clean_pion_state()
         else:
             print(f"[Pion] Leaving server alive on port {PION_PORT} (PION_BENCH_NO_CLEANUP=1)")
+        if pion_log:
+            print_build_lines(pion_log)
         # After the server is stopped, so a refusal leaks no process.
         if no_queries:
             print(f"\nERROR: the run reports 0 QPS, so no query reached the server.\n"
@@ -474,6 +514,9 @@ def main():
         for r in bench_results:
             new_content += f"| {r['name']} | {r['load_dur']} | {r['qps']} | {r['p99']} | {r['recall']} |\n"
         new_content += "\n"
+        for r in bench_results:
+            if r.get("server_log"):
+                new_content += f"Server log: `{os.path.relpath(r['server_log'], PROJECT_ROOT)}`\n\n"
 
         old_content = ""
         if os.path.exists(RESULTS_MD):
@@ -543,6 +586,8 @@ def main():
             print(f"GATE FAILED [{profile_name}] — vector baselines not met:")
             for f in gate_failures:
                 print(f)
+            if pion_res.get("server_log"):
+                print(f"  Server log: {pion_res['server_log']}")
             print(f"{'='*60}")
             sys.exit(1)
         else:
