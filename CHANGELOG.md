@@ -4,7 +4,9 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.0.9] — 2026-11-04
+
+Builds where the level-0 repair fires no longer lose recall.
 
 ### Fixed
 
@@ -22,6 +24,8 @@ enumerated — there were roughly 1,100 of them.
   closest reachable node, which can be a member of the region. One of the 960
   probe builds read 0.936 with only the reachability line logged. Closed
   regions are now rebuilt before unreachable nodes are linked in.
+  In 600 more probe builds with both fixes, the repair fired 12 times, and all
+  12 builds read 0.941.
   `tests/test_hnsw_l0_exits.mojo` covers both cases, and now also checks that
   most of a region's nodes link out of it (59 of 60; one link gave 1 of 60).
 
