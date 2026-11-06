@@ -65,8 +65,8 @@
 | MOVE | ✅ | ✅ | ✅ | **SLOW** | ✅ | One database, as Redis with `databases 1`: DB 0 is the source itself, any other index is out of range |
 | OBJECT ENCODING | ✅ | ✅ | ✅ | **SLOW** | ✅ | By Redis 8's size rules: int / embstr (≤44 bytes) / raw; a list is listpack while its elements fit 8 KB, else quicklist; hash listpack up to 512 short entries, set intset up to 512 integers or listpack up to 128, sorted set listpack up to 128; stream. Redis also keeps an encoding a value grew into, which Pion does not track (#47) |
 | OBJECT REFCOUNT | ✅ | ✅ | ✅ | **SLOW** | ✅ | |
-| OBJECT IDLETIME | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Refuses: Pion keeps no per-key access time (it answered 0) (#47) |
-| OBJECT FREQ | ✅ | ✅ | ✅ | **SLOW** | ✅ | Refuses, as Redis does without an LFU maxmemory policy (Pion has none). On a missing key every OBJECT subcommand answers nil |
+| OBJECT IDLETIME | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Under an LRU maxmemory policy, the idle seconds. Otherwise refuses: Pion keeps no per-key access time without one |
+| OBJECT FREQ | ✅ | ✅ | ✅ | **SLOW** | ✅ | Under an LFU maxmemory policy, the logarithmic counter. Otherwise refuses, as Redis does. On a missing key every OBJECT subcommand answers nil |
 | SORT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Lists, sets and sorted sets; BY/LIMIT/GET/ASC/DESC/ALPHA/STORE |
 | SORT_RO | ✅ | ✅ | ✅ | **SLOW** | ✅ | SORT without STORE |
 | SCAN | ✅ | ✅ | ✅ | **SLOW** | ✅ | MATCH/COUNT/TYPE; single sweep (cursor 0 returns every key, cursor "0" back) |
@@ -404,8 +404,8 @@ WAIT and XREAD BLOCK answer at once inside a script, as in Redis.
 | TIME | ✅ | ✅ | ✅ | **SLOW** | ✅ | [unix seconds, microseconds] |
 | INFO | ✅ | ✅ | 🟡 | **SLOW** | ✅ | Server / Memory / Cluster / Replication / Persistence / Stats / Pion / Keyspace sections; `INFO <section> ...` returns only those. Port, RSS, uptime, per-worker key counts and the replication role are resolved from real state; `redis_version` stays `7.0.0` for client feature gating, `pion_version` carries the build. A RESP3 verbatim string under `HELLO 3`. |
 | PION.STATS | n/a | n/a | n/a | **SLOW** | n/a | Pion-only. The value receipt: a 14-pair map (RESP3 `%`, RESP2 flat array) — `kvprefix_hits/misses/tokens_served/bytes_served`, `prefill_seconds_avoided` (measured + estimated) and `prefill_seconds_avoided_measured` (client-reported `PREFILL_MS` only), `semantic_hits/misses`, `vector_queries`. Per WORKER. `PION.STATS RESET` zeroes the counters. |
-| CONFIG GET | ✅ | ✅ | ✅ | **SLOW** | ✅ | Glob patterns over the parameters Pion can state truthfully (`databases`, `maxmemory`, `maxmemory-policy`, `appendonly`, `save`, `port`, `timeout`, `enable-debug-command`, `slowlog-*`, `latency-monitor-threshold` 0, `latency-tracking` no) |
-| CONFIG SET | ✅ | ✅ | 🟡 | **SLOW** | ✅ | `maxmemory`, `slowlog-log-slower-than` and `slowlog-max-len` are runtime-settable, several pairs at once (all checked before any is set); `latency-monitor-threshold 0` and `latency-tracking no` are accepted (that is what Pion is); every other key refuses with an explanatory `-ERR` |
+| CONFIG GET | ✅ | ✅ | ✅ | **SLOW** | ✅ | Glob patterns over the parameters Pion can state truthfully (`databases`, `maxmemory`, `maxmemory-policy`, `maxmemory-samples`, `lfu-log-factor`, `lfu-decay-time`, `appendonly`, `save`, `port`, `timeout`, `enable-debug-command`, `slowlog-*`, `latency-monitor-threshold` 0, `latency-tracking` no) |
+| CONFIG SET | ✅ | ✅ | 🟡 | **SLOW** | ✅ | `maxmemory`, `maxmemory-policy`, `maxmemory-samples`, `lfu-log-factor`, `lfu-decay-time`, `slowlog-log-slower-than` and `slowlog-max-len` are runtime-settable, several pairs at once (all checked before any is set); `latency-monitor-threshold 0` and `latency-tracking no` are accepted (that is what Pion is); every other key refuses with an explanatory `-ERR` |
 | CONFIG REWRITE | ✅ | ✅ | ✅ | **SLOW** | ✅ | `ERR The server is running without a config file`, as Redis without one |
 | CONFIG RESETSTAT | ✅ | ✅ | ✅ | **SLOW** | ✅ | Resets the counters INFO reports (PION.STATS) |
 | COMMAND | ✅ | ✅ | ✅ | **SLOW** | ✅ | Every command's entry: Redis's own (RESP2 and RESP3, key specs, ACL categories, subcommands) for a command Redis has, one built from Pion's table for a Pion-only command (#47) |

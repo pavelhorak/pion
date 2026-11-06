@@ -79,8 +79,9 @@ slower than doing nothing, and we shipped it that way for a while.
 - **`-w N` is N independent keyspaces**, not one shared keyspace. The server
   refuses to start with `-w N > 1` unless you pass `--independent-workers`.
 - **No TLS.** Loopback by default; terminate TLS at a proxy.
-- **No eviction.** `--maxmemory` refuses writes with `-OOM` once the process
-  reaches the limit, but nothing is ever evicted to make room.
+- **Eviction holds RSS, not allocator bytes.** `--maxmemory-policy` evicts as
+  Redis's policies do, but freed memory stays with the allocator, so RSS can sit
+  somewhat over the limit after a burst.
 - **Cluster mode is single-node.** Slot migration and replication exist;
   production multi-node does not.
 - **One maintainer**, working evenings.

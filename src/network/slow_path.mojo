@@ -3160,6 +3160,8 @@ struct SlowPathHandler:
                         _ = handle_config(tokens, i, cmd_end_tok, writer, config, _cfg_reset)
                         if _cfg_reset:
                             self.ledger.reset()       # CONFIG RESETSTAT: the counters INFO reports
+                            if is_not_null(self.keyspace[].evict):
+                                self.keyspace[].evict[].evicted = 0
                         self.update_dispatch_gate()   # #47: a SLOWLOG threshold may move the fast path
                         i = cmd_end_tok - 1
                     # ── CLUSTER ──

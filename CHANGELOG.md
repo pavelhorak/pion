@@ -4,6 +4,24 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Added
+
+- **Eviction.** `--maxmemory-policy` (or `CONFIG SET maxmemory-policy`) evicts keys
+  to hold RSS to `--maxmemory`, with Redis's `allkeys-` and `volatile-` `lru`, `lfu`
+  and `random` and `volatile-ttl`. `noeviction` stays the default and its hot path is
+  unchanged. `maxmemory-samples`, `lfu-log-factor`, `lfu-decay-time`, `evicted_keys`,
+  `OBJECT IDLETIME` and `OBJECT FREQ` work as in Redis. An eviction logs a `DEL`, so a
+  restart does not revive the key and a replica drops it. Redis 8.10's `allkeys-lrm`
+  and `volatile-lrm` are not implemented. What differs because the limit is on RSS:
+  [`doc/configuration.md`](doc/configuration.md#eviction---maxmemory-policy).
+
+### Changed
+
+- **Mojo 1.2.0.** The toolchain moved from 1.1.0, with the closed vector library
+  rebuilt on all three platforms. The engine compiled unchanged.
+
 ## [1.0.9] — 2026-11-04
 
 Builds where the level-0 repair fires no longer lose recall.

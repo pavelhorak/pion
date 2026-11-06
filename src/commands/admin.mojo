@@ -18,6 +18,9 @@ from src.common.utils import format_int_to_buf, parse_memory_value, arg_eq, pars
 # Not `| 0x20` — that maps '-' fine but mangles '_' (see gh #225), and
 # `maxmemory-policy` must match exactly.
 from src.network.fast_path import cmd_eq
+from src.common.memory_usage import memory_usage
+from src.common.hash_map import evict_policy_name
+from src.commands.evict import evict_policy_from_name, EVICT_POLICY_ERROR
 from src.io.wal import WAL
 from src.io.snapshot import SnapshotEngine
 from src.network.raft import RaftNode
@@ -492,12 +495,17 @@ def _config_known_value(p: Pointer[UInt8, MutUntrackedOrigin], plen: Int,
     if cmd_eq(p, plen, "databases"):
         return "1"
     # gh #261: the live limit (from --maxmemory or CONFIG SET), in bytes; 0 is
-    # unlimited. The policy is always noeviction: over the limit, memory-growing
-    # writes are refused with -OOM and nothing is ever evicted.
+    # unlimited. What happens over it is the policy's business (commands/evict).
     if cmd_eq(p, plen, "maxmemory"):
         return String(Int(external_call["pion_get_maxmemory", UInt64]()))
     if cmd_eq(p, plen, "maxmemory-policy"):
-        return "noeviction"
+        return String(evict_policy_name(Int(external_call["pion_get_maxmemory_policy", Int32]())))
+    if cmd_eq(p, plen, "maxmemory-samples"):
+        return String(Int(external_call["pion_get_maxmemory_samples", Int32]()))
+    if cmd_eq(p, plen, "lfu-log-factor"):
+        return String(Int(external_call["pion_get_lfu_log_factor", Int32]()))
+    if cmd_eq(p, plen, "lfu-decay-time"):
+        return String(Int(external_call["pion_get_lfu_decay_time", Int32]()))
     # Pion's durability is a WAL, not a Redis AOF. "no" is the truthful answer
     # to "do you have an append-only file", not a claim about durability.
     if cmd_eq(p, plen, "appendonly"):
@@ -533,7 +541,7 @@ def _config_known_value(p: Pointer[UInt8, MutUntrackedOrigin], plen: Int,
     return ""
 
 
-comptime _CONFIG_COUNT = 14
+comptime _CONFIG_COUNT = 17
 
 
 @always_inline
@@ -561,6 +569,9 @@ def _config_name(k: Int) -> StaticString:
     if k == 10: return "latency-monitor-threshold"
     if k == 11: return "slowlog-entry-max-argc"
     if k == 12: return "slowlog-entry-max-string-len"
+    if k == 14: return "maxmemory-samples"
+    if k == 15: return "lfu-log-factor"
+    if k == 16: return "lfu-decay-time"
     return "latency-tracking"
 
 
@@ -636,6 +647,14 @@ def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         var slt_val = Int64(0)
         var sml_set = False
         var sml_val = Int64(0)
+        var pol_set = False
+        var pol_val = 0
+        var ms_set = False
+        var ms_val = Int64(0)
+        var lfl_set = False
+        var lfl_val = Int64(0)
+        var lfd_set = False
+        var lfd_val = Int64(0)
         var j = i + 2
         while j + 1 < num_tokens:
             var nt = tokens[unsafe_offset=j]
@@ -649,6 +668,38 @@ def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                     return num_tokens - i - 1
                 mm_set = True
                 mm_val = UInt64(parsed.value)
+            elif cmd_eq(nt.ptr, nt.length, "maxmemory-policy"):
+                pol_val = evict_policy_from_name(vt.ptr, vt.length)
+                if pol_val < 0:
+                    writer.append_error_response(EVICT_POLICY_ERROR)
+                    return num_tokens - i - 1
+                pol_set = True
+            elif cmd_eq(nt.ptr, nt.length, "maxmemory-samples") or cmd_eq(nt.ptr, nt.length, "lfu-log-factor") \
+                    or cmd_eq(nt.ptr, nt.length, "lfu-decay-time"):
+                var is_ms = cmd_eq(nt.ptr, nt.length, "maxmemory-samples")
+                var is_lfl = cmd_eq(nt.ptr, nt.length, "lfu-log-factor")
+                var ename = String("maxmemory-samples") if is_ms else (String("lfu-log-factor") if is_lfl else String("lfu-decay-time"))
+                var ev = parse_int64_strict(vt.ptr, vt.length)
+                if not ev.ok:
+                    writer.append_error_response("ERR CONFIG SET failed (possibly related to argument '" + ename
+                                                 + "') - argument couldn't be parsed into an integer")
+                    return num_tokens - i - 1
+                var elo = Int64(1) if is_ms else Int64(0)
+                var ehi = Int64(64) if is_ms else Int64(2147483647)
+                if ev.value < elo or ev.value > ehi:
+                    writer.append_error_response("ERR CONFIG SET failed (possibly related to argument '" + ename
+                                                 + "') - argument must be between " + String(Int(elo))
+                                                 + " and " + String(Int(ehi)) + " inclusive")
+                    return num_tokens - i - 1
+                if is_ms:
+                    ms_set = True
+                    ms_val = ev.value
+                elif is_lfl:
+                    lfl_set = True
+                    lfl_val = ev.value
+                else:
+                    lfd_set = True
+                    lfd_val = ev.value
             elif cmd_eq(nt.ptr, nt.length, "slowlog-log-slower-than") or cmd_eq(nt.ptr, nt.length, "slowlog-max-len"):
                 var is_slt = cmd_eq(nt.ptr, nt.length, "slowlog-log-slower-than")
                 var name = String("slowlog-log-slower-than") if is_slt else String("slowlog-max-len")
@@ -685,6 +736,14 @@ def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             j += 2
         if mm_set:
             external_call["pion_set_maxmemory", NoneType](mm_val)
+        if pol_set:
+            external_call["pion_set_maxmemory_policy", NoneType](Int32(pol_val))
+        if ms_set:
+            external_call["pion_set_maxmemory_samples", NoneType](Int32(ms_val))
+        if lfl_set:
+            external_call["pion_set_lfu_log_factor", NoneType](Int32(lfl_val))
+        if lfd_set:
+            external_call["pion_set_lfu_decay_time", NoneType](Int32(lfd_val))
         if slt_set:
             external_call["pion_slowlog_set_slower_than", NoneType](slt_val)
         if sml_set:
@@ -1020,57 +1079,6 @@ def handle_latency(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     return argc - 1
 
 
-def _memory_usage(v: GenericValue, key_len: Int, samples: Int) -> Int64:
-    """MEMORY USAGE's estimate: the slot (metadata byte, 32-byte key and
-    value), the key's bytes when they do not fit in it, and the value's own
-    allocations: a string's bytes; a hash's, set's or sorted set's table plus
-    its elements' bytes, sampled as Redis samples them (`samples` elements, 0
-    all) and scaled to the whole; a list's elements."""
-    var total = Int64(65)
-    if key_len > 23:
-        total += Int64(key_len)
-    var t = v.type.value
-    if t == ValueType.STRING or t == ValueType.BITMAP:
-        total += Int64(v.string_len())
-    elif t == ValueType.HLL:
-        total += Int64(HLL_REGISTERS)
-    elif t == ValueType.HASH:
-        var m = v.as_hash().bitcast[SlabHashMap]()
-        total += Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
-    elif t == ValueType.SET:
-        var m = v.as_set().bitcast[SlabHashMap]()
-        total += Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
-    elif t == ValueType.LIST:
-        var l = v.as_list().bitcast[SlabList]()
-        total += Int64(l[].size) * 34 + 64
-    elif t == ValueType.ZSET or t == ValueType.GEO:
-        var z = v.as_zset().bitcast[SlabSkipList]()
-        var m = Pointer[SlabHashMap, MutUntrackedOrigin](unsafe_from_address=Int(Pointer(to=z[].members)))
-        total += Int64(z[].length) * 96 + Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
-    return total
-
-
-def _sampled_payload(m: Pointer[SlabHashMap, MutUntrackedOrigin], samples: Int) -> Int64:
-    """The heap bytes of a hash's or set's fields and values: every element
-    when samples is 0, else the first `samples` found, scaled to the size."""
-    var seen = 0
-    var bytes = Int64(0)
-    for slot in range(m[].capacity):
-        var md = m[].metadata[slot]
-        if md == 0x80 or md == 0xFF:
-            continue
-        if m[].keys[slot].type.value == ValueType.STRING:
-            bytes += Int64(m[].keys[slot].string_len())
-        if m[].values[slot].type.value == ValueType.STRING:
-            bytes += Int64(m[].values[slot].string_len())
-        seen += 1
-        if samples > 0 and seen >= samples:
-            break
-    if seen == 0:
-        return 0
-    return bytes * Int64(m[].size) // Int64(seen)
-
-
 @always_inline
 def handle_memory(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut writer: ResponseWriter) raises -> Int:
     """MEMORY (#47). USAGE of a missing key is nil (it answered 64), and
@@ -1106,7 +1114,7 @@ def handle_memory(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         if v.is_none():
             writer.append_null_response()
         else:
-            writer.append_int_response(_memory_usage(v, kt.length, samples))
+            writer.append_int_response(memory_usage(v, kt.length, samples))
     elif arg_eq(sp, sl, "stats"):
         if argc != 2:
             _subcommand_arity(writer, "memory", "stats")

@@ -1,5 +1,6 @@
 from src.common.utils import acc_digit_checked
 from src.common.ptr import null_ptr, is_not_null, is_null
+from src.common.hash_map import evict_policy_name
 from src.vector.vector_abi import vector_backend_line
 from src.common.container_free import free_container, hash_get_live
 from src.common.version import PION_VERSION, PION_BUILD_SHA
@@ -331,7 +332,8 @@ struct CommandDispatcher:
         var maxmem = external_call["pion_get_maxmemory", UInt64]()
         body += "maxmemory:" + String(maxmem) + "\r\n"
         body += "maxmemory_human:" + String(maxmem >> 20) + "M\r\n"
-        body += "maxmemory_policy:noeviction\r\n"
+        body += "maxmemory_policy:" + String(evict_policy_name(
+            Int(external_call["pion_get_maxmemory_policy", Int32]()))) + "\r\n"
         body += "maxmemory_refusing_writes:" + String(
             external_call["pion_maxmemory_check", Int32]()) + "\r\n"
         body += "# Cluster\r\ncluster_enabled:" + ("1" if cluster_enabled else "0") + "\r\n"
@@ -386,6 +388,14 @@ struct CommandDispatcher:
         # (each ≈150 µs of usleep on macOS). This worker only — the writer is
         # per-worker. The kill-test/observability signal for substrate TTFT.
         body += "# Stats\r\n"
+        # This worker's, as the Keyspace section's keys are.
+        var _ev = self.keyspace[].evict
+        body += "evicted_keys:" + String(Int(_ev[].evicted) if is_not_null(_ev) else 0) + "\r\n"
+        if is_not_null(_ev) and _ev[].policy != 0:
+            # What the controller steers by (commands/evict.mojo).
+            body += "evict_target_bytes:" + String(_ev[].target) + "\r\n"
+            body += "evict_key_bytes:" + String(Int(_ev[].avg_bytes)) + "\r\n"
+            body += "evict_rss_steered:" + String(Int(external_call["pion_evict_ctl", UInt64]())) + "\r\n"
         body += "send_eagain_stalls:" + String(send_stalls) + "\r\n"
         body += extra   # gh #262: the `# Pion` value-receipt section, built by the caller
         body += "# Keyspace\r\n"
