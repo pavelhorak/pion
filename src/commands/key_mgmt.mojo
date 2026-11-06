@@ -12,6 +12,7 @@ from std.ffi import external_call
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
 from src.network.fast_path import _get_now_ns
+from src.common.hash_map import LRU_SHIFT, LRU_MASK, LFU_INIT
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue, ValueType
 from src.common.list import SlabList
@@ -324,12 +325,35 @@ def handle_object(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         elif arg_eq(sub_p2, sub_l2, "refcount"):
             writer.append_int_response(Int64(1))
         elif arg_eq(sub_p2, sub_l2, "idletime"):
-            # #47: Pion keeps no per-key access time, so it refuses, as Redis
-            # refuses when its policy does not track idle time (this said 0)
-            writer.append_error_response("ERR Pion does not track key access times, idle time not tracked")
+            # Only an LRU policy keeps a per-key access time. Otherwise it
+            # refuses, as Redis refuses when its policy tracks none (#47: it
+            # said 0). A key untouched since tracking began has no entry: 0,
+            # since nothing says otherwise.
+            var _ev = keyspace[].evict
+            if is_not_null(_ev) and _ev[].tracked and not _ev[].lfu:
+                var _kv = GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
+                var _ent = keyspace[].access_entry(_kv, UInt64(_kv.__hash__()))
+                var _idle = 0
+                if _ent != 0:
+                    var _now = Int((_get_now_ns() >> LRU_SHIFT) & LRU_MASK)
+                    var _units = (_now - Int(_ent & UInt32(LRU_MASK))) & LRU_MASK
+                    _idle = (_units << LRU_SHIFT) // 1000000000
+                writer.append_int_response(Int64(_idle))
+            elif is_not_null(_ev) and _ev[].lfu:
+                writer.append_error_response("ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.")
+            else:
+                writer.append_error_response("ERR Pion does not track key access times, idle time not tracked")
         elif arg_eq(sub_p2, sub_l2, "freq"):
-            # Access frequency exists only under an LFU maxmemory policy, and
-            # Pion has none (noeviction): Redis refuses, it does not answer 0.
+            # Access frequency exists only under an LFU maxmemory policy.
+            # Otherwise Redis refuses, it does not answer 0.
+            var _evf = keyspace[].evict
+            if is_not_null(_evf) and _evf[].lfu:
+                var _kvf = GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
+                var _entf = keyspace[].access_entry(_kvf, UInt64(_kvf.__hash__()))
+                # No entry: untouched since tracking began, Redis's initial count.
+                var _freq = LFU_INIT if _entf == 0 else _evf[].lfu_decayed(_entf, _get_now_ns())
+                writer.append_int_response(Int64(_freq))
+                return 2
             writer.append_error_response("ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.")
         elif arg_eq(sub_p2, sub_l2, "help"):
             _object_help(writer)

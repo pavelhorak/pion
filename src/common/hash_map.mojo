@@ -80,14 +80,93 @@ struct SlabHashMap(Movable):
         self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         self.vec_gen = 0
         self.rehashes = 0
-        self.metadata = alloc[UInt8](real_cap + 16)
+        self.metadata = alloc[UInt8](real_cap + 16 + 8)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), real_cap + 16)
+        unsafe_memset(self.metadata.unsafe_offset(real_cap + 16), UInt8(0), 8)   # no access table
         self.keys = alloc[GenericValue](real_cap)
         self.values = alloc[GenericValue](real_cap)
         for i in range(real_cap):
             (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
             (self.values.unsafe_offset(i)).unsafe_write(GenericValue())
 
+
+    # ── The access table: what an LRU or LFU maxmemory policy knows of a slot ──
+    #
+    # One UInt32 per slot, [tag:8][stamp:24], on a keyspace shard, only while a
+    # maxmemory policy is set; on the TTL map too (random and TTL policies do
+    # not read it, but its presence also changes when _rehash grows or shrinks
+    # the table). Its pointer sits in the 8 bytes after the metadata's mirror
+    # bytes and NOT in a field of this struct: an out-of-line call can pass a
+    # struct field by field (the #49 writer lesson), the shards are on the hot
+    # path, and no hot path reads the table.
+    #
+    # The tag is 8 bits of the key's hash. A slot's entry goes stale when its
+    # key is overwritten or removed, and neither path knows the table exists;
+    # a tag that does not match says this entry was another key's, so the
+    # occupant has not been accessed since tracking began. See
+    # StripedHashMap.touch and src/commands/evict.mojo.
+    @always_inline
+    def access_table(self) -> Pointer[UInt32, MutUntrackedOrigin]:
+        var a = (self.metadata.unsafe_offset(self.capacity + 16)).unsafe_bitcast[Int]().load[alignment=1]()
+        return Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=a)
+
+    @always_inline
+    def _set_access_table(mut self, t: Pointer[UInt32, MutUntrackedOrigin]):
+        (self.metadata.unsafe_offset(self.capacity + 16)).unsafe_bitcast[Int]().store[alignment=1](Int(t))
+
+    def enable_access_table(mut self):
+        if Int(self.access_table()) != 0:
+            return
+        # One word past the slots: may this table grow (set_may_grow).
+        var t = alloc[UInt32](self.capacity + 1)
+        unsafe_memset(t.unsafe_bitcast[UInt8](), UInt8(0), self.capacity * 4)
+        t[unsafe_offset=self.capacity] = 1
+        self._set_access_table(t)
+
+    def set_may_grow(mut self, yes: Bool):
+        """Eviction says whether a table twice this size fits under the limit.
+        It is the one that can read RSS; this module also builds without the
+        server's C shims."""
+        var t = self.access_table()
+        if Int(t) != 0:
+            t[unsafe_offset=self.capacity] = 1 if yes else 0
+
+    def disable_access_table(mut self):
+        var t = self.access_table()
+        if Int(t) != 0:
+            t.unsafe_free()
+            self._set_access_table(null_ptr[UInt32, MutUntrackedOrigin]())
+
+    def shrink_if_sparse(mut self):
+        """Eviction's: see _rehash. An insert would get here too, but when writes
+        are being refused no insert ever comes."""
+        if self.capacity > 4096 and self.size * 8 < self.capacity:
+            self._rehash()
+
+    def find_slot(self, key: GenericValue, h: UInt64) -> Int:
+        """The slot holding `key`, or -1."""
+        if self.capacity == 0:
+            return -1
+        var h2 = self._h2(h)
+        var mask = self.capacity - 1
+        var idx = self._h1(h) & mask
+        var start_idx = idx
+        comptime width = 16
+        var h2_vec = SIMD[DType.uint8, width](h2)
+        var empty_vec = SIMD[DType.uint8, width](Self.EMPTY)
+        while True:
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var mbits = _movemask16(meta_chunk.eq(h2_vec))
+            while mbits != 0:
+                var slot_idx = (idx + count_trailing_zeros(mbits)) & mask
+                if self.keys[unsafe_offset=slot_idx] == key:
+                    return slot_idx
+                mbits &= mbits - 1
+            if _movemask16(meta_chunk.eq(empty_vec)) != 0:
+                return -1
+            idx = (idx + 16) & mask
+            if idx == start_idx:
+                return -1
 
     @always_inline
     def reset(mut self):
@@ -870,6 +949,7 @@ struct SlabHashMap(Movable):
         var old_meta = self.metadata
         var old_keys = self.keys
         var old_values = self.values
+        var old_table = self.access_table()   # before capacity changes: it locates it
 
         # gh #210: doubling is for genuine live-entry pressure. When the table
         # is mostly tombstones (churn workload), rebuild at the same capacity —
@@ -877,11 +957,37 @@ struct SlabHashMap(Movable):
         var new_cap = old_cap * 2
         if self.size * 100 <= old_cap * 35:
             new_cap = old_cap
+        elif Int(old_table) != 0 and self.size * 100 <= old_cap * 66 \
+                and (self.size * 100 <= old_cap * 50 or old_table[unsafe_offset=old_cap] == 0):
+            # Under eviction the live count holds still and churn alone fills
+            # the table with tombstones. Doubling for that costs 69 bytes a slot,
+            # which the limit takes from the data: a 72 MB table over 48 MB of
+            # values. Past 50% it doubles only if the result fits; eviction holds
+            # the count under EVICT_TABLE_FILL when it does not. The 66 is the
+            # backstop: at the 70% that triggers a rebuild, a table that stayed
+            # this size would rebuild on every insert.
+            new_cap = old_cap
+        if Int(old_table) != 0 and self.size * 8 < old_cap:
+            # And when eviction has left the table mostly empty, give the slots
+            # back. A large block is the one thing the allocator returns to the
+            # OS, and with RSS still over the limit nothing else could end -OOM.
+            new_cap = old_cap
+            while new_cap > 4096 and self.size * 4 < new_cap:
+                new_cap //= 2
         self.capacity = new_cap
         self.size = 0
         self.tombstones = 0
-        self.metadata = alloc[UInt8](self.capacity + 16)
+        self.metadata = alloc[UInt8](self.capacity + 16 + 8)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), self.capacity + 16)
+        unsafe_memset(self.metadata.unsafe_offset(self.capacity + 16), UInt8(0), 8)
+        # The stamps move with their entries: a tombstone purge rebuilds the
+        # table every so often under churn, and eviction is churn. Dropping them
+        # here would make every key look new after each purge.
+        var new_table = null_ptr[UInt32, MutUntrackedOrigin]()
+        if Int(old_table) != 0:
+            self.enable_access_table()
+            new_table = self.access_table()
+            new_table[unsafe_offset=self.capacity] = old_table[unsafe_offset=old_cap]
         self.keys = alloc[GenericValue](self.capacity)
         self.values = alloc[GenericValue](self.capacity)
         for i in range(self.capacity):
@@ -913,6 +1019,8 @@ struct SlabHashMap(Movable):
                             self.metadata[unsafe_offset=self.capacity + slot_idx] = h2
                         self.keys[unsafe_offset=slot_idx] = key.owned()
                         self.values[unsafe_offset=slot_idx] = old_values[unsafe_offset=i]
+                        if Int(new_table) != 0:
+                            new_table[unsafe_offset=slot_idx] = old_table[unsafe_offset=i]
                         self.size += 1
                         found = True
                     if found: break
@@ -924,6 +1032,8 @@ struct SlabHashMap(Movable):
         old_meta.unsafe_free()
         old_keys.unsafe_free()
         old_values.unsafe_free()
+        if Int(old_table) != 0:
+            old_table.unsafe_free()
 
     def forget_borrowed(mut self):
         """Drop every key and value WITHOUT freeing its heap payload.
@@ -951,6 +1061,9 @@ struct SlabHashMap(Movable):
             self.field_ttl.unsafe_deinit_pointee()
             self.field_ttl.unsafe_free()
         if Int(self.metadata) != 0:
+            var t = self.access_table()
+            if Int(t) != 0:
+                t.unsafe_free()
             self.metadata.unsafe_free()
         if Int(self.keys) != 0:
             for i in range(self.capacity):
@@ -965,6 +1078,157 @@ struct SlabHashMap(Movable):
 
 
 comptime VEC_KEY_SHARDS = 8
+
+# maxmemory-policy. 0 is what a worker has when it never heard of eviction.
+comptime POLICY_NOEVICTION = 0
+comptime POLICY_ALLKEYS_LRU = 1
+comptime POLICY_VOLATILE_LRU = 2
+comptime POLICY_ALLKEYS_LFU = 3
+comptime POLICY_VOLATILE_LFU = 4
+comptime POLICY_ALLKEYS_RANDOM = 5
+comptime POLICY_VOLATILE_RANDOM = 6
+comptime POLICY_VOLATILE_TTL = 7
+
+# An LRU stamp is clock_ns >> 27, about 134 ms, in 24 bits: it wraps after 26
+# days. Redis's is 1 s; at a million writes a second a whole cache turns over
+# in less, and every key would tie. An LFU stamp is Redis's: 16 bits of minutes
+# (here clock_ns >> 36, about 68.7 s) and an 8-bit logarithmic counter.
+comptime LRU_SHIFT = 27
+comptime LRU_MASK = 0xFFFFFF
+comptime LFU_MINUTE_SHIFT = 36
+comptime LFU_INIT = 5
+# Under eviction, live keys per 100 slots that the keyspace's tables may hold
+# when they cannot grow. Rebuilds trigger at 70, tombstones included.
+comptime EVICT_TABLE_FILL = 60
+
+
+def evict_policy_name(p: Int) -> StaticString:
+    if p == POLICY_ALLKEYS_LRU: return "allkeys-lru"
+    if p == POLICY_VOLATILE_LRU: return "volatile-lru"
+    if p == POLICY_ALLKEYS_LFU: return "allkeys-lfu"
+    if p == POLICY_VOLATILE_LFU: return "volatile-lfu"
+    if p == POLICY_ALLKEYS_RANDOM: return "allkeys-random"
+    if p == POLICY_VOLATILE_RANDOM: return "volatile-random"
+    if p == POLICY_VOLATILE_TTL: return "volatile-ttl"
+    return "noeviction"
+
+
+@always_inline
+def evict_tag(h: UInt64) -> UInt32:
+    """A slot's owner, in an access-table entry. The top bit is set, so a zeroed
+    entry matches no key."""
+    return UInt32(((h >> 48) & 0x7F) | 0x80) << 24
+
+
+@fieldwise_init
+struct EvictPoolEntry(Copyable, Movable, ImplicitlyCopyable):
+    """A candidate victim: where it is, whose it was, how good a victim."""
+    var shard: Int
+    var slot: Int
+    var tag: UInt32
+    var score: Int64
+
+
+struct EvictState(Movable):
+    """One worker's eviction state, allocated the first time a policy is set
+    and kept for its counter. Behind StripedHashMap.evict and off every hot
+    path. The controller's fields are explained in src/commands/evict.mojo."""
+    var policy: Int
+    var tracked: Bool       # an access table exists: LRU or LFU
+    var lfu: Bool
+    var samples: Int
+    var log_factor: Int
+    var decay_time: Int
+    var rng: UInt64
+    var target: Int         # bytes of data to hold; -1 = not over the limit yet
+    var peak_ctl: Int       # highest RSS over the limit since it last fell under
+    var base_ctl: Int       # RSS with an empty keyspace; 0 = never seen
+    var last_limit: Int
+    var last_steer_ns: Int64
+    var prev_keys: Int
+    var avg_bytes: Float64  # 0 = no sample yet
+    var evicted: Int64
+    var pool: Pointer[EvictPoolEntry, MutUntrackedOrigin]
+    var pool_n: Int
+
+    def __init__(out self, seed: UInt64):
+        self.policy = POLICY_NOEVICTION
+        self.tracked = False
+        self.lfu = False
+        self.samples = 5
+        self.log_factor = 10
+        self.decay_time = 1
+        self.rng = seed | 1
+        self.target = -1
+        self.peak_ctl = 0
+        self.base_ctl = 0
+        self.last_limit = 0
+        self.last_steer_ns = 0
+        self.prev_keys = 0
+        self.avg_bytes = 0.0
+        self.evicted = 0
+        self.pool = alloc[EvictPoolEntry](16)
+        self.pool_n = 0
+
+    def __moveinit__(out self, deinit take: Self):
+        self.policy = take.policy
+        self.tracked = take.tracked
+        self.lfu = take.lfu
+        self.samples = take.samples
+        self.log_factor = take.log_factor
+        self.decay_time = take.decay_time
+        self.rng = take.rng
+        self.target = take.target
+        self.peak_ctl = take.peak_ctl
+        self.base_ctl = take.base_ctl
+        self.last_limit = take.last_limit
+        self.last_steer_ns = take.last_steer_ns
+        self.prev_keys = take.prev_keys
+        self.avg_bytes = take.avg_bytes
+        self.evicted = take.evicted
+        self.pool = take.pool
+        self.pool_n = take.pool_n
+
+    @always_inline
+    def next_rand(mut self) -> UInt64:
+        var x = self.rng
+        x ^= x << 13
+        x ^= x >> 7
+        x ^= x << 17
+        self.rng = x
+        return x
+
+    @always_inline
+    def lfu_decayed(self, entry: UInt32, now_ns: Int64) -> Int:
+        """An entry's counter after its idle minutes' decay."""
+        var c = Int(entry & 0xFF)
+        if self.decay_time <= 0:
+            return c
+        var minutes = Int((now_ns >> LFU_MINUTE_SHIFT) & 0xFFFF)
+        var elapsed = (minutes - Int((entry >> 8) & 0xFFFF)) & 0xFFFF
+        var periods = elapsed // self.decay_time
+        return c - periods if periods < c else 0
+
+    def stamped(mut self, entry: UInt32, tag: UInt32, now_ns: Int64) -> UInt32:
+        """An access-table entry after one access by the key with this tag."""
+        if not self.lfu:
+            return tag | (UInt32(now_ns >> LRU_SHIFT) & UInt32(LRU_MASK))
+        var minutes = UInt32((now_ns >> LFU_MINUTE_SHIFT) & 0xFFFF)
+        if (entry & 0xFF000000) != tag:
+            # A new key starts at Redis's initial count and its first read takes
+            # it past it, so a key read once beats one never read. Counting the
+            # write as well erased that: every key started where one read gets,
+            # and LFU's hit rate fell to LRU's.
+            return tag | (minutes << 8) | UInt32(LFU_INIT)
+        var c = self.lfu_decayed(entry, now_ns)
+        if c < 255:
+            # Redis's LFULogIncr: the higher the count, the rarer an increment.
+            var base = c - LFU_INIT if c > LFU_INIT else 0
+            var p = 1.0 / (Float64(base * self.log_factor) + 1.0)
+            var r = Float64(self.next_rand() >> 11) / 9007199254740992.0   # [0, 1)
+            if r < p:
+                c += 1
+        return tag | (minutes << 8) | UInt32(c)
 
 
 struct StripedHashMap(Movable):
@@ -1015,9 +1279,19 @@ struct StripedHashMap(Movable):
     # first vector is ingested (_vec_alloc). One field: an out-of-line call can
     # pass this struct field by field (the #49 writer lesson).
     var vec_maps: Pointer[SlabHashMap, MutUntrackedOrigin]
+    # An LRU or LFU maxmemory policy: lookups record the access. The lookups
+    # carry no new branch for this. Their `clock_ns != 0` test already leads
+    # out of line to _expire_if_due while any key has a TTL, so this flag keeps
+    # the clock running (the engine's _set_expiry_clock) and _expire_if_due
+    # records the access. Under noeviction the hot path is what it was.
+    var track_access: Bool
+    # Null until a maxmemory policy is first set.
+    var evict: Pointer[EvictState, MutUntrackedOrigin]
 
     def __init__(out self, initial_capacity: Int):
         var shard_cap = max(16, initial_capacity // 8)
+        self.track_access = False
+        self.evict = null_ptr[EvictState, MutUntrackedOrigin]()
         self.ttl_map = null_ptr[SlabHashMap, MutUntrackedOrigin]()
         self.clock_ns = 0
         self.expired_log = null_ptr[List[UInt8], MutUntrackedOrigin]()
@@ -1043,8 +1317,14 @@ struct StripedHashMap(Movable):
         self.active_expire = take.active_expire
         self.expire_hides_only = take.expire_hides_only
         self.vec_maps = take.vec_maps
+        self.track_access = take.track_access
+        self.evict = take.evict
 
     def __del__(deinit self):
+        if Int(self.evict) != 0:
+            self.evict[].pool.unsafe_free()
+            self.evict.unsafe_deinit_pointee()
+            self.evict.unsafe_free()
         if Int(self.shards) != 0:
             for i in range(8):
                 (self.shards.unsafe_offset(i)).unsafe_deinit_pointee()
@@ -1106,6 +1386,38 @@ struct StripedHashMap(Movable):
         return True
 
     @no_inline
+    def _set_and_touch(mut self, key: GenericValue, var value: GenericValue, h: UInt64):
+        """set() under an LRU or LFU policy. A new key has its slot only after
+        the insert, so the access is recorded after it. Out of line, behind the
+        two tests that say a policy is on: nothing else pays for it, a TTL
+        included (going out of line for any TTL cost MSET 18% of its cycles)."""
+        self.shards[unsafe_offset=self._shard(h)].set_with_hash(key, value^, h)
+        self.touch(key, h)
+
+    @no_inline
+    def touch(self, key: GenericValue, h: UInt64):
+        """Record an access to `key`, if it is here, for an LRU or LFU policy."""
+        var m = self.shards.unsafe_offset(self._shard(h))
+        var table = m[].access_table()
+        if Int(table) == 0:
+            return
+        var slot = m[].find_slot(key, h)
+        if slot >= 0:
+            table[unsafe_offset=slot] = self.evict[].stamped(
+                table[unsafe_offset=slot], evict_tag(h), self.clock_ns)
+
+    def access_entry(self, key: GenericValue, h: UInt64) -> UInt32:
+        """The access-table entry `key` owns, 0 when it has none."""
+        var m = self.shards.unsafe_offset(self._shard(h))
+        var table = m[].access_table()
+        if Int(table) == 0:
+            return 0
+        var slot = m[].find_slot(key, h)
+        if slot < 0 or (table[unsafe_offset=slot] & 0xFF000000) != evict_tag(h):
+            return 0
+        return table[unsafe_offset=slot]
+
+    @no_inline
     def _expire_if_due(self, key: GenericValue, h: UInt64) -> Bool:
         """Lazy expiry: remove `key` (just found) when it is past its deadline
         at the batch clock. True when it was removed. Redis's rule: expired
@@ -1115,6 +1427,8 @@ struct StripedHashMap(Movable):
         TTL map with the hash the caller already has (one hash function for
         both maps) instead of going through deadline(), which hashed the key
         again and called the map's out-of-line get()."""
+        if self.track_access:
+            self.touch(key, h)
         if Int(self.ttl_map) == 0 or self.ttl_map[].size == 0:
             return False
         var dv = self.ttl_map[].get_with_hash(key, h)
@@ -1196,6 +1510,9 @@ struct StripedHashMap(Movable):
         var h = UInt64(key.__hash__())
         if self.clock_ns != 0:
             _ = self._expire_if_due(key, h)   # #45: never store over an expired value
+            if self.track_access:
+                self._set_and_touch(key, value^, h)
+                return
         self.shards[unsafe_offset=self._shard(h)].set_with_hash(key, value^, h)
 
     @always_inline
@@ -1206,6 +1523,9 @@ struct StripedHashMap(Movable):
         computing it here as well would mean hashing every key twice."""
         if self.clock_ns != 0:
             _ = self._expire_if_due(key, h)   # #45: as in set()
+            if self.track_access:
+                self._set_and_touch(key, value^, h)
+                return
         self.shards[unsafe_offset=self._shard(h)].set_with_hash(key, value^, h)
 
     @always_inline
@@ -1217,6 +1537,10 @@ struct StripedHashMap(Movable):
         var h = UInt64(key.__hash__())
         if self.clock_ns != 0:
             _ = self._expire_if_due(key, h)   # #45: as in set()
+            self.shards[unsafe_offset=self._shard(h)].set_str_reuse_with_hash(key, h, val_ptr, val_len)
+            if self.track_access:
+                self.touch(key, h)            # a new key has its slot only now
+            return
         self.shards[unsafe_offset=self._shard(h)].set_str_reuse_with_hash(key, h, val_ptr, val_len)
 
     @always_inline

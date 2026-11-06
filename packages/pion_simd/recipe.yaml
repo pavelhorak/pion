@@ -1,7 +1,7 @@
 # Draft recipe for the modular-community channel (recipes/pion-simd/recipe.yaml there).
 # Not submitted. Set the version to the first Pion tag that contains packages/.
 context:
-  version: "0.9.8"
+  version: "1.1.0"
 
 package:
   name: "pion-simd"

@@ -168,6 +168,8 @@ replies against a real `redis-server`: strings, hashes, lists, sets, sorted
 sets, bitmaps, HyperLogLog, geo, streams and consumer groups, pub/sub,
 `MULTI`/`EXEC`/`WATCH`, TTLs, Lua. Every write goes to a write-ahead log
 before it is acknowledged; an acked write is still there after `SIGKILL`.
+`--maxmemory` with `--maxmemory-policy` makes it a cache, evicting by LRU, LFU, TTL
+or at random.
 `redis-cli` and redis-py, which the test suite uses, talk to it unmodified over
 RESP2 or RESP3. Reference:
 [`doc/command_matrix.md`](doc/command_matrix.md),

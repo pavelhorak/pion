@@ -655,6 +655,12 @@ server = "self"
 tier = "gate"
 
 [[test]]
+file = "tests/test_eviction.py"
+server = "self"
+tier = "gate"
+timeout = 600
+
+[[test]]
 file = "tests/test_gh261_maxmemory.py"
 server = "self"
 tier = "gate"

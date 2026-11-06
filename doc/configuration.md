@@ -1,8 +1,10 @@
 # Configuration
 
 Pion's defaults live in `src/common/config.mojo` and are overridden with CLI flags at startup.
-There is no config file. Only `maxmemory` can be changed at runtime with `CONFIG SET` (every other key is refused with an explanatory error)
-(`maxmemory` among them).
+There is no config file. `maxmemory` and the eviction parameters can be changed at
+runtime with `CONFIG SET`, as can a few others (see `CONFIG SET` in
+[`command_matrix.md`](command_matrix.md)); every other key is refused with an
+explanatory error.
 
 ---
 
@@ -168,11 +170,61 @@ commands) are refused with Redis's exact error:
 ```
 
 Reads, `DEL` and the POP family keep working, so a client can free memory.
-The policy is `noeviction`: **nothing is ever evicted.** Inside a transaction,
-`MULTI` refuses the command at queue time, and a limit crossed after queueing
-makes `EXEC` answer `EXECABORT` with nothing applied. A script runs, and only a
-memory-growing `redis.call` inside it errors. The binary lane on port+1 refuses
-its store opcodes the same way. Every crossing is logged with the measured RSS.
+That is the default policy, `noeviction`. Inside a transaction, `MULTI` refuses
+the command at queue time, and a limit crossed after queueing makes `EXEC` answer
+`EXECABORT` with nothing applied. A script runs, and only a memory-growing
+`redis.call` inside it errors. The binary lane on port+1 refuses its store opcodes
+the same way. Every crossing is logged with the measured RSS.
+
+### Eviction (`--maxmemory-policy`)
+
+```bash
+./pion-server --maxmemory 8gb --maxmemory-policy allkeys-lru
+redis-cli CONFIG SET maxmemory-policy allkeys-lfu   # at runtime too
+```
+
+| Policy | Evicts |
+|---|---|
+| `allkeys-lru`, `volatile-lru` | the least recently used key |
+| `allkeys-lfu`, `volatile-lfu` | the least frequently used key |
+| `allkeys-random`, `volatile-random` | a random key |
+| `volatile-ttl` | the key closest to its expiry |
+
+`allkeys-*` choose among all keys, `volatile-*` only among keys with a TTL. When
+a `volatile-*` policy has no candidate left, writes get the `-OOM` above. LRU and
+LFU are sampled approximations, as in Redis: `--maxmemory-samples` (or `CONFIG SET
+maxmemory-samples`, 1-64, default 5) keys per eviction, from a pool of the best 16
+seen. `lfu-log-factor` and `lfu-decay-time` work as in Redis. Redis 8.10's
+`allkeys-lrm` and `volatile-lrm` do not exist here.
+
+**What differs from Redis, because the limit is on RSS:**
+
+- **RSS is the number being held, not allocator bytes.** Freed memory stays with
+  the allocator to be reused, so RSS does not fall when keys go. After a burst it
+  can sit somewhat over the limit with writes reusing that memory, and lowering
+  the limit evicts keys without RSS following at once. `INFO` shows what the
+  controller reads: `evict_target_bytes`, `evict_key_bytes` and `evict_rss_steered`.
+- **Eviction runs between batches of requests, not before each command.** One
+  pipelined burst can pass the limit before the next tick evicts for it.
+- **The hash table counts.** The keyspace's table is a real share of memory with
+  small values, and under a policy it grows only if the larger table fits under the
+  limit; it shrinks when eviction leaves it mostly empty.
+- **`KV.PREFIX`, `ATTEND`, `V.*` and other stores outside the keyspace are not
+  evicted.** Keys are evicted to make room for them, and once no key is left their
+  writes get `-OOM`.
+
+An eviction is what an expiry is: it logs a `DEL` to the WAL, so a restart does not
+revive the key and a replica drops it. A replica does not evict by itself, as with
+Redis's `replica-ignore-maxmemory yes`. `CLIENT PAUSE` holds eviction, as it holds
+expiry. It also counts as a change to the key for `WATCH`. `INFO` counts
+`evicted_keys`, and `OBJECT IDLETIME` (LRU) and `OBJECT FREQ` (LFU) report what the
+policy tracks.
+
+For a pure cache, run with `--no-wal`. With the WAL on, every write and eviction is
+logged, so the log grows at the write rate while the data stays the same size, until
+`--wal-max-segments` or the next `SAVE`. A policy also turns the blob tier off: an
+arena's bytes come back only at a restart, so evicting a value there would free
+nothing.
 
 Default is `0` (off): the server grows until the OS kills it, which the crash
 breadcrumbs in `doc/operations.md` §1 will show.

@@ -617,6 +617,23 @@ static volatile uint64_t g_maxmemory      = 0;   /* bytes; 0 = unlimited */
 static volatile uint64_t g_mm_last_ms     = 0;
 static volatile int      g_over_maxmemory = 0;
 
+/* Eviction (maxmemory-policy other than noeviction). The worker that samples
+ * publishes `g_evict_ctl`: RSS without the WAL's resident pages, which are
+ * file-backed, reclaimable and go away at rotation, so evicting user data for
+ * them would trade the cache for a log. Each worker owns its keyspace and
+ * decides what to evict from this number (src/commands/evict.mojo). Over the
+ * limit, the process refuses writes only when no worker has anything left to
+ * evict, as Redis answers -OOM when eviction cannot free memory. */
+#define PION_EVICT_MAX_WORKERS 64
+static volatile int      g_evict_policy   = 0;   /* 0 = noeviction */
+static volatile int      g_evict_samples  = 5;
+static volatile int      g_lfu_log_factor = 10;
+static volatile int      g_lfu_decay_time = 1;
+static volatile uint64_t g_evict_ctl      = 0;
+static volatile int      g_evict_logged   = 0;   /* 1 evicting, 2 refusing */
+static volatile uint64_t g_evict_wal[PION_EVICT_MAX_WORKERS];
+static volatile uint64_t g_evict_evictable[PION_EVICT_MAX_WORKERS];
+
 static uint64_t _mono_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
@@ -627,7 +644,38 @@ static uint64_t _mono_ms(void) {
 void pion_set_maxmemory(uint64_t bytes) {
     g_maxmemory = bytes;
     g_mm_last_ms = 0;        /* re-sample on the next check */
+    g_evict_logged = 0;
     if (bytes == 0) g_over_maxmemory = 0;
+}
+
+void pion_set_maxmemory_policy(int policy) {
+    /* "Has something to evict" until the workers say otherwise: nobody may be
+     * refused in the gap before their first report. */
+    if (policy != 0 && g_evict_policy == 0) g_evict_evictable[0] = 1;
+    g_evict_policy = policy;
+    g_mm_last_ms = 0;
+    g_evict_logged = 0;
+}
+int  pion_get_maxmemory_policy(void) { return g_evict_policy; }
+void pion_set_maxmemory_samples(int n) { g_evict_samples = n; }
+int  pion_get_maxmemory_samples(void) { return g_evict_samples; }
+void pion_set_lfu_log_factor(int n) { g_lfu_log_factor = n; }
+int  pion_get_lfu_log_factor(void) { return g_lfu_log_factor; }
+void pion_set_lfu_decay_time(int n) { g_lfu_decay_time = n; }
+int  pion_get_lfu_decay_time(void) { return g_lfu_decay_time; }
+uint64_t pion_evict_ctl(void) { return g_evict_ctl; }
+
+/* A worker's report, from its housekeeping tick. */
+void pion_evict_report(int worker, uint64_t wal_resident, uint64_t evictable) {
+    if (worker < 0 || worker >= PION_EVICT_MAX_WORKERS) return;
+    g_evict_wal[worker] = wal_resident;
+    g_evict_evictable[worker] = evictable;
+}
+
+static int _evict_nothing_left(void) {
+    for (int i = 0; i < PION_EVICT_MAX_WORKERS; i++)
+        if (g_evict_evictable[i] != 0) return 0;
+    return 1;
 }
 
 uint64_t pion_get_maxmemory(void) { return g_maxmemory; }
@@ -637,28 +685,62 @@ uint64_t pion_physical_ram_bytes(void) { return _total_ram(); }
 int pion_maxmemory_check(void) {
     uint64_t lim = g_maxmemory;
     if (lim == 0) return 0;
+    int policy = g_evict_policy;
     uint64_t now = _mono_ms();
     uint64_t last = g_mm_last_ms;
-    if (last != 0 && now - last < 100) return g_over_maxmemory;
-    if (__sync_bool_compare_and_swap(&g_mm_last_ms, last, now ? now : 1)) {
+    /* A write-heavy cache can fill megabytes in 100 ms, and eviction steers by
+     * this sample; refusing (noeviction) has no such need. */
+    uint64_t every = policy != 0 ? 10 : 100;
+    if ((last == 0 || now - last >= every)
+        && __sync_bool_compare_and_swap(&g_mm_last_ms, last, now ? now : 1)) {
         uint64_t rss = _sample_rss();
         if (rss > g_rss_peak_bytes) g_rss_peak_bytes = rss;
-        int over = rss > lim;
-        if (over != g_over_maxmemory) {
-            /* Say so on every crossing: an operator seeing -OOM needs to know
-             * when it started and what the process measured, not guess. */
-            char line[200];
-            int o = 0;
-            o += _lit(line + o, over ? "PION WARN: rss_mb=" : "PION: rss_mb=");
-            o += _u64(line + o, rss >> 20);
-            o += _lit(line + o, over ? " > maxmemory_mb=" : " <= maxmemory_mb=");
-            o += _u64(line + o, lim >> 20);
-            o += _lit(line + o, over ? " — refusing memory-growing writes with -OOM\n"
-                                     : " — writes accepted again\n");
-            if (g_log_fd >= 0) { ssize_t w = write(g_log_fd, line, (size_t)o); (void)w; }
-            { ssize_t w = write(STDERR_FILENO, line, (size_t)o); (void)w; }
+        if (policy != 0) {
+            uint64_t wal = 0;
+            for (int i = 0; i < PION_EVICT_MAX_WORKERS; i++) wal += g_evict_wal[i];
+            uint64_t ctl = rss > wal ? rss - wal : 0;
+            g_evict_ctl = ctl;
+            g_over_maxmemory = ctl > lim;
+            int state = !g_over_maxmemory ? g_evict_logged
+                      : (_evict_nothing_left() ? 2 : 1);
+            /* Once per state, not per crossing: under eviction RSS sits at the
+             * limit and crosses it constantly. */
+            if (state != g_evict_logged) {
+                char line[200];
+                int o = 0;
+                o += _lit(line + o, "PION WARN: rss_mb=");
+                o += _u64(line + o, rss >> 20);
+                o += _lit(line + o, " wal_mb=");
+                o += _u64(line + o, wal >> 20);
+                o += _lit(line + o, " > maxmemory_mb=");
+                o += _u64(line + o, lim >> 20);
+                o += _lit(line + o, state == 2
+                    ? " — nothing left to evict, refusing memory-growing writes with -OOM\n"
+                    : " — evicting keys\n");
+                if (g_log_fd >= 0) { ssize_t w = write(g_log_fd, line, (size_t)o); (void)w; }
+                { ssize_t w = write(STDERR_FILENO, line, (size_t)o); (void)w; }
+                g_evict_logged = state;
+            }
+        } else {
+            int over = rss > lim;
+            if (over != g_over_maxmemory) {
+                /* Say so on every crossing: an operator seeing -OOM needs to know
+                 * when it started and what the process measured, not guess. */
+                char line[200];
+                int o = 0;
+                o += _lit(line + o, over ? "PION WARN: rss_mb=" : "PION: rss_mb=");
+                o += _u64(line + o, rss >> 20);
+                o += _lit(line + o, over ? " > maxmemory_mb=" : " <= maxmemory_mb=");
+                o += _u64(line + o, lim >> 20);
+                o += _lit(line + o, over ? " — refusing memory-growing writes with -OOM\n"
+                                         : " — writes accepted again\n");
+                if (g_log_fd >= 0) { ssize_t w = write(g_log_fd, line, (size_t)o); (void)w; }
+                { ssize_t w = write(STDERR_FILENO, line, (size_t)o); (void)w; }
+            }
+            g_over_maxmemory = over;
         }
-        g_over_maxmemory = over;
     }
+    if (policy != 0)
+        return g_over_maxmemory && _evict_nothing_left();
     return g_over_maxmemory;
 }

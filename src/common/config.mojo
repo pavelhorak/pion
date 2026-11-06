@@ -106,11 +106,13 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
     # INADDR_ANY unconditionally, because the sockaddr was memset to zero and
     # nobody filled in sin_addr.
     var bind_addr: String
-    # gh #261: refuse memory-growing writes (Redis's `denyoom` set, plus the
-    # substrate ingest commands) while process RSS is above this many bytes,
-    # with Redis's own -OOM error. 0 = unlimited. No eviction: refusal is the
-    # whole policy (`maxmemory-policy noeviction`).
+    # gh #261: hold process RSS to this many bytes. 0 = unlimited. Over it,
+    # maxmemory_policy decides: noeviction refuses memory-growing writes (Redis's
+    # `denyoom` set, plus the substrate ingest commands) with Redis's own -OOM
+    # error; the others evict keys (src/commands/evict.mojo).
     var maxmemory: Int
+    var maxmemory_policy: Int
+    var maxmemory_samples: Int
     # gh #465: threads serving ONE keyspace, as Redis's io-threads counts them: the
     # worker thread executes every command, and io_threads - 1 I/O threads own
     # the client sockets (accept, recv, send). 1 = today's single-thread loop.
@@ -173,6 +175,8 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         self.enable_debug_command = 0
         self.bind_addr = ""
         self.maxmemory = 0
+        self.maxmemory_policy = 0
+        self.maxmemory_samples = 5
         self.io_threads = 1
 
 @fieldwise_init

@@ -43,7 +43,11 @@ A precompiled package is tied to the compiler that built it (Mojo 1.2.0 here).
 
 ## Packaging for the modular-community channel
 
-`packages/<name>/recipe.yaml` is a draft rattler-build recipe in the
+`packages/pion/` is the server itself, built from source only with the open
+reference vector kernels, because the channel carries no closed binaries. It has
+a recipe and no `package.toml`, so `build.py` leaves it alone.
+
+For the libraries, `packages/<name>/recipe.yaml` is a draft rattler-build recipe in the
 channel's format: the source is a Pion release tag, the build assembles the
 package with `build.py --assemble-only` and precompiles it into
 `$PREFIX/lib/mojo/<name>.mojoc`, and the test runs the package's tests against
