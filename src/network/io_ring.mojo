@@ -136,7 +136,7 @@ def evfd_signal(fd: Int32):
     comptime if CompilationTarget.is_linux():
         var one = stack_allocation[1, UInt64]()
         one[] = 1
-        _ = external_call["write", Int](Int(fd), one, 8)
+        _ = external_call["write", Int](fd, one, 8)   # fd as an Int32: Mojo 1.2 refuses a second signature for one C symbol
     else:
         _ = kev_change(fd, WAKE_IDENT, EVFILT_USER, UInt16(0), NOTE_TRIGGER)
 

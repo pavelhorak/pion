@@ -20,10 +20,10 @@ build:
 
 requirements:
   build:
-    - mojo-compiler =1.1.0
+    - mojo-compiler =1.2.0
     - python >=3.11
   host:
-    - mojo-compiler =1.1.0
+    - mojo-compiler =1.2.0
   run:
     - ${{ pin_compatible('mojo-compiler') }}
 
@@ -35,9 +35,9 @@ tests:
         - packages/pion_resp/tests/
     requirements:
       build:
-        - mojo =1.1.0
+        - mojo =1.2.0
       run:
-        - mojo =1.1.0
+        - mojo =1.2.0
 
 about:
   homepage: https://github.com/pavelhorak/pion
