@@ -6,7 +6,7 @@
 
 Pion is built using the [Mojo](https://modular.com/mojo) programming language and the [Pixi](https://pixi.sh) package manager.
 
-- **Mojo 1.1**: pinned exactly (`==1.1.0`) in `pixi.toml`. Performance baselines depend on the compiler, so the toolchain must not float.
+- **Mojo 1.2**: pinned exactly (`==1.2.0`) in `pixi.toml`. Performance baselines depend on the compiler, so the toolchain must not float.
 - **Pixi**: Used for dependency management and environment isolation.
 
 ## Project Structure

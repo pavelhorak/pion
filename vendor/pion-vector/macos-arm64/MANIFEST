@@ -2,7 +2,7 @@ library: libpion_vector
 platform: macos-arm64 (target-cpu apple-m1)
 abi: 1
 source: e4feb0bd0f0e6282 (sha256 of the held sources + the open view/ABI files)
-built: 2026-10-05T22:46:58Z with Mojo 1.1.0 (8189361e)
+built: 2026-11-06T18:23:25Z with Mojo 1.2.0 (2016d0cd)
 exports:
   pion_v_abi_version
   pion_v_beam_1536

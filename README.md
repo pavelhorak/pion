@@ -6,7 +6,7 @@
 
 # Pion — The Memory Engine for AI Inference
 
-[![Mojo](https://img.shields.io/badge/Mojo-1.1-orange.svg)](https://docs.modular.com/mojo/)
+[![Mojo](https://img.shields.io/badge/Mojo-1.2-orange.svg)](https://docs.modular.com/mojo/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 📚 **Documentation:** [`doc/index.md`](doc/index.md) — full reference.

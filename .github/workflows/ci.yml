@@ -136,7 +136,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.8.1
         with:
           # Cache on the lockfile: the toolchain is pinned exactly (mojo
-          # ==1.1.0) precisely so it cannot float, so the key is stable until
+          # ==1.2.0) precisely so it cannot float, so the key is stable until
           # someone changes it deliberately.
           cache: true
           cache-key: pixi-${{ matrix.leg }}-${{ hashFiles('pixi.lock') }}
