@@ -9,7 +9,6 @@ Protocol:
   ATTEND.INFO
 """
 
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.collections import Array
 from std.memory import unsafe_memcpy
@@ -78,7 +77,7 @@ def _tok_matches(ptr: Pointer[UInt8, MutUntrackedOrigin], length: Int,
     """Case-insensitive ASCII match against a lowercase literal."""
     if length != expected_lower.byte_length():
         return False
-    var elit = expected_lower.unsafe_ptr()
+    var elit = expected_lower.ptr()
     for i in range(length):
         if (ptr[unsafe_offset=i] | 0x20) != elit[unsafe_offset=i]:
             return False

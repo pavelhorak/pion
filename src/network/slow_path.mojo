@@ -1,6 +1,6 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.vec_tomb import VecTomb
-from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc, unsafe_memcpy, unsafe_memset, stack_allocation
 from std.collections import Array, List
 
@@ -114,7 +114,7 @@ comptime MAX_SHARD_K = 100  # matches lock_free.mojo MAX_SHARD_K
 
 @always_inline
 def _binary_send_all(server: TCPServer, fd: Int32,
-                     ptr: UnsafePointer[UInt8, MutUntrackedOrigin], total: Int):
+                     ptr: Pointer[UInt8, MutUntrackedOrigin], total: Int):
     """Blocking send-all for binary-lane bodies that exceed binary_resp_buf.
     Mirrors the gh #76 SSM.PREFIX.FETCH writev loop: server.send may transmit
     partially (or return EAGAIN on a non-blocking socket) for multi-MB blobs,
@@ -123,7 +123,7 @@ def _binary_send_all(server: TCPServer, fd: Int32,
     var sent = 0
     var stalls = 0
     while sent < total:
-        var n = server.send(fd, ptr + sent, total - sent)
+        var n = server.send(fd, ptr.unsafe_offset(sent), total - sent)
         if n > 0:
             sent += n
             stalls = 0
@@ -149,7 +149,7 @@ def _binary_send_all(server: TCPServer, fd: Int32,
 
 
 
-def unknown_command_error(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int) -> String:
+def unknown_command_error(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int) -> String:
     """#53: Redis 7's error for an unknown command, byte for byte:
     `ERR unknown command '<name>', with args beginning with: '<a>' '<b>' `,
     the name cut at 128 bytes, arguments listed until they reach 128 bytes
@@ -158,9 +158,9 @@ def unknown_command_error(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
     var head = "ERR unknown command '"
     for b in head.as_bytes():
         out.append(b)
-    var nl = tokens[i].length if tokens[i].length < 128 else 128
+    var nl = tokens[unsafe_offset=i].length if tokens[unsafe_offset=i].length < 128 else 128
     for k in range(nl):
-        out.append(tokens[i].ptr[k])
+        out.append(tokens[unsafe_offset=i].ptr[unsafe_offset=k])
     var mid = "', with args beginning with: "
     for b in mid.as_bytes():
         out.append(b)
@@ -168,10 +168,10 @@ def unknown_command_error(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
     var a = i + 1
     while a < end and args_len < 128:
         var room = 128 - args_len
-        var al = tokens[a].length if tokens[a].length < room else room
+        var al = tokens[unsafe_offset=a].length if tokens[unsafe_offset=a].length < room else room
         out.append(39)
         for k in range(al):
-            out.append(tokens[a].ptr[k])
+            out.append(tokens[unsafe_offset=a].ptr[unsafe_offset=k])
         out.append(39)
         out.append(32)
         args_len += al + 3
@@ -179,7 +179,7 @@ def unknown_command_error(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
     for k in range(len(out)):
         if out[k] == 13 or out[k] == 10:
             out[k] = 32
-    var s = bytes_to_string(UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(out.unsafe_ptr())), len(out))
+    var s = bytes_to_string(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(out.unsafe_ptr())), len(out))
     _ = out^   # alive until the copy above is made: the pointer does not keep it
     return s^
 
@@ -192,21 +192,21 @@ struct SlowPathHandler:
     # process_slow_path; at MAX_CMD_TOKENS = 2048 that is ~112 KB of a ~512 KB
     # parallelize worker stack, in a frame that also hosts the EXEC replay loop
     # (kept iterative for the same reason — gh #94).
-    var tokens_buf: UnsafePointer[RESP3Token, MutUntrackedOrigin]
-    var cmd_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
-    var cmd_byte_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
-    var replay_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
-    var replay_byte_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
-    var keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]
-    var skip_list_pool: UnsafePointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]
-    var shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
+    var tokens_buf: Pointer[RESP3Token, MutUntrackedOrigin]
+    var cmd_ends_buf: Pointer[Int, MutUntrackedOrigin]
+    var cmd_byte_ends_buf: Pointer[Int, MutUntrackedOrigin]
+    var replay_ends_buf: Pointer[Int, MutUntrackedOrigin]
+    var replay_byte_ends_buf: Pointer[Int, MutUntrackedOrigin]
+    var keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]
+    var skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin]
+    var shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin]
     var scratch_ids: List[Int]
     var scratch_dists: List[Float32]
     var worker_id: Int    # V18
     var snapshot_engine: SnapshotEngine
     var last_save_time: Int64
     var num_workers: Int  # V18
-    var shard_query_seq: UnsafePointer[UInt64, MutUntrackedOrigin]
+    var shard_query_seq: Pointer[UInt64, MutUntrackedOrigin]
     # gh #207: the P3 multi-query staging machinery (p3_batch_start_node
     # cached-start + p3_staged_* deferred-pair fields, flush_staged_search,
     # reset_p3_tick) is DELETED. VectorDBBench is closed-loop per connection:
@@ -223,7 +223,7 @@ struct SlowPathHandler:
     var kvcache: KVCacheStore
     # M14 Phase 2: Layer-granular KV store + binary protocol
     var layer_store: LayerStore
-    var binary_resp_buf: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var binary_resp_buf: Pointer[UInt8, MutUntrackedOrigin]
     # M14 Phase 3: Attention index (per-session, per-layer HNSW for token KV pairs)
     var attn_idx: AttentionIndex
     # V-Store: token-ID-indexed V cache (no HNSW, GPU keeps K)
@@ -240,13 +240,13 @@ struct SlowPathHandler:
     # Phase 4: LLM client for AI.CHAT (HTTP proxy to MAX Serve / OpenAI-compatible)
     var llm_client: LLMClient
     # Phase 4: per-worker scratch buffer for LLM output (1MB)
-    var llm_out_buf: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var llm_out_buf: Pointer[UInt8, MutUntrackedOrigin]
     # FLARE gateway: in-process HNSW KB + mid-generation retrieval loop
     var flare: FLAREGateway
     # Phase 5: Cluster state (shared, read-only after init)
-    var cluster: UnsafePointer[ClusterState, MutUntrackedOrigin]
+    var cluster: Pointer[ClusterState, MutUntrackedOrigin]
     # TTL: per-worker map of key → expiry_ns (GenericValue.INT). Shared with FastPathHandler.
-    var ttl_map: UnsafePointer[SlabHashMap, MutUntrackedOrigin]
+    var ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]
     # T3.4 async shard deferred responses: up to 16 concurrent deferred FT.SEARCH queries.
     # When FT.SEARCH posts shard queries, it stores state here instead of spin-waiting.
     # drain_deferred_shard_responses() is called each engine-loop iteration to check results.
@@ -265,7 +265,7 @@ struct SlowPathHandler:
     var infer_deferred_types:   Array[UInt8, 8]   # 1=embed, 2=generate, 3=loadmodel
     var infer_deferred_count:   Int
     var infer_deferred_ticks:   Array[Int32, 8]   # timeout guard
-    var infer_resp_buf: UnsafePointer[UInt8, MutUntrackedOrigin]  # scratch for response body
+    var infer_resp_buf: Pointer[UInt8, MutUntrackedOrigin]  # scratch for response body
     # In-process Metal SDPA engine (handles ATTEND.PREFIX.* end-to-end).
     var metal_attn_engine: MetalAttentionEngine
     # gh #9: In-process CUDA SDPA engine (Linux GPU equivalent of metal_attn_engine).
@@ -273,7 +273,7 @@ struct SlowPathHandler:
     var cuda_attn_engine: CudaAttentionEngine
     # A1: VSET state (element name ↔ HNSW node ID mapping)
     # Lua 5.1 scripting engine (per-worker, shared-nothing)
-    var lua_engine: UnsafePointer[LuaEngine, MutUntrackedOrigin]
+    var lua_engine: Pointer[LuaEngine, MutUntrackedOrigin]
     # gh #100 (C2): server password (from config.server.requirepass). Empty = no
     # auth. Cached here so the binary path (process_binary_request, no config
     # param) can gate frames identically to the RESP path.
@@ -284,8 +284,8 @@ struct SlowPathHandler:
     # cur_tenant_ns_len is 0 for admin/non-tenant commands; the pre-pass in
     # process_slow_path sets it at every command boundary when tenant mode is on.
     var tenant_table: TenantTable
-    var tenant_scratch: UnsafePointer[UInt8, MutUntrackedOrigin]
-    var tenant_ns_buf: UnsafePointer[UInt8, MutUntrackedOrigin]   # [MAX_TENANT_NAME + 1]
+    var tenant_scratch: Pointer[UInt8, MutUntrackedOrigin]
+    var tenant_ns_buf: Pointer[UInt8, MutUntrackedOrigin]   # [MAX_TENANT_NAME + 1]
     var cur_tenant_ns_len: Int
     # gh #262: value receipt. New fields go at the END of this struct (gh #149).
     var ledger: ValueLedger
@@ -307,18 +307,18 @@ struct SlowPathHandler:
     # script_writer, a capture-only writer (flush keeps the bytes). The
     # script_* context is the outer call's, set by _script_context before a run.
     var script_depth: Int
-    var script_tokens_buf: UnsafePointer[RESP3Token, MutUntrackedOrigin]
-    var script_cmd_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
-    var script_cmd_byte_ends_buf: UnsafePointer[Int, MutUntrackedOrigin]
-    var script_writer: UnsafePointer[ResponseWriter, MutUntrackedOrigin]
-    var script_frame: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var script_tokens_buf: Pointer[RESP3Token, MutUntrackedOrigin]
+    var script_cmd_ends_buf: Pointer[Int, MutUntrackedOrigin]
+    var script_cmd_byte_ends_buf: Pointer[Int, MutUntrackedOrigin]
+    var script_writer: Pointer[ResponseWriter, MutUntrackedOrigin]
+    var script_frame: Pointer[UInt8, MutUntrackedOrigin]
     var script_frame_cap: Int
     var script_fd: Int32
-    var script_server: UnsafePointer[TCPServer, MutUntrackedOrigin]
+    var script_server: Pointer[TCPServer, MutUntrackedOrigin]
     var script_kq: Int32
-    var script_hnsw: UnsafePointer[HNSWGraph, MutUntrackedOrigin]
-    var script_db_size: UnsafePointer[Int, MutUntrackedOrigin]
-    var script_config: UnsafePointer[PionConfig, MutUntrackedOrigin]
+    var script_hnsw: Pointer[HNSWGraph, MutUntrackedOrigin]
+    var script_db_size: Pointer[Int, MutUntrackedOrigin]
+    var script_config: Pointer[PionConfig, MutUntrackedOrigin]
     var script_allow_oom: Bool
     # #38: BLPOP & co. parked until a key they wait on has data or they time
     # out; the engine wakes them (NetworkEngine._service_blocked_clients).
@@ -336,18 +336,18 @@ struct SlowPathHandler:
     var monitor_skip: Bool
     var monitor_exec_line: List[UInt8]
     # The engine's per-fd affinity bytes (3 = READONLY), which RESET clears.
-    var local_affinity: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var local_affinity: Pointer[UInt8, MutUntrackedOrigin]
     # The engine's writer while a script runs: a script's PUBLISH reaches
     # subscribers through it (the script's own writer only captures replies).
-    var script_main_writer: UnsafePointer[ResponseWriter, MutUntrackedOrigin]
+    var script_main_writer: Pointer[ResponseWriter, MutUntrackedOrigin]
     # #46: the worker's vector-index tombstones (state.mojo sets it)
-    var vec_tomb: UnsafePointer[VecTomb, MutUntrackedOrigin]
+    var vec_tomb: Pointer[VecTomb, MutUntrackedOrigin]
     # #47: CLIENT's per-connection state and CLIENT PAUSE, SLOWLOG, ACL LOG,
     # and the engine's receive-buffer lengths and capacity (CLIENT LIST qbuf)
     var clients: ClientRegistry
     var slowlog: SlowLog
     var acl_log: AclLog
-    var client_buffer_lens: UnsafePointer[Int, MutUntrackedOrigin]
+    var client_buffer_lens: Pointer[Int, MutUntrackedOrigin]
     var client_buf_cap: Int
     var kill_after_reply: Int32       # CLIENT KILL of itself: shut down once its reply is out
     var slowlog_all: Bool             # slowlog-log-slower-than < 1 ms: every command is timed here
@@ -357,9 +357,9 @@ struct SlowPathHandler:
     # alone into one of these, grown to its size (24 B per argument; at most
     # MAX_ARRAY_LEN). One for the top level, one for a script's redis.call,
     # which runs while the EVAL that started it is still using its tokens.
-    var big_tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin]
+    var big_tokens: Pointer[RESP3Token, MutUntrackedOrigin]
     var big_tok_cap: Int
-    var script_big_tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin]
+    var script_big_tokens: Pointer[RESP3Token, MutUntrackedOrigin]
     var script_big_tok_cap: Int
     # #52: tenant_scratch's size; grown to fit a command with many keys
     var tenant_scratch_cap: Int
@@ -369,34 +369,34 @@ struct SlowPathHandler:
 
     def __init__(
         out self,
-        keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-        hash_map_pool: UnsafePointer[ObjectPool[SlabHashMap], MutUntrackedOrigin],
-        skip_list_pool: UnsafePointer[ObjectPool[SlabSkipList], MutUntrackedOrigin],
-        list_pool: UnsafePointer[ObjectPool[SlabList], MutUntrackedOrigin],
-        ai_queue: UnsafePointer[LockFreeRingBuffer, MutUntrackedOrigin],
-        wal: UnsafePointer[WAL, MutUntrackedOrigin],
-        raft: UnsafePointer[RaftNode, MutUntrackedOrigin],
-        shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+        keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+        hash_map_pool: Pointer[ObjectPool[SlabHashMap], MutUntrackedOrigin],
+        skip_list_pool: Pointer[ObjectPool[SlabSkipList], MutUntrackedOrigin],
+        list_pool: Pointer[ObjectPool[SlabList], MutUntrackedOrigin],
+        ai_queue: Pointer[LockFreeRingBuffer, MutUntrackedOrigin],
+        wal: Pointer[WAL, MutUntrackedOrigin],
+        raft: Pointer[RaftNode, MutUntrackedOrigin],
+        shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
         config: PionConfig = PionConfig(),
         worker_id: Int = 0,
         num_workers: Int = 1,
-        cluster: UnsafePointer[ClusterState, MutUntrackedOrigin] = null_ptr[ClusterState, MutUntrackedOrigin](),
-        ttl_map: UnsafePointer[SlabHashMap, MutUntrackedOrigin] = null_ptr[SlabHashMap, MutUntrackedOrigin](),
+        cluster: Pointer[ClusterState, MutUntrackedOrigin] = null_ptr[ClusterState, MutUntrackedOrigin](),
+        ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin] = null_ptr[SlabHashMap, MutUntrackedOrigin](),
     ):
         self.dispatcher = CommandDispatcher(keyspace, hash_map_pool, skip_list_pool, list_pool, ai_queue, wal, raft)
         self.parser = RESP3Parser()
         # gh #166: one heap-resident table set per worker (see the field decls).
         # RESP3Token is a plain marker/ptr/length triple, so the raw allocation
         # is usable directly — parse_stream writes every slot it later reads.
-        self.tokens_buf = alloc[RESP3Token](MAX_CMD_TOKENS)
-        self.cmd_ends_buf = alloc[Int](MAX_CMD_ENDS)
-        self.cmd_byte_ends_buf = alloc[Int](MAX_CMD_ENDS)
-        self.replay_ends_buf = alloc[Int](MAX_CMD_ENDS)
-        self.replay_byte_ends_buf = alloc[Int](MAX_CMD_ENDS)
-        unsafe_memset(self.cmd_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
-        unsafe_memset(self.cmd_byte_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
-        unsafe_memset(self.replay_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
-        unsafe_memset(self.replay_byte_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        self.tokens_buf = unsafe_alloc[RESP3Token](MAX_CMD_TOKENS)
+        self.cmd_ends_buf = unsafe_alloc[Int](MAX_CMD_ENDS)
+        self.cmd_byte_ends_buf = unsafe_alloc[Int](MAX_CMD_ENDS)
+        self.replay_ends_buf = unsafe_alloc[Int](MAX_CMD_ENDS)
+        self.replay_byte_ends_buf = unsafe_alloc[Int](MAX_CMD_ENDS)
+        unsafe_memset(self.cmd_ends_buf.unsafe_bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        unsafe_memset(self.cmd_byte_ends_buf.unsafe_bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        unsafe_memset(self.replay_ends_buf.unsafe_bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        unsafe_memset(self.replay_byte_ends_buf.unsafe_bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
         self.keyspace = keyspace
         self.skip_list_pool = skip_list_pool
         self.shared_hnsw = shared_hnsw
@@ -408,8 +408,8 @@ struct SlowPathHandler:
         # gh #101: tenant namespacing state. The scratch is only sized when
         # tenant mode is on (256KB/worker otherwise wasted).
         self.tenant_table = TenantTable(config.server.tenants)
-        self.tenant_scratch = alloc[UInt8](TENANT_SCRATCH_CAP) if self.tenant_table.count > 0 else alloc[UInt8](1)
-        self.tenant_ns_buf = alloc[UInt8](MAX_TENANT_NAME + 1)
+        self.tenant_scratch = unsafe_alloc[UInt8](TENANT_SCRATCH_CAP) if self.tenant_table.count > 0 else unsafe_alloc[UInt8](1)
+        self.tenant_ns_buf = unsafe_alloc[UInt8](MAX_TENANT_NAME + 1)
         self.cur_tenant_ns_len = 0
         self.ledger = ValueLedger()
         self.listen_port = config.server.port
@@ -418,11 +418,11 @@ struct SlowPathHandler:
         self.parked_waits = ParkedWaits()
         self.can_park_wait = not config.server.use_xdp
         self.script_depth = 0
-        self.script_tokens_buf = alloc[RESP3Token](MAX_CMD_TOKENS)
-        self.script_cmd_ends_buf = alloc[Int](MAX_CMD_ENDS)
-        self.script_cmd_byte_ends_buf = alloc[Int](MAX_CMD_ENDS)
-        unsafe_memset(self.script_cmd_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
-        unsafe_memset(self.script_cmd_byte_ends_buf.bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        self.script_tokens_buf = unsafe_alloc[RESP3Token](MAX_CMD_TOKENS)
+        self.script_cmd_ends_buf = unsafe_alloc[Int](MAX_CMD_ENDS)
+        self.script_cmd_byte_ends_buf = unsafe_alloc[Int](MAX_CMD_ENDS)
+        unsafe_memset(self.script_cmd_ends_buf.unsafe_bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
+        unsafe_memset(self.script_cmd_byte_ends_buf.unsafe_bitcast[UInt8](), 0, MAX_CMD_ENDS * 8)
         self.script_writer = null_ptr[ResponseWriter, MutUntrackedOrigin]()
         self.script_frame = null_ptr[UInt8, MutUntrackedOrigin]()
         self.script_frame_cap = 0
@@ -457,8 +457,8 @@ struct SlowPathHandler:
         self.tenant_scratch_cap = TENANT_SCRATCH_CAP if self.tenant_table.count > 0 else 1
         self.vauto = VectorAuto()
         self.cluster = cluster
-        self.shard_query_seq = alloc[UInt64](1)
-        self.shard_query_seq[0] = 1
+        self.shard_query_seq = unsafe_alloc[UInt64](1)
+        self.shard_query_seq[unsafe_offset=0] = 1
         # gh #207: P3 staging field inits removed with the fields.
         # gh #87.1: IVF-PQ scratch alloc block removed.
         # Phase 2: semantic cache (per-worker; disabled by default unless config.embedding.enabled)
@@ -477,7 +477,7 @@ struct SlowPathHandler:
         self.kvcache = KVCacheStore(config.embedding.dimensions, Float32(0.95), config.server.kvcache_enabled)
         self.layer_store = LayerStore(config.server.kvcache_enabled)
         # Only allocate 4MB binary response buffer when kvcache is enabled
-        self.binary_resp_buf = alloc[UInt8](4 * 1024 * 1024) if config.server.kvcache_enabled else alloc[UInt8](1)
+        self.binary_resp_buf = unsafe_alloc[UInt8](4 * 1024 * 1024) if config.server.kvcache_enabled else unsafe_alloc[UInt8](1)
         self.attn_idx = AttentionIndex(config.server.kvcache_enabled)
         self.v_store = VStoreIndex(config.server.kvcache_enabled)
         self.state_store = StateStore(config.server.kvcache_enabled)
@@ -487,7 +487,7 @@ struct SlowPathHandler:
         self.v_store.my_worker_id = worker_id
         self.v_store.ns_prefix = config.server.ns_prefix
         if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].vstore_directory):
-            self.v_store.directory = UnsafePointer[VStoreDirectory, MutUntrackedOrigin](
+            self.v_store.directory = Pointer[VStoreDirectory, MutUntrackedOrigin](
                 unsafe_from_address=Int(shared_hnsw[].vstore_directory))
         # V-store persistence on warm restart:
         #   1. Snapshot load (pion.vstore.<wid>) — base state at last KV.PREFIX.SAVE.
@@ -516,7 +516,7 @@ struct SlowPathHandler:
             config.llm.model,
             config.llm.enabled,
         )
-        self.llm_out_buf = alloc[UInt8](1024 * 1024)  # 1MB scratch for LLM response
+        self.llm_out_buf = unsafe_alloc[UInt8](1024 * 1024)  # 1MB scratch for LLM response
         # FLARE gateway (shares embedding + LLM config; enabled only when both are enabled)
         var flare_enabled = config.embedding.enabled and config.llm.enabled
         self.flare = FLAREGateway(
@@ -550,13 +550,13 @@ struct SlowPathHandler:
         if config.inference.enabled:
             _ = self.inference_bridge.connect()
             # A3: Wire inference bridge to semantic cache for auto-embedding
-            self.scache.set_bridge(rebind[UnsafePointer[InferenceBridge, MutUntrackedOrigin]](UnsafePointer(to=self.inference_bridge)))
+            self.scache.set_bridge(rebind[Pointer[InferenceBridge, MutUntrackedOrigin]](Pointer(to=self.inference_bridge)))
         self.infer_deferred_fds     = Array[Int32, 8](fill=Int32(-1))
         self.infer_deferred_req_ids = Array[UInt32, 8](fill=UInt32(0))
         self.infer_deferred_types   = Array[UInt8, 8](fill=UInt8(0))
         self.infer_deferred_count   = 0
         self.infer_deferred_ticks   = Array[Int32, 8](fill=Int32(0))
-        self.infer_resp_buf = alloc[UInt8](INFER_RECV_BUF_SIZE)
+        self.infer_resp_buf = unsafe_alloc[UInt8](INFER_RECV_BUF_SIZE)
         # In-process Metal SDPA engine. All workers init (Phase 2: per-worker session
         # cache + staging buffers); the device, queue, PSOs, and shared event are still
         # process-global, but each worker owns its own slot[256] and Q/O buffers, so
@@ -566,12 +566,12 @@ struct SlowPathHandler:
         # the FFI symbols aren't linked and self.available stays False.
         self.cuda_attn_engine = CudaAttentionEngine(config.cuda_attention.enabled, Int(worker_id), config.cuda_attention.fa_window)
         # Initialize Lua engine (one per worker)
-        self.lua_engine = alloc[LuaEngine](1)
+        self.lua_engine = unsafe_alloc[LuaEngine](1)
         self.lua_engine.unsafe_write(LuaEngine())
 
     def process_binary_request(
         mut self,
-        buffer: UnsafePointer[UInt8, MutUntrackedOrigin],
+        buffer: Pointer[UInt8, MutUntrackedOrigin],
         n: Int,
         server: TCPServer,
         fd: Int32,
@@ -592,17 +592,17 @@ struct SlowPathHandler:
             if matches:
                 var rp = self.requirepass.unsafe_ptr()
                 for k in range(body_len):
-                    if req.body_ptr[k] != rp[k]:
+                    if req.body_ptr[unsafe_offset=k] != rp[unsafe_offset=k]:
                         matches = False; break
             if matches:
-                self.tx_state.authed[Int(fd)] = 1
+                self.tx_state.authed[unsafe_offset=Int(fd)] = 1
                 resp_len = build_binary_response_ok(resp_buf)
             else:
                 resp_len = build_binary_response(resp_buf, STATUS_ERROR,
                     null_ptr[UInt8, MutUntrackedOrigin](), UInt32(0))
             _binary_send_all(server, fd, resp_buf, resp_len)
             return BINARY_HEADER_SIZE + Int(req.body_len)
-        if self.requirepass.byte_length() > 0 and self.tx_state.authed[Int(fd)] == 0:
+        if self.requirepass.byte_length() > 0 and self.tx_state.authed[unsafe_offset=Int(fd)] == 0:
             resp_len = build_binary_response(resp_buf, STATUS_ERROR,
                 null_ptr[UInt8, MutUntrackedOrigin](), UInt32(0))
             _binary_send_all(server, fd, resp_buf, resp_len)
@@ -617,7 +617,7 @@ struct SlowPathHandler:
             # A literal: static data, never a stack pointer (gh #349).
             comptime OOM_MSG = "OOM command not allowed when used memory > 'maxmemory'."
             resp_len = build_binary_response(resp_buf, STATUS_ERROR,
-                rebind[Pointer[UInt8, MutUntrackedOrigin]](OOM_MSG.unsafe_ptr()),
+                rebind[Pointer[UInt8, MutUntrackedOrigin]](OOM_MSG.ptr()),
                 UInt32(OOM_MSG.byte_length()))
             _binary_send_all(server, fd, resp_buf, resp_len)
             return BINARY_HEADER_SIZE + Int(req.body_len)
@@ -635,8 +635,8 @@ struct SlowPathHandler:
         elif req.cmd == CMD_LAYER_FETCH:
             var lreq = parse_layer_fetch_request(req.body_ptr, Int(req.body_len))
             if lreq.valid:
-                var out_ptr = alloc[UnsafePointer[UInt8, MutUntrackedOrigin]](1)
-                var out_len = alloc[Int](1)
+                var out_ptr = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+                var out_len = unsafe_alloc[Int](1)
                 var hit = self.layer_store.fetch_layer(
                     lreq.session_id_ptr, Int(lreq.session_id_len),
                     Int(lreq.layer_id), out_ptr, out_len)
@@ -649,7 +649,7 @@ struct SlowPathHandler:
                     # header + blob via scatter-gather (matches gh #76).
                     if blob_len + BINARY_RESP_HEADER_SIZE > 4 * 1024 * 1024:
                         write_u16_le(resp_buf, 0, BINARY_MAGIC)
-                        resp_buf[2] = STATUS_OK
+                        resp_buf[unsafe_offset=2] = STATUS_OK
                         write_u32_le(resp_buf, 3, UInt32(blob_len))
                         _binary_send_all(server, fd, resp_buf, BINARY_RESP_HEADER_SIZE)
                         _binary_send_all(server, fd, out_ptr[], blob_len)
@@ -658,8 +658,8 @@ struct SlowPathHandler:
                         resp_len = build_binary_response(resp_buf, STATUS_OK, out_ptr[], UInt32(blob_len))
                 else:
                     resp_len = build_binary_response_miss(resp_buf)
-                out_ptr.free()
-                out_len.free()
+                out_ptr.unsafe_free()
+                out_len.unsafe_free()
             else:
                 resp_len = build_binary_response_miss(resp_buf)
         elif req.cmd == CMD_ATTEND_CREATE:
@@ -672,10 +672,10 @@ struct SlowPathHandler:
                                                        boundary_v_format=areq.boundary_v_format)
                 if si >= 0:
                     # Return session index as 4-byte LE body
-                    var si_buf = alloc[UInt8](4)
-                    write_u32_le(UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(si_buf)), 0, UInt32(si))
+                    var si_buf = unsafe_alloc[UInt8](4)
+                    write_u32_le(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(si_buf)), 0, UInt32(si))
                     resp_len = build_binary_response(resp_buf, STATUS_OK,
-                        UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(si_buf)), 4)
+                        Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(si_buf)), 4)
                 else:
                     resp_len = build_binary_response_miss(resp_buf)
             else:
@@ -684,14 +684,14 @@ struct SlowPathHandler:
         elif req.cmd == CMD_ATTEND_STORE:
             # Need session's key/val dims — find session first
             var sid_len = Int(read_u16_le(req.body_ptr, 0))
-            var sid_ptr = req.body_ptr + 2
+            var sid_ptr = req.body_ptr.unsafe_offset(2)
             var si = self.attn_idx._find_session(sid_ptr, sid_len)
             if si >= 0:
-                var meta = self.attn_idx.sessions[si]
+                var meta = self.attn_idx.sessions[unsafe_offset=si]
                 var areq = parse_attend_store(req.body_ptr, Int(req.body_len), meta.key_dim, meta.value_dim)
                 if areq.valid:
                     var ok = self.attn_idx.store_tokens(si, Int(areq.layer_id),
-                        areq.keys_ptr.bitcast[Float32](), areq.values_ptr.bitcast[Float32](), Int(areq.num_tokens))
+                        areq.keys_ptr.unsafe_bitcast[Float32](), areq.values_ptr.unsafe_bitcast[Float32](), Int(areq.num_tokens))
                     resp_len = build_binary_response_ok(resp_buf) if ok else build_binary_response_miss(resp_buf)
                 else:
                     resp_len = build_binary_response_miss(resp_buf)
@@ -721,17 +721,17 @@ struct SlowPathHandler:
                 var k = Int(areq.k)
                 var shape_ok = False
                 if si >= 0:
-                    shape_ok = (Int(req.body_len) - q_off == self.attn_idx.sessions[si].key_dim * 4
+                    shape_ok = (Int(req.body_len) - q_off == self.attn_idx.sessions[unsafe_offset=si].key_dim * 4
                                 and k >= 1 and k <= ATTEND_MAX_K)
                 if si >= 0 and shape_ok:
-                    var meta = self.attn_idx.sessions[si]
+                    var meta = self.attn_idx.sessions[unsafe_offset=si]
                     var ef = ATTEND_QUERY_EF   # gh #391
-                    var out_keys = alloc[Float32](k * meta.key_dim)
-                    var out_values = alloc[Float32](k * meta.value_dim)
-                    var _tid = alloc[Int](k)
-                    var out_tids = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_tid))
+                    var out_keys = unsafe_alloc[Float32](k * meta.key_dim)
+                    var out_values = unsafe_alloc[Float32](k * meta.value_dim)
+                    var _tid = unsafe_alloc[Int](k)
+                    var out_tids = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_tid))
                     var nr = self.attn_idx.query_topk(si, Int(areq.layer_id),
-                        areq.query_ptr.bitcast[Float32](), k, ef, out_keys, out_values, out_tids)
+                        areq.query_ptr.unsafe_bitcast[Float32](), k, ef, out_keys, out_values, out_tids)
                     if nr > 0:
                         # gh #404: all `nr` value rows, best first (was the first
                         # row only, whatever k was). Same body as the RESP arm.
@@ -739,24 +739,24 @@ struct SlowPathHandler:
                         if val_bytes + BINARY_RESP_HEADER_SIZE > 4 * 1024 * 1024:
                             # Past binary_resp_buf: stream it (gh #91 pattern).
                             write_u16_le(resp_buf, 0, BINARY_MAGIC)
-                            resp_buf[2] = STATUS_OK
+                            resp_buf[unsafe_offset=2] = STATUS_OK
                             write_u32_le(resp_buf, 3, UInt32(val_bytes))
                             _binary_send_all(server, fd, resp_buf, BINARY_RESP_HEADER_SIZE)
-                            _binary_send_all(server, fd, out_values.bitcast[UInt8](), val_bytes)
+                            _binary_send_all(server, fd, out_values.unsafe_bitcast[UInt8](), val_bytes)
                             resp_len = 0
                         else:
                             resp_len = build_binary_response(resp_buf, STATUS_OK,
-                                out_values.bitcast[UInt8](), UInt32(val_bytes))
+                                out_values.unsafe_bitcast[UInt8](), UInt32(val_bytes))
                     else:
                         resp_len = build_binary_response_miss(resp_buf)
-                    out_keys.free()
-                    out_values.free()
-                    _tid.free()
+                    out_keys.unsafe_free()
+                    out_values.unsafe_free()
+                    _tid.unsafe_free()
                 elif si >= 0:
                     # A literal: static data, never a stack pointer (gh #349).
                     comptime AQ_SHAPE_MSG = "ERR ATTEND.QUERY query must be key_dim * 4 bytes and 1 <= k <= 4096"
                     resp_len = build_binary_response(resp_buf, STATUS_ERROR,
-                        rebind[Pointer[UInt8, MutUntrackedOrigin]](AQ_SHAPE_MSG.unsafe_ptr()),
+                        rebind[Pointer[UInt8, MutUntrackedOrigin]](AQ_SHAPE_MSG.ptr()),
                         UInt32(AQ_SHAPE_MSG.byte_length()))
                 else:
                     resp_len = build_binary_response_miss(resp_buf)
@@ -791,11 +791,11 @@ struct SlowPathHandler:
                     # Write attention output directly into the response body slot,
                     # then patch the header in place — saves the memcpy that
                     # build_binary_response would do otherwise.
-                    var out_ptr = UnsafePointer[Float32, MutUntrackedOrigin](
-                        unsafe_from_address=Int(resp_buf + BINARY_RESP_HEADER_SIZE))
-                    var Q_ptr = freq.Q_ptr.bitcast[Float32]()
-                    var Ks_ptr = freq.K_suf_ptr.bitcast[Float32]()
-                    var Vs_ptr = freq.V_suf_ptr.bitcast[Float32]()
+                    var out_ptr = Pointer[Float32, MutUntrackedOrigin](
+                        unsafe_from_address=Int(resp_buf.unsafe_offset(BINARY_RESP_HEADER_SIZE)))
+                    var Q_ptr = freq.Q_ptr.unsafe_bitcast[Float32]()
+                    var Ks_ptr = freq.K_suf_ptr.unsafe_bitcast[Float32]()
+                    var Vs_ptr = freq.V_suf_ptr.unsafe_bitcast[Float32]()
                     var ok = self.metal_attn_engine.query_batched_fused(
                         freq.session_id_ptr, Int(freq.session_id_len),
                         Int(freq.layer_id),
@@ -805,7 +805,7 @@ struct SlowPathHandler:
                     )
                     if ok:
                         write_u16_le(resp_buf, 0, BINARY_MAGIC)
-                        resp_buf[2] = STATUS_OK
+                        resp_buf[unsafe_offset=2] = STATUS_OK
                         write_u32_le(resp_buf, 3, UInt32(out_bytes))
                         resp_len = BINARY_RESP_HEADER_SIZE + out_bytes
                     else:
@@ -904,8 +904,8 @@ struct SlowPathHandler:
             state = "exact"
         elif sh[].pre_index_ready:
             state = "empty"
-        var unindexed = sh[].vec_stats[0] if is_not_null(sh[].vec_stats) else UInt64(0)
-        var builds = sh[].vec_stats[1] if is_not_null(sh[].vec_stats) else UInt64(0)
+        var unindexed = sh[].vec_stats[unsafe_offset=0] if is_not_null(sh[].vec_stats) else UInt64(0)
+        var builds = sh[].vec_stats[unsafe_offset=1] if is_not_null(sh[].vec_stats) else UInt64(0)
         var o = String("vector_index:") + state + "\r\n"
         o += "vector_graph_rows:" + String(graph) + "\r\n"
         o += "vector_exact_rows:" + String(delta if ready != 0 else rows) + "\r\n"
@@ -936,7 +936,7 @@ struct SlowPathHandler:
         subscribed connection, whose commands the slow path checks."""
         return (not self.over_maxmemory and self.monitors.count() == 0
                 and not self.pubsub.subscribed(Int32(ci))
-                and self.clients.reply[ci] == REPLY_ON and self.clients.pause_until_ms == 0
+                and self.clients.reply[unsafe_offset=ci] == REPLY_ON and self.clients.pause_until_ms == 0
                 and not self.slowlog_all)
 
     def _reset_connection(mut self, fd: Int32, mut writer: ResponseWriter):
@@ -951,34 +951,34 @@ struct SlowPathHandler:
         # #47: REPLY back ON, NO-EVICT and NO-TOUCH off (the library name stays)
         self.clients.set_reply(fd, REPLY_ON)
         if Int(fd) >= 0 and Int(fd) < CLIENT_MAX_FDS:
-            self.clients.no_evict[Int(fd)] = 0
-            self.clients.no_touch[Int(fd)] = 0
+            self.clients.no_evict[unsafe_offset=Int(fd)] = 0
+            self.clients.no_touch[unsafe_offset=Int(fd)] = 0
         self.update_dispatch_gate()
-        if is_not_null(self.local_affinity) and self.local_affinity[Int(fd)] == 3:
-            self.local_affinity[Int(fd)] = 0
+        if is_not_null(self.local_affinity) and self.local_affinity[unsafe_offset=Int(fd)] == 3:
+            self.local_affinity[unsafe_offset=Int(fd)] = 0
         writer.proto = 2
         writer.append_status_response("RESET")
 
-    def _monitor_line_for(self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int,
+    def _monitor_line_for(self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int,
                           fd: Int32) -> List[UInt8]:
         """#39: the MONITOR line for tokens[i:end], or nothing when Redis
         would not show the command: unknown, a wrong argument count (refused
         before it ran), or `admin`."""
-        var tp = tokens[i].ptr
-        var tl = tokens[i].length
+        var tp = tokens[unsafe_offset=i].ptr
+        var tl = tokens[unsafe_offset=i].length
         if not command_exists(tp, tl):
             return List[UInt8]()
         var argc = end - i
         var ar = command_arity(tp, tl)
         if (ar > 0 and argc != ar) or (ar < 0 and argc < -ar):
             return List[UInt8]()
-        var sp = tokens[i + 1].ptr if argc > 1 else tp
-        var sl = tokens[i + 1].length if argc > 1 else 0
+        var sp = tokens[unsafe_offset=i + 1].ptr if argc > 1 else tp
+        var sl = tokens[unsafe_offset=i + 1].length if argc > 1 else 0
         if command_hidden_from_monitor(tp, tl, sp, sl):
             return List[UInt8]()
         return monitor_line(tokens, i, end, Int32(-1) if self.script_depth > 0 else fd)
 
-    def _monitor_feed(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int,
+    def _monitor_feed(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int,
                       fd: Int32, mut writer: ResponseWriter, server: TCPServer, kq: Int32):
         """#39: show a command to the monitors. A script's commands wait in
         `monitors.pending` until the script's own line is out."""
@@ -998,7 +998,7 @@ struct SlowPathHandler:
         var n = len(line)
         if n == 0:
             return
-        var lp = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(line.unsafe_ptr()))
+        var lp = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(line.unsafe_ptr()))
         for k in range(self.monitors.count()):
             var m = self.monitors.fds[k]
             if m == fd:
@@ -1006,12 +1006,12 @@ struct SlowPathHandler:
             else:
                 writer.deliver_to(m, lp, n, server, kq)
 
-    def _rpoplpush(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int,
+    def _rpoplpush(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int,
                    mut writer: ResponseWriter) raises:
         """RPOPLPUSH tokens[i+1] tokens[i+2] (BRPOPLPUSH runs it once its source
         has an element)."""
-        var rpl_src = tokens[i+1].value()
-        var rpl_dst = tokens[i+2].value()
+        var rpl_src = tokens[unsafe_offset=i+1].value()
+        var rpl_dst = tokens[unsafe_offset=i+2].value()
         # gh #232: neither key was type-checked, and the pop
         # happened first. With a wrong-type DESTINATION the
         # element was popped, answered as a normal success,
@@ -1020,8 +1020,8 @@ struct SlowPathHandler:
         # (`RPOPLPUSH work processing`), so that is a job
         # vanishing with a reply that says it moved. Redis
         # validates both keys before touching either.
-        var rpl_sv = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-        var rpl_dv = self.keyspace[].get(GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length))
+        var rpl_sv = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
+        var rpl_dv = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length))
         # Redis's precedence, and it is observable: wrong-type
         # SOURCE errors; a MISSING source is nil and the
         # destination is never examined; only then does a
@@ -1055,19 +1055,19 @@ struct SlowPathHandler:
                 # AFTER the push: `src == dst` is a legal
                 # rotation and is size 1 again by here.
                 var rpl_after = self.keyspace[].get(
-                    GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                    GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
                 if (not rpl_after.is_none()
                         and rpl_after.type.value == ValueType.LIST
                         and rpl_after.as_list()
                             .unsafe_bitcast[SlabList]()[].size == 0):
                     _ = remove_and_free(self.keyspace, 
-                        GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                        GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
                     _ = self.dispatcher.wal[].append(
-                        2, tokens[i+1].ptr, tokens[i+1].length)
+                        2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
 
-    def _park_blocked(mut self, fd: Int32, buffer: UnsafePointer[UInt8, MutUntrackedOrigin],
-                      cmd_idx: Int, num_cmds: Int, cmd_byte_ends: UnsafePointer[Int, MutUntrackedOrigin],
-                      on_primary: Bool, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    def _park_blocked(mut self, fd: Int32, buffer: Pointer[UInt8, MutUntrackedOrigin],
+                      cmd_idx: Int, num_cmds: Int, cmd_byte_ends: Pointer[Int, MutUntrackedOrigin],
+                      on_primary: Bool, tokens: Pointer[RESP3Token, MutUntrackedOrigin],
                       key_first: Int, key_end: Int, deadline_ms: Int64, zset: Bool,
                       nil_bulk: Bool = False, group_at: Int = -1) -> Bool:
         """#38: park a blocking command that found nothing: register it with a
@@ -1076,25 +1076,25 @@ struct SlowPathHandler:
         (MULTI/EXEC replay, a script, the XDP lane): the caller answers nil."""
         if not (self.can_park_wait and on_primary and cmd_idx < num_cmds and fd >= 0):
             return False
-        var start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
-        var end = cmd_byte_ends[cmd_idx]
-        var bc = new_blocked_client(fd, deadline_ms, zset, nil_bulk, buffer + start, end - start,
+        var start = cmd_byte_ends[unsafe_offset=cmd_idx - 1] if cmd_idx > 0 else 0
+        var end = cmd_byte_ends[unsafe_offset=cmd_idx]
+        var bc = new_blocked_client(fd, deadline_ms, zset, nil_bulk, buffer.unsafe_offset(start), end - start,
                                     tokens, key_first, key_end)
         if group_at >= 0:              # #40: XREADGROUP waits for its group
-            for b in range(tokens[group_at].length):
-                bc.group.append(tokens[group_at].ptr[b])
+            for b in range(tokens[unsafe_offset=group_at].length):
+                bc.group.append(tokens[unsafe_offset=group_at].ptr[unsafe_offset=b])
         self.blocked_clients.add(bc^)
         self.parked_waits.park_fd(fd)
         return True
 
-    def _bpop_lists(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+    def _bpop_lists(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
                     left: Bool, mut writer: ResponseWriter) raises -> Bool:
         """BLPOP/BRPOP's pop: the keys left to right, a missing one skipped, a
         wrong-type one an error, from the first list an element, replied
         [key, element]. True when it replied."""
         for _bk in range(first, end):
-            var _bkey = tokens[_bk].value()
-            var _bval = self.keyspace[].get(GenericValue.borrow(tokens[_bk].ptr, tokens[_bk].length))
+            var _bkey = tokens[unsafe_offset=_bk].value()
+            var _bval = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=_bk].ptr, tokens[unsafe_offset=_bk].length))
             if _bval.is_none():
                 continue
             if _bval.type.value != ValueType.LIST:
@@ -1107,53 +1107,53 @@ struct SlowPathHandler:
             if _bpopped.is_none():
                 continue
             writer.append_array_header(2)
-            writer.append_bulk_string_response(tokens[_bk].ptr, tokens[_bk].length)
+            writer.append_bulk_string_response(tokens[unsafe_offset=_bk].ptr, tokens[unsafe_offset=_bk].length)
             writer.append_bulk_value_response(_bpopped)
             _bpopped.free_str_payload()   # owned by the caller once popped
             # gh #234: drop an emptied list, and only AFTER the reply.
             if self.dispatcher.execute_llen(_bkey) == 0:
-                _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[_bk].ptr, tokens[_bk].length))
+                _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=_bk].ptr, tokens[unsafe_offset=_bk].length))
                 if is_not_null(self.dispatcher.wal):
-                    _ = self.dispatcher.wal[].append(2, tokens[_bk].ptr, tokens[_bk].length)
+                    _ = self.dispatcher.wal[].append(2, tokens[unsafe_offset=_bk].ptr, tokens[unsafe_offset=_bk].length)
             return True
         return False
 
-    def _bzpop(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+    def _bzpop(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
                from_min: Bool, mut writer: ResponseWriter) raises -> Bool:
         """BZPOPMIN/BZPOPMAX's pop: from the first sorted set, one member,
         replied [key, member, score]. True when it replied."""
         for k in range(first, end):
-            var kv = self.keyspace[].get(GenericValue.borrow(tokens[k].ptr, tokens[k].length))
+            var kv = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length))
             if kv.is_none():
                 continue
             if kv.type.value != ValueType.ZSET:
                 writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                 return True
-            var zp = kv.as_zset().bitcast[SlabSkipList]()
+            var zp = kv.as_zset().unsafe_bitcast[SlabSkipList]()
             if zp[].length == 0:
                 continue
             var r = zp[].pop_min() if from_min else zp[].pop_max()
             if not r.valid:
                 continue
             writer.append_array_header(3)
-            writer.append_bulk_string_response(tokens[k].ptr, tokens[k].length)
+            writer.append_bulk_string_response(tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length)
             writer.append_bulk_value_response(r.obj)
             writer.append_score_response(r.score)
             if is_not_null(self.dispatcher.wal):            # gh #170: the resolved effect, a ZREM
-                var wb = alloc[UInt8](64)
+                var wb = unsafe_alloc[UInt8](64)
                 var wl = 0
                 var wp = gv_bytes(r.obj, wb, wl)
-                _ = self.dispatcher.wal[].append_kv(12, tokens[k].ptr, tokens[k].length, wp, wl)
-                wb.free()
+                _ = self.dispatcher.wal[].append_kv(12, tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length, wp, wl)
+                wb.unsafe_free()
             r.obj.free_str_payload()
             if zp[].length == 0:                             # gh #234
-                _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[k].ptr, tokens[k].length))
+                _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length))
                 if is_not_null(self.dispatcher.wal):
-                    _ = self.dispatcher.wal[].append(2, tokens[k].ptr, tokens[k].length)
+                    _ = self.dispatcher.wal[].append(2, tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length)
             return True
         return False
 
-    def _mpop_lists(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first_key: Int,
+    def _mpop_lists(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], first_key: Int,
                     numkeys: Int, left: Bool, count: Int, mut writer: ResponseWriter) -> Bool:
         """LMPOP's pop, as Redis's mpopGenericCommand: the keys in order, a
         missing one skipped, a wrong-type one an error, and from the first
@@ -1161,7 +1161,7 @@ struct SlowPathHandler:
         emptied list is removed (gh #234). True when it replied; False when no
         key held anything, which the caller answers (a null array for LMPOP)."""
         for k in range(numkeys):
-            var kt = tokens[first_key + k]
+            var kt = tokens[unsafe_offset=first_key + k]
             var kv = GenericValue.borrow(kt.ptr, kt.length)
             var v = self.keyspace[].get(kv)
             if v.is_none():
@@ -1169,7 +1169,7 @@ struct SlowPathHandler:
             if v.type.value != ValueType.LIST:
                 writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                 return True
-            var lp = v.as_list().bitcast[SlabList]()
+            var lp = v.as_list().unsafe_bitcast[SlabList]()
             if lp[].size == 0:
                 continue
             var n = min(count, lp[].size)
@@ -1194,7 +1194,7 @@ struct SlowPathHandler:
         """The connection's user: -1 default, else its tenant."""
         if self.tenant_table.count == 0:
             return -1
-        return Int(self.tx_state.tenant_id[Int(fd)])
+        return Int(self.tx_state.tenant_id[unsafe_offset=Int(fd)])
 
     def _user_name(self, fd: Int32) -> String:
         var u = self._user_of(fd)
@@ -1204,7 +1204,7 @@ struct SlowPathHandler:
 
     def _acl_users(mut self, config: PionConfig) -> AclUsers:
         return AclUsers(config.server.requirepass,
-                        UnsafePointer[TenantTable, MutUntrackedOrigin](unsafe_from_address=Int(UnsafePointer(to=self.tenant_table))))
+                        Pointer[TenantTable, MutUntrackedOrigin](unsafe_from_address=Int(Pointer(to=self.tenant_table))))
 
     def _client_view(mut self, fd: Int32, caller: Int32, qbuf_self: Int, resp_self: Int,
                      pending: Bool) raises -> ClientView:
@@ -1220,24 +1220,24 @@ struct SlowPathHandler:
             flags += "x"
         if self.parked_waits.is_parked(f):
             flags += "b"
-        if is_not_null(self.local_affinity) and self.local_affinity[f] == 3:
+        if is_not_null(self.local_affinity) and self.local_affinity[unsafe_offset=f] == 3:
             flags += "r"
-        if self.clients.no_evict[f] != 0:
+        if self.clients.no_evict[unsafe_offset=f] != 0:
             flags += "e"
-        if self.clients.no_touch[f] != 0:
+        if self.clients.no_touch[unsafe_offset=f] != 0:
             flags += "T"
         if flags.byte_length() == 0:
             flags = "N"
         var sub = len(self.pubsub.names_of(KIND_CHANNEL, fd))
         var psub = len(self.pubsub.names_of(KIND_PATTERN, fd))
         var ssub = self.pubsub.get_shard_count(fd)
-        var multi = Int(self.tx_state.queue_counts[f]) if self.tx_state.is_multi(fd) else -1
-        var watch = Int(self.tx_state.watch_counts[f])
+        var multi = Int(self.tx_state.queue_counts[unsafe_offset=f]) if self.tx_state.is_multi(fd) else -1
+        var watch = Int(self.tx_state.watch_counts[unsafe_offset=f])
         var qbuf = qbuf_self
         if fd != caller:
-            qbuf = self.client_buffer_lens[f] if is_not_null(self.client_buffer_lens) else 0
+            qbuf = self.client_buffer_lens[unsafe_offset=f] if is_not_null(self.client_buffer_lens) else 0
         var qfree = self.client_buf_cap - qbuf if self.client_buf_cap > qbuf else 0
-        var resp = resp_self if fd == caller else Int(self.tx_state.resp_proto[f])
+        var resp = resp_self if fd == caller else Int(self.tx_state.resp_proto[unsafe_offset=f])
         if resp != 3:
             resp = 2
         return ClientView(fd, name^, flags^, sub, psub, ssub, multi, watch, qbuf, qfree,
@@ -1247,7 +1247,7 @@ struct SlowPathHandler:
         """This worker's connections in the order they connected (by ID)."""
         var keys = List[UInt64]()
         for f in range(CLIENT_MAX_FDS):
-            var id = self.clients.ids[f]
+            var id = self.clients.ids[unsafe_offset=f]
             if id != 0:
                 keys.append((id << 16) | UInt64(f))
         heapsort_u64(keys)
@@ -1309,43 +1309,43 @@ struct SlowPathHandler:
     def _tx_has_write(self, fd: Int32) -> Bool:
         """CLIENT PAUSE WRITE holds an EXEC whose transaction writes."""
         var f = Int(fd)
-        var q = self.tx_state.queues[f]
+        var q = self.tx_state.queues[unsafe_offset=f]
         if is_null(q):
             return False
-        for k in range(Int(self.tx_state.queue_counts[f])):
-            var d = q[k].data
-            var l = q[k].length
+        for k in range(Int(self.tx_state.queue_counts[unsafe_offset=f])):
+            var d = q[unsafe_offset=k].data
+            var l = q[unsafe_offset=k].length
             # *N\r\n$L\r\nNAME\r\n[$L\r\nSUB\r\n]: the name and the first argument
             var at = 0
-            while at < l and d[at] != 10:
+            while at < l and d[unsafe_offset=at] != 10:
                 at += 1
             var np = d
             var nl = 0
             var sp = d
             var sl = 0
             for arg in range(2):
-                if at + 1 >= l or d[at + 1] != 36:
+                if at + 1 >= l or d[unsafe_offset=at + 1] != 36:
                     break
                 var x = at + 2
                 var alen = 0
-                while x < l and d[x] != 13:
-                    alen = alen * 10 + Int(d[x] - 48)
+                while x < l and d[unsafe_offset=x] != 13:
+                    alen = alen * 10 + Int(d[unsafe_offset=x] - 48)
                     x += 1
                 var start = x + 2
                 if start + alen > l:
                     break
                 if arg == 0:
-                    np = d + start
+                    np = d.unsafe_offset(start)
                     nl = alen
                 else:
-                    sp = d + start
+                    sp = d.unsafe_offset(start)
                     sl = alen
                 at = start + alen + 1
             if nl > 0 and (cmd_pause_write(np, nl, sp, sl) or command_is_denyoom(np, nl)):
                 return True
         return False
 
-    def _pause_holds(mut self, fd: Int32, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    def _pause_holds(mut self, fd: Int32, tokens: Pointer[RESP3Token, MutUntrackedOrigin],
                      i: Int, end: Int) -> Bool:
         """Does CLIENT PAUSE hold this command? ALL: every command. WRITE:
         Redis's write and may-replicate commands (and Pion's ingest ones), an
@@ -1357,31 +1357,31 @@ struct SlowPathHandler:
             return False
         if self.clients.pause_all:
             return True
-        var tp = tokens[i].ptr
-        var tl = tokens[i].length
-        var sp = tokens[i + 1].ptr if end - i > 1 else tp
-        var sl = tokens[i + 1].length if end - i > 1 else 0
+        var tp = tokens[unsafe_offset=i].ptr
+        var tl = tokens[unsafe_offset=i].length
+        var sp = tokens[unsafe_offset=i + 1].ptr if end - i > 1 else tp
+        var sl = tokens[unsafe_offset=i + 1].length if end - i > 1 else 0
         if cmd_pause_write(tp, tl, sp, sl) or command_is_denyoom(tp, tl):
             return True
         if cmd_eq(tp, tl, "exec") and self.tx_state.is_multi(fd):
             return self._tx_has_write(fd)
         return False
 
-    def _big_token_table(mut self, need: Int) -> UnsafePointer[RESP3Token, MutUntrackedOrigin]:
+    def _big_token_table(mut self, need: Int) -> Pointer[RESP3Token, MutUntrackedOrigin]:
         """#52: the table a command of `need` arguments is parsed into when the
         regular one is too small: the top level's or the running script's,
         grown to fit and kept for the next one."""
         if self.script_depth == 0:
             if need > self.big_tok_cap:
                 if is_not_null(self.big_tokens):
-                    self.big_tokens.free()
-                self.big_tokens = alloc[RESP3Token](need)
+                    self.big_tokens.unsafe_free()
+                self.big_tokens = unsafe_alloc[RESP3Token](need)
                 self.big_tok_cap = need
             return self.big_tokens
         if need > self.script_big_tok_cap:
             if is_not_null(self.script_big_tokens):
-                self.script_big_tokens.free()
-            self.script_big_tokens = alloc[RESP3Token](need)
+                self.script_big_tokens.unsafe_free()
+            self.script_big_tokens = unsafe_alloc[RESP3Token](need)
             self.script_big_tok_cap = need
         return self.script_big_tokens
 
@@ -1390,11 +1390,11 @@ struct SlowPathHandler:
         drops the reply of the command after CLIENT REPLY SKIP. A reply that
         was already (partly) sent cannot be taken back and stays."""
         var f = Int(fd)
-        var m = self.clients.reply[f]
+        var m = self.clients.reply[unsafe_offset=f]
         if m == REPLY_ON:
             return
         if m == REPLY_SKIP_NEXT:
-            self.clients.reply[f] = REPLY_SKIP_NOW   # the next command's reply goes
+            self.clients.reply[unsafe_offset=f] = REPLY_SKIP_NOW   # the next command's reply goes
             return
         if writer.ctx[].flush_count == flushes and start <= writer.offset:
             writer.offset = start
@@ -1402,7 +1402,7 @@ struct SlowPathHandler:
             self.clients.set_reply(fd, REPLY_ON)
             self.update_dispatch_gate()
 
-    def _slowlog_push(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
+    def _slowlog_push(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int,
                       us: Int64, fd: Int32) raises:
         var f = Int(fd)
         var name = self.tx_state.client_names[f] if f in self.tx_state.client_names else String("")
@@ -1418,7 +1418,7 @@ struct SlowPathHandler:
         var il = info.byte_length()
         if il > 0:
             var line = bytes_to_string(
-                UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(info.unsafe_ptr())), il - 1)
+                Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(info.unsafe_ptr())), il - 1)
             _ = info^   # alive until the copy above is made: the pointer does not keep it
             info = line^
         self.acl_log.add(reason^, ctx^, object^, username^, info^)
@@ -1430,13 +1430,13 @@ struct SlowPathHandler:
         comptime W = "-WRONGPASS"
         if start < 0 or writer.ctx[].flush_count != flushes or writer.offset - start < 10:
             return False
-        var p = W.unsafe_ptr()
+        var p = W.ptr()
         for k in range(10):
-            if writer.buffer[start + k] != p[k]:
+            if writer.buffer[unsafe_offset=start + k] != p[unsafe_offset=k]:
                 return False
         return True
 
-    def _client_cmd(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32,
+    def _client_cmd(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32,
                     mut writer: ResponseWriter, qbuf_self: Int, config: PionConfig) raises -> Bool:
         """CLIENT (#47). True when the caller killed itself: the rest of its
         input is dropped and the connection closes after this reply, as
@@ -1445,7 +1445,7 @@ struct SlowPathHandler:
         if argc < 2:
             writer.append_error_response("ERR wrong number of arguments for 'client' command")
             return False
-        var sub = tokens[i + 1]
+        var sub = tokens[unsafe_offset=i + 1]
         var sp = sub.ptr
         var sl = sub.length
         var f = Int(fd)
@@ -1458,9 +1458,9 @@ struct SlowPathHandler:
             if argc != 3:
                 writer.append_error_response("ERR wrong number of arguments for 'client|setname' command")
                 return False
-            var nt = tokens[i + 2]
+            var nt = tokens[unsafe_offset=i + 2]
             for k in range(nt.length):
-                var c = nt.ptr[k]
+                var c = nt.ptr[unsafe_offset=k]
                 if c < 33 or c > 126:
                     writer.append_error_response("ERR Client names cannot contain spaces, newlines or special characters.")
                     return False
@@ -1488,15 +1488,15 @@ struct SlowPathHandler:
             var want_type = -1
             var ids = List[UInt64]()
             var by_id = False
-            if argc == 4 and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "type"):
-                want_type = client_type_of(tokens[i + 3].ptr, tokens[i + 3].length)
+            if argc == 4 and arg_eq(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, "type"):
+                want_type = client_type_of(tokens[unsafe_offset=i + 3].ptr, tokens[unsafe_offset=i + 3].length)
                 if want_type == -1:
-                    writer.append_error_response("ERR Unknown client type '" + bytes_to_string(tokens[i + 3].ptr, tokens[i + 3].length) + "'")
+                    writer.append_error_response("ERR Unknown client type '" + bytes_to_string(tokens[unsafe_offset=i + 3].ptr, tokens[unsafe_offset=i + 3].length) + "'")
                     return False
-            elif argc > 3 and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "id"):
+            elif argc > 3 and arg_eq(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, "id"):
                 by_id = True
                 for k in range(i + 3, end):
-                    var v = parse_int64_strict(tokens[k].ptr, tokens[k].length)
+                    var v = parse_int64_strict(tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length)
                     if not v.ok:
                         writer.append_error_response("ERR Invalid client ID")
                         return False
@@ -1529,13 +1529,13 @@ struct SlowPathHandler:
                 return False
             var all = True
             if argc == 4:
-                var m = tokens[i + 3]
+                var m = tokens[unsafe_offset=i + 3]
                 if arg_eq(m.ptr, m.length, "write"):
                     all = False
                 elif not arg_eq(m.ptr, m.length, "all"):
                     writer.append_error_response("ERR CLIENT PAUSE mode must be WRITE or ALL")
                     return False
-            var tv = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+            var tv = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
             if not tv.ok:
                 writer.append_error_response("ERR timeout is not an integer or out of range")
                 return False
@@ -1559,14 +1559,14 @@ struct SlowPathHandler:
             if argc != 3:
                 writer.append_error_response("ERR wrong number of arguments for 'client|reply' command")
                 return False
-            var m = tokens[i + 2]
+            var m = tokens[unsafe_offset=i + 2]
             if arg_eq(m.ptr, m.length, "on"):
                 self.clients.set_reply(fd, REPLY_ON)
                 writer.append_ok_response()
             elif arg_eq(m.ptr, m.length, "off"):
                 self.clients.set_reply(fd, REPLY_OFF)
             elif arg_eq(m.ptr, m.length, "skip"):
-                if self.clients.reply[f] != REPLY_OFF:
+                if self.clients.reply[unsafe_offset=f] != REPLY_OFF:
                     self.clients.set_reply(fd, REPLY_SKIP_NEXT)
             else:
                 writer.append_error_response("ERR syntax error")
@@ -1577,13 +1577,13 @@ struct SlowPathHandler:
                 return False
             var reason = UNBLOCK_TIMEOUT
             if argc == 4:
-                var r = tokens[i + 3]
+                var r = tokens[unsafe_offset=i + 3]
                 if arg_eq(r.ptr, r.length, "error"):
                     reason = UNBLOCK_ERROR
                 elif not arg_eq(r.ptr, r.length, "timeout"):
                     writer.append_error_response("ERR CLIENT UNBLOCK reason should be TIMEOUT or ERROR")
                     return False
-            var idv = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+            var idv = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
             if not idv.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return False
@@ -1593,28 +1593,28 @@ struct SlowPathHandler:
             if argc != 3:
                 writer.append_error_response("ERR wrong number of arguments for 'client|" + lower_bytes(sub.ptr, sub.length) + "' command")
                 return False
-            var m = tokens[i + 2]
+            var m = tokens[unsafe_offset=i + 2]
             var on = arg_eq(m.ptr, m.length, "on")
             if not on and not arg_eq(m.ptr, m.length, "off"):
                 writer.append_error_response("ERR syntax error")
                 return False
             if arg_eq(sp, sl, "no-evict"):
-                self.clients.no_evict[f] = 1 if on else 0
+                self.clients.no_evict[unsafe_offset=f] = 1 if on else 0
             else:
-                self.clients.no_touch[f] = 1 if on else 0
+                self.clients.no_touch[unsafe_offset=f] = 1 if on else 0
             writer.append_ok_response()
         elif arg_eq(sp, sl, "setinfo"):
             if argc != 4:
                 writer.append_error_response("ERR wrong number of arguments for 'client|setinfo' command")
                 return False
-            var attr = tokens[i + 2]
-            var v = tokens[i + 3]
+            var attr = tokens[unsafe_offset=i + 2]
+            var v = tokens[unsafe_offset=i + 3]
             var is_name = arg_eq(attr.ptr, attr.length, "lib-name")
             if not is_name and not arg_eq(attr.ptr, attr.length, "lib-ver"):
                 writer.append_error_response("ERR Unrecognized option '" + bytes_to_string(attr.ptr, attr.length) + "'")
                 return False
             for k in range(v.length):
-                var c = v.ptr[k]
+                var c = v.ptr[unsafe_offset=k]
                 if c < 33 or c > 126:
                     writer.append_error_response("ERR " + bytes_to_string(attr.ptr, attr.length)
                                                  + " cannot contain spaces, newlines or special characters.")
@@ -1636,7 +1636,7 @@ struct SlowPathHandler:
             if argc < 3:
                 writer.append_error_response("ERR wrong number of arguments for 'client|tracking' command")
                 return False
-            var m = tokens[i + 2]
+            var m = tokens[unsafe_offset=i + 2]
             if argc == 3 and arg_eq(m.ptr, m.length, "off"):
                 writer.append_ok_response()          # it is off, and stays off
             else:
@@ -1658,12 +1658,12 @@ struct SlowPathHandler:
                 writer.append_error_response("ERR wrong number of arguments for 'client|trackinginfo' command")
                 return False
             writer.append_map_header(3)
-            writer.append_bulk_string_response("flags".unsafe_ptr(), 5)
+            writer.append_bulk_string_response("flags".ptr(), 5)
             writer.append_set_header(1)
-            writer.append_bulk_string_response("off".unsafe_ptr(), 3)
-            writer.append_bulk_string_response("redirect".unsafe_ptr(), 8)
+            writer.append_bulk_string_response("off".ptr(), 3)
+            writer.append_bulk_string_response("redirect".ptr(), 8)
             writer.append_int_response(-1)
-            writer.append_bulk_string_response("prefixes".unsafe_ptr(), 8)
+            writer.append_bulk_string_response("prefixes".ptr(), 8)
             writer.append_array_header(0)
         elif arg_eq(sp, sl, "help"):
             if argc != 2:
@@ -1674,7 +1674,7 @@ struct SlowPathHandler:
             writer.append_error_response("ERR unknown subcommand '" + bytes_to_string(sp, sl) + "'. Try CLIENT HELP.")
         return False
 
-    def _client_kill(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32,
+    def _client_kill(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32,
                      mut writer: ResponseWriter, config: PionConfig) raises -> Bool:
         """CLIENT KILL <ip:port> | CLIENT KILL <filter> <value> ..., as Redis:
         the old form answers +OK or "No such client" and may kill the caller;
@@ -1691,41 +1691,41 @@ struct SlowPathHandler:
         var skipme = True
         var maxage = Int64(0)
         if argc == 3:
-            addr = bytes_to_string(tokens[i + 2].ptr, tokens[i + 2].length)
+            addr = bytes_to_string(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
             has_addr = True
             skipme = False
         elif argc > 3:
             var j = i + 2
             while j < end:
-                var o = tokens[j]
+                var o = tokens[unsafe_offset=j]
                 var more = j + 1 < end
                 if arg_eq(o.ptr, o.length, "id") and more:
-                    var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+                    var v = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
                     if not v.ok or v.value < 1:
                         writer.append_error_response("ERR client-id should be greater than 0")
                         return False
                     want_id = UInt64(v.value)
                 elif arg_eq(o.ptr, o.length, "type") and more:
-                    want_type = client_type_of(tokens[j + 1].ptr, tokens[j + 1].length)
+                    want_type = client_type_of(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
                     if want_type == -1:
                         writer.append_error_response("ERR Unknown client type '"
-                                                     + bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length) + "'")
+                                                     + bytes_to_string(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length) + "'")
                         return False
                 elif arg_eq(o.ptr, o.length, "addr") and more:
-                    addr = bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length)
+                    addr = bytes_to_string(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
                     has_addr = True
                 elif arg_eq(o.ptr, o.length, "laddr") and more:
-                    laddr = bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length)
+                    laddr = bytes_to_string(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
                     has_laddr = True
                 elif arg_eq(o.ptr, o.length, "user") and more:
                     var users = self._acl_users(config)
-                    want_user = users.find(tokens[j + 1].ptr, tokens[j + 1].length)
+                    want_user = users.find(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
                     if want_user == -2:
                         writer.append_error_response("ERR No such user '"
-                                                     + bytes_to_string(tokens[j + 1].ptr, tokens[j + 1].length) + "'")
+                                                     + bytes_to_string(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length) + "'")
                         return False
                 elif arg_eq(o.ptr, o.length, "skipme") and more:
-                    var v = tokens[j + 1]
+                    var v = tokens[unsafe_offset=j + 1]
                     if arg_eq(v.ptr, v.length, "yes"):
                         skipme = True
                     elif arg_eq(v.ptr, v.length, "no"):
@@ -1734,7 +1734,7 @@ struct SlowPathHandler:
                         writer.append_error_response("ERR syntax error")
                         return False
                 elif arg_eq(o.ptr, o.length, "maxage") and more:
-                    var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+                    var v = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
                     if not v.ok:
                         writer.append_error_response("ERR maxage is not an integer or out of range")
                         return False
@@ -1783,7 +1783,7 @@ struct SlowPathHandler:
 
     def process_slow_path(
         mut self,
-        buffer: UnsafePointer[UInt8, MutUntrackedOrigin],
+        buffer: Pointer[UInt8, MutUntrackedOrigin],
         n: Int,
         fd: Int32,
         mut writer: ResponseWriter,
@@ -1843,7 +1843,7 @@ struct SlowPathHandler:
                 writer.append_error_response("ERR " + protocol_error_text(need_tokens))
                 writer.flush_response(fd, server, kq)
                 if self.script_depth == 0 and is_not_null(writer.ctx[].pending_offsets):
-                    self.clients.close_after[Int(fd)] = 1
+                    self.clients.close_after[unsafe_offset=Int(fd)] = 1
                     if not writer.ctx[].use_uring and kq != -1 and not writer.owes(Int(fd)):
                         _ = external_call["pion_kill_fd", Int32](fd)
                 return n
@@ -1862,7 +1862,7 @@ struct SlowPathHandler:
             var primary_consumed = consumed_bytes
             while True:
                 while i < num_tokens:
-                    var token = tokens[i]
+                    var token = tokens[unsafe_offset=i]
                     var tl = token.length
                     var tp = token.ptr
                     # #49: bound the buffer across a long batch of fixed-size
@@ -1889,7 +1889,7 @@ struct SlowPathHandler:
                         # the writer so a reply too big to buffer is dropped as
                         # it fills instead of sent before _reply_gate can.
                         if self.clients.reply_off_count > 0:
-                            var _rm = self.clients.reply[Int(fd)]
+                            var _rm = self.clients.reply[unsafe_offset=Int(fd)]
                             if _rm == REPLY_OFF or _rm == REPLY_SKIP_NOW:
                                 writer.ctx[].suppress_from = writer.offset
                     cmd_write_start = writer.offset
@@ -1902,7 +1902,7 @@ struct SlowPathHandler:
                     # `num_tokens` fallback then made the 17th command swallow
                     # every command behind it). The fallback stays for the
                     # degenerate no-command parse.
-                    var cmd_end_tok = cmd_ends[cmd_idx] if cmd_idx < num_cmds else num_tokens
+                    var cmd_end_tok = cmd_ends[unsafe_offset=cmd_idx] if cmd_idx < num_cmds else num_tokens
 
                     # #47 CLIENT PAUSE: a command the pause holds is not run;
                     # the connection is parked in front of it until the pause
@@ -1911,19 +1911,19 @@ struct SlowPathHandler:
                        and self.can_park_wait and self._pause_holds(fd, tokens, i, cmd_end_tok):
                         self.clients.hold(fd)
                         self.parked_waits.park_fd(fd)
-                        primary_consumed = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
+                        primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx - 1] if cmd_idx > 0 else 0
                         _rg_start = -1          # nothing of this command was written
                         break
 
                     # #39: a connection in MONITOR mode may not touch the
                     # keyspace, as in Redis (where a monitor is a kind of replica).
                     if self.script_depth == 0 and self.monitors.count() > 0 and self.monitors.contains(fd):
-                        var _msp = tokens[i + 1].ptr if cmd_end_tok - i > 1 else tp
-                        var _msl = tokens[i + 1].length if cmd_end_tok - i > 1 else 0
+                        var _msp = tokens[unsafe_offset=i + 1].ptr if cmd_end_tok - i > 1 else tp
+                        var _msl = tokens[unsafe_offset=i + 1].length if cmd_end_tok - i > 1 else 0
                         if command_touches_keyspace(tp, tl, _msp, _msl):
                             writer.append_error_response("ERR Replica can't interact with the keyspace")
                             i = cmd_end_tok
-                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                            while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                                 cmd_idx += 1
                             continue
 
@@ -1936,13 +1936,13 @@ struct SlowPathHandler:
                                 writer.append_error_response("ERR wrong number of arguments for 'ping' command")
                             else:
                                 writer.append_array_header(2)
-                                writer.append_bulk_string_response("pong".unsafe_ptr(), 4)
+                                writer.append_bulk_string_response("pong".ptr(), 4)
                                 if cmd_end_tok - i == 2:
-                                    writer.append_bulk_string_response(tokens[i + 1].ptr, tokens[i + 1].length)
+                                    writer.append_bulk_string_response(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                                 else:
-                                    writer.append_bulk_string_response("".unsafe_ptr(), 0)
+                                    writer.append_bulk_string_response("".ptr(), 0)
                             i = cmd_end_tok
-                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                            while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                                 cmd_idx += 1
                             continue
                         if not (cmd_eq(tp, tl, "subscribe") or cmd_eq(tp, tl, "unsubscribe")
@@ -1952,7 +1952,7 @@ struct SlowPathHandler:
                             writer.append_error_response("ERR Can't execute '" + token.value().lower()
                                                          + "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context")
                             i = cmd_end_tok
-                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                            while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                                 cmd_idx += 1
                             continue
 
@@ -1981,8 +1981,8 @@ struct SlowPathHandler:
                             #
                             # The parser's byte boundaries delimit the frame: this
                             # command starts where the previous one ended.
-                            var q_start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
-                            var q_end = cmd_byte_ends[cmd_idx] if cmd_idx < num_cmds else n
+                            var q_start = cmd_byte_ends[unsafe_offset=cmd_idx - 1] if cmd_idx > 0 else 0
+                            var q_end = cmd_byte_ends[unsafe_offset=cmd_idx] if cmd_idx < num_cmds else n
                             # The enqueue result is load-bearing: replying
                             # +QUEUED for a command that was NOT stored told the
                             # client it was accepted and then dropped it. At the
@@ -2043,7 +2043,7 @@ struct SlowPathHandler:
                                     queued = self.tx_state.enqueue(
                                         fd, buffer.unsafe_offset(q_start), q_end - q_start)
                                 if queued:
-                                    writer.append_to_response("+QUEUED\r\n".unsafe_ptr(), 9)
+                                    writer.append_to_response("+QUEUED\r\n".ptr(), 9)
                                 else:
                                     self.tx_state.set_dirty(fd)
                                     writer.append_error_response(
@@ -2052,7 +2052,7 @@ struct SlowPathHandler:
                             # normally does `i += 1` and advances cmd_idx, so it must
                             # do both itself — same idiom as the auth gate below.
                             i = cmd_end_tok
-                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                            while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                                 cmd_idx += 1
                             continue
 
@@ -2070,7 +2070,7 @@ struct SlowPathHandler:
                         if not auth_exempt:
                             writer.append_error_response("NOAUTH Authentication required.")
                             i = cmd_end_tok  # skip this whole command's tokens
-                            while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                            while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                                 cmd_idx += 1
                             continue
 
@@ -2092,7 +2092,7 @@ struct SlowPathHandler:
                             + "raise --wal-max-segments, or start with "
                             + "--wal-full-policy drop to accept the data loss.")
                         i = cmd_end_tok
-                        while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                        while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                             cmd_idx += 1
                         continue
 
@@ -2105,7 +2105,7 @@ struct SlowPathHandler:
                        and external_call["pion_maxmemory_check", Int32]() != 0:
                         writer.append_error_response("OOM command not allowed when used memory > 'maxmemory'.")
                         i = cmd_end_tok
-                        while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                        while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                             cmd_idx += 1
                         continue
 
@@ -2119,7 +2119,7 @@ struct SlowPathHandler:
                     # here per queued command and rewrites deterministically.
                     if self.tenant_table.count > 0:
                         self.cur_tenant_ns_len = 0
-                        var _tid = Int(self.tx_state.tenant_id[Int(fd)])
+                        var _tid = Int(self.tx_state.tenant_id[unsafe_offset=Int(fd)])
                         if _tid >= 0:
                             var _tspec = tenant_keyspec(tp, tl)
                             var _treject = not _tspec.allowed
@@ -2130,14 +2130,14 @@ struct SlowPathHandler:
                                 # token points into it yet (it is per command)
                                 var _tneed = tenant_rewrite_need(tokens, i, cmd_end_tok, _tspec, _tnl)
                                 if _tneed > self.tenant_scratch_cap:
-                                    self.tenant_scratch.free()
-                                    self.tenant_scratch = alloc[UInt8](_tneed)
+                                    self.tenant_scratch.unsafe_free()
+                                    self.tenant_scratch = unsafe_alloc[UInt8](_tneed)
                                     self.tenant_scratch_cap = _tneed
                                 if apply_tenant_rewrite(tokens, i, cmd_end_tok, _tspec,
                                                         _tnp, _tnl, self.tenant_scratch, self.tenant_scratch_cap):
                                     # Namespace filter for KEYS/SCAN: "name:".
                                     unsafe_memcpy(dest=self.tenant_ns_buf, src=_tnp, count=_tnl)
-                                    self.tenant_ns_buf[_tnl] = 58  # ':'
+                                    self.tenant_ns_buf[unsafe_offset=_tnl] = 58  # ':'
                                     self.cur_tenant_ns_len = _tnl + 1
                                 else:
                                     writer.append_error_response("ERR tenant key rewrite exceeds scratch buffer")
@@ -2146,14 +2146,14 @@ struct SlowPathHandler:
                                 # #47: Redis's NOPERM text, and an ACL LOG entry
                                 var _tobj = lower_bytes(tp, tl)
                                 if cmd_is_container(tp, tl) and cmd_end_tok - i > 1:
-                                    _tobj += "|" + lower_bytes(tokens[i + 1].ptr, tokens[i + 1].length)
+                                    _tobj += "|" + lower_bytes(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                                 writer.append_error_response("NOPERM User " + self._user_name(fd)
                                                              + " has no permissions to run the '" + _tobj + "' command")
                                 self._acl_log("command", _tobj^, self._user_name(fd), fd,
-                                              n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
+                                              n - (cmd_byte_ends[unsafe_offset=cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                             if _treject:
                                 i = cmd_end_tok
-                                while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                                while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                                     cmd_idx += 1
                                 continue
 
@@ -2181,22 +2181,22 @@ struct SlowPathHandler:
                     # ── HELLO ──
                     elif tl == 5 and cmd_matches_5(tp, 104, 101, 108, 108, 111):
                         _ = handle_hello(tokens, i, cmd_end_tok, writer, self.cluster, config.server.requirepass, self.tx_state.authed, fd,
-                                         rebind[UnsafePointer[TenantTable, MutUntrackedOrigin]](UnsafePointer(to=self.tenant_table)),
+                                         rebind[Pointer[TenantTable, MutUntrackedOrigin]](Pointer(to=self.tenant_table)),
                                          self.tx_state.tenant_id,
                                          self.tx_state.resp_proto)
                         # #47: a rejected AUTH clause goes to ACL LOG, under the user it named
                         if self._wrote_wrongpass(writer, cmd_write_start, cmd_flushes):
                             var _hu = String("default")
                             for _hk in range(i + 1, cmd_end_tok - 2):
-                                if arg_eq(tokens[_hk].ptr, tokens[_hk].length, "auth"):
-                                    _hu = bytes_to_string(tokens[_hk + 1].ptr, tokens[_hk + 1].length)
+                                if arg_eq(tokens[unsafe_offset=_hk].ptr, tokens[unsafe_offset=_hk].length, "auth"):
+                                    _hu = bytes_to_string(tokens[unsafe_offset=_hk + 1].ptr, tokens[unsafe_offset=_hk + 1].length)
                                     break
-                            self._acl_log("auth", "AUTH", _hu^, fd, n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
+                            self._acl_log("auth", "AUTH", _hu^, fd, n - (cmd_byte_ends[unsafe_offset=cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                         i = cmd_end_tok - 1  # consume all HELLO args (incl. AUTH clause)
                     # ── SET (slow path) ──
                     elif tl == 3 and cmd_matches_3(tp, 115, 101, 116):
                         if i + 2 < cmd_end_tok:
-                            var key = tokens[i+1].value(); var val_str = tokens[i+2].raw_value()   # gh #334: byte-exact value
+                            var key = tokens[unsafe_offset=i+1].value(); var val_str = tokens[unsafe_offset=i+2].raw_value()   # gh #334: byte-exact value
                             i += 2
                             # Parse optional NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL/IFEQ/IFNE after SET key value
                             var set_expiry_ns = Int64(0)
@@ -2213,61 +2213,61 @@ struct SlowPathHandler:
                             var n_expiry = 0
                             var j_sopt = i + 1
                             while j_sopt < cmd_end_tok:   # NOT num_tokens: that ran into the next pipelined command
-                                var sopt_tl = tokens[j_sopt].length
-                                var sopt_tp = tokens[j_sopt].ptr
-                                if sopt_tl == 2 and (sopt_tp[0]|0x20)==101 and (sopt_tp[1]|0x20)==120:  # EX
+                                var sopt_tl = tokens[unsafe_offset=j_sopt].length
+                                var sopt_tp = tokens[unsafe_offset=j_sopt].ptr
+                                if sopt_tl == 2 and (sopt_tp[unsafe_offset=0]|0x20)==101 and (sopt_tp[unsafe_offset=1]|0x20)==120:  # EX
                                     if j_sopt + 1 < cmd_end_tok:
-                                        var _e = set_expiry(Int64(strict_atol(tokens[j_sopt+1].value())), 1000, True, _get_now_ns())
+                                        var _e = set_expiry(Int64(strict_atol(tokens[unsafe_offset=j_sopt+1].value())), 1000, True, _get_now_ns())
                                         if _e.status == SETEXP_INVALID: set_err = String("ERR invalid expire time in 'set' command")
                                         n_expiry += 1
                                         set_expiry_ns = _e.ns; set_expired = _e.status == SETEXP_EXPIRED
                                         has_expiry = True; i += 2; j_sopt += 2
                                     else: set_err = String("ERR syntax error"); break
-                                elif sopt_tl == 2 and (sopt_tp[0]|0x20)==112 and (sopt_tp[1]|0x20)==120:  # PX
+                                elif sopt_tl == 2 and (sopt_tp[unsafe_offset=0]|0x20)==112 and (sopt_tp[unsafe_offset=1]|0x20)==120:  # PX
                                     if j_sopt + 1 < cmd_end_tok:
-                                        var _e = set_expiry(Int64(strict_atol(tokens[j_sopt+1].value())), 1, True, _get_now_ns())
+                                        var _e = set_expiry(Int64(strict_atol(tokens[unsafe_offset=j_sopt+1].value())), 1, True, _get_now_ns())
                                         if _e.status == SETEXP_INVALID: set_err = String("ERR invalid expire time in 'set' command")
                                         n_expiry += 1
                                         set_expiry_ns = _e.ns; set_expired = _e.status == SETEXP_EXPIRED
                                         has_expiry = True; i += 2; j_sopt += 2
                                     else: set_err = String("ERR syntax error"); break
-                                elif sopt_tl == 4 and (sopt_tp[0]|0x20)==101 and (sopt_tp[1]|0x20)==120 and (sopt_tp[2]|0x20)==97 and (sopt_tp[3]|0x20)==116:  # EXAT
+                                elif sopt_tl == 4 and (sopt_tp[unsafe_offset=0]|0x20)==101 and (sopt_tp[unsafe_offset=1]|0x20)==120 and (sopt_tp[unsafe_offset=2]|0x20)==97 and (sopt_tp[unsafe_offset=3]|0x20)==116:  # EXAT
                                     if j_sopt + 1 < cmd_end_tok:
-                                        var _e = set_expiry(Int64(strict_atol(tokens[j_sopt+1].value())), 1000, False, _get_now_ns())
+                                        var _e = set_expiry(Int64(strict_atol(tokens[unsafe_offset=j_sopt+1].value())), 1000, False, _get_now_ns())
                                         if _e.status == SETEXP_INVALID: set_err = String("ERR invalid expire time in 'set' command")
                                         n_expiry += 1
                                         set_expiry_ns = _e.ns; set_expired = _e.status == SETEXP_EXPIRED
                                         has_expiry = True; i += 2; j_sopt += 2
                                     else: set_err = String("ERR syntax error"); break
-                                elif sopt_tl == 4 and (sopt_tp[0]|0x20)==112 and (sopt_tp[1]|0x20)==120 and (sopt_tp[2]|0x20)==97 and (sopt_tp[3]|0x20)==116:  # PXAT
+                                elif sopt_tl == 4 and (sopt_tp[unsafe_offset=0]|0x20)==112 and (sopt_tp[unsafe_offset=1]|0x20)==120 and (sopt_tp[unsafe_offset=2]|0x20)==97 and (sopt_tp[unsafe_offset=3]|0x20)==116:  # PXAT
                                     if j_sopt + 1 < cmd_end_tok:
-                                        var _e = set_expiry(Int64(strict_atol(tokens[j_sopt+1].value())), 1, False, _get_now_ns())
+                                        var _e = set_expiry(Int64(strict_atol(tokens[unsafe_offset=j_sopt+1].value())), 1, False, _get_now_ns())
                                         if _e.status == SETEXP_INVALID: set_err = String("ERR invalid expire time in 'set' command")
                                         n_expiry += 1
                                         set_expiry_ns = _e.ns; set_expired = _e.status == SETEXP_EXPIRED
                                         has_expiry = True; i += 2; j_sopt += 2
                                     else: set_err = String("ERR syntax error"); break
-                                elif sopt_tl == 7 and (sopt_tp[0]|0x20)==107 and (sopt_tp[1]|0x20)==101 and (sopt_tp[2]|0x20)==101 and (sopt_tp[3]|0x20)==112 and (sopt_tp[4]|0x20)==116 and (sopt_tp[5]|0x20)==116 and (sopt_tp[6]|0x20)==108:  # KEEPTTL
+                                elif sopt_tl == 7 and (sopt_tp[unsafe_offset=0]|0x20)==107 and (sopt_tp[unsafe_offset=1]|0x20)==101 and (sopt_tp[unsafe_offset=2]|0x20)==101 and (sopt_tp[unsafe_offset=3]|0x20)==112 and (sopt_tp[unsafe_offset=4]|0x20)==116 and (sopt_tp[unsafe_offset=5]|0x20)==116 and (sopt_tp[unsafe_offset=6]|0x20)==108:  # KEEPTTL
                                     keepttl = True; i += 1; j_sopt += 1
                                 # NX (2 bytes: n=110, x=120)
-                                elif sopt_tl == 2 and (sopt_tp[0]|0x20)==110 and (sopt_tp[1]|0x20)==120:
+                                elif sopt_tl == 2 and (sopt_tp[unsafe_offset=0]|0x20)==110 and (sopt_tp[unsafe_offset=1]|0x20)==120:
                                     has_nx = True; i += 1; j_sopt += 1
                                 # XX (2 bytes: x=120, x=120)
-                                elif sopt_tl == 2 and (sopt_tp[0]|0x20)==120 and (sopt_tp[1]|0x20)==120:
+                                elif sopt_tl == 2 and (sopt_tp[unsafe_offset=0]|0x20)==120 and (sopt_tp[unsafe_offset=1]|0x20)==120:
                                     has_xx = True; i += 1; j_sopt += 1
                                 # GET (3 bytes: g=103, e=101, t=116)
-                                elif sopt_tl == 3 and (sopt_tp[0]|0x20)==103 and (sopt_tp[1]|0x20)==101 and (sopt_tp[2]|0x20)==116:
+                                elif sopt_tl == 3 and (sopt_tp[unsafe_offset=0]|0x20)==103 and (sopt_tp[unsafe_offset=1]|0x20)==101 and (sopt_tp[unsafe_offset=2]|0x20)==116:
                                     has_get = True; i += 1; j_sopt += 1
                                 # R3: IFEQ (4 bytes: i=105, f=102, e=101, q=113)
-                                elif sopt_tl == 4 and (sopt_tp[0]|0x20)==105 and (sopt_tp[1]|0x20)==102 and (sopt_tp[2]|0x20)==101 and (sopt_tp[3]|0x20)==113:
+                                elif sopt_tl == 4 and (sopt_tp[unsafe_offset=0]|0x20)==105 and (sopt_tp[unsafe_offset=1]|0x20)==102 and (sopt_tp[unsafe_offset=2]|0x20)==101 and (sopt_tp[unsafe_offset=3]|0x20)==113:
                                     if j_sopt + 1 < cmd_end_tok:
-                                        has_ifeq = True; ifeq_val = tokens[j_sopt+1].raw_value()
+                                        has_ifeq = True; ifeq_val = tokens[unsafe_offset=j_sopt+1].raw_value()
                                         i += 2; j_sopt += 2
                                     else: set_err = String("ERR syntax error"); break
                                 # R3: IFNE (4 bytes: i=105, f=102, n=110, e=101)
-                                elif sopt_tl == 4 and (sopt_tp[0]|0x20)==105 and (sopt_tp[1]|0x20)==102 and (sopt_tp[2]|0x20)==110 and (sopt_tp[3]|0x20)==101:
+                                elif sopt_tl == 4 and (sopt_tp[unsafe_offset=0]|0x20)==105 and (sopt_tp[unsafe_offset=1]|0x20)==102 and (sopt_tp[unsafe_offset=2]|0x20)==110 and (sopt_tp[unsafe_offset=3]|0x20)==101:
                                     if j_sopt + 1 < cmd_end_tok:
-                                        has_ifne = True; ifeq_val = tokens[j_sopt+1].raw_value()
+                                        has_ifne = True; ifeq_val = tokens[unsafe_offset=j_sopt+1].raw_value()
                                         i += 2; j_sopt += 2
                                     else: set_err = String("ERR syntax error"); break
                                 else: set_err = String("ERR syntax error"); break
@@ -2307,7 +2307,7 @@ struct SlowPathHandler:
                                                 var exp_ptr = ifeq_val.unsafe_ptr()
                                                 var eq = True
                                                 for ci in range(cur_len):
-                                                    if cur_ptr[ci] != exp_ptr[ci]: eq = False; break
+                                                    if cur_ptr[unsafe_offset=ci] != exp_ptr[unsafe_offset=ci]: eq = False; break
                                                 should_set = eq
                                     elif has_ifne:
                                         if not cur.is_none():
@@ -2321,7 +2321,7 @@ struct SlowPathHandler:
                                                 var exp_ptr = ifeq_val.unsafe_ptr()
                                                 var eq2 = True
                                                 for ci in range(cur_len):
-                                                    if cur_ptr[ci] != exp_ptr[ci]: eq2 = False; break
+                                                    if cur_ptr[unsafe_offset=ci] != exp_ptr[unsafe_offset=ci]: eq2 = False; break
                                                 should_set = not eq2  # set if NOT equal
                                 if should_set:
                                     # GET's reply goes FIRST: old_val borrows the payload
@@ -2376,7 +2376,7 @@ struct SlowPathHandler:
                             if i + 2 < cmd_end_tok:
                                 writer.append_error_response("ERR wrong number of arguments for 'get' command")
                             else:
-                                var key = tokens[i+1].value(); var val = self.dispatcher.execute_get(key)
+                                var key = tokens[unsafe_offset=i+1].value(); var val = self.dispatcher.execute_get(key)
                                 writer.append_bulk_value_response(val)
                             i = cmd_end_tok - 1
                         else:
@@ -2390,7 +2390,7 @@ struct SlowPathHandler:
                             writer.append_to_response(mget_hdr.unsafe_ptr(), mget_hdr.byte_length())
                             var j_mget = i + 1
                             while j_mget < cmd_end_tok:
-                                writer.append_bulk_value_response(self.dispatcher.execute_get(tokens[j_mget].value()))
+                                writer.append_bulk_value_response(self.dispatcher.execute_get(tokens[unsafe_offset=j_mget].value()))
                                 j_mget += 1
                             i = cmd_end_tok - 1
                         else:
@@ -2401,7 +2401,7 @@ struct SlowPathHandler:
                         if i + 2 < cmd_end_tok and (cmd_end_tok - i - 1) % 2 == 0:
                             var j_mset = i + 1
                             while j_mset + 1 < cmd_end_tok:
-                                self.dispatcher.execute_set(tokens[j_mset].value(), tokens[j_mset+1].value())
+                                self.dispatcher.execute_set(tokens[unsafe_offset=j_mset].value(), tokens[unsafe_offset=j_mset+1].value())
                                 j_mset += 2
                             writer.append_ok_response()
                             i = cmd_end_tok - 1
@@ -2414,11 +2414,11 @@ struct SlowPathHandler:
                             var del_count = Int64(0)
                             var j_del = i + 1
                             while j_del < cmd_end_tok:
-                                var del_key = tokens[j_del].value()
+                                var del_key = tokens[unsafe_offset=j_del].value()
                                 if self.dispatcher.execute_del(del_key):
                                     del_count += 1
                                     if is_not_null(self.ttl_map):
-                                        _ = self.ttl_map[].remove_generic(GenericValue.borrow(tokens[j_del].ptr, tokens[j_del].length))
+                                        _ = self.ttl_map[].remove_generic(GenericValue.borrow(tokens[unsafe_offset=j_del].ptr, tokens[unsafe_offset=j_del].length))
                                 j_del += 1
                             writer.append_int_response(del_count)
                             i = cmd_end_tok - 1
@@ -2436,7 +2436,7 @@ struct SlowPathHandler:
                             # got a reply and the client waited forever: a HANG, not
                             # just a desync. Bound is always cmd_end_tok (gh #218).
                             while j_ex < cmd_end_tok:
-                                var ex_key = tokens[j_ex].value()
+                                var ex_key = tokens[unsafe_offset=j_ex].value()
                                 if self.dispatcher.execute_exists(ex_key): count += 1
                                 j_ex += 1
                                 i += 1
@@ -2450,10 +2450,10 @@ struct SlowPathHandler:
                             if i + 2 < cmd_end_tok:   # gh #239
                                 writer.append_error_response("ERR wrong number of arguments for 'incr' command")
                             else:
-                                var key = tokens[i+1].value()
+                                var key = tokens[unsafe_offset=i+1].value()
                                 # gh #232: an aggregate is WRONGTYPE (the fast path
                                 # already says so); execute_incr folds it into "not an integer".
-                                var _ik = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                                var _ik = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
                                 if not _ik.is_none() and _ik.is_container():
                                     writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                                 else:
@@ -2470,10 +2470,10 @@ struct SlowPathHandler:
                             if i + 2 < cmd_end_tok:   # gh #239
                                 writer.append_error_response("ERR wrong number of arguments for 'decr' command")
                             else:
-                                var key = tokens[i+1].value()
+                                var key = tokens[unsafe_offset=i+1].value()
                                 # gh #232: an aggregate is WRONGTYPE (the fast path
                                 # already says so); execute_decr folds it into "not an integer".
-                                var _ik = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                                var _ik = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
                                 if not _ik.is_none() and _ik.is_container():
                                     writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                                 else:
@@ -2487,11 +2487,11 @@ struct SlowPathHandler:
                     # ── LPUSH (multi-value, gh #111) ──
                     elif tl == 5 and cmd_matches_5(tp, 108, 112, 117, 115, 104):
                         if i + 2 < cmd_end_tok:
-                            var lpush_key = tokens[i+1].value()
+                            var lpush_key = tokens[unsafe_offset=i+1].value()
                             var lpush_len = 0
                             var j_lpush = i + 2
                             while j_lpush < cmd_end_tok:
-                                lpush_len = self.dispatcher.execute_lpush(lpush_key, tokens[j_lpush].value())
+                                lpush_len = self.dispatcher.execute_lpush(lpush_key, tokens[unsafe_offset=j_lpush].value())
                                 j_lpush += 1
                             if lpush_len < 0: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             else: writer.append_int_response(Int64(lpush_len))
@@ -2502,11 +2502,11 @@ struct SlowPathHandler:
                     # ── RPUSH (multi-value, gh #111) ──
                     elif tl == 5 and cmd_matches_5(tp, 114, 112, 117, 115, 104):
                         if i + 2 < cmd_end_tok:
-                            var rpush_key = tokens[i+1].value()
+                            var rpush_key = tokens[unsafe_offset=i+1].value()
                             var rpush_len = 0
                             var j_rpush = i + 2
                             while j_rpush < cmd_end_tok:
-                                rpush_len = self.dispatcher.execute_rpush(rpush_key, tokens[j_rpush].raw_value())
+                                rpush_len = self.dispatcher.execute_rpush(rpush_key, tokens[unsafe_offset=j_rpush].raw_value())
                                 j_rpush += 1
                             if rpush_len < 0: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             else: writer.append_int_response(Int64(rpush_len))
@@ -2518,7 +2518,7 @@ struct SlowPathHandler:
                     #    list already exists, else :0) ──
                     elif tl == 6 and (cmd_matches_6(tp, 108, 112, 117, 115, 104, 120) or cmd_matches_6(tp, 114, 112, 117, 115, 104, 120)):
                         if i + 2 < cmd_end_tok:
-                            var pushx_key = tokens[i+1].value()
+                            var pushx_key = tokens[unsafe_offset=i+1].value()
                             var pushx_existing = self.keyspace[].get(pushx_key)
                             # gh #232: "exists but is a hash" is a type error,
                             # not "does not exist yet". Answering :0 tells a
@@ -2528,12 +2528,12 @@ struct SlowPathHandler:
                             elif pushx_existing.is_none():
                                 writer.append_int_response(0)
                             else:
-                                var pushx_left = (tp[0]|0x20) == 108
+                                var pushx_left = (tp[unsafe_offset=0]|0x20) == 108
                                 var pushx_len = 0
                                 var j_pushx = i + 2
                                 while j_pushx < cmd_end_tok:
-                                    if pushx_left: pushx_len = self.dispatcher.execute_lpush(pushx_key, tokens[j_pushx].raw_value())
-                                    else: pushx_len = self.dispatcher.execute_rpush(pushx_key, tokens[j_pushx].raw_value())
+                                    if pushx_left: pushx_len = self.dispatcher.execute_lpush(pushx_key, tokens[unsafe_offset=j_pushx].raw_value())
+                                    else: pushx_len = self.dispatcher.execute_rpush(pushx_key, tokens[unsafe_offset=j_pushx].raw_value())
                                     j_pushx += 1
                                 if pushx_len < 0: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                                 else: writer.append_int_response(Int64(pushx_len))
@@ -2549,9 +2549,9 @@ struct SlowPathHandler:
                             # the "2" to be dispatched as its own command (one in,
                             # two replies out). Redis returns an ARRAY for the
                             # count form and nil/array for a missing key.
-                            var key = tokens[i+1].value()
+                            var key = tokens[unsafe_offset=i+1].value()
                             if i + 2 < cmd_end_tok:
-                                var _pc = Int(strict_atol(tokens[i+2].value()))
+                                var _pc = Int(strict_atol(tokens[unsafe_offset=i+2].value()))
                                 if _pc < 0:
                                     writer.append_error_response("ERR value is out of range, must be positive")
                                 else:
@@ -2572,8 +2572,8 @@ struct SlowPathHandler:
                                         # gh #234: the count form drains too, so it
                                         # needs the same emptied-key removal.
                                         if self.dispatcher.execute_llen(key) == 0:
-                                            _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                            _ = self.dispatcher.wal[].append(2, tokens[i+1].ptr, tokens[i+1].length)
+                                            _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
+                                            _ = self.dispatcher.wal[].append(2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
                             else:
                                 var popped = self.dispatcher.execute_lpop(key)
                                 if popped.is_none(): writer.append_null_response()
@@ -2585,8 +2585,8 @@ struct SlowPathHandler:
                                     # command (e.g. multi-value RPUSH) routes every
                                     # command here, so the slow path needs it too.
                                     if self.dispatcher.execute_llen(key) == 0:
-                                        _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                        _ = self.dispatcher.wal[].append(2, tokens[i+1].ptr, tokens[i+1].length)
+                                        _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
+                                        _ = self.dispatcher.wal[].append(2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
                             i = cmd_end_tok - 1
                         else:
                             writer.append_error_response("ERR wrong number of arguments for 'lpop' command")
@@ -2599,9 +2599,9 @@ struct SlowPathHandler:
                             # the "2" to be dispatched as its own command (one in,
                             # two replies out). Redis returns an ARRAY for the
                             # count form and nil/array for a missing key.
-                            var key = tokens[i+1].value()
+                            var key = tokens[unsafe_offset=i+1].value()
                             if i + 2 < cmd_end_tok:
-                                var _pc = Int(strict_atol(tokens[i+2].value()))
+                                var _pc = Int(strict_atol(tokens[unsafe_offset=i+2].value()))
                                 if _pc < 0:
                                     writer.append_error_response("ERR value is out of range, must be positive")
                                 else:
@@ -2622,8 +2622,8 @@ struct SlowPathHandler:
                                         # gh #234: the count form drains too, so it
                                         # needs the same emptied-key removal.
                                         if self.dispatcher.execute_llen(key) == 0:
-                                            _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                            _ = self.dispatcher.wal[].append(2, tokens[i+1].ptr, tokens[i+1].length)
+                                            _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
+                                            _ = self.dispatcher.wal[].append(2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
                             else:
                                 var popped = self.dispatcher.execute_rpop(key)
                                 if popped.is_none(): writer.append_null_response()
@@ -2635,8 +2635,8 @@ struct SlowPathHandler:
                                     # command (e.g. multi-value RPUSH) routes every
                                     # command here, so the slow path needs it too.
                                     if self.dispatcher.execute_llen(key) == 0:
-                                        _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                        _ = self.dispatcher.wal[].append(2, tokens[i+1].ptr, tokens[i+1].length)
+                                        _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
+                                        _ = self.dispatcher.wal[].append(2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
                             i = cmd_end_tok - 1
                         else:
                             writer.append_error_response("ERR wrong number of arguments for 'rpop' command")
@@ -2644,7 +2644,7 @@ struct SlowPathHandler:
                     # ── LRANGE ──
                     elif tl == 6 and cmd_matches_6(tp, 108, 114, 97, 110, 103, 101):
                          if i + 3 < cmd_end_tok:
-                            var key = tokens[i+1].value(); var start_idx = strict_atol(tokens[i+2].value()); var stop_idx = strict_atol(tokens[i+3].value())
+                            var key = tokens[unsafe_offset=i+1].value(); var start_idx = strict_atol(tokens[unsafe_offset=i+2].value()); var stop_idx = strict_atol(tokens[unsafe_offset=i+3].value())
                             var list_ptr = self.dispatcher.get_list(key)
                             if is_not_null(list_ptr):
                                 var size = list_ptr[].size; var start = start_idx; var stop = stop_idx
@@ -2656,22 +2656,22 @@ struct SlowPathHandler:
                                 if start > stop or start >= size: writer.append_empty_array_response()
                                 else:
                                     var count = stop - start + 1
-                                    writer.buffer[writer.offset] = 42 # '*'
+                                    writer.buffer[unsafe_offset=writer.offset] = 42 # '*'
                                     writer.offset += 1
                                     writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(count))
-                                    writer.buffer[writer.offset] = 13 # '\r'
-                                    writer.buffer[writer.offset + 1] = 10 # '\n'
+                                    writer.buffer[unsafe_offset=writer.offset] = 13 # '\r'
+                                    writer.buffer[unsafe_offset=writer.offset + 1] = 10 # '\n'
                                     writer.offset += 2
                                     if is_not_null(list_ptr[].zip_buf):
                                         var offset = 0
                                         var idx = 0
                                         while idx < start and idx < size:
-                                            var v_len = Int((list_ptr[].zip_buf + offset).bitcast[UInt16]()[])
+                                            var v_len = Int((list_ptr[].zip_buf.unsafe_offset(offset)).unsafe_bitcast[UInt16]()[])
                                             offset += 2 + v_len
                                             idx += 1
                                         while idx <= stop and idx < size:
-                                            var v_len = Int((list_ptr[].zip_buf + offset).bitcast[UInt16]()[])
-                                            writer.append_bulk_string_response(list_ptr[].zip_buf + offset + 2, v_len)
+                                            var v_len = Int((list_ptr[].zip_buf.unsafe_offset(offset)).unsafe_bitcast[UInt16]()[])
+                                            writer.append_bulk_string_response(list_ptr[].zip_buf.unsafe_offset(offset).unsafe_offset(2), v_len)
                                             offset += 2 + v_len
                                             idx += 1
                                     else:
@@ -2682,7 +2682,7 @@ struct SlowPathHandler:
                                         # segs below head_segs_start were handed to the tail side
                                         while hi < list_ptr[].head_end and global_idx <= stop:
                                             if global_idx >= start:
-                                                writer.append_bulk_value_response(list_ptr[].active_head_data[hi])
+                                                writer.append_bulk_value_response(list_ptr[].active_head_data[unsafe_offset=hi])
                                             hi += 1
                                             global_idx += 1
                                         var seg = list_ptr[].head_seg_count - 1
@@ -2690,7 +2690,7 @@ struct SlowPathHandler:
                                             var j = 0
                                             while j < SEG and global_idx <= stop:
                                                 if global_idx >= start:
-                                                    writer.append_bulk_value_response(list_ptr[].head_segs[seg][j])
+                                                    writer.append_bulk_value_response(list_ptr[].head_segs[unsafe_offset=seg][unsafe_offset=j])
                                                 j += 1
                                                 global_idx += 1
                                             seg -= 1
@@ -2699,14 +2699,14 @@ struct SlowPathHandler:
                                             var j = 0
                                             while j < SEG and global_idx <= stop:
                                                 if global_idx >= start:
-                                                    writer.append_bulk_value_response(list_ptr[].tail_segs[tseg][j])
+                                                    writer.append_bulk_value_response(list_ptr[].tail_segs[unsafe_offset=tseg][unsafe_offset=j])
                                                 j += 1
                                                 global_idx += 1
                                             tseg += 1
                                         var tk = 0
                                         while tk < list_ptr[].tail_count and global_idx <= stop:
                                             if global_idx >= start:
-                                                writer.append_bulk_value_response(list_ptr[].active_tail_data[tk])
+                                                writer.append_bulk_value_response(list_ptr[].active_tail_data[unsafe_offset=tk])
                                             tk += 1
                                             global_idx += 1
                             else: writer.append_empty_array_response()
@@ -2720,7 +2720,7 @@ struct SlowPathHandler:
                             if i + 2 < cmd_end_tok:   # gh #239
                                 writer.append_error_response("ERR wrong number of arguments for 'llen' command")
                             else:
-                                var key = tokens[i+1].value(); var len_res = self.dispatcher.execute_llen(key)
+                                var key = tokens[unsafe_offset=i+1].value(); var len_res = self.dispatcher.execute_llen(key)
                                 if len_res < 0: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                                 else: writer.append_int_response(Int64(len_res))
                             i = cmd_end_tok - 1
@@ -2735,20 +2735,20 @@ struct SlowPathHandler:
                         # written — on every slow-path route (MULTI/EXEC replay,
                         # tenant connections, a pipeline behind a slow command).
                         if i + 3 < cmd_end_tok and (cmd_end_tok - i - 2) % 2 == 0:
-                            var key = tokens[i+1].value()
+                            var key = tokens[unsafe_offset=i+1].value()
                             var hs_added = Int64(0)
                             var hs_ok = True
                             var j_hs = i + 2
                             while j_hs + 1 < cmd_end_tok:
-                                var res = self.dispatcher.execute_hset(key, tokens[j_hs].value(), tokens[j_hs+1].value())
+                                var res = self.dispatcher.execute_hset(key, tokens[unsafe_offset=j_hs].value(), tokens[unsafe_offset=j_hs+1].value())
                                 if not res.is_valid:
                                     hs_ok = False
                                     break
                                 hs_added += res.value
                                 # #43: the index's vector field is indexed here too
                                 _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,
-                                                       tokens[i+1].ptr, tokens[i+1].length, tokens[j_hs].ptr,
-                                                       tokens[j_hs].length, tokens[j_hs+1].ptr, tokens[j_hs+1].length)
+                                                       tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length, tokens[unsafe_offset=j_hs].ptr,
+                                                       tokens[unsafe_offset=j_hs].length, tokens[unsafe_offset=j_hs+1].ptr, tokens[unsafe_offset=j_hs+1].length)
                                 j_hs += 2
                             if hs_ok: writer.append_int_response(hs_added)
                             else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -2761,7 +2761,7 @@ struct SlowPathHandler:
                         if i + 2 < cmd_end_tok:
                             # gh #392: hash_get_live deletes this hash's expired
                             # fields (and the key with its last one) before the read.
-                            var hg_v = hash_get_live(self.keyspace, GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                            var hg_v = hash_get_live(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
                             if not hg_v.is_none() and hg_v.type.value != ValueType.HASH:
                                 # gh #232: the fast path already says WRONGTYPE; this
                                 # arm answered nil, so the reply depended on the path.
@@ -2769,7 +2769,7 @@ struct SlowPathHandler:
                             elif hg_v.is_none():
                                 writer.append_null_response()
                             else:
-                                var field_val = hg_v.as_hash().bitcast[SlabHashMap]()[].get(GenericValue.borrow(tokens[i+2].ptr, tokens[i+2].length))
+                                var field_val = hg_v.as_hash().unsafe_bitcast[SlabHashMap]()[].get(GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length))
                                 if field_val.is_none(): writer.append_null_response()
                                 else: writer.append_bulk_value_response(field_val)
                             i += 2
@@ -2779,17 +2779,17 @@ struct SlowPathHandler:
                     # ── HMSET (legacy multi-field HSET, replies +OK; gh #101 slow-path coverage) ──
                     elif tl == 5 and cmd_matches_5(tp, 104, 109, 115, 101, 116):
                         if i + 3 < cmd_end_tok and (cmd_end_tok - i - 2) % 2 == 0:
-                            var hmset_key = tokens[i+1].value()
+                            var hmset_key = tokens[unsafe_offset=i+1].value()
                             var hmset_wrong = False
                             var j_hmset = i + 2
                             while j_hmset + 1 < cmd_end_tok:
-                                var hmset_res = self.dispatcher.execute_hset(hmset_key, tokens[j_hmset].value(), tokens[j_hmset+1].value())
+                                var hmset_res = self.dispatcher.execute_hset(hmset_key, tokens[unsafe_offset=j_hmset].value(), tokens[unsafe_offset=j_hmset+1].value())
                                 if not hmset_res.is_valid:
                                     hmset_wrong = True
                                     break
                                 _ = ingest_hash_vector(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,   # #43
-                                                       tokens[i+1].ptr, tokens[i+1].length, tokens[j_hmset].ptr,
-                                                       tokens[j_hmset].length, tokens[j_hmset+1].ptr, tokens[j_hmset+1].length)
+                                                       tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length, tokens[unsafe_offset=j_hmset].ptr,
+                                                       tokens[unsafe_offset=j_hmset].length, tokens[unsafe_offset=j_hmset+1].ptr, tokens[unsafe_offset=j_hmset+1].length)
                                 j_hmset += 2
                             if hmset_wrong: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             else: writer.append_ok_response()
@@ -2803,11 +2803,11 @@ struct SlowPathHandler:
                             # gh #232: execute_hget cannot distinguish "no such
                             # hash" from "that key is a list", so both answered
                             # :0. Check the key's type first.
-                            var hstrlen_kv = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                            var hstrlen_kv = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
                             if not hstrlen_kv.is_none() and hstrlen_kv.type.value != ValueType.HASH:
                                 writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             else:
-                                var hstrlen_val = self.dispatcher.execute_hget(tokens[i+1].value(), tokens[i+2].value())
+                                var hstrlen_val = self.dispatcher.execute_hget(tokens[unsafe_offset=i+1].value(), tokens[unsafe_offset=i+2].value())
                                 if hstrlen_val.is_none(): writer.append_int_response(0)
                                 else: writer.append_int_response(Int64(hstrlen_val.string_len()))
                             i += 2
@@ -2817,12 +2817,12 @@ struct SlowPathHandler:
                     # ── SADD (multi-member, gh #111) ──
                     elif tl == 4 and cmd_matches_4(tp, 115, 97, 100, 100):
                         if i + 2 < cmd_end_tok:
-                            var sadd_key = tokens[i+1].value()
+                            var sadd_key = tokens[unsafe_offset=i+1].value()
                             var sadd_count = Int64(0)
                             var sadd_wrongtype = False
                             var j_sadd = i + 2
                             while j_sadd < cmd_end_tok:
-                                var sadd_res = self.dispatcher.execute_sadd(sadd_key, tokens[j_sadd].value())
+                                var sadd_res = self.dispatcher.execute_sadd(sadd_key, tokens[unsafe_offset=j_sadd].value())
                                 if sadd_res.is_valid: sadd_count += sadd_res.value
                                 else:
                                     sadd_wrongtype = True; break
@@ -2838,7 +2838,7 @@ struct SlowPathHandler:
                     #    than silently misparsed as scores; full flag support is future work) ──
                     elif tl == 4 and cmd_matches_4(tp, 122, 97, 100, 100):
                         if i + 2 < cmd_end_tok:
-                            var zadd_key = tokens[i+1].value()
+                            var zadd_key = tokens[unsafe_offset=i+1].value()
                             var zadd_added = Int64(0)
                             var zadd_wrongtype = False
                             var zadd_badfloat = False
@@ -2848,14 +2848,14 @@ struct SlowPathHandler:
                             var _zlt = False; var _zch = False; var _zincr = False
                             var j_zadd = i + 2
                             while j_zadd < cmd_end_tok:
-                                var ft = tokens[j_zadd]
+                                var ft = tokens[unsafe_offset=j_zadd]
                                 var fp = ft.ptr
-                                if ft.length == 2 and (fp[0]|0x20) == 110 and (fp[1]|0x20) == 120: _znx = True
-                                elif ft.length == 2 and (fp[0]|0x20) == 120 and (fp[1]|0x20) == 120: _zxx = True
-                                elif ft.length == 2 and (fp[0]|0x20) == 103 and (fp[1]|0x20) == 116: _zgt = True
-                                elif ft.length == 2 and (fp[0]|0x20) == 108 and (fp[1]|0x20) == 116: _zlt = True
-                                elif ft.length == 2 and (fp[0]|0x20) == 99 and (fp[1]|0x20) == 104: _zch = True
-                                elif ft.length == 4 and (fp[0]|0x20) == 105 and (fp[1]|0x20) == 110 and (fp[2]|0x20) == 99 and (fp[3]|0x20) == 114: _zincr = True
+                                if ft.length == 2 and (fp[unsafe_offset=0]|0x20) == 110 and (fp[unsafe_offset=1]|0x20) == 120: _znx = True
+                                elif ft.length == 2 and (fp[unsafe_offset=0]|0x20) == 120 and (fp[unsafe_offset=1]|0x20) == 120: _zxx = True
+                                elif ft.length == 2 and (fp[unsafe_offset=0]|0x20) == 103 and (fp[unsafe_offset=1]|0x20) == 116: _zgt = True
+                                elif ft.length == 2 and (fp[unsafe_offset=0]|0x20) == 108 and (fp[unsafe_offset=1]|0x20) == 116: _zlt = True
+                                elif ft.length == 2 and (fp[unsafe_offset=0]|0x20) == 99 and (fp[unsafe_offset=1]|0x20) == 104: _zch = True
+                                elif ft.length == 4 and (fp[unsafe_offset=0]|0x20) == 105 and (fp[unsafe_offset=1]|0x20) == 110 and (fp[unsafe_offset=2]|0x20) == 99 and (fp[unsafe_offset=3]|0x20) == 114: _zincr = True
                                 else: break
                                 j_zadd += 1
                             var _zchanged = Int64(0)
@@ -2883,7 +2883,7 @@ struct SlowPathHandler:
                             if not _zbadopt:
                                 var j_chk = j_zadd
                                 while j_chk + 1 < cmd_end_tok:
-                                    var _zps = parse_redis_double(tokens[j_chk].ptr, tokens[j_chk].length, DOUBLE_VALUE)
+                                    var _zps = parse_redis_double(tokens[unsafe_offset=j_chk].ptr, tokens[unsafe_offset=j_chk].length, DOUBLE_VALUE)
                                     if not _zps.ok:
                                         zadd_badfloat = True; break
                                     _zscores.append(_zps.value)
@@ -2892,7 +2892,7 @@ struct SlowPathHandler:
                                 var _zpair = 0
                                 while j_zadd + 1 < cmd_end_tok:
                                     var _zo = self.dispatcher.execute_zadd_cond(
-                                        zadd_key, _zscores[_zpair], tokens[j_zadd+1].value(),
+                                        zadd_key, _zscores[_zpair], tokens[unsafe_offset=j_zadd+1].value(),
                                         _znx, _zxx, _zgt, _zlt, _zincr)
                                     _zpair += 1
                                     if not _zo.ok:
@@ -2934,13 +2934,13 @@ struct SlowPathHandler:
                     # array, so the reply shape depended on which path ran it.
                     elif tl == 4 and cmd_matches_4(tp, 115, 112, 111, 112):
                         if i + 1 < cmd_end_tok and i + 3 >= cmd_end_tok:
-                            var key = tokens[i+1].value()
-                            var sp_v = self.keyspace[].get(GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
+                            var key = tokens[unsafe_offset=i+1].value()
+                            var sp_v = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
                             var sp_has_count = i + 2 < cmd_end_tok
                             var sp_count = Int64(1)
                             var sp_err = String("")
                             if sp_has_count:
-                                var _spc = parse_int64_strict(tokens[i+2].ptr, tokens[i+2].length)
+                                var _spc = parse_int64_strict(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
                                 if not _spc.ok:
                                     sp_err = "ERR value is not an integer or out of range"
                                 elif _spc.value < 0:
@@ -2954,7 +2954,7 @@ struct SlowPathHandler:
                                 if sp_has_count: writer.append_set_header(0)   # RESP3 `~0`
                                 else: writer.append_null_response()
                             else:
-                                var sp_set = sp_v.as_set().bitcast[SlabHashMap]()
+                                var sp_set = sp_v.as_set().unsafe_bitcast[SlabHashMap]()
                                 var sp_n = 1
                                 if sp_has_count:
                                     sp_n = Int(min(sp_count, Int64(sp_set[].size)))
@@ -2965,8 +2965,8 @@ struct SlowPathHandler:
                                     popped.free_str_payload()   # gh #394: pop_random hands the member over
                                 # gh #234: an emptied set is removed.
                                 if sp_set[].size == 0:
-                                    _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                    _ = self.dispatcher.wal[].append(2, tokens[i+1].ptr, tokens[i+1].length)
+                                    _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
+                                    _ = self.dispatcher.wal[].append(2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
                         else:
                             writer.append_error_response("ERR wrong number of arguments for 'spop' command")
                         i = cmd_end_tok - 1
@@ -3052,7 +3052,7 @@ struct SlowPathHandler:
                     elif tl == 8 and cmd_matches_8(tp, 101, 120, 112, 105, 114, 101, 97, 116):
                         _ = handle_expireat(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal)
                         i = cmd_end_tok - 1
-                    elif tl == 9 and (tp[0]|0x20)==112 and (tp[1]|0x20)==101 and (tp[2]|0x20)==120 and (tp[3]|0x20)==112 and (tp[4]|0x20)==105 and (tp[5]|0x20)==114 and (tp[6]|0x20)==101 and (tp[7]|0x20)==97 and (tp[8]|0x20)==116:
+                    elif tl == 9 and (tp[unsafe_offset=0]|0x20)==112 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==120 and (tp[unsafe_offset=3]|0x20)==112 and (tp[unsafe_offset=4]|0x20)==105 and (tp[unsafe_offset=5]|0x20)==114 and (tp[unsafe_offset=6]|0x20)==101 and (tp[unsafe_offset=7]|0x20)==97 and (tp[unsafe_offset=8]|0x20)==116:
                         _ = handle_pexpireat(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     elif tl == 3 and cmd_matches_3(tp, 116, 116, 108):
@@ -3073,7 +3073,7 @@ struct SlowPathHandler:
                         # only form that read it. Sections filter as in Redis.
                         var _isecs = List[String]()
                         for _ij in range(i + 1, cmd_end_tok):
-                            _isecs.append(tokens[_ij].value())
+                            _isecs.append(tokens[unsafe_offset=_ij].value())
                         var _ik = 0
                         for _is in range(8):
                             _ik += self.keyspace[].shards[unsafe_offset=_is].size
@@ -3087,7 +3087,7 @@ struct SlowPathHandler:
                     # ── GETBIT ──
                     elif tl == 6 and cmd_matches_6(tp, 103, 101, 116, 98, 105, 116):
                         if i + 2 < cmd_end_tok:
-                            var key = tokens[i+1].value(); var offset = strict_atol(tokens[i+2].value())
+                            var key = tokens[unsafe_offset=i+1].value(); var offset = strict_atol(tokens[unsafe_offset=i+2].value())
                             if offset < 0 or offset >= 4294967296:   # read before the bitmap otherwise
                                 writer.append_error_response("ERR bit offset is not an integer or out of range")
                                 i = cmd_end_tok - 1; continue
@@ -3101,7 +3101,7 @@ struct SlowPathHandler:
                     # ── SETBIT ──
                     elif tl == 6 and cmd_matches_6(tp, 115, 101, 116, 98, 105, 116):
                         if i + 3 < cmd_end_tok:
-                            var key = tokens[i+1].value(); var offset = strict_atol(tokens[i+2].value()); var value = strict_atol(tokens[i+3].value())
+                            var key = tokens[unsafe_offset=i+1].value(); var offset = strict_atol(tokens[unsafe_offset=i+2].value()); var value = strict_atol(tokens[unsafe_offset=i+3].value())
                             # Bounded as on the fast path: a negative offset wrote
                             # before the bitmap (reachable via MULTI / tenant fds).
                             if offset < 0 or offset >= 4294967296:
@@ -3120,9 +3120,9 @@ struct SlowPathHandler:
                     # ── PFADD ──
                     elif tl == 5 and cmd_matches_5(tp, 112, 102, 97, 100, 100):
                         if i + 1 < cmd_end_tok:
-                            var key = tokens[i+1].value(); var elements = List[String](); var element_idx = i + 2
+                            var key = tokens[unsafe_offset=i+1].value(); var elements = List[String](); var element_idx = i + 2
                             while element_idx < cmd_end_tok:   # not num_tokens: the next command's tokens are not elements
-                                elements.append(tokens[element_idx].value()); element_idx += 1
+                                elements.append(tokens[unsafe_offset=element_idx].value()); element_idx += 1
                             var res = self.dispatcher.execute_pfadd(key, elements)
                             if res.is_valid: writer.append_int_response(res.value)
                             else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -3136,7 +3136,7 @@ struct SlowPathHandler:
                             var pfc_keys = List[String]()
                             var j_pfc = i + 1
                             while j_pfc < cmd_end_tok:
-                                pfc_keys.append(tokens[j_pfc].value()); j_pfc += 1
+                                pfc_keys.append(tokens[unsafe_offset=j_pfc].value()); j_pfc += 1
                             var pfc_res = self.dispatcher.execute_pfcount(pfc_keys)
                             if pfc_res.is_valid: writer.append_int_response(pfc_res.value)
                             else: writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -3171,7 +3171,7 @@ struct SlowPathHandler:
                         # CLUSTER STATS. KEYSLOT answered 0 and COUNTKEYSINSLOT 0
                         # for any key, REPLICATE and RESET +OK, doing nothing.
                         if not (is_not_null(self.cluster) and self.cluster[].enabled) \
-                           and not (cmd_end_tok - i >= 2 and arg_eq(tokens[i + 1].ptr, tokens[i + 1].length, "stats")):
+                           and not (cmd_end_tok - i >= 2 and arg_eq(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length, "stats")):
                             writer.append_error_response("ERR This instance has cluster support disabled")
                         else:
                             _ = handle_cluster(tokens, i, cmd_end_tok, writer, self.cluster, self.keyspace, self.dispatcher.raft, self.shared_hnsw, self.v_store, self.attn_idx, self.worker_id, self.num_workers)
@@ -3195,16 +3195,16 @@ struct SlowPathHandler:
                     # ── RESTORE ──
                     elif tl == 7 and cmd_matches_7(tp, 114, 101, 115, 116, 111, 114, 101):
                         if handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal):
-                            self.tx_state.bump_key_version(tokens[i + 1].ptr, tokens[i + 1].length)
+                            self.tx_state.bump_key_version(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                             _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #46
-                                                  self.vec_tomb, tokens[i + 1].ptr, tokens[i + 1].length)
+                                                  self.vec_tomb, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         i = cmd_end_tok - 1
                     # ── MIGRATE ──
                     elif tl == 7 and cmd_matches_7(tp, 109, 105, 103, 114, 97, 116, 101):
                         var _moved = handle_migrate(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map,
                                                     self.dispatcher.wal, is_not_null(self.cluster) and self.cluster[].enabled)
                         for _mk in range(len(_moved)):
-                            self.tx_state.bump_key_version(tokens[_moved[_mk]].ptr, tokens[_moved[_mk]].length)
+                            self.tx_state.bump_key_version(tokens[unsafe_offset=_moved[_mk]].ptr, tokens[unsafe_offset=_moved[_mk]].length)
                         i = cmd_end_tok - 1
                     # ── FT.* command family ──
                     # gh #156/#162 family: every handler gets `cmd_end_tok` as its
@@ -3215,8 +3215,7 @@ struct SlowPathHandler:
                     # command behind an FT.SEARCH was silently swallowed, and a
                     # second pipelined FT.SEARCH's PARAMS blob overwrote the first
                     # query's blob (request 1 answered with query 2's results).
-                    elif tl >= 7 and (tp[0]|0x20)==102 and (tp[1]|0x20)==116 and tp[2]==46:
-                        var ft_sub = tp[3] | 0x20
+                    elif tl >= 7 and (tp[unsafe_offset=0]|0x20)==102 and (tp[unsafe_offset=1]|0x20)==116 and tp[unsafe_offset=2]==46:
                         if cmd_eq(tp, tl, "ft.info"): # FT.INFO
                             _ = handle_ft_info(tokens, i, cmd_end_tok, hnsw, self.shared_hnsw, writer)
                             i = cmd_end_tok - 1
@@ -3237,9 +3236,9 @@ struct SlowPathHandler:
                                 clear_vector_records(self.keyspace, self.dispatcher.wal)
                             # DD: the documents go as with DEL (WAL record, WATCH)
                             var _dd_at = 0
-                            var _dd_p = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_dd_keys.unsafe_ptr()))
+                            var _dd_p = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_dd_keys.unsafe_ptr()))
                             for _dk in range(len(_dd_ends)):
-                                var _kp = _dd_p + _dd_at
+                                var _kp = _dd_p.unsafe_offset(_dd_at)
                                 var _kl = _dd_ends[_dk] - _dd_at
                                 var _taken = GenericValue()
                                 if self.keyspace[].remove_generic_taking(GenericValue.borrow(_kp, _kl), _taken):
@@ -3292,14 +3291,14 @@ struct SlowPathHandler:
                             # Int round-trip: an address laundered through Int loses provenance
                             # to `self`, and -O3 may then keep these fields' stores in
                             # registers across the call (gh #349).
-                            var _df_fds_ptr = rebind[UnsafePointer[Array[Int32, 16], MutUntrackedOrigin]](UnsafePointer(to=self.deferred_fds))
-                            var _df_seqs_ptr = rebind[UnsafePointer[Array[UInt64, 16], MutUntrackedOrigin]](UnsafePointer(to=self.deferred_seqs))
-                            var _df_ks_ptr = rebind[UnsafePointer[Array[Int32, 16], MutUntrackedOrigin]](UnsafePointer(to=self.deferred_ks))
-                            var _df_ns_ptr = rebind[UnsafePointer[Array[Int32, 16], MutUntrackedOrigin]](UnsafePointer(to=self.deferred_n_shards))
-                            var _df_act_ptr = rebind[UnsafePointer[Array[UInt32, 16], MutUntrackedOrigin]](UnsafePointer(to=self.deferred_active))
-                            var _df_done_ptr = rebind[UnsafePointer[Array[UInt32, 16], MutUntrackedOrigin]](UnsafePointer(to=self.deferred_done))
-                            var _df_dt_ptr = rebind[UnsafePointer[Array[Int32, 16], MutUntrackedOrigin]](UnsafePointer(to=self.deferred_drain_ticks))
-                            var _df_cnt_ptr = rebind[UnsafePointer[Int, MutUntrackedOrigin]](UnsafePointer(to=self.deferred_count))
+                            var _df_fds_ptr = rebind[Pointer[Array[Int32, 16], MutUntrackedOrigin]](Pointer(to=self.deferred_fds))
+                            var _df_seqs_ptr = rebind[Pointer[Array[UInt64, 16], MutUntrackedOrigin]](Pointer(to=self.deferred_seqs))
+                            var _df_ks_ptr = rebind[Pointer[Array[Int32, 16], MutUntrackedOrigin]](Pointer(to=self.deferred_ks))
+                            var _df_ns_ptr = rebind[Pointer[Array[Int32, 16], MutUntrackedOrigin]](Pointer(to=self.deferred_n_shards))
+                            var _df_act_ptr = rebind[Pointer[Array[UInt32, 16], MutUntrackedOrigin]](Pointer(to=self.deferred_active))
+                            var _df_done_ptr = rebind[Pointer[Array[UInt32, 16], MutUntrackedOrigin]](Pointer(to=self.deferred_done))
+                            var _df_dt_ptr = rebind[Pointer[Array[Int32, 16], MutUntrackedOrigin]](Pointer(to=self.deferred_drain_ticks))
+                            var _df_cnt_ptr = rebind[Pointer[Int, MutUntrackedOrigin]](Pointer(to=self.deferred_count))
                             # The handler's token bound is cmd_end_tok (NOT
                             # num_tokens): its FILTER/PARAMS/LIMIT scan walks every
                             # unrecognized token, so a num_tokens bound made it eat
@@ -3329,16 +3328,16 @@ struct SlowPathHandler:
                                 var _ln_l = self.shared_hnsw[].index_name_len
                                 var _ln_crlf = False
                                 for _lb in range(_ln_l):
-                                    if _ln_p[_lb] == 13 or _ln_p[_lb] == 10:
+                                    if _ln_p[unsafe_offset=_lb] == 13 or _ln_p[unsafe_offset=_lb] == 10:
                                         _ln_crlf = True
                                 if _ln_crlf:
                                     writer.append_bulk_string_response(_ln_p, _ln_l)
                                 else:
                                     comptime _PLUS = "+"
                                     comptime _CRLF = "\r\n"
-                                    writer.append_to_response(rebind[Pointer[UInt8, MutUntrackedOrigin]](_PLUS.unsafe_ptr()), 1)
+                                    writer.append_to_response(rebind[Pointer[UInt8, MutUntrackedOrigin]](_PLUS.ptr()), 1)
                                     writer.append_to_response(_ln_p, _ln_l)
-                                    writer.append_to_response(rebind[Pointer[UInt8, MutUntrackedOrigin]](_CRLF.unsafe_ptr()), 2)
+                                    writer.append_to_response(rebind[Pointer[UInt8, MutUntrackedOrigin]](_CRLF.ptr()), 2)
                             else:
                                 writer.append_array_header(0)
                             i = cmd_end_tok - 1
@@ -3361,31 +3360,31 @@ struct SlowPathHandler:
                         _ = handle_ai_semantic_cache(tokens, i, cmd_end_tok, writer, self.scache, server, fd, kq)
                         i = cmd_end_tok - 1
                     # ── AI.EMBED ──
-                    elif tl == 8 and (tp[0]|0x20)==97 and (tp[1]|0x20)==105 and tp[2]==46 and (tp[3]|0x20)==101 and (tp[4]|0x20)==109 and (tp[5]|0x20)==98 and (tp[6]|0x20)==101 and (tp[7]|0x20)==100:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==97 and (tp[unsafe_offset=1]|0x20)==105 and tp[unsafe_offset=2]==46 and (tp[unsafe_offset=3]|0x20)==101 and (tp[unsafe_offset=4]|0x20)==109 and (tp[unsafe_offset=5]|0x20)==98 and (tp[unsafe_offset=6]|0x20)==101 and (tp[unsafe_offset=7]|0x20)==100:
                         _ = handle_ai_embed(tokens, i, cmd_end_tok, writer, self.inference_bridge, self.scache)
                         i = cmd_end_tok - 1
                     # ── AI.GENERATE ──
-                    elif tl == 11 and (tp[0]|0x20)==97 and (tp[1]|0x20)==105 and tp[2]==46 and (tp[3]|0x20)==103 and (tp[4]|0x20)==101 and (tp[5]|0x20)==110 and (tp[6]|0x20)==101 and (tp[7]|0x20)==114 and (tp[8]|0x20)==97 and (tp[9]|0x20)==116 and (tp[10]|0x20)==101:
+                    elif tl == 11 and (tp[unsafe_offset=0]|0x20)==97 and (tp[unsafe_offset=1]|0x20)==105 and tp[unsafe_offset=2]==46 and (tp[unsafe_offset=3]|0x20)==103 and (tp[unsafe_offset=4]|0x20)==101 and (tp[unsafe_offset=5]|0x20)==110 and (tp[unsafe_offset=6]|0x20)==101 and (tp[unsafe_offset=7]|0x20)==114 and (tp[unsafe_offset=8]|0x20)==97 and (tp[unsafe_offset=9]|0x20)==116 and (tp[unsafe_offset=10]|0x20)==101:
                         _ = handle_ai_generate(tokens, i, cmd_end_tok, writer, self.keyspace, self.inference_bridge)
                         i = cmd_end_tok - 1
                     # ── AI.LOADMODEL ──
-                    elif tl == 12 and (tp[0]|0x20)==97 and (tp[1]|0x20)==105 and tp[2]==46 and (tp[3]|0x20)==108 and (tp[4]|0x20)==111 and (tp[5]|0x20)==97 and (tp[6]|0x20)==100 and (tp[7]|0x20)==109 and (tp[8]|0x20)==111 and (tp[9]|0x20)==100 and (tp[10]|0x20)==101 and (tp[11]|0x20)==108:
+                    elif tl == 12 and (tp[unsafe_offset=0]|0x20)==97 and (tp[unsafe_offset=1]|0x20)==105 and tp[unsafe_offset=2]==46 and (tp[unsafe_offset=3]|0x20)==108 and (tp[unsafe_offset=4]|0x20)==111 and (tp[unsafe_offset=5]|0x20)==97 and (tp[unsafe_offset=6]|0x20)==100 and (tp[unsafe_offset=7]|0x20)==109 and (tp[unsafe_offset=8]|0x20)==111 and (tp[unsafe_offset=9]|0x20)==100 and (tp[unsafe_offset=10]|0x20)==101 and (tp[unsafe_offset=11]|0x20)==108:
                         _ = handle_ai_loadmodel(tokens, i, cmd_end_tok, writer, self.inference_bridge)
                         i = cmd_end_tok - 1
                     # ── AI.MEMORY ──
-                    elif tl == 9 and (tp[0]|0x20)==97 and (tp[1]|0x20)==105 and tp[2]==46 and (tp[3]|0x20)==109 and (tp[4]|0x20)==101 and (tp[5]|0x20)==109 and (tp[6]|0x20)==111 and (tp[7]|0x20)==114 and (tp[8]|0x20)==121:
+                    elif tl == 9 and (tp[unsafe_offset=0]|0x20)==97 and (tp[unsafe_offset=1]|0x20)==105 and tp[unsafe_offset=2]==46 and (tp[unsafe_offset=3]|0x20)==109 and (tp[unsafe_offset=4]|0x20)==101 and (tp[unsafe_offset=5]|0x20)==109 and (tp[unsafe_offset=6]|0x20)==111 and (tp[unsafe_offset=7]|0x20)==114 and (tp[unsafe_offset=8]|0x20)==121:
                         _ = handle_ai_memory(tokens, i, cmd_end_tok, writer, self.keyspace, self.scache, self.dispatcher.list_pool, server, fd, kq)
                         i = cmd_end_tok - 1
                     # ── KV.STORE ── (8 bytes: k=107,v=118,.,s,t,o,r,e)
-                    elif tl == 8 and (tp[0]|0x20)==107 and (tp[1]|0x20)==118 and tp[2]==46 and (tp[3]|0x20)==115 and (tp[4]|0x20)==116 and (tp[5]|0x20)==111 and (tp[6]|0x20)==114 and (tp[7]|0x20)==101:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==107 and (tp[unsafe_offset=1]|0x20)==118 and tp[unsafe_offset=2]==46 and (tp[unsafe_offset=3]|0x20)==115 and (tp[unsafe_offset=4]|0x20)==116 and (tp[unsafe_offset=5]|0x20)==111 and (tp[unsafe_offset=6]|0x20)==114 and (tp[unsafe_offset=7]|0x20)==101:
                         _ = handle_kv_store(tokens, i, cmd_end_tok, writer, self.kvcache, server, fd, kq)
                         i = cmd_end_tok - 1
                     # ── KV.FETCH ── (8 bytes: k=107,v=118,.,f,e,t,c,h)
-                    elif tl == 8 and (tp[0]|0x20)==107 and (tp[1]|0x20)==118 and tp[2]==46 and (tp[3]|0x20)==102 and (tp[4]|0x20)==101 and (tp[5]|0x20)==116 and (tp[6]|0x20)==99 and (tp[7]|0x20)==104:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==107 and (tp[unsafe_offset=1]|0x20)==118 and tp[unsafe_offset=2]==46 and (tp[unsafe_offset=3]|0x20)==102 and (tp[unsafe_offset=4]|0x20)==101 and (tp[unsafe_offset=5]|0x20)==116 and (tp[unsafe_offset=6]|0x20)==99 and (tp[unsafe_offset=7]|0x20)==104:
                         _ = handle_kv_fetch(tokens, i, cmd_end_tok, writer, self.kvcache, server, fd, kq)
                         i = cmd_end_tok - 1
                     # ── KV.INFO ── (7 bytes: k=107,v=118,.,i,n,f,o)
-                    elif tl == 7 and (tp[0]|0x20)==107 and (tp[1]|0x20)==118 and tp[2]==46 and (tp[3]|0x20)==105 and (tp[4]|0x20)==110 and (tp[5]|0x20)==102 and (tp[6]|0x20)==111:
+                    elif tl == 7 and (tp[unsafe_offset=0]|0x20)==107 and (tp[unsafe_offset=1]|0x20)==118 and tp[unsafe_offset=2]==46 and (tp[unsafe_offset=3]|0x20)==105 and (tp[unsafe_offset=4]|0x20)==110 and (tp[unsafe_offset=5]|0x20)==102 and (tp[unsafe_offset=6]|0x20)==111:
                         _ = handle_kv_info(writer, self.kvcache)
                         i = cmd_end_tok - 1
                     # ── ATTEND.CREATE ── (13 bytes)
@@ -3413,7 +3412,7 @@ struct SlowPathHandler:
                     # ATTEND.PREFIX.STORE + ATTEND.PREFIX.QUERY instead — it's faster
                     # AND the same wire shape with K/V resident across queries.
                     # ── V.CREATE ── (8 bytes: v=118,.,c,r,e,a,t,e)
-                    elif tl == 8 and (tp[0]|0x20)==118 and tp[1]==46 and (tp[2]|0x20)==99 and (tp[3]|0x20)==114 and (tp[4]|0x20)==101 and (tp[5]|0x20)==97 and (tp[6]|0x20)==116 and (tp[7]|0x20)==101:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==118 and tp[unsafe_offset=1]==46 and (tp[unsafe_offset=2]|0x20)==99 and (tp[unsafe_offset=3]|0x20)==114 and (tp[unsafe_offset=4]|0x20)==101 and (tp[unsafe_offset=5]|0x20)==97 and (tp[unsafe_offset=6]|0x20)==116 and (tp[unsafe_offset=7]|0x20)==101:
                         _ = handle_v_create(tokens, i, num_tokens, writer, self.v_store)
                         i = cmd_end_tok - 1
                     # ── V.STOREBATCH ── (12 bytes: v=118,.,s,t,o,r,e,b,a,t,c,h)
@@ -3423,7 +3422,7 @@ struct SlowPathHandler:
                         _ = handle_v_storebatch(tokens, i, cmd_end_tok, writer, self.v_store)
                         i = cmd_end_tok - 1
                     # ── V.FETCH ── (7 bytes: v=118,.,f,e,t,c,h)
-                    elif tl == 7 and (tp[0]|0x20)==118 and tp[1]==46 and (tp[2]|0x20)==102 and (tp[3]|0x20)==101 and (tp[4]|0x20)==116 and (tp[5]|0x20)==99 and (tp[6]|0x20)==104:
+                    elif tl == 7 and (tp[unsafe_offset=0]|0x20)==118 and tp[unsafe_offset=1]==46 and (tp[unsafe_offset=2]|0x20)==102 and (tp[unsafe_offset=3]|0x20)==101 and (tp[unsafe_offset=4]|0x20)==116 and (tp[unsafe_offset=5]|0x20)==99 and (tp[unsafe_offset=6]|0x20)==104:
                         # gh #193: pass cmd_end_tok as the handler bound — its
                         # optional-arg scan (FMT NATIVE) must never read into a
                         # pipelined neighbor (the gh #166/FT.* lesson).
@@ -3434,39 +3433,39 @@ struct SlowPathHandler:
                         _ = handle_v_export(tokens, i, cmd_end_tok, writer, self.v_store, fd)
                         i = cmd_end_tok - 1
                     # ── V.INFO ── (6 bytes: v=118,.,i,n,f,o)
-                    elif tl == 6 and (tp[0]|0x20)==118 and tp[1]==46 and (tp[2]|0x20)==105 and (tp[3]|0x20)==110 and (tp[4]|0x20)==102 and (tp[5]|0x20)==111:
+                    elif tl == 6 and (tp[unsafe_offset=0]|0x20)==118 and tp[unsafe_offset=1]==46 and (tp[unsafe_offset=2]|0x20)==105 and (tp[unsafe_offset=3]|0x20)==110 and (tp[unsafe_offset=4]|0x20)==102 and (tp[unsafe_offset=5]|0x20)==111:
                         _ = handle_v_info(tokens, i, num_tokens, writer, self.v_store)
                         i = cmd_end_tok - 1
                     # ── V.SNAPSHOT ── (10 bytes: v=118,.,s,n,a,p,s,h,o,t)
-                    elif tl == 10 and (tp[0]|0x20)==118 and tp[1]==46 and (tp[2]|0x20)==115 and (tp[3]|0x20)==110 and (tp[4]|0x20)==97 and (tp[5]|0x20)==112 and (tp[6]|0x20)==115 and (tp[7]|0x20)==104 and (tp[8]|0x20)==111 and (tp[9]|0x20)==116:
+                    elif tl == 10 and (tp[unsafe_offset=0]|0x20)==118 and tp[unsafe_offset=1]==46 and (tp[unsafe_offset=2]|0x20)==115 and (tp[unsafe_offset=3]|0x20)==110 and (tp[unsafe_offset=4]|0x20)==97 and (tp[unsafe_offset=5]|0x20)==112 and (tp[unsafe_offset=6]|0x20)==115 and (tp[unsafe_offset=7]|0x20)==104 and (tp[unsafe_offset=8]|0x20)==111 and (tp[unsafe_offset=9]|0x20)==116:
                         _ = handle_v_snapshot(tokens, i, num_tokens, writer, self.v_store)
                         i = cmd_end_tok - 1
                     # ── V.RESTORE ── (9 bytes: v=118,.,r,e,s,t,o,r,e)
-                    elif tl == 9 and (tp[0]|0x20)==118 and tp[1]==46 and (tp[2]|0x20)==114 and (tp[3]|0x20)==101 and (tp[4]|0x20)==115 and (tp[5]|0x20)==116 and (tp[6]|0x20)==111 and (tp[7]|0x20)==114 and (tp[8]|0x20)==101:
+                    elif tl == 9 and (tp[unsafe_offset=0]|0x20)==118 and tp[unsafe_offset=1]==46 and (tp[unsafe_offset=2]|0x20)==114 and (tp[unsafe_offset=3]|0x20)==101 and (tp[unsafe_offset=4]|0x20)==115 and (tp[unsafe_offset=5]|0x20)==116 and (tp[unsafe_offset=6]|0x20)==111 and (tp[unsafe_offset=7]|0x20)==114 and (tp[unsafe_offset=8]|0x20)==101:
                         _ = handle_v_restore(tokens, i, num_tokens, writer, self.v_store)
                         i = cmd_end_tok - 1
                     # ── V.COMMIT ── (8 bytes: v=118,.,c,o,m,m,i,t)
-                    elif tl == 8 and (tp[0]|0x20)==118 and tp[1]==46 and (tp[2]|0x20)==99 and (tp[3]|0x20)==111 and (tp[4]|0x20)==109 and (tp[5]|0x20)==109 and (tp[6]|0x20)==105 and (tp[7]|0x20)==116:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==118 and tp[unsafe_offset=1]==46 and (tp[unsafe_offset=2]|0x20)==99 and (tp[unsafe_offset=3]|0x20)==111 and (tp[unsafe_offset=4]|0x20)==109 and (tp[unsafe_offset=5]|0x20)==109 and (tp[unsafe_offset=6]|0x20)==105 and (tp[unsafe_offset=7]|0x20)==116:
                         _ = handle_v_commit(tokens, i, num_tokens, writer, self.v_store)
                         i = cmd_end_tok - 1
                     # ── STATE.ALLOC ── (11 bytes: s,t,a,t,e,.,a,l,l,o,c)
-                    elif tl == 11 and (tp[0]|0x20)==115 and (tp[1]|0x20)==116 and (tp[2]|0x20)==97 and (tp[3]|0x20)==116 and (tp[4]|0x20)==101 and tp[5]==46 and (tp[6]|0x20)==97 and (tp[7]|0x20)==108 and (tp[8]|0x20)==108 and (tp[9]|0x20)==111 and (tp[10]|0x20)==99:
+                    elif tl == 11 and (tp[unsafe_offset=0]|0x20)==115 and (tp[unsafe_offset=1]|0x20)==116 and (tp[unsafe_offset=2]|0x20)==97 and (tp[unsafe_offset=3]|0x20)==116 and (tp[unsafe_offset=4]|0x20)==101 and tp[unsafe_offset=5]==46 and (tp[unsafe_offset=6]|0x20)==97 and (tp[unsafe_offset=7]|0x20)==108 and (tp[unsafe_offset=8]|0x20)==108 and (tp[unsafe_offset=9]|0x20)==111 and (tp[unsafe_offset=10]|0x20)==99:
                         _ = handle_state_alloc(tokens, i, num_tokens, writer, self.state_store)
                         i = cmd_end_tok - 1
                     # ── STATE.WRITE ── (11 bytes: s,t,a,t,e,.,w,r,i,t,e)
-                    elif tl == 11 and (tp[0]|0x20)==115 and (tp[1]|0x20)==116 and (tp[2]|0x20)==97 and (tp[3]|0x20)==116 and (tp[4]|0x20)==101 and tp[5]==46 and (tp[6]|0x20)==119 and (tp[7]|0x20)==114 and (tp[8]|0x20)==105 and (tp[9]|0x20)==116 and (tp[10]|0x20)==101:
+                    elif tl == 11 and (tp[unsafe_offset=0]|0x20)==115 and (tp[unsafe_offset=1]|0x20)==116 and (tp[unsafe_offset=2]|0x20)==97 and (tp[unsafe_offset=3]|0x20)==116 and (tp[unsafe_offset=4]|0x20)==101 and tp[unsafe_offset=5]==46 and (tp[unsafe_offset=6]|0x20)==119 and (tp[unsafe_offset=7]|0x20)==114 and (tp[unsafe_offset=8]|0x20)==105 and (tp[unsafe_offset=9]|0x20)==116 and (tp[unsafe_offset=10]|0x20)==101:
                         _ = handle_state_write(tokens, i, num_tokens, writer, self.state_store)
                         i = cmd_end_tok - 1
                     # ── STATE.READ ── (10 bytes: s,t,a,t,e,.,r,e,a,d)
-                    elif tl == 10 and (tp[0]|0x20)==115 and (tp[1]|0x20)==116 and (tp[2]|0x20)==97 and (tp[3]|0x20)==116 and (tp[4]|0x20)==101 and tp[5]==46 and (tp[6]|0x20)==114 and (tp[7]|0x20)==101 and (tp[8]|0x20)==97 and (tp[9]|0x20)==100:
+                    elif tl == 10 and (tp[unsafe_offset=0]|0x20)==115 and (tp[unsafe_offset=1]|0x20)==116 and (tp[unsafe_offset=2]|0x20)==97 and (tp[unsafe_offset=3]|0x20)==116 and (tp[unsafe_offset=4]|0x20)==101 and tp[unsafe_offset=5]==46 and (tp[unsafe_offset=6]|0x20)==114 and (tp[unsafe_offset=7]|0x20)==101 and (tp[unsafe_offset=8]|0x20)==97 and (tp[unsafe_offset=9]|0x20)==100:
                         _ = handle_state_read(tokens, i, num_tokens, writer, self.state_store)
                         i = cmd_end_tok - 1
                     # ── STATE.FREE ── (10 bytes: s,t,a,t,e,.,f,r,e,e)
-                    elif tl == 10 and (tp[0]|0x20)==115 and (tp[1]|0x20)==116 and (tp[2]|0x20)==97 and (tp[3]|0x20)==116 and (tp[4]|0x20)==101 and tp[5]==46 and (tp[6]|0x20)==102 and (tp[7]|0x20)==114 and (tp[8]|0x20)==101 and (tp[9]|0x20)==101:
+                    elif tl == 10 and (tp[unsafe_offset=0]|0x20)==115 and (tp[unsafe_offset=1]|0x20)==116 and (tp[unsafe_offset=2]|0x20)==97 and (tp[unsafe_offset=3]|0x20)==116 and (tp[unsafe_offset=4]|0x20)==101 and tp[unsafe_offset=5]==46 and (tp[unsafe_offset=6]|0x20)==102 and (tp[unsafe_offset=7]|0x20)==114 and (tp[unsafe_offset=8]|0x20)==101 and (tp[unsafe_offset=9]|0x20)==101:
                         _ = handle_state_free(tokens, i, num_tokens, writer, self.state_store)
                         i = cmd_end_tok - 1
                     # ── STATE.INFO ── (10 bytes: s,t,a,t,e,.,i,n,f,o)
-                    elif tl == 10 and (tp[0]|0x20)==115 and (tp[1]|0x20)==116 and (tp[2]|0x20)==97 and (tp[3]|0x20)==116 and (tp[4]|0x20)==101 and tp[5]==46 and (tp[6]|0x20)==105 and (tp[7]|0x20)==110 and (tp[8]|0x20)==102 and (tp[9]|0x20)==111:
+                    elif tl == 10 and (tp[unsafe_offset=0]|0x20)==115 and (tp[unsafe_offset=1]|0x20)==116 and (tp[unsafe_offset=2]|0x20)==97 and (tp[unsafe_offset=3]|0x20)==116 and (tp[unsafe_offset=4]|0x20)==101 and tp[unsafe_offset=5]==46 and (tp[unsafe_offset=6]|0x20)==105 and (tp[unsafe_offset=7]|0x20)==110 and (tp[unsafe_offset=8]|0x20)==102 and (tp[unsafe_offset=9]|0x20)==111:
                         _ = handle_state_info(tokens, i, num_tokens, writer, self.state_store)
                         i = cmd_end_tok - 1
                     # ── KV.PREFIX.REGISTER ── (18 bytes: k,v,.,p,r,e,f,i,x,.,r,e,g,i,s,t,e,r)
@@ -3641,11 +3640,11 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── RENAME ──
                     elif tl == 6 and cmd_matches_6(tp, 114, 101, 110, 97, 109, 101):
-                        var _vmv = hash_addr(self.keyspace, tokens[i + 1].ptr, tokens[i + 1].length) if i + 2 < cmd_end_tok else 0
+                        var _vmv = hash_addr(self.keyspace, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length) if i + 2 < cmd_end_tok else 0
                         _ = handle_rename(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
                         if _vmv != 0:   # #46: a renamed hash's slot names its old key
                             after_rename(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb, _vmv,
-                                         tokens[i + 1].ptr, tokens[i + 1].length, tokens[i + 2].ptr, tokens[i + 2].length)
+                                         tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
@@ -3653,11 +3652,11 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     # ── RENAMENX ──
                     elif tl == 8 and cmd_matches_8(tp, 114, 101, 110, 97, 109, 101, 110, 120):
-                        var _vmv = hash_addr(self.keyspace, tokens[i + 1].ptr, tokens[i + 1].length) if i + 2 < cmd_end_tok else 0
+                        var _vmv = hash_addr(self.keyspace, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length) if i + 2 < cmd_end_tok else 0
                         _ = handle_renamenx(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
                         if _vmv != 0:   # #46: a renamed hash's slot names its old key
                             after_rename(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb, _vmv,
-                                         tokens[i + 1].ptr, tokens[i + 1].length, tokens[i + 2].ptr, tokens[i + 2].length)
+                                         tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 1 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
@@ -3668,7 +3667,7 @@ struct SlowPathHandler:
                         _ = handle_copy(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map)
                         if i + 2 < cmd_end_tok:   # #46: the copy's vector, as HSET's
                             _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal, self.vec_tomb,
-                                                  tokens[i + 2].ptr, tokens[i + 2].length)
+                                                  tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                         if is_not_null(self.dispatcher.wal) and i + 2 < cmd_end_tok:   # effect not logged by the handler
                             self.dispatcher.wal[].log_key_image(self.keyspace, self.ttl_map, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                         i = cmd_end_tok - 1
@@ -3715,7 +3714,7 @@ struct SlowPathHandler:
                             # WAIT may run before it. Stop at WAIT's byte end;
                             # the rest stays in the fd's buffer until the engine
                             # answers the WAIT and resumes it (as EXEC does).
-                            primary_consumed = cmd_byte_ends[cmd_idx]
+                            primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx]
                             i = num_tokens
                         else:
                             i = cmd_end_tok - 1
@@ -3777,39 +3776,39 @@ struct SlowPathHandler:
                                           self.vec_tomb)
                         i = cmd_end_tok - 1
                     # ── R3: HEXPIRE (7 bytes: h=104,e=101,x=120,p=112,i=105,r=114,e=101) ──
-                    elif tl == 7 and (tp[0]|0x20)==104 and (tp[1]|0x20)==101 and (tp[2]|0x20)==120 and (tp[3]|0x20)==112 and (tp[4]|0x20)==105 and (tp[5]|0x20)==114 and (tp[6]|0x20)==101:
+                    elif tl == 7 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==120 and (tp[unsafe_offset=3]|0x20)==112 and (tp[unsafe_offset=4]|0x20)==105 and (tp[unsafe_offset=5]|0x20)==114 and (tp[unsafe_offset=6]|0x20)==101:
                         _ = handle_hexpire(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── R3: HPEXPIRE (8 bytes: h,p,e,x,p,i,r,e) ──
-                    elif tl == 8 and (tp[0]|0x20)==104 and (tp[1]|0x20)==112 and (tp[2]|0x20)==101 and (tp[3]|0x20)==120 and (tp[4]|0x20)==112 and (tp[5]|0x20)==105 and (tp[6]|0x20)==114 and (tp[7]|0x20)==101:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==112 and (tp[unsafe_offset=2]|0x20)==101 and (tp[unsafe_offset=3]|0x20)==120 and (tp[unsafe_offset=4]|0x20)==112 and (tp[unsafe_offset=5]|0x20)==105 and (tp[unsafe_offset=6]|0x20)==114 and (tp[unsafe_offset=7]|0x20)==101:
                         _ = handle_hpexpire(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── R3: HEXPIREAT (9 bytes: h,e,x,p,i,r,e,a,t) ──
-                    elif tl == 9 and (tp[0]|0x20)==104 and (tp[1]|0x20)==101 and (tp[2]|0x20)==120 and (tp[3]|0x20)==112 and (tp[4]|0x20)==105 and (tp[5]|0x20)==114 and (tp[6]|0x20)==101 and (tp[7]|0x20)==97 and (tp[8]|0x20)==116:
+                    elif tl == 9 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==120 and (tp[unsafe_offset=3]|0x20)==112 and (tp[unsafe_offset=4]|0x20)==105 and (tp[unsafe_offset=5]|0x20)==114 and (tp[unsafe_offset=6]|0x20)==101 and (tp[unsafe_offset=7]|0x20)==97 and (tp[unsafe_offset=8]|0x20)==116:
                         _ = handle_hexpireat(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── R3: HPEXPIREAT (10 bytes: h,p,e,x,p,i,r,e,a,t) ──
-                    elif tl == 10 and (tp[0]|0x20)==104 and (tp[1]|0x20)==112 and (tp[2]|0x20)==101 and (tp[3]|0x20)==120 and (tp[4]|0x20)==112 and (tp[5]|0x20)==105 and (tp[6]|0x20)==114 and (tp[7]|0x20)==101 and (tp[8]|0x20)==97 and (tp[9]|0x20)==116:
+                    elif tl == 10 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==112 and (tp[unsafe_offset=2]|0x20)==101 and (tp[unsafe_offset=3]|0x20)==120 and (tp[unsafe_offset=4]|0x20)==112 and (tp[unsafe_offset=5]|0x20)==105 and (tp[unsafe_offset=6]|0x20)==114 and (tp[unsafe_offset=7]|0x20)==101 and (tp[unsafe_offset=8]|0x20)==97 and (tp[unsafe_offset=9]|0x20)==116:
                         _ = handle_hpexpireat(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── R3: HTTL (4 bytes: h=104,t=116,t=116,l=108) ──
-                    elif tl == 4 and (tp[0]|0x20)==104 and (tp[1]|0x20)==116 and (tp[2]|0x20)==116 and (tp[3]|0x20)==108:
+                    elif tl == 4 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==116 and (tp[unsafe_offset=2]|0x20)==116 and (tp[unsafe_offset=3]|0x20)==108:
                         _ = handle_httl(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     # ── R3: HPTTL (5 bytes: h=104,p=112,t=116,t=116,l=108) ──
-                    elif tl == 5 and (tp[0]|0x20)==104 and (tp[1]|0x20)==112 and (tp[2]|0x20)==116 and (tp[3]|0x20)==116 and (tp[4]|0x20)==108:
+                    elif tl == 5 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==112 and (tp[unsafe_offset=2]|0x20)==116 and (tp[unsafe_offset=3]|0x20)==116 and (tp[unsafe_offset=4]|0x20)==108:
                         _ = handle_hpttl(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     # ── R3: HPERSIST (8 bytes: h=104,p=112,e=101,r=114,s=115,i=105,s=115,t=116) ──
-                    elif tl == 8 and (tp[0]|0x20)==104 and (tp[1]|0x20)==112 and (tp[2]|0x20)==101 and (tp[3]|0x20)==114 and (tp[4]|0x20)==115 and (tp[5]|0x20)==105 and (tp[6]|0x20)==115 and (tp[7]|0x20)==116:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==112 and (tp[unsafe_offset=2]|0x20)==101 and (tp[unsafe_offset=3]|0x20)==114 and (tp[unsafe_offset=4]|0x20)==115 and (tp[unsafe_offset=5]|0x20)==105 and (tp[unsafe_offset=6]|0x20)==115 and (tp[unsafe_offset=7]|0x20)==116:
                         _ = handle_hpersist(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # ── R3: HEXPIRETIME (11 bytes: h,e,x,p,i,r,e,t,i,m,e) ──
-                    elif tl == 11 and (tp[0]|0x20)==104 and (tp[1]|0x20)==101 and (tp[2]|0x20)==120 and (tp[3]|0x20)==112 and (tp[4]|0x20)==105 and (tp[5]|0x20)==114 and (tp[6]|0x20)==101 and (tp[7]|0x20)==116 and (tp[8]|0x20)==105 and (tp[9]|0x20)==109 and (tp[10]|0x20)==101:
+                    elif tl == 11 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==120 and (tp[unsafe_offset=3]|0x20)==112 and (tp[unsafe_offset=4]|0x20)==105 and (tp[unsafe_offset=5]|0x20)==114 and (tp[unsafe_offset=6]|0x20)==101 and (tp[unsafe_offset=7]|0x20)==116 and (tp[unsafe_offset=8]|0x20)==105 and (tp[unsafe_offset=9]|0x20)==109 and (tp[unsafe_offset=10]|0x20)==101:
                         _ = handle_hexpiretime(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     # ── R3: HPEXPIRETIME (12 bytes: h,p,e,x,p,i,r,e,t,i,m,e) ──
-                    elif tl == 12 and (tp[0]|0x20)==104 and (tp[1]|0x20)==112 and (tp[2]|0x20)==101 and (tp[3]|0x20)==120 and (tp[4]|0x20)==112 and (tp[5]|0x20)==105 and (tp[6]|0x20)==114 and (tp[7]|0x20)==101 and (tp[8]|0x20)==116 and (tp[9]|0x20)==105 and (tp[10]|0x20)==109 and (tp[11]|0x20)==101:
+                    elif tl == 12 and (tp[unsafe_offset=0]|0x20)==104 and (tp[unsafe_offset=1]|0x20)==112 and (tp[unsafe_offset=2]|0x20)==101 and (tp[unsafe_offset=3]|0x20)==120 and (tp[unsafe_offset=4]|0x20)==112 and (tp[unsafe_offset=5]|0x20)==105 and (tp[unsafe_offset=6]|0x20)==114 and (tp[unsafe_offset=7]|0x20)==101 and (tp[unsafe_offset=8]|0x20)==116 and (tp[unsafe_offset=9]|0x20)==105 and (tp[unsafe_offset=10]|0x20)==109 and (tp[unsafe_offset=11]|0x20)==101:
                         _ = handle_hpexpiretime(tokens, i, cmd_end_tok, writer, self.keyspace)
                         i = cmd_end_tok - 1
                     # ── LINDEX ──
@@ -3985,7 +3984,7 @@ struct SlowPathHandler:
                     #    to the z,p ZPOPMAX match below and popped the WRONG end) ──
                     elif cmd_eq(tp, tl, "zpopmin"):
                         if i + 1 < cmd_end_tok:
-                            var zpmin_key = tokens[i+1].value()
+                            var zpmin_key = tokens[unsafe_offset=i+1].value()
                             # gh #238: the optional COUNT was neither honoured nor
                             # consumed. `ZPOPMIN key 2` popped one pair and left
                             # the "2" to be dispatched as its own command — one
@@ -3996,7 +3995,7 @@ struct SlowPathHandler:
                             var zpmin_n = 1
                             var zpmin_has_cnt = i + 2 < cmd_end_tok
                             if zpmin_has_cnt:
-                                zpmin_n = Int(strict_atol(tokens[i+2].value()))
+                                zpmin_n = Int(strict_atol(tokens[unsafe_offset=i+2].value()))
                             var zpmin_val = self.keyspace[].get(zpmin_key)
                             # gh #393: Redis reads COUNT as a non-negative long,
                             # before the key; a negative one answered `*0`.
@@ -4007,7 +4006,7 @@ struct SlowPathHandler:
                             elif zpmin_val.is_none():
                                 writer.append_empty_array_response()
                             elif zpmin_val.type.value == ValueType.ZSET:
-                                var zpmin_ptr = zpmin_val.as_zset().bitcast[SlabSkipList]()
+                                var zpmin_ptr = zpmin_val.as_zset().unsafe_bitcast[SlabSkipList]()
                                 var zpmin_avail = zpmin_ptr[].length
                                 var zpmin_out = zpmin_n if zpmin_n < zpmin_avail else zpmin_avail
                                 if zpmin_out <= 0:
@@ -4021,7 +4020,7 @@ struct SlowPathHandler:
                                         writer.append_array_header(2)
                                     # heap, not stack_allocation: gv_bytes writes it
                                     # out of line (the gh #349 tail-call hazard).
-                                    var _zpm_wb = alloc[UInt8](64)
+                                    var _zpm_wb = unsafe_alloc[UInt8](64)
                                     for _ in range(zpmin_out):
                                         var zpmin_res = zpmin_ptr[].pop_min()
                                         if not zpmin_res.valid or zpmin_res.obj.is_none(): break
@@ -4039,14 +4038,14 @@ struct SlowPathHandler:
                                         # a slow-path ZPOPMIN had popped.
                                         var _zpm_wl = 0
                                         var _zpm_wp = gv_bytes(zpmin_res.obj, _zpm_wb, _zpm_wl)
-                                        _ = self.dispatcher.wal[].append_kv(12, tokens[i+1].ptr, tokens[i+1].length, _zpm_wp, _zpm_wl)
+                                        _ = self.dispatcher.wal[].append_kv(12, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length, _zpm_wp, _zpm_wl)
                                         # gh #394: the popped member is ours; the reply copied it.
                                         zpmin_res.obj.free_str_payload()
                                     _zpm_wb.unsafe_free()
                                     # gh #234: an emptied zset is removed.
                                     if zpmin_ptr[].length == 0:
-                                        _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[i+1].ptr, tokens[i+1].length))
-                                        _ = self.dispatcher.wal[].append(2, tokens[i+1].ptr, tokens[i+1].length)
+                                        _ = remove_and_free(self.keyspace, GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length))
+                                        _ = self.dispatcher.wal[].append(2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
                             else:
                                 writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                             i = cmd_end_tok - 1
@@ -4177,19 +4176,19 @@ struct SlowPathHandler:
                     #      eventually mis-framed a bulk length and tripped the
                     #      catch-all `except`, which then dropped the whole batch.
                     # ── GEOPOS ──
-                    elif tl == 6 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==112 and (tp[4]|0x20)==111 and (tp[5]|0x20)==115:
+                    elif tl == 6 and (tp[unsafe_offset=0]|0x20)==103 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==111 and (tp[unsafe_offset=3]|0x20)==112 and (tp[unsafe_offset=4]|0x20)==111 and (tp[unsafe_offset=5]|0x20)==115:
                         _ = handle_geopos(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
                         i = cmd_end_tok - 1
                     # ── GEODIST ──
-                    elif tl == 7 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==100 and (tp[4]|0x20)==105 and (tp[5]|0x20)==115 and (tp[6]|0x20)==116:
+                    elif tl == 7 and (tp[unsafe_offset=0]|0x20)==103 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==111 and (tp[unsafe_offset=3]|0x20)==100 and (tp[unsafe_offset=4]|0x20)==105 and (tp[unsafe_offset=5]|0x20)==115 and (tp[unsafe_offset=6]|0x20)==116:
                         _ = handle_geodist(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
                         i = cmd_end_tok - 1
                     # ── GEOHASH ──
-                    elif tl == 7 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==104 and (tp[4]|0x20)==97 and (tp[5]|0x20)==115 and (tp[6]|0x20)==104:
+                    elif tl == 7 and (tp[unsafe_offset=0]|0x20)==103 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==111 and (tp[unsafe_offset=3]|0x20)==104 and (tp[unsafe_offset=4]|0x20)==97 and (tp[unsafe_offset=5]|0x20)==115 and (tp[unsafe_offset=6]|0x20)==104:
                         _ = handle_geohash(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool)
                         i = cmd_end_tok - 1
                     # ── GEORADIUS ──
-                    elif tl == 9 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==114 and (tp[4]|0x20)==97 and (tp[5]|0x20)==100 and (tp[6]|0x20)==105 and (tp[7]|0x20)==117 and (tp[8]|0x20)==115:
+                    elif tl == 9 and (tp[unsafe_offset=0]|0x20)==103 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==111 and (tp[unsafe_offset=3]|0x20)==114 and (tp[unsafe_offset=4]|0x20)==97 and (tp[unsafe_offset=5]|0x20)==100 and (tp[unsafe_offset=6]|0x20)==105 and (tp[unsafe_offset=7]|0x20)==117 and (tp[unsafe_offset=8]|0x20)==115:
                         _ = handle_georadius(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "georadius_ro"):
@@ -4199,15 +4198,15 @@ struct SlowPathHandler:
                         _ = handle_georadiusbymember(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map, True)
                         i = cmd_end_tok - 1
                     # ── GEOSEARCH ──
-                    elif tl == 9 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==115 and (tp[4]|0x20)==101 and (tp[5]|0x20)==97 and (tp[6]|0x20)==114 and (tp[7]|0x20)==99 and (tp[8]|0x20)==104:
+                    elif tl == 9 and (tp[unsafe_offset=0]|0x20)==103 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==111 and (tp[unsafe_offset=3]|0x20)==115 and (tp[unsafe_offset=4]|0x20)==101 and (tp[unsafe_offset=5]|0x20)==97 and (tp[unsafe_offset=6]|0x20)==114 and (tp[unsafe_offset=7]|0x20)==99 and (tp[unsafe_offset=8]|0x20)==104:
                         _ = handle_geosearch(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── GEOSEARCHSTORE ──
-                    elif tl == 14 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==115 and (tp[4]|0x20)==101 and (tp[5]|0x20)==97 and (tp[6]|0x20)==114 and (tp[7]|0x20)==99 and (tp[8]|0x20)==104 and (tp[9]|0x20)==115 and (tp[10]|0x20)==116 and (tp[11]|0x20)==111 and (tp[12]|0x20)==114 and (tp[13]|0x20)==101:
+                    elif tl == 14 and (tp[unsafe_offset=0]|0x20)==103 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==111 and (tp[unsafe_offset=3]|0x20)==115 and (tp[unsafe_offset=4]|0x20)==101 and (tp[unsafe_offset=5]|0x20)==97 and (tp[unsafe_offset=6]|0x20)==114 and (tp[unsafe_offset=7]|0x20)==99 and (tp[unsafe_offset=8]|0x20)==104 and (tp[unsafe_offset=9]|0x20)==115 and (tp[unsafe_offset=10]|0x20)==116 and (tp[unsafe_offset=11]|0x20)==111 and (tp[unsafe_offset=12]|0x20)==114 and (tp[unsafe_offset=13]|0x20)==101:
                         _ = handle_geosearchstore(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── GEORADIUSBYMEMBER ──
-                    elif tl == 17 and (tp[0]|0x20)==103 and (tp[1]|0x20)==101 and (tp[2]|0x20)==111 and (tp[3]|0x20)==114 and (tp[4]|0x20)==97 and (tp[5]|0x20)==100 and (tp[6]|0x20)==105 and (tp[7]|0x20)==117 and (tp[8]|0x20)==115 and (tp[9]|0x20)==98 and (tp[10]|0x20)==121 and (tp[11]|0x20)==109 and (tp[12]|0x20)==101 and (tp[13]|0x20)==109 and (tp[14]|0x20)==98 and (tp[15]|0x20)==101 and (tp[16]|0x20)==114:
+                    elif tl == 17 and (tp[unsafe_offset=0]|0x20)==103 and (tp[unsafe_offset=1]|0x20)==101 and (tp[unsafe_offset=2]|0x20)==111 and (tp[unsafe_offset=3]|0x20)==114 and (tp[unsafe_offset=4]|0x20)==97 and (tp[unsafe_offset=5]|0x20)==100 and (tp[unsafe_offset=6]|0x20)==105 and (tp[unsafe_offset=7]|0x20)==117 and (tp[unsafe_offset=8]|0x20)==115 and (tp[unsafe_offset=9]|0x20)==98 and (tp[unsafe_offset=10]|0x20)==121 and (tp[unsafe_offset=11]|0x20)==109 and (tp[unsafe_offset=12]|0x20)==101 and (tp[unsafe_offset=13]|0x20)==109 and (tp[unsafe_offset=14]|0x20)==98 and (tp[unsafe_offset=15]|0x20)==101 and (tp[unsafe_offset=16]|0x20)==114:
                         _ = handle_georadiusbymember(tokens, i, cmd_end_tok, writer, self.keyspace, self.skip_list_pool, self.dispatcher.wal, self.ttl_map)
                         i = cmd_end_tok - 1
                     # ── Stream Commands (src/commands/stream.mojo) ──
@@ -4220,13 +4219,13 @@ struct SlowPathHandler:
                         var _xadd_key_ptr = null_ptr[UInt8, MutUntrackedOrigin]()
                         var _xadd_key_len = 0
                         if i + 1 < cmd_end_tok:
-                            _xadd_key_ptr = tokens[i + 1].ptr
-                            _xadd_key_len = tokens[i + 1].length
+                            _xadd_key_ptr = tokens[unsafe_offset=i + 1].ptr
+                            _xadd_key_len = tokens[unsafe_offset=i + 1].length
                         _ = handle_xadd(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                         # The readers are answered by the event loop's next
                         # tick, not here: this connection is mid-batch.
-                        if self.blocked_readers.count_ptr[0] > 0 and _xadd_key_len > 0:
+                        if self.blocked_readers.count_ptr[unsafe_offset=0] > 0 and _xadd_key_len > 0:
                             self.blocked_readers.mark_ready(_xadd_key_ptr, _xadd_key_len)
                     elif cmd_eq(tp, tl, "xack"):
                         handle_xack(tokens, i, cmd_end_tok, writer, self.keyspace, self.dispatcher.wal)   # #40
@@ -4242,7 +4241,7 @@ struct SlowPathHandler:
                         var can_block = self.can_park_wait and on_primary and cmd_idx < num_cmds and fd >= 0
                         if handle_xread(tokens, i, cmd_end_tok, writer, self.keyspace, self.blocked_readers, fd, can_block):
                             self.parked_waits.park_fd(fd)
-                            primary_consumed = cmd_byte_ends[cmd_idx]
+                            primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx]
                             i = num_tokens
                         else:
                             i = cmd_end_tok - 1
@@ -4288,7 +4287,7 @@ struct SlowPathHandler:
                         if _xrg_r == XRG_BLOCK:
                             if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
                                                   tokens, _xrg_k, _xrg_k + _xrg_n, _xrg_dl, False, False, _xrg_g):
-                                primary_consumed = cmd_byte_ends[cmd_idx]
+                                primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx]
                                 i = num_tokens
                             else:
                                 writer.append_null_array_response()   # cannot wait: the timeout's nil
@@ -4369,7 +4368,7 @@ struct SlowPathHandler:
                         else:
                             exec_replay_count = handle_exec_start(fd, self.tx_state, writer, self._expiry_now())
                         if exec_replay_count > 0:
-                            exec_replay_q = self.tx_state.queues[Int(fd)]
+                            exec_replay_q = self.tx_state.queues[unsafe_offset=Int(fd)]
                             exec_replay_qi = 0
                             # gh #219: the replayed replies must fill the array
                             # header handle_exec_start just wrote, so NOTHING
@@ -4386,8 +4385,8 @@ struct SlowPathHandler:
                             # engine's drain loop (`_dispatch_recv_buffer`)
                             # re-enters with the remainder once the replay has
                             # closed out the array.
-                            if on_primary and cmd_idx < num_cmds and cmd_byte_ends[cmd_idx] < consumed_bytes:
-                                primary_consumed = cmd_byte_ends[cmd_idx]
+                            if on_primary and cmd_idx < num_cmds and cmd_byte_ends[unsafe_offset=cmd_idx] < consumed_bytes:
+                                primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx]
                                 i = num_tokens  # leave the dispatch loop
                     elif tl == 7 and cmd_matches_7(tp, 100, 105, 115, 99, 97, 114, 100):
                         _ = handle_discard(fd, self.tx_state, writer)
@@ -4404,14 +4403,14 @@ struct SlowPathHandler:
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "auth"):
                         _ = handle_auth(tokens, i, cmd_end_tok, writer, config.server.requirepass, self.tx_state.authed, fd,
-                                         rebind[UnsafePointer[TenantTable, MutUntrackedOrigin]](UnsafePointer(to=self.tenant_table)),
+                                         rebind[Pointer[TenantTable, MutUntrackedOrigin]](Pointer(to=self.tenant_table)),
                                          self.tx_state.tenant_id)
                         # #47: a failed AUTH goes to ACL LOG, under the user it named
                         if self._wrote_wrongpass(writer, cmd_write_start, cmd_flushes):
                             var _au = String("default")
                             if cmd_end_tok - i == 3:
-                                _au = bytes_to_string(tokens[i + 1].ptr, tokens[i + 1].length)
-                            self._acl_log("auth", "AUTH", _au^, fd, n - (cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0), writer)
+                                _au = bytes_to_string(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
+                            self._acl_log("auth", "AUTH", _au^, fd, n - (cmd_byte_ends[unsafe_offset=cmd_idx - 1] if cmd_idx > 0 else 0), writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "flushdb"):
                         _ = handle_flushdb(tokens, i, cmd_end_tok, self.keyspace, writer, self.dispatcher.wal)
@@ -4419,7 +4418,7 @@ struct SlowPathHandler:
                     # All six bytes: `tl == 6 and 'd','b'` matched ANY six-byte
                     # command starting "db" (DBSIZ\0 ran DBSIZE), which is the
                     # gh #162 shape — match the whole command name.
-                    elif tl == 6 and (tp[0]|0x20) == 100 and (tp[1]|0x20) == 98 and (tp[2]|0x20) == 115 and (tp[3]|0x20) == 105 and (tp[4]|0x20) == 122 and (tp[5]|0x20) == 101:
+                    elif tl == 6 and (tp[unsafe_offset=0]|0x20) == 100 and (tp[unsafe_offset=1]|0x20) == 98 and (tp[unsafe_offset=2]|0x20) == 115 and (tp[unsafe_offset=3]|0x20) == 105 and (tp[unsafe_offset=4]|0x20) == 122 and (tp[unsafe_offset=5]|0x20) == 101:
                         _ = handle_dbsize(self.keyspace, writer)
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "select"):
@@ -4470,7 +4469,7 @@ struct SlowPathHandler:
                     elif tl == 6 and cmd_matches_6(tp, 99, 108, 105, 101, 110, 116):
                         # #47: a client that kills itself is closed after this
                         # reply; what it sent after the command is dropped
-                        var _cl_start = cmd_byte_ends[cmd_idx - 1] if cmd_idx > 0 else 0
+                        var _cl_start = cmd_byte_ends[unsafe_offset=cmd_idx - 1] if cmd_idx > 0 else 0
                         if self._client_cmd(tokens, i, cmd_end_tok, fd, writer, n - _cl_start, config) and on_primary:
                             primary_consumed = n
                             i = num_tokens
@@ -4485,11 +4484,11 @@ struct SlowPathHandler:
                             writer.append_error_response("ERR wrong number of arguments for '"
                                                          + String("blpop" if _bpop_left else "brpop") + "' command")
                         else:
-                            var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                            var _bdl = parse_block_timeout(tokens[unsafe_offset=cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
                             if _bdl >= 0 and not self._bpop_lists(tokens, i + 1, cmd_end_tok - 1, _bpop_left, writer):
                                 if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
                                                       tokens, i + 1, cmd_end_tok - 1, _bdl, False):
-                                    primary_consumed = cmd_byte_ends[cmd_idx]
+                                    primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx]
                                     i = num_tokens
                                 else:
                                     writer.append_null_array_response()
@@ -4556,15 +4555,15 @@ struct SlowPathHandler:
                         _ = handle_vemb(tokens, i, cmd_end_tok, self.keyspace, writer)
                         i = cmd_end_tok - 1
                     # VISMEMBER (9 bytes)
-                    elif tl == 9 and (tp[0]|0x20)==118 and (tp[1]|0x20)==105 and (tp[2]|0x20)==115 and (tp[3]|0x20)==109 and (tp[4]|0x20)==101 and (tp[5]|0x20)==109 and (tp[6]|0x20)==98 and (tp[7]|0x20)==101 and (tp[8]|0x20)==114:
+                    elif tl == 9 and (tp[unsafe_offset=0]|0x20)==118 and (tp[unsafe_offset=1]|0x20)==105 and (tp[unsafe_offset=2]|0x20)==115 and (tp[unsafe_offset=3]|0x20)==109 and (tp[unsafe_offset=4]|0x20)==101 and (tp[unsafe_offset=5]|0x20)==109 and (tp[unsafe_offset=6]|0x20)==98 and (tp[unsafe_offset=7]|0x20)==101 and (tp[unsafe_offset=8]|0x20)==114:
                         _ = handle_vismember(tokens, i, cmd_end_tok, self.keyspace, writer)
                         i = cmd_end_tok - 1
                     # VSETATTR (8 bytes)
-                    elif tl == 8 and (tp[0]|0x20)==118 and (tp[1]|0x20)==115 and (tp[2]|0x20)==101 and (tp[3]|0x20)==116 and (tp[4]|0x20)==97 and (tp[5]|0x20)==116 and (tp[6]|0x20)==116 and (tp[7]|0x20)==114:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==118 and (tp[unsafe_offset=1]|0x20)==115 and (tp[unsafe_offset=2]|0x20)==101 and (tp[unsafe_offset=3]|0x20)==116 and (tp[unsafe_offset=4]|0x20)==97 and (tp[unsafe_offset=5]|0x20)==116 and (tp[unsafe_offset=6]|0x20)==116 and (tp[unsafe_offset=7]|0x20)==114:
                         _ = handle_vsetattr(tokens, i, cmd_end_tok, self.keyspace, writer, self.dispatcher.wal)
                         i = cmd_end_tok - 1
                     # VGETATTR (8 bytes)
-                    elif tl == 8 and (tp[0]|0x20)==118 and (tp[1]|0x20)==103 and (tp[2]|0x20)==101 and (tp[3]|0x20)==116 and (tp[4]|0x20)==97 and (tp[5]|0x20)==116 and (tp[6]|0x20)==116 and (tp[7]|0x20)==114:
+                    elif tl == 8 and (tp[unsafe_offset=0]|0x20)==118 and (tp[unsafe_offset=1]|0x20)==103 and (tp[unsafe_offset=2]|0x20)==101 and (tp[unsafe_offset=3]|0x20)==116 and (tp[unsafe_offset=4]|0x20)==97 and (tp[unsafe_offset=5]|0x20)==116 and (tp[unsafe_offset=6]|0x20)==116 and (tp[unsafe_offset=7]|0x20)==114:
                         _ = handle_vgetattr(tokens, i, cmd_end_tok, self.keyspace, writer)
                         i = cmd_end_tok - 1
                     # VINFO (5 bytes: v=118,i=105,n=110,f=102,o=111)
@@ -4572,7 +4571,7 @@ struct SlowPathHandler:
                         _ = handle_vinfo(tokens, i, cmd_end_tok, self.keyspace, writer)
                         i = cmd_end_tok - 1
                     # VRANDMEMBER (11 bytes)
-                    elif tl == 11 and (tp[0]|0x20)==118 and (tp[1]|0x20)==114 and (tp[2]|0x20)==97 and (tp[3]|0x20)==110 and (tp[4]|0x20)==100 and (tp[5]|0x20)==109 and (tp[6]|0x20)==101 and (tp[7]|0x20)==109 and (tp[8]|0x20)==98 and (tp[9]|0x20)==101 and (tp[10]|0x20)==114:
+                    elif tl == 11 and (tp[unsafe_offset=0]|0x20)==118 and (tp[unsafe_offset=1]|0x20)==114 and (tp[unsafe_offset=2]|0x20)==97 and (tp[unsafe_offset=3]|0x20)==110 and (tp[unsafe_offset=4]|0x20)==100 and (tp[unsafe_offset=5]|0x20)==109 and (tp[unsafe_offset=6]|0x20)==101 and (tp[unsafe_offset=7]|0x20)==109 and (tp[unsafe_offset=8]|0x20)==98 and (tp[unsafe_offset=9]|0x20)==101 and (tp[unsafe_offset=10]|0x20)==114:
                         _ = handle_vrandmember(tokens, i, cmd_end_tok, self.keyspace, writer)
                         i = cmd_end_tok - 1
                     # VLINKS (6 bytes: v=118,l=108,i=105,n=110,k=107,s=115)
@@ -4631,15 +4630,15 @@ struct SlowPathHandler:
                             var _bdir_ok = True
                             if _blm:
                                 for _d in range(i + 3, i + 5):
-                                    if not arg_eq(tokens[_d].ptr, tokens[_d].length, "left") \
-                                       and not arg_eq(tokens[_d].ptr, tokens[_d].length, "right"):
+                                    if not arg_eq(tokens[unsafe_offset=_d].ptr, tokens[unsafe_offset=_d].length, "left") \
+                                       and not arg_eq(tokens[unsafe_offset=_d].ptr, tokens[unsafe_offset=_d].length, "right"):
                                         _bdir_ok = False
                             if not _bdir_ok:
                                 writer.append_error_response("ERR syntax error")
                             else:
-                                var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                                var _bdl = parse_block_timeout(tokens[unsafe_offset=cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
                                 if _bdl >= 0:
-                                    var _bsv = self.keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+                                    var _bsv = self.keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length))
                                     if not _bsv.is_none():
                                         # the source exists: the move runs (or errors) now
                                         if _blm:
@@ -4648,7 +4647,7 @@ struct SlowPathHandler:
                                             self._rpoplpush(tokens, i, writer)
                                     elif self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
                                                             tokens, i + 1, i + 2, _bdl, False, True):
-                                        primary_consumed = cmd_byte_ends[cmd_idx]
+                                        primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx]
                                         i = num_tokens
                                     else:
                                         writer.append_null_response()
@@ -4666,7 +4665,7 @@ struct SlowPathHandler:
                             if _bmp.error.byte_length() > 0:
                                 writer.append_error_response(_bmp.error)
                             else:
-                                var _bdl = parse_block_timeout(tokens[i + 1], Int64(_get_now_ns() // 1_000_000), writer)
+                                var _bdl = parse_block_timeout(tokens[unsafe_offset=i + 1], Int64(_get_now_ns() // 1_000_000), writer)
                                 if _bdl >= 0:
                                     var _served: Bool
                                     if _bz:
@@ -4677,7 +4676,7 @@ struct SlowPathHandler:
                                     if not _served:
                                         if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
                                                               tokens, i + 3, i + 3 + _bmp.numkeys, _bdl, _bz):
-                                            primary_consumed = cmd_byte_ends[cmd_idx]
+                                            primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx]
                                             i = num_tokens
                                         else:
                                             writer.append_null_array_response()
@@ -4689,11 +4688,11 @@ struct SlowPathHandler:
                             writer.append_error_response("ERR wrong number of arguments for '"
                                                          + String("bzpopmin" if _bmin else "bzpopmax") + "' command")
                         else:
-                            var _bdl = parse_block_timeout(tokens[cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
+                            var _bdl = parse_block_timeout(tokens[unsafe_offset=cmd_end_tok - 1], Int64(_get_now_ns() // 1_000_000), writer)
                             if _bdl >= 0 and not self._bzpop(tokens, i + 1, cmd_end_tok - 1, _bmin, writer):
                                 if self._park_blocked(fd, buffer, cmd_idx, num_cmds, cmd_byte_ends, on_primary,
                                                       tokens, i + 1, cmd_end_tok - 1, _bdl, True):
-                                    primary_consumed = cmd_byte_ends[cmd_idx]
+                                    primary_consumed = cmd_byte_ends[unsafe_offset=cmd_idx]
                                     i = num_tokens
                                 else:
                                     writer.append_null_array_response()
@@ -4740,9 +4739,9 @@ struct SlowPathHandler:
                     elif cmd_eq(tp, tl, "restore-asking"):
                         # RESTORE, as a cluster's MIGRATE sends it mid-resharding
                         if handle_restore(tokens, i, cmd_end_tok, writer, self.keyspace, self.ttl_map, self.dispatcher.wal):
-                            self.tx_state.bump_key_version(tokens[i + 1].ptr, tokens[i + 1].length)
+                            self.tx_state.bump_key_version(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                             _ = ingest_whole_hash(self.shared_hnsw, self.keyspace, self.dispatcher.wal,   # #46
-                                                  self.vec_tomb, tokens[i + 1].ptr, tokens[i + 1].length)
+                                                  self.vec_tomb, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
                         i = cmd_end_tok - 1
                     # #47: READONLY / READWRITE / ASKING outside cluster mode (the
                     # fast path answers them in cluster mode), or with arguments
@@ -4754,9 +4753,9 @@ struct SlowPathHandler:
                             writer.append_error_response("ERR This instance has cluster support disabled")
                         else:
                             if is_not_null(self.local_affinity) and cmd_eq(tp, tl, "readonly"):
-                                self.local_affinity[Int(fd)] = 3
+                                self.local_affinity[unsafe_offset=Int(fd)] = 3
                             elif is_not_null(self.local_affinity) and cmd_eq(tp, tl, "readwrite"):
-                                self.local_affinity[Int(fd)] = 0
+                                self.local_affinity[unsafe_offset=Int(fd)] = 0
                             writer.append_ok_response()
                         i = cmd_end_tok - 1
                     elif cmd_eq(tp, tl, "xsetid"):
@@ -4811,11 +4810,11 @@ struct SlowPathHandler:
                                                self.slowlog.elapsed_us(_sl_t0, _sl_t1), fd)
                     i += 1
                     # Advance command index
-                    while cmd_idx < num_cmds and i >= cmd_ends[cmd_idx]:
+                    while cmd_idx < num_cmds and i >= cmd_ends[unsafe_offset=cmd_idx]:
                         cmd_idx += 1
                 # Replay continuation (in the same stack frame).
                 if exec_replay_qi < exec_replay_count and is_not_null(exec_replay_q):
-                    var rq = exec_replay_q[exec_replay_qi]
+                    var rq = exec_replay_q[unsafe_offset=exec_replay_qi]
                     exec_replay_qi += 1
                     if is_not_null(rq.data) and rq.length > 0:
                         # Re-parse the queued frame, reset dispatch state,
@@ -4843,10 +4842,10 @@ struct SlowPathHandler:
                             rnt = 0
                         num_tokens = rnt
                         num_cmds = rnc
-                        unsafe_memcpy(dest=cmd_ends.bitcast[UInt8](),
-                               src=rce.bitcast[UInt8](), count=MAX_CMD_ENDS * 8)
-                        unsafe_memcpy(dest=cmd_byte_ends.bitcast[UInt8](),
-                               src=rcbe.bitcast[UInt8](), count=MAX_CMD_ENDS * 8)
+                        unsafe_memcpy(dest=cmd_ends.unsafe_bitcast[UInt8](),
+                               src=rce.unsafe_bitcast[UInt8](), count=MAX_CMD_ENDS * 8)
+                        unsafe_memcpy(dest=cmd_byte_ends.unsafe_bitcast[UInt8](),
+                               src=rcbe.unsafe_bitcast[UInt8](), count=MAX_CMD_ENDS * 8)
                         i = 0
                         cmd_idx = 0
                         continue
@@ -4872,7 +4871,7 @@ struct SlowPathHandler:
             # reply has gone out (`clients.close_after`).
             if self.kill_after_reply == fd:
                 self.kill_after_reply = -1
-                self.clients.close_after[Int(fd)] = 1
+                self.clients.close_after[unsafe_offset=Int(fd)] = 1
                 if not writer.ctx[].use_uring and kq != -1 and is_not_null(writer.ctx[].pending_offsets) \
                    and not writer.owes(Int(fd)):
                     _ = external_call["pion_kill_fd", Int32](fd)
@@ -4919,12 +4918,12 @@ struct SlowPathHandler:
                 self._reply_gate(fd, writer, cmd_write_start, _rg_flushes)
             writer.flush_response(fd, server, kq)
             if _out_of_step:
-                self.clients.close_after[Int(fd)] = 1
+                self.clients.close_after[unsafe_offset=Int(fd)] = 1
                 if not writer.ctx[].use_uring and kq != -1 and not writer.owes(Int(fd)):
                     _ = external_call["pion_kill_fd", Int32](fd)
                 return n
             if on_primary and cmd_idx < num_cmds:
-                var skip_to = cmd_byte_ends[cmd_idx]
+                var skip_to = cmd_byte_ends[unsafe_offset=cmd_idx]
                 if skip_to > 0 and skip_to <= n:
                     return skip_to
             return n
@@ -4937,43 +4936,43 @@ struct SlowPathHandler:
         return c if c != 0 else Int64(_get_now_ns())
 
     @always_inline
-    def _host(mut self) -> UnsafePointer[NoneType, MutUntrackedOrigin]:
+    def _host(mut self) -> Pointer[NoneType, MutUntrackedOrigin]:
         """This handler's address: the context pion_script_dispatch is given back."""
-        return UnsafePointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(UnsafePointer(to=self)))
+        return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(Pointer(to=self)))
 
     def _script_context(mut self, fd: Int32, server: TCPServer, kq: Int32, mut hnsw: HNSWGraph,
                         mut db_size: Int, config: PionConfig, mut writer: ResponseWriter):
         """Remember the outer call's context for script_dispatch. Valid for this
         command only: the script runs synchronously inside it."""
         self.script_fd = fd
-        self.script_main_writer = UnsafePointer[ResponseWriter, MutUntrackedOrigin](
-            unsafe_from_address=Int(UnsafePointer(to=writer)))
-        self.script_server = UnsafePointer[TCPServer, MutUntrackedOrigin](
-            unsafe_from_address=Int(UnsafePointer(to=server)))
+        self.script_main_writer = Pointer[ResponseWriter, MutUntrackedOrigin](
+            unsafe_from_address=Int(Pointer(to=writer)))
+        self.script_server = Pointer[TCPServer, MutUntrackedOrigin](
+            unsafe_from_address=Int(Pointer(to=server)))
         self.script_kq = kq
-        self.script_hnsw = UnsafePointer[HNSWGraph, MutUntrackedOrigin](
-            unsafe_from_address=Int(UnsafePointer(to=hnsw)))
-        self.script_db_size = UnsafePointer[Int, MutUntrackedOrigin](
-            unsafe_from_address=Int(UnsafePointer(to=db_size)))
-        self.script_config = UnsafePointer[PionConfig, MutUntrackedOrigin](
-            unsafe_from_address=Int(UnsafePointer(to=config)))
+        self.script_hnsw = Pointer[HNSWGraph, MutUntrackedOrigin](
+            unsafe_from_address=Int(Pointer(to=hnsw)))
+        self.script_db_size = Pointer[Int, MutUntrackedOrigin](
+            unsafe_from_address=Int(Pointer(to=db_size)))
+        self.script_config = Pointer[PionConfig, MutUntrackedOrigin](
+            unsafe_from_address=Int(Pointer(to=config)))
 
     def script_dispatch(mut self, argc: Int,
-                        argv: UnsafePointer[UnsafePointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
-                        lens: UnsafePointer[Int64, MutUntrackedOrigin], flags: Int, resp: Int,
-                        reply: UnsafePointer[UnsafePointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
-                        wrote: UnsafePointer[Int64, MutUntrackedOrigin]) -> Int:
+                        argv: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                        lens: Pointer[Int64, MutUntrackedOrigin], flags: Int, resp: Int,
+                        reply: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
+                        wrote: Pointer[Int64, MutUntrackedOrigin]) -> Int:
         """One redis.call() from a running script (#36): argv runs as a command
         through process_slow_path, and its reply comes back (reply[0], length)
         from the capture-only script writer. Redis's script checks come first:
         an unknown command, the arity, `noscript`, a write from a read-only
         script. flags: 1 read-only, 2 existence check only, 4 allow-oom."""
-        var np = argv[0]
-        var nl = Int(lens[0])
+        var np = argv[unsafe_offset=0]
+        var nl = Int(lens[unsafe_offset=0])
         if flags & 2 != 0:
             return 1 if command_exists(np, nl) else 0
         if is_null(self.script_writer):
-            self.script_writer = alloc[ResponseWriter](1)
+            self.script_writer = unsafe_alloc[ResponseWriter](1)
             self.script_writer.unsafe_write(ResponseWriter(capture_only=True))
         var w = self.script_writer
         w[].offset = 0
@@ -4981,8 +4980,8 @@ struct SlowPathHandler:
         w[].ctx[].overflow_emitted = False
         w[].proto = UInt8(resp)
         var ar = command_arity(np, nl)
-        var sp = argv[1] if argc > 1 else np
-        var sl = Int(lens[1]) if argc > 1 else 0
+        var sp = argv[unsafe_offset=1] if argc > 1 else np
+        var sl = Int(lens[unsafe_offset=1]) if argc > 1 else 0
         if not command_exists(np, nl):
             w[].append_error_response("ERR Unknown Redis command called from script")
         elif (ar > 0 and argc != ar) or (ar < 0 and argc < -ar):
@@ -4994,31 +4993,31 @@ struct SlowPathHandler:
         else:
             var need = 16
             for k in range(argc):
-                need += Int(lens[k]) + 24
+                need += Int(lens[unsafe_offset=k]) + 24
             if need > self.script_frame_cap:
                 if is_not_null(self.script_frame):
-                    self.script_frame.free()
-                self.script_frame = alloc[UInt8](need)
+                    self.script_frame.unsafe_free()
+                self.script_frame = unsafe_alloc[UInt8](need)
                 self.script_frame_cap = need
             var f = self.script_frame
             var o = 0
-            f[o] = 42
+            f[unsafe_offset=o] = 42
             o += 1
-            o += format_int_to_buf(f + o, 0, Int64(argc))
-            f[o] = 13
-            f[o + 1] = 10
+            o += format_int_to_buf(f.unsafe_offset(o), 0, Int64(argc))
+            f[unsafe_offset=o] = 13
+            f[unsafe_offset=o + 1] = 10
             o += 2
             for k in range(argc):
-                f[o] = 36
+                f[unsafe_offset=o] = 36
                 o += 1
-                o += format_int_to_buf(f + o, 0, lens[k])
-                f[o] = 13
-                f[o + 1] = 10
+                o += format_int_to_buf(f.unsafe_offset(o), 0, lens[unsafe_offset=k])
+                f[unsafe_offset=o] = 13
+                f[unsafe_offset=o + 1] = 10
                 o += 2
-                unsafe_memcpy(dest=f + o, src=argv[k], count=Int(lens[k]))
-                o += Int(lens[k])
-                f[o] = 13
-                f[o + 1] = 10
+                unsafe_memcpy(dest=f.unsafe_offset(o), src=argv[unsafe_offset=k], count=Int(lens[unsafe_offset=k]))
+                o += Int(lens[unsafe_offset=k])
+                f[unsafe_offset=o] = 13
+                f[unsafe_offset=o + 1] = 10
                 o += 2
             var park = self.can_park_wait
             self.can_park_wait = False        # WAIT and XREAD BLOCK answer at once
@@ -5032,11 +5031,11 @@ struct SlowPathHandler:
             self.script_allow_oom = False
             self.can_park_wait = park
             if command_is_write(np, nl):
-                wrote[0] = 1
+                wrote[unsafe_offset=0] = 1
         # #49: a reply too long for the buffer spilled into cap_buf, where it
         # is read whole; the next call starts both over
         var rlen = w[].captured()
-        reply[0] = w[].ctx[].cap_buf if w[].ctx[].cap_len > 0 else w[].buffer
+        reply[unsafe_offset=0] = w[].ctx[].cap_buf if w[].ctx[].cap_len > 0 else w[].buffer
         return rlen
 
     def drain_pubsub(mut self, mut writer: ResponseWriter, server: TCPServer, kq: Int32):
@@ -5058,17 +5057,17 @@ struct SlowPathHandler:
             for c in range(n_sh):
                 if c == self.worker_id: continue
                 var qidx = c * n_sh + self.worker_id
-                if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].query_ready + qidx, UInt64(0)) == 0: continue
-                var qs = shard_bus[].query_slots[qidx]
-                Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shard_bus[].query_ready + qidx, UInt64(0))
+                if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].query_ready.unsafe_offset(qidx), UInt64(0)) == 0: continue
+                var qs = shard_bus[].query_slots[unsafe_offset=qidx]
+                Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shard_bus[].query_ready.unsafe_offset(qidx), UInt64(0))
                 self.scratch_dists.clear()
                 try:
                     var sids = hnsw.search_fp32_scored(qs.query_fp32, Int(qs.k), self.scratch_dists, Int(qs.ef))
                     shard_bus[].write_result(c, self.worker_id, sids, self.scratch_dists, qs.seq)
                 except:
-                    shard_bus[].result_counts[c * n_sh + self.worker_id] = 0
-                    shard_bus[].result_seq[c * n_sh + self.worker_id] = qs.seq
-                    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shard_bus[].result_ready + c * n_sh + self.worker_id, UInt64(1))
+                    shard_bus[].result_counts[unsafe_offset=c * n_sh + self.worker_id] = 0
+                    shard_bus[].result_seq[unsafe_offset=c * n_sh + self.worker_id] = qs.seq
+                    Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shard_bus[].result_ready.unsafe_offset(c * n_sh).unsafe_offset(self.worker_id), UInt64(1))
 
         # Check completion and send deferred responses.
         var i = 0
@@ -5077,7 +5076,7 @@ struct SlowPathHandler:
             # still holds whichever connection was dispatched last, and
             # write_ft_search_response picks the RESP3 map or the RESP2 array
             # from it (as pubsub_drain reads resp_proto per recipient).
-            writer.proto = self.tx_state.resp_proto[Int(self.deferred_fds[i])]
+            writer.proto = self.tx_state.resp_proto[unsafe_offset=Int(self.deferred_fds[i])]
             writer.ctx[].cur_fd = self.deferred_fds[i]   # #49: what is written here is that fd's
             var active = self.deferred_active[i]
             var done   = self.deferred_done[i]
@@ -5088,8 +5087,8 @@ struct SlowPathHandler:
                 if not ((active >> UInt32(shard_id)) & UInt32(1)): continue
                 if (done >> UInt32(shard_id)) & UInt32(1): continue
                 var ridx = self.worker_id * ns + shard_id
-                if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].result_ready + ridx, UInt64(0)) == 0: continue
-                if shard_bus[].result_seq[ridx] != seq: continue
+                if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].result_ready.unsafe_offset(ridx), UInt64(0)) == 0: continue
+                if shard_bus[].result_seq[unsafe_offset=ridx] != seq: continue
                 done |= (UInt32(1) << UInt32(shard_id))
             self.deferred_done[i] = done
             if done != active:
@@ -5118,13 +5117,13 @@ struct SlowPathHandler:
             for shard_id in range(ns):
                 if not ((active >> UInt32(shard_id)) & UInt32(1)): continue
                 var idx2 = self.worker_id * ns + shard_id
-                var cnt = Int(shard_bus[].result_counts[idx2])
+                var cnt = Int(shard_bus[].result_counts[unsafe_offset=idx2])
                 if cnt < 0 or cnt > MAX_SHARD_K: cnt = 0
-                var base_ids    = shard_bus[].result_ids    + idx2 * MAX_SHARD_K
-                var base_scores = shard_bus[].result_scores + idx2 * MAX_SHARD_K
+                var base_ids    = shard_bus[].result_ids.unsafe_offset(idx2 * MAX_SHARD_K)
+                var base_scores = shard_bus[].result_scores.unsafe_offset(idx2 * MAX_SHARD_K)
                 for r in range(cnt):
-                    all_ids.append(Int(base_ids[r]))
-                    all_scores.append(base_scores[r])
+                    all_ids.append(Int(base_ids[unsafe_offset=r]))
+                    all_scores.append(base_scores[unsafe_offset=r])
             var n_all   = len(all_ids)
             var final_k = Int(self.deferred_ks[i]) if Int(self.deferred_ks[i]) < n_all else n_all
             for fi in range(final_k):

@@ -1,6 +1,6 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr, is_null, is_not_null
 from src.network.io_ring import ring_at, ring_push, is_sleeping, evfd_signal, IO_MSG_KICK
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import CompilationTarget
@@ -155,9 +155,9 @@ struct WriterCtx(Movable):
         output state, which is how the paths that would write to a connection
         recognise it (`is_null(pending_offsets)`)."""
         if connections:
-            self.pending_offsets = alloc[Int](65536)
-            self.pending_buffers = alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
-            self.uring_inflight = alloc[Int](65536)
+            self.pending_offsets = unsafe_alloc[Int](65536)
+            self.pending_buffers = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
+            self.uring_inflight = unsafe_alloc[Int](65536)
             for i in range(65536):
                 self.pending_offsets[unsafe_offset=i] = 0
                 self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
@@ -215,7 +215,7 @@ struct WriterCtx(Movable):
                 ncap = self.cap_len + n
             if ncap < RESP_BUF_SIZE:
                 ncap = RESP_BUF_SIZE
-            var nb = alloc[UInt8](ncap)
+            var nb = unsafe_alloc[UInt8](ncap)
             if self.cap_len > 0:
                 unsafe_memcpy(dest=nb, src=self.cap_buf, count=self.cap_len)
             if is_not_null(self.cap_buf):
@@ -226,10 +226,10 @@ struct WriterCtx(Movable):
         self.cap_len += n
 
     def _ovf_init(mut self):
-        self.ovf_bufs = alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
-        self.ovf_lens = alloc[Int](65536)
-        self.ovf_heads = alloc[Int](65536)
-        self.ovf_caps = alloc[Int](65536)
+        self.ovf_bufs = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
+        self.ovf_lens = unsafe_alloc[Int](65536)
+        self.ovf_heads = unsafe_alloc[Int](65536)
+        self.ovf_caps = unsafe_alloc[Int](65536)
         for i in range(65536):
             self.ovf_bufs[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
             self.ovf_lens[unsafe_offset=i] = 0
@@ -272,7 +272,7 @@ struct WriterCtx(Movable):
                     ncap = live + n
                 if ncap < OUT_BLOCK:
                     ncap = OUT_BLOCK
-                var nb = alloc[UInt8](ncap)
+                var nb = unsafe_alloc[UInt8](ncap)
                 if live > 0:
                     unsafe_memcpy(dest=nb, src=buf.unsafe_offset(head), count=live)
                 if is_not_null(buf):
@@ -296,7 +296,7 @@ struct WriterCtx(Movable):
         var left = n
         if not self.out_overflowed(ci):
             if is_null(self.pending_buffers[unsafe_offset=ci]):
-                self.pending_buffers[unsafe_offset=ci] = alloc[UInt8](OUT_BLOCK)
+                self.pending_buffers[unsafe_offset=ci] = unsafe_alloc[UInt8](OUT_BLOCK)
             var cur = self.pending_offsets[unsafe_offset=ci]
             var take = OUT_BLOCK - cur
             if take > left:
@@ -315,7 +315,7 @@ struct WriterCtx(Movable):
         if not self.out_overflowed(ci):
             return
         if is_null(self.pending_buffers[unsafe_offset=ci]):
-            self.pending_buffers[unsafe_offset=ci] = alloc[UInt8](OUT_BLOCK)
+            self.pending_buffers[unsafe_offset=ci] = unsafe_alloc[UInt8](OUT_BLOCK)
         var cur = self.pending_offsets[unsafe_offset=ci]
         var head = self.ovf_heads[unsafe_offset=ci]
         var take = OUT_BLOCK - cur
@@ -538,9 +538,9 @@ struct ResponseWriter(Movable):
 
 
     def __init__(out self):
-        self.buffer = alloc[UInt8](RESP_BUF_SIZE)
+        self.buffer = unsafe_alloc[UInt8](RESP_BUF_SIZE)
         self.offset = 0
-        self.ctx = alloc[WriterCtx](1)
+        self.ctx = unsafe_alloc[WriterCtx](1)
         self.ctx.unsafe_write(WriterCtx(connections=True))
         self.proto = 2
 
@@ -552,9 +552,9 @@ struct ResponseWriter(Movable):
         given kq = -1, the no-op flush the XDP lane uses. (A `capture` field on
         every writer cost the MSET and GET helpers, which take the writer, about
         1% more instructions — the effect WriterCtx exists to avoid.)"""
-        self.buffer = alloc[UInt8](RESP_BUF_SIZE)
+        self.buffer = unsafe_alloc[UInt8](RESP_BUF_SIZE)
         self.offset = 0
-        self.ctx = alloc[WriterCtx](1)
+        self.ctx = unsafe_alloc[WriterCtx](1)
         self.ctx.unsafe_write(WriterCtx(connections=False))
         self.proto = 2
 
@@ -1090,11 +1090,11 @@ struct ResponseWriter(Movable):
         stop hand-rolling the bytes (several already did, inconsistently)."""
         if self.offset + 16 > RESP_LIMIT:
             if not self._fixed_cold(): return
-        self.buffer[self.offset] = 42 # '*'
+        self.buffer[unsafe_offset=self.offset] = 42 # '*'
         self.offset += 1
         self.offset = format_int_to_buf(self.buffer, self.offset, Int64(count))
-        self.buffer[self.offset] = 13 # '\r'
-        self.buffer[self.offset + 1] = 10 # '\n'
+        self.buffer[unsafe_offset=self.offset] = 13 # '\r'
+        self.buffer[unsafe_offset=self.offset + 1] = 10 # '\n'
         self.offset += 2
 
     @always_inline

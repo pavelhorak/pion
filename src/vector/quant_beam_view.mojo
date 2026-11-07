@@ -10,7 +10,6 @@ Unlike the INT8 beam, these beams keep the older dual-heap discipline
 allocate through the Mojo runtime the engine links. Same allocator on both
 sides of the call; recorded because the INT8 beam's view does not allocate.
 """
-from std.memory.unsafe_pointer import UnsafePointer
 
 from src.common.heap import MinHeap, MaxHeap
 from .hnsw_types import HNSWNode
@@ -24,23 +23,23 @@ comptime QUANT_KIND_TURBO = 2
 struct QuantBeamView1536(Copyable, Movable):
     var kind: Int
     var ef: Int
-    var candidates: UnsafePointer[MinHeap, MutUntrackedOrigin]
-    var results: UnsafePointer[MaxHeap, MutUntrackedOrigin]
-    var query_block_int8: UnsafePointer[Int8, MutUntrackedOrigin]
-    var query_block_scales: UnsafePointer[Float32, MutUntrackedOrigin]
+    var candidates: Pointer[MinHeap, MutUntrackedOrigin]
+    var results: Pointer[MaxHeap, MutUntrackedOrigin]
+    var query_block_int8: Pointer[Int8, MutUntrackedOrigin]
+    var query_block_scales: Pointer[Float32, MutUntrackedOrigin]
     var query_block_norm: Float32
-    var l0_compact: UnsafePointer[UInt32, MutUntrackedOrigin]
-    var l0_slots: UnsafePointer[UInt32, MutUntrackedOrigin]
+    var l0_compact: Pointer[UInt32, MutUntrackedOrigin]
+    var l0_slots: Pointer[UInt32, MutUntrackedOrigin]
     var num_nodes: Int
-    var deleted: UnsafePointer[UInt8, MutUntrackedOrigin]
-    var visited: UnsafePointer[UInt16, MutUntrackedOrigin]
+    var deleted: Pointer[UInt8, MutUntrackedOrigin]
+    var visited: Pointer[UInt16, MutUntrackedOrigin]
     var cur_epoch: UInt16
-    var compact_buffer: UnsafePointer[Int8, MutUntrackedOrigin]
+    var compact_buffer: Pointer[Int8, MutUntrackedOrigin]
     var compact_stride: Int
     var compact_hdr: Int
-    var nodes: UnsafePointer[HNSWNode, MutUntrackedOrigin]
-    var qjl_buffer: UnsafePointer[UInt64, MutUntrackedOrigin]
-    var qjl_res_norms: UnsafePointer[Float32, MutUntrackedOrigin]
-    var qjl_query_signs: UnsafePointer[UInt64, MutUntrackedOrigin]
+    var nodes: Pointer[HNSWNode, MutUntrackedOrigin]
+    var qjl_buffer: Pointer[UInt64, MutUntrackedOrigin]
+    var qjl_res_norms: Pointer[Float32, MutUntrackedOrigin]
+    var qjl_query_signs: Pointer[UInt64, MutUntrackedOrigin]
     var qjl_query_res_norm: Float32
     var qjl_lambda: Float32

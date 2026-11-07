@@ -1,5 +1,5 @@
 from std.sys.info import CompilationTarget
-from std.memory.unsafe_pointer import UnsafePointer, alloc
+from std.memory.unsafe_pointer import alloc
 from std.memory import unsafe_memcpy
 
 comptime BS: Int = 256
@@ -11,7 +11,7 @@ def main() raises:
         from std.gpu.host import DeviceContext, DeviceBuffer
         from std.math import ceildiv
 
-        def trivial_kernel(s_ptr: UnsafePointer[Float32, MutAnyOrigin]):
+        def trivial_kernel(s_ptr: Pointer[Float32, MutAnyOrigin]):
             var gid = Int(block_idx.x * block_dim.x + thread_idx.x)
             if gid >= 256:
                 return

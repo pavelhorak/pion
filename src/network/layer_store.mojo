@@ -10,8 +10,8 @@ Storage: mmap'd arena with bump allocation. Sessions are evicted by TTL
 or manual deletion.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 from std.collections import List
@@ -31,7 +31,7 @@ comptime DEFAULT_ARENA_SIZE = 8 * 1024 * 1024 * 1024
 @always_inline
 def _layerstore_now_ns() -> Int64:
     """Current CLOCK_REALTIME in nanoseconds (LRU clock; same as kv_cache_store)."""
-    var ts = alloc[Int64](2)
+    var ts = unsafe_alloc[Int64](2)
     _ = external_call["clock_gettime", Int32](Int32(0), ts)
     var result = ts[unsafe_offset=0] * Int64(1_000_000_000) + ts[unsafe_offset=1]
     ts.unsafe_free()
@@ -107,9 +107,9 @@ struct LayerStore(Movable):
 
         var n_sess = MAX_SESSIONS if enabled else 1
         var n_layers = n_sess * MAX_LAYERS
-        var _s = alloc[SessionEntry](n_sess)
+        var _s = unsafe_alloc[SessionEntry](n_sess)
         self.sessions = Pointer[SessionEntry, MutUntrackedOrigin](unsafe_from_address=Int(_s))
-        var _l = alloc[LayerEntry](n_layers)
+        var _l = unsafe_alloc[LayerEntry](n_layers)
         self.layers = Pointer[LayerEntry, MutUntrackedOrigin](unsafe_from_address=Int(_l))
 
         for si in range(n_sess):
@@ -155,7 +155,7 @@ struct LayerStore(Movable):
         """Populate an inactive slot `si` with a fresh session. Returns `si`."""
         var entry = SessionEntry()
         entry.session_hash = self._hash_bytes(session_id_ptr, session_id_len)
-        var id_copy = alloc[UInt8](session_id_len)
+        var id_copy = unsafe_alloc[UInt8](session_id_len)
         unsafe_memcpy(dest=id_copy, src=session_id_ptr, count=session_id_len)
         entry.session_id_ptr = Pointer[UInt8, MutUntrackedOrigin](
             unsafe_from_address=Int(id_copy)
@@ -166,7 +166,7 @@ struct LayerStore(Movable):
         entry.last_access = now
         # Allocate initial blob space (64 MB per session — enough for ~16 layers of 4MB each)
         var initial_cap = 64 * 1024 * 1024
-        var blob = alloc[UInt8](initial_cap)
+        var blob = unsafe_alloc[UInt8](initial_cap)
         entry.blob_ptr = Pointer[UInt8, MutUntrackedOrigin](
             unsafe_from_address=Int(blob)
         )
@@ -247,7 +247,7 @@ struct LayerStore(Movable):
             var new_cap = session.blob_capacity * 4
             while session.blob_used + tensor_len > new_cap:
                 new_cap *= 4
-            var new_blob = alloc[UInt8](new_cap)
+            var new_blob = unsafe_alloc[UInt8](new_cap)
             unsafe_memcpy(dest=new_blob, src=session.blob_ptr, count=session.blob_used)
             session.blob_ptr.unsafe_free()
             self.sessions[unsafe_offset=si].blob_ptr = Pointer[UInt8, MutUntrackedOrigin](

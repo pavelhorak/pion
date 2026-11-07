@@ -1,5 +1,5 @@
+from std.memory.alloc import unsafe_alloc
 from std.collections import Span
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from std.memory import alloc, stack_allocation
 from std.sys import CompilationTarget
@@ -23,7 +23,7 @@ def arg_eq(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int, lit: StringLiteral) 
     so a keyword containing an underscore cannot be written with it."""
     if tl != lit.byte_length():
         return False
-    var lp = lit.unsafe_ptr()
+    var lp = lit.ptr()
     for k in range(tl):
         var c = tp[unsafe_offset=k]
         if c >= 65 and c <= 90:
@@ -84,7 +84,7 @@ def format_int_to_buf(buf: Pointer[UInt8, MutUntrackedOrigin], offset: Int, val:
         # (measured: SET k -9223372036854775807 ; DECRBY k 1 -> 0, GET -> "-0").
         # Emit the literal; it is the one Int64 with no negatable magnitude.
         if n == -9223372036854775808:
-            var min_lit = INT64_MIN_STR.unsafe_ptr()
+            var min_lit = INT64_MIN_STR.ptr()
             for mi in range(20):
                 buf[unsafe_offset=new_offset + mi] = min_lit[unsafe_offset=mi]
             return new_offset + 20
@@ -100,7 +100,7 @@ def format_int_to_buf(buf: Pointer[UInt8, MutUntrackedOrigin], offset: Int, val:
     var num_len = int_string_len(n) 
     var curr_idx = new_offset + num_len - 1
     
-    var lut_ptr = DIGIT_LUT.unsafe_ptr()
+    var lut_ptr = DIGIT_LUT.ptr()
     
     # Process two digits per iteration using multiplication tricks instead of division
     while n >= 100:
@@ -306,7 +306,7 @@ def format_score(score: Float64) -> String:
     var n = s.byte_length()
     var i = 0
     var neg = False
-    if n > 0 and p[0] == 45:   # '-'
+    if n > 0 and p[unsafe_offset=0] == 45:   # '-'
         neg = True
         i = 1
     var digits = String("")
@@ -314,17 +314,17 @@ def format_score(score: Float64) -> String:
     var nd_raw = 0
     var exp10 = 0
     while i < n:
-        var c = p[i]
+        var c = p[unsafe_offset=i]
         if c == 46:           # '.'
             point = nd_raw
         elif c == 101 or c == 69:   # 'e' / 'E'
             i += 1
             var eneg = False
-            if i < n and (p[i] == 45 or p[i] == 43):
-                eneg = p[i] == 45
+            if i < n and (p[unsafe_offset=i] == 45 or p[unsafe_offset=i] == 43):
+                eneg = p[unsafe_offset=i] == 45
                 i += 1
             while i < n:
-                exp10 = exp10 * 10 + Int(p[i] - 48)
+                exp10 = exp10 * 10 + Int(p[unsafe_offset=i] - 48)
                 i += 1
             if eneg:
                 exp10 = -exp10
@@ -338,11 +338,11 @@ def format_score(score: Float64) -> String:
     # value = digits * 10^K with digits stripped of leading and trailing zeros
     var dp = digits.unsafe_ptr()
     var lo = 0
-    while lo < nd_raw - 1 and dp[lo] == 48:
+    while lo < nd_raw - 1 and dp[unsafe_offset=lo] == 48:
         lo += 1
     var hi = nd_raw
     var K = point - nd_raw + exp10
-    while hi > lo + 1 and dp[hi - 1] == 48:
+    while hi > lo + 1 and dp[unsafe_offset=hi - 1] == 48:
         hi -= 1
         K += 1
     var nd = hi - lo
@@ -351,7 +351,7 @@ def format_score(score: Float64) -> String:
     var ae = e if e >= 0 else -e
     if K >= 0 and ae < nd + 7:
         for j in range(lo, hi):
-            out += chr(Int(dp[j]))
+            out += chr(Int(dp[unsafe_offset=j]))
         for _ in range(K):
             out += "0"
         return out
@@ -362,19 +362,19 @@ def format_score(score: Float64) -> String:
             for _ in range(-offset):
                 out += "0"
             for j in range(lo, hi):
-                out += chr(Int(dp[j]))
+                out += chr(Int(dp[unsafe_offset=j]))
         else:
             for j in range(lo, lo + offset):
-                out += chr(Int(dp[j]))
+                out += chr(Int(dp[unsafe_offset=j]))
             out += "."
             for j in range(lo + offset, hi):
-                out += chr(Int(dp[j]))
+                out += chr(Int(dp[unsafe_offset=j]))
         return out
-    out += chr(Int(dp[lo]))
+    out += chr(Int(dp[unsafe_offset=lo]))
     if nd > 1:
         out += "."
         for j in range(lo + 1, hi):
-            out += chr(Int(dp[j]))
+            out += chr(Int(dp[unsafe_offset=j]))
     out += "e-" if e < 0 else "e+"
     out += String(ae)
     return out
@@ -404,7 +404,7 @@ def set_thread_affinity(cpu_id: Int) -> String:
         # macOS THREAD_AFFINITY_POLICY = 4, THREAD_AFFINITY_POLICY_COUNT = 1
         var policy = cpu_id
         var thread = external_call["mach_thread_self", UInt32]()
-        var policy_ptr = alloc[Int](1)
+        var policy_ptr = unsafe_alloc[Int](1)
         policy_ptr[unsafe_offset=0] = policy
         var kr = external_call["thread_policy_set", Int32](
             thread,
@@ -586,7 +586,7 @@ def parse_redis_double(p: Pointer[UInt8, _], n: Int, mode: Int) -> ParsedFloat:
     to C, which is safe (gh #349 is about out-of-line MOJO callees)."""
     var out = stack_allocation[1, Float64]()
     var ok = external_call["pion_parse_double", Int32](p, Int64(n), Int32(mode), out) == 1
-    return ParsedFloat(out[0] if ok else 0.0, ok)
+    return ParsedFloat(out[unsafe_offset=0] if ok else 0.0, ok)
 
 
 @fieldwise_init
@@ -615,16 +615,16 @@ def strict_atol(s: String) raises -> Int:
         raise Error("ERR value is not an integer or out of range")
     var i = 0
     var neg = False
-    if p[0] == 45:
+    if p[unsafe_offset=0] == 45:
         neg = True
         i = 1
-        if n == 1 or (n == 2 and p[1] == 48):          # "-" and "-0"
+        if n == 1 or (n == 2 and p[unsafe_offset=1] == 48):          # "-" and "-0"
             raise Error("ERR value is not an integer or out of range")
-    if p[i] == 48 and n - i > 1:                         # leading zero: "01"
+    if p[unsafe_offset=i] == 48 and n - i > 1:                         # leading zero: "01"
         raise Error("ERR value is not an integer or out of range")
     var acc: Int64 = 0
     while i < n:
-        var c = Int(p[i])
+        var c = Int(p[unsafe_offset=i])
         if c < 48 or c > 57:
             raise Error("ERR value is not an integer or out of range")
         var d = Int64(c - 48)
@@ -810,7 +810,7 @@ def parse_memory_value(p: Pointer[UInt8, MutUntrackedOrigin], plen: Int,
         u1 = Int(p[unsafe_offset=ndig + 1])
         if u1 >= 65 and u1 <= 90:
             u1 += 32
-    var mult: Int64 = 0
+    var mult: Int64
     if ulen == 0:
         mult = 1
     elif ulen == 1 and u0 == 37:            # '%'

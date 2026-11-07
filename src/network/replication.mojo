@@ -8,9 +8,9 @@ Replication port = main port + 10000 (e.g., 11974 for port 1974).
 Only worker 0 runs these; all workers share the same keyspace pointer.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import remove_and_free
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
 
@@ -30,7 +30,7 @@ struct PrimaryReplicator(Movable):
     def __moveinit__(out self, deinit take: Self):
         self.handle = take.handle
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if is_not_null(self.handle):
             external_call["pion_repl_primary_stop", NoneType](self.handle)
 
@@ -40,7 +40,7 @@ struct PrimaryReplicator(Movable):
             return False
         # WAL data section starts after the 64-byte header
         var data_ptr = wal[].map.unsafe_offset(WAL_HEADER_SIZE)
-        var tail_ptr = alloc[UInt64](1)  # we pass a pointer that C reads each poll
+        var tail_ptr = unsafe_alloc[UInt64](1)  # we pass a pointer that C reads each poll
         # We don't want to alloc a new UInt64 — pass the address of wal.tail_offset directly.
         # Since tail_offset is a field in the WAL struct (heap-allocated), its address is stable.
         # Reconstruct pointer to tail_offset: WAL layout has tail_offset at byte offset 8 in struct.
@@ -103,7 +103,7 @@ struct ReplicaReceiver(Movable):
     def __moveinit__(out self, deinit take: Self):
         self.handle = take.handle
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if is_not_null(self.handle):
             external_call["pion_repl_replica_stop", NoneType](self.handle)
 
@@ -114,7 +114,7 @@ struct ReplicaReceiver(Movable):
         var ph = primary_host
         var blk = external_call["pion_repl_replica_create",
                                  Pointer[NoneType, MutUntrackedOrigin]](
-            ph.as_c_string_slice(),
+            ph.as_c_string_span(),
             Int32(primary_repl_port),
         )
         if is_null(blk):

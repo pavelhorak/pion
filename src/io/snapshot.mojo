@@ -22,8 +22,8 @@ Recovery flow:
   SAVE:     take_snapshot() → WAL.checkpoint() — WAL resets to 0 so only fresh deltas accumulate
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from std.memory import unsafe_memcpy, unsafe_memset, alloc
 
@@ -118,9 +118,9 @@ struct RecordSink(Movable):
         self.fd = fd
         self.buf = List[UInt8]()
 
-    def __init__(out self, *, deinit take: Self):
-        self.fd = take.fd
-        self.buf = take.buf^
+    def __init__(out self, *, deinit move: Self):
+        self.fd = move.fd
+        self.buf = move.buf^
 
     def write(mut self, p: Pointer[UInt8, MutUntrackedOrigin], n: Int):
         if n <= 0:
@@ -203,7 +203,7 @@ def write_key_records(mut sink: RecordSink, kp: Pointer[UInt8, MutUntrackedOrigi
                 is_blob = False     # not resolvable — fall back to bytes
 
         if is_blob:
-            var pr = alloc[UInt8](24)
+            var pr = unsafe_alloc[UInt8](24)
             var q = pr.unsafe_bitcast[UInt64]()
             q[unsafe_offset=0] = UInt64(bseg); q[unsafe_offset=1] = UInt64(boff); q[unsafe_offset=2] = UInt64(vl)
             _sink_record(sink, ehdr, 4, kp, kl, pr, 24)
@@ -342,7 +342,7 @@ def write_key_records(mut sink: RecordSink, kp: Pointer[UInt8, MutUntrackedOrigi
         # ties by slot), each as the WAL's VADD record, then its
         # attribute. Tombstones are dropped, so a load compacts.
         var vs = val.as_hash().unsafe_bitcast[VectorSet]()
-        var payload = alloc[UInt8](vs[].payload_len())
+        var payload = unsafe_alloc[UInt8](vs[].payload_len())
         for s in range(vs[].n):
             if vs[].alive[unsafe_offset=s] == 0:
                 continue
@@ -484,13 +484,13 @@ struct SnapshotEngine(Movable):
             snap_path = path_override
             tmp_path = path_override
         var ctmp = tmp_path
-        var fd = external_call["pion_creat", Int32](ctmp.as_c_string_slice())
+        var fd = external_call["pion_creat", Int32](ctmp.as_c_string_span())
         if fd < 0:
             print("Snapshot: failed to open " + tmp_path)
             return -1
 
         # --- Write header ---
-        var hdr = alloc[UInt8](SNAP_HDR_LEN)
+        var hdr = unsafe_alloc[UInt8](SNAP_HDR_LEN)
         unsafe_memset(hdr, 0, SNAP_HDR_LEN)
         _snap_write_u64(hdr, 0, SNAP_MAGIC)
         _snap_write_u32(hdr, 8, SNAP_VERSION)
@@ -504,11 +504,11 @@ struct SnapshotEngine(Movable):
         # --- Pass 2: write entries ---
         # entry header: [4B entry_len][1B cmd_id][4B key_len] = 9 bytes, then val_len 4 bytes
         var sink = RecordSink(fd)
-        var ehdr = alloc[UInt8](16)
-        var sso_buf = alloc[UInt8](64)   # key scratch (SSO/int formatting)
-        var vbuf = alloc[UInt8](64)      # element scratch
-        var fbuf = alloc[UInt8](64)      # hash-field scratch
-        var scored = alloc[UInt8](8)     # f64 score prefix
+        var ehdr = unsafe_alloc[UInt8](16)
+        var sso_buf = unsafe_alloc[UInt8](64)   # key scratch (SSO/int formatting)
+        var vbuf = unsafe_alloc[UInt8](64)      # element scratch
+        var fbuf = unsafe_alloc[UInt8](64)      # hash-field scratch
+        var scored = unsafe_alloc[UInt8](8)     # f64 score prefix
 
         for si in range(8):
             var shard = keyspace[].shards.unsafe_offset(si)
@@ -579,7 +579,7 @@ struct SnapshotEngine(Movable):
         # #36: the FUNCTION libraries. FLUSH first, so a replica loading this
         # image (a FULLRESYNC) also drops libraries the primary has deleted.
         _sink_record(sink, ehdr, UInt8(37), sso_buf, 0, sso_buf, 0)
-        var clen = alloc[Int64](1)
+        var clen = unsafe_alloc[Int64](1)
         for li in range(n_libs):
             clen[unsafe_offset=0] = 0
             var code = external_call["pion_lua_tls_library_code", Pointer[UInt8, MutUntrackedOrigin]](
@@ -605,7 +605,7 @@ struct SnapshotEngine(Movable):
         if path_override.byte_length() == 0:
             var csnap = snap_path
             _ = external_call["pion_snapshot_rename", Int32](
-                ctmp.as_c_string_slice(), csnap.as_c_string_slice())
+                ctmp.as_c_string_span(), csnap.as_c_string_span())
 
         print("Snapshot: saved " + String(kv_count) + " entries → " + snap_path)
         return ts
@@ -620,12 +620,12 @@ struct SnapshotEngine(Movable):
         """Load snapshot into keyspace. Returns snapshot timestamp (-1 if no snapshot)."""
         var snap_path = "pion.snapshot." + String(worker_id)
         var cpath = snap_path
-        var fd = external_call["pion_open_rdonly", Int32](cpath.as_c_string_slice())
+        var fd = external_call["pion_open_rdonly", Int32](cpath.as_c_string_span())
         if fd < 0:
             return -1
 
         # Read and verify header
-        var hdr = alloc[UInt8](SNAP_HDR_LEN)
+        var hdr = unsafe_alloc[UInt8](SNAP_HDR_LEN)
         if not _snap_read_all(fd, hdr, SNAP_HDR_LEN):
             hdr.unsafe_free()
             _ = external_call["close", Int32](fd)
@@ -645,7 +645,7 @@ struct SnapshotEngine(Movable):
         hdr.unsafe_free()
 
         # Read entries
-        var ehdr    = alloc[UInt8](16)
+        var ehdr    = unsafe_alloc[UInt8](16)
         var replayed = 0
 
         # gh #174: read until EOF rather than exactly `kv_count` records.
@@ -666,7 +666,7 @@ struct SnapshotEngine(Movable):
             var cmd_id = ehdr[unsafe_offset=4]
             var kl     = Int(_snap_read_u32(ehdr, 5))
 
-            var key_buf = alloc[UInt8](kl + 1)
+            var key_buf = unsafe_alloc[UInt8](kl + 1)
             if not _snap_read_all(fd, key_buf, kl):
                 key_buf.unsafe_free()
                 break
@@ -677,7 +677,7 @@ struct SnapshotEngine(Movable):
                 break
             var vl = Int(_snap_read_u32(ehdr, 0))
 
-            var val_buf = alloc[UInt8](vl + 1)
+            var val_buf = unsafe_alloc[UInt8](vl + 1)
             if vl > 0 and not _snap_read_all(fd, val_buf, vl):
                 key_buf.unsafe_free()
                 val_buf.unsafe_free()

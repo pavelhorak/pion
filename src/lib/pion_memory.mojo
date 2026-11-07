@@ -19,7 +19,6 @@ API:
 """
 
 from src.common.ptr import is_null
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 from src.vector.hnsw import HNSWGraph

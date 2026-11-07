@@ -1,5 +1,5 @@
+from std.memory.alloc import unsafe_alloc
 from std.collections import List
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
 from src.common.ptr import null_ptr, is_not_null
@@ -156,7 +156,7 @@ struct LinearPool(Movable):
         self.cursor = 0
         self.ef = 0
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if is_not_null(self.entries):
             self.entries.unsafe_free()
 
@@ -168,7 +168,7 @@ struct LinearPool(Movable):
         if bound > self.capacity:
             if is_not_null(self.entries):
                 self.entries.unsafe_free()
-            self.entries = alloc[PoolEntry](bound)
+            self.entries = unsafe_alloc[PoolEntry](bound)
             self.capacity = bound
         self.ef = bound
         self.size = 0

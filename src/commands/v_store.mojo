@@ -6,6 +6,7 @@ On decode, GPU sends top-k token IDs → Pion returns dequantized V.
 A1 (gh #29) extends V.CREATE with a SCHEMA form for per-layer formats.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null
 from src.common.utils import strict_atol, arg_eq
 from src.network.v_store import (
@@ -19,7 +20,6 @@ from src.common.metrics import ValueLedger
 from src.network.server import TCPServer
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from std.collections import Array
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.ffi import external_call
@@ -170,9 +170,9 @@ def handle_v_create(
             writer.append_error_response("ERR V.CREATE SCHEMA: not enough layer specs (need " + String(n_layers) + ")")
             return 1
 
-        var ldim_buf = alloc[Int](n_layers)
-        var lfmt_buf = alloc[UInt8](n_layers)
-        var lrope_buf = alloc[Int](n_layers)
+        var ldim_buf = unsafe_alloc[Int](n_layers)
+        var lfmt_buf = unsafe_alloc[UInt8](n_layers)
+        var lrope_buf = unsafe_alloc[Int](n_layers)
         var ldim = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(ldim_buf))
         var lfmt = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(lfmt_buf))
         var lrope = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(lrope_buf))
@@ -442,12 +442,12 @@ def handle_v_storebatch(
         writer.append_error_response("ERR V.STOREBATCH: blob size " + String(val_len) + " != expected " + String(expected) + " (count=" + String(Int(count)) + " × per_layer_dim=" + String(per_layer_dim) + " × " + String(elem) + ")")
         return 1
 
-    var widened = alloc[Float32](n_vals if fp16_in else 1)
+    var widened = unsafe_alloc[Float32](n_vals if fp16_in else 1)
     if fp16_in:
-        var src16 = val_ptr.bitcast[Float16]()
+        var src16 = val_ptr.unsafe_bitcast[Float16]()
         for vi in range(n_vals):
-            widened[vi] = src16[vi].cast[DType.float32]()
-    var fp32_addr = Int(widened) if fp16_in else Int(val_ptr.bitcast[Float32]())
+            widened[unsafe_offset=vi] = src16[unsafe_offset=vi].cast[DType.float32]()
+    var fp32_addr = Int(widened) if fp16_in else Int(val_ptr.unsafe_bitcast[Float32]())
     var fp32_ext = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=fp32_addr)
 
     var ok = vstore.store_batch(session_idx, Int(layer_id), Int(start_id), Int(count), fp32_ext)
@@ -470,7 +470,7 @@ def handle_v_storebatch(
         writer.append_ok_response()
     else:
         writer.append_error_response("ERR V.STOREBATCH failed")
-    widened.free()
+    widened.unsafe_free()
 
     return 1
 
@@ -596,7 +596,7 @@ def handle_v_fetch(
 
         # Single token-id buffer reused across layers (RANGE is contiguous so
         # the IDs are identical for every layer).
-        var b_ids_alloc = alloc[Int32](b_num_ids)
+        var b_ids_alloc = unsafe_alloc[Int32](b_num_ids)
         var b_ids = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(b_ids_alloc))
         for j in range(b_num_ids):
             b_ids[unsafe_offset=j] = Int32(b_range_start + j)
@@ -611,7 +611,7 @@ def handle_v_fetch(
             if ld > b_max_dim:
                 b_max_dim = ld
         var b_out_size = b_num_ids * b_max_dim
-        var b_out_alloc = alloc[Float32](b_out_size)
+        var b_out_alloc = unsafe_alloc[Float32](b_out_size)
         var b_out_fp32 = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(b_out_alloc))
 
         for li in range(b_layers):
@@ -622,7 +622,7 @@ def handle_v_fetch(
             # fp32-sized scratch buffer — half the bytes). Other formats keep
             # the fp32 expansion; the client disambiguates by payload length.
             if fmt_native and vstore.v_fmt[unsafe_offset=session_idx * MAX_VS_LAYERS + li] == VFMT_FP16:
-                var out16 = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(b_out_fp32.bitcast[UInt8]()))
+                var out16 = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(b_out_fp32.unsafe_bitcast[UInt8]()))
                 var n_live = vstore.fetch_range_fp16_raw(session_idx, li, b_range_start, b_num_ids, out16)
                 if n_live > 0:
                     writer.append_bulk_bytes_writev(fd, out16, b_num_ids * li_dim * 2)
@@ -632,7 +632,7 @@ def handle_v_fetch(
             else:
                 var n_fetched = vstore.fetch_tokens(session_idx, li, b_ids, b_num_ids, b_out_fp32)
                 if n_fetched > 0:
-                    var out_u8 = b_out_fp32.bitcast[UInt8]()
+                    var out_u8 = b_out_fp32.unsafe_bitcast[UInt8]()
                     var out_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(out_u8))
                     var li_bytes = b_num_ids * li_dim * 4
                     # Use writev-aware bulk helper — single layer can exceed
@@ -693,7 +693,7 @@ def handle_v_fetch(
             return 1
 
     # Parse token IDs into array
-    var _ids = alloc[Int32](num_ids)
+    var _ids = unsafe_alloc[Int32](num_ids)
     var ids = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(_ids))
     if is_range:
         for i in range(num_ids):
@@ -713,7 +713,7 @@ def handle_v_fetch(
     # two apart by payload length.
     if fmt_native and vstore.v_fmt[unsafe_offset=session_idx * MAX_VS_LAYERS + Int(layer_id)] == VFMT_FP16:
         var nat_bytes = num_ids * val_dim * 2
-        var _o16 = alloc[UInt8](nat_bytes)
+        var _o16 = unsafe_alloc[UInt8](nat_bytes)
         var o16 = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_o16))
         var n_live = vstore.fetch_range_fp16_raw(session_idx, Int(layer_id), range_start, num_ids, o16)
         if n_live > 0:
@@ -726,14 +726,14 @@ def handle_v_fetch(
         return 1
 
     var out_size = num_ids * val_dim
-    var _out = alloc[Float32](out_size)
+    var _out = unsafe_alloc[Float32](out_size)
     var out_fp32 = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_out))
 
     var fetched = vstore.fetch_tokens(session_idx, Int(layer_id), ids, num_ids, out_fp32)
 
     if fetched > 0:
         var out_bytes = out_size * 4
-        var out_u8 = out_fp32.bitcast[UInt8]()
+        var out_u8 = out_fp32.unsafe_bitcast[UInt8]()
         var out_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(out_u8))
         # writev for large responses: a 2K-token prefix at val_dim=512 already
         # produces 4 MB which overflows RESP_BUF_SIZE (also 4 MB) → heap
@@ -1124,19 +1124,19 @@ def handle_v_export(
         header += "}"
         while (8 + header.byte_length()) % 8 != 0:
             header += " "
-        var hlen = alloc[UInt64](1)
-        hlen[0] = UInt64(header.byte_length())
-        var ok = external_call["pion_xf_write", Int32](xfd, hlen.bitcast[UInt8](), Int64(8)) == 0
-        hlen.free()
+        var hlen = unsafe_alloc[UInt64](1)
+        hlen[unsafe_offset=0] = UInt64(header.byte_length())
+        var ok = external_call["pion_xf_write", Int32](xfd, hlen.unsafe_bitcast[UInt8](), Int64(8)) == 0
+        hlen.unsafe_free()
         ok = ok and external_call["pion_xf_write", Int32](xfd, header.unsafe_ptr(), Int64(header.byte_length())) == 0
         _ = header^
 
-        var ids = alloc[Int32](n)
+        var ids = unsafe_alloc[Int32](n)
         for j in range(n):
-            ids[j] = Int32(Int(rs) + j)
-        var rows32 = alloc[Float32](n * kv_dim)        # stored rows, fp32 (dequantized path)
-        var rows16 = alloc[Float16](n * kv_dim)        # stored rows, fp16 [N, kv_dim]
-        var out16 = alloc[Float16](n * kv_dim)         # written tensor [heads, N, head_dim]
+            ids[unsafe_offset=j] = Int32(Int(rs) + j)
+        var rows32 = unsafe_alloc[Float32](n * kv_dim)        # stored rows, fp32 (dequantized path)
+        var rows16 = unsafe_alloc[Float16](n * kv_dim)        # stored rows, fp16 [N, kv_dim]
+        var out16 = unsafe_alloc[Float16](n * kv_dim)         # written tensor [heads, N, head_dim]
         var rows32_p = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(rows32))
         var ids_p = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(ids))
         var rows16_u8 = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rows16))
@@ -1150,18 +1150,18 @@ def handle_v_export(
                 else:
                     _ = vstore.fetch_tokens(sidx, li, ids_p, n, rows32_p)
                     for x in range(n * kv_dim):
-                        rows16[x] = rows32[x].cast[DType.float16]()
+                        rows16[unsafe_offset=x] = rows32[unsafe_offset=x].cast[DType.float16]()
                 # [N, heads * head_dim] -> [heads, N, head_dim]
                 for h in range(n_heads):
                     for t in range(n):
-                        unsafe_memcpy(dest=out16 + (h * n + t) * head_dim,
-                                      src=rows16 + t * kv_dim + h * head_dim, count=head_dim)
+                        unsafe_memcpy(dest=out16.unsafe_offset((h * n + t) * head_dim),
+                                      src=rows16.unsafe_offset(t * kv_dim).unsafe_offset(h * head_dim), count=head_dim)
                 ok = ok and external_call["pion_xf_write", Int32](
-                    xfd, out16.bitcast[UInt8](), Int64(t_bytes)) == 0
-        ids.free()
-        rows32.free()
-        rows16.free()
-        out16.free()
+                    xfd, out16.unsafe_bitcast[UInt8](), Int64(t_bytes)) == 0
+        ids.unsafe_free()
+        rows32.unsafe_free()
+        rows16.unsafe_free()
+        out16.unsafe_free()
         var tmp_name_c = String(".tmp-") + final_name + "\0"
         var committed = external_call["pion_xf_commit", Int32](
             xfd, dir_c.unsafe_ptr(), tmp_name_c.unsafe_ptr(), final_c.unsafe_ptr(), Int32(1 if ok else 0)) == 0
@@ -1175,14 +1175,14 @@ def handle_v_export(
         _ = external_call["pion_xf_prune", Int32](dir_c.unsafe_ptr(), ap_c.unsafe_ptr(), final_c.unsafe_ptr())
         _ = ap_c^
 
-    var pathbuf = alloc[UInt8](4096)
+    var pathbuf = unsafe_alloc[UInt8](4096)
     var plen = external_call["pion_xf_realpath", Int64](dir_c.unsafe_ptr(), final_c.unsafe_ptr(), pathbuf, Int64(4096))
     _ = dir_c^
     _ = final_c^
     if plen <= 0:
-        pathbuf.free()
+        pathbuf.unsafe_free()
         writer.append_error_response("ERR V.EXPORT cannot resolve the file path")
         return 1
     writer.append_bulk_string_response(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pathbuf)), Int(plen))
-    pathbuf.free()
+    pathbuf.unsafe_free()
     return 1

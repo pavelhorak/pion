@@ -1,6 +1,5 @@
 from std.math import sqrt
 from src.vector.fma_mad import fma_mad
-from std.memory.unsafe_pointer import UnsafePointer
 from std.sys import simd_width_of
 from std.sys import CompilationTarget
 from std.sys.intrinsics import prefetch, llvm_intrinsic
@@ -51,8 +50,8 @@ def roundeven_to_int32[width: Int](val: SIMD[DType.float32, width]) -> SIMD[DTyp
 
 @always_inline
 def quantize_fp32_to_int8_simd(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Int8, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Int8, MutUntrackedOrigin],
     dim: Int,
     qmin: Float32,
     scale: Float32):
@@ -69,30 +68,30 @@ def quantize_fp32_to_int8_simd(
     var qi = 0
     # 2×-unrolled main loop: two independent clamp chains per iteration
     while qi + stride <= dim:
-        var norm_a = (src.load[width=fp_width](qi) - qmin_v) * scale_v
-        var norm_b = (src.load[width=fp_width](qi + fp_width) - qmin_v) * scale_v
+        var norm_a = (src.unsafe_load[width=fp_width](qi) - qmin_v) * scale_v
+        var norm_b = (src.unsafe_load[width=fp_width](qi + fp_width) - qmin_v) * scale_v
         # Fused round-to-nearest + convert (fcvtns on NEON), then int32 clamp
         var rounded_a = roundeven_to_int32(norm_a)
         var rounded_b = roundeven_to_int32(norm_b)
         var clamped_a = min(max(rounded_a, lo_v), hi_v)
         var clamped_b = min(max(rounded_b, lo_v), hi_v)
-        dst.store[width=fp_width](qi, (clamped_a - off_v).cast[DType.int8]())
-        dst.store[width=fp_width](qi + fp_width, (clamped_b - off_v).cast[DType.int8]())
+        dst.unsafe_store[width=fp_width](qi, (clamped_a - off_v).cast[DType.int8]())
+        dst.unsafe_store[width=fp_width](qi + fp_width, (clamped_b - off_v).cast[DType.int8]())
         qi += stride
     # Single-width remainder
     while qi + fp_width <= dim:
-        var norm = (src.load[width=fp_width](qi) - qmin_v) * scale_v
+        var norm = (src.unsafe_load[width=fp_width](qi) - qmin_v) * scale_v
         var rounded = roundeven_to_int32(norm)
         var clamped = min(max(rounded, lo_v), hi_v)
-        dst.store[width=fp_width](qi, (clamped - off_v).cast[DType.int8]())
+        dst.unsafe_store[width=fp_width](qi, (clamped - off_v).cast[DType.int8]())
         qi += fp_width
     # Scalar tail
     while qi < dim:
-        var norm = (src[qi] - qmin) * scale
+        var norm = (src[unsafe_offset=qi] - qmin) * scale
         var r = Int(norm + 0.5) if norm >= 0.0 else Int(norm - 0.5)
         if r > 254: r = 254
         if r < 0:   r = 0
-        dst[qi] = Int8(r - 127)
+        dst[unsafe_offset=qi] = Int8(r - 127)
         qi += 1
 
 # ── Welford online statistics (inspired by MAX nn/normalization.mojo) ──────────
@@ -101,7 +100,7 @@ def quantize_fp32_to_int8_simd(
 
 @no_inline
 def welford_calibrate(
-    data: UnsafePointer[Float32, MutUntrackedOrigin],
+    data: Pointer[Float32, MutUntrackedOrigin],
     count: Int, dim: Int,
     sigma: Float32 = 3.0,
 ) -> Tuple[Float32, Float32]:
@@ -120,7 +119,7 @@ def welford_calibrate(
 
     var i = 0
     while i + fp_width <= total:
-        var val = data.load[width=fp_width](i)
+        var val = data.unsafe_load[width=fp_width](i)
         count_v += one_v
         var d1 = val - mean_v
         mean_v += d1 / count_v
@@ -146,9 +145,9 @@ def welford_calibrate(
     # Scalar tail
     while i < total:
         n += 1.0
-        var d1 = data[i] - mean
+        var d1 = data[unsafe_offset=i] - mean
         mean += d1 / n
-        var d2 = data[i] - mean
+        var d2 = data[unsafe_offset=i] - mean
         m2 += d1 * d2
         i += 1
 
@@ -169,11 +168,11 @@ def welford_calibrate(
 
 @no_inline
 def calibrate_per_group(
-    data: UnsafePointer[Float32, MutUntrackedOrigin],
+    data: Pointer[Float32, MutUntrackedOrigin],
     count: Int, dim: Int,
     group_size: Int,
-    group_qmins: UnsafePointer[Float32, MutUntrackedOrigin],
-    group_scales: UnsafePointer[Float32, MutUntrackedOrigin],
+    group_qmins: Pointer[Float32, MutUntrackedOrigin],
+    group_scales: Pointer[Float32, MutUntrackedOrigin],
     sigma: Float32 = 3.0):
     """Compute per-group (Q8_K-style) calibration from buffer of FP32 vectors.
     For each group of group_size dimensions, computes Welford mean±sigma clipping
@@ -317,8 +316,8 @@ def sdot_int8(acc: SIMD[DType.int32, 4], a: SIMD[DType.int8, 16], b: SIMD[DType.
 
 @always_inline
 def l2_normalize_fp32(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     dim: Int):
     """Scale `src` to unit L2 length into `dst` (gh #271, DISTANCE_METRIC COSINE).
 
@@ -337,42 +336,42 @@ def l2_normalize_fp32(
     var acc = SIMD[DType.float32, width](0.0)
     var i = 0
     while i + width <= dim:
-        var v = src.load[width=width](i)
+        var v = src.unsafe_load[width=width](i)
         acc += v * v
         i += width
     var norm_sq = acc.reduce_add()
     while i < dim:
-        norm_sq += src[i] * src[i]
+        norm_sq += src[unsafe_offset=i] * src[unsafe_offset=i]
         i += 1
     if norm_sq <= 0.0:
         if dst != src:
-            for j in range(dim): dst[j] = src[j]
+            for j in range(dim): dst[unsafe_offset=j] = src[unsafe_offset=j]
         return
     var inv = Float32(1.0) / sqrt(norm_sq)
     var inv_v = SIMD[DType.float32, width](inv)
     var k = 0
     while k + width <= dim:
-        dst.store[width=width](k, src.load[width=width](k) * inv_v)
+        dst.unsafe_store[width=width](k, src.unsafe_load[width=width](k) * inv_v)
         k += width
     while k < dim:
-        dst[k] = src[k] * inv
+        dst[unsafe_offset=k] = src[unsafe_offset=k] * inv
         k += 1
 
 
 @no_inline
-def norm_sq_int8_jit[dim: Int](v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+def norm_sq_int8_jit[dim: Int](v: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     """INT8 L2 norm squared via SDOT: sum(v[i]^2). Computed once per query at search time.
     dim must be a multiple of 64 (1536 qualifies)."""
     comptime if CompilationTarget.is_x86() and CompilationTarget.has_vnni():
         var acc = SIMD[DType.int32, 16](0)
         for i in range(0, dim, 64):
-            var vv = v.load[width=64](i)
+            var vv = v.unsafe_load[width=64](i)
             acc = _x86_sdot_int8_vnni_512(acc, vv, vv)
         return acc.reduce_add().cast[DType.float32]()
     else:
         var acc = SIMD[DType.int32, 4](0)
         for i in range(0, dim, 16):
-            var vv = v.load[width=16](i)
+            var vv = v.unsafe_load[width=16](i)
             acc = sdot_int8(acc, vv, vv)
         return acc.reduce_add().cast[DType.float32]()
 
@@ -387,7 +386,7 @@ def manual_popcount(val: UInt64) -> Int:
     return Int(llvm_intrinsic["llvm.ctpop.i64", UInt64](val))
 
 @always_inline
-def l2_distance_int8_128(v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+def l2_distance_int8_128(v1: Pointer[Int8, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     comptime width = 16
     # Two independent accumulator chains (sum0/sum1) to hide INT32 multiply-add latency.
     # sum0 accumulates even iterations, sum1 accumulates odd iterations.
@@ -415,24 +414,24 @@ def l2_distance_int8_128(v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: Unsafe
     return (sum0 + sum1).reduce_add().cast[DType.float32]()
 
 @always_inline
-def l2_distance_int8(v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], dim: Int) -> Float32:
+def l2_distance_int8(v1: Pointer[Int8, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin], dim: Int) -> Float32:
     comptime width = simd_width_of[DType.int8]()
     var sum = SIMD[DType.int32, width](0)
 
     for i in range(0, dim - width + 1, width):
-        var d = v1.load[width=width](i).cast[DType.int32]() - v2.load[width=width](i).cast[DType.int32]()
+        var d = v1.unsafe_load[width=width](i).cast[DType.int32]() - v2.unsafe_load[width=width](i).cast[DType.int32]()
         sum += d * d
 
     # Scalar tail (not hit for dim=1536 which is always SIMD-aligned)
     var result = sum.reduce_add().cast[DType.float32]()
     for i in range(dim - (dim % width), dim):
-        var d = v1[i].cast[DType.int32]() - v2[i].cast[DType.int32]()
+        var d = v1[unsafe_offset=i].cast[DType.int32]() - v2[unsafe_offset=i].cast[DType.int32]()
         result += (d * d).cast[DType.float32]()
 
     return result
 
 @always_inline
-def l2_distance_fp32_int8(v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], dim: Int, min_val: Float32, range_val: Float32) -> Float32:
+def l2_distance_fp32_int8(v1: Pointer[Float32, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin], dim: Int, min_val: Float32, range_val: Float32) -> Float32:
     comptime width = simd_width_of[DType.float32]()
     # Pre-calculate fused dequant constants (same as JIT variant)
     var scale = range_val / 254.0
@@ -443,26 +442,26 @@ def l2_distance_fp32_int8(v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: Un
     var sum_b = SIMD[DType.float32, width](0.0)
     var i = 0
     while i + width * 2 <= dim:
-        var d_a = v1.load[width=width](i) - fma_mad[width](v2.load[width=width](i).cast[DType.float32](), scale_v, offset_v)
+        var d_a = v1.unsafe_load[width=width](i) - fma_mad[width](v2.unsafe_load[width=width](i).cast[DType.float32](), scale_v, offset_v)
         sum_a = fma_mad[width](d_a, d_a, sum_a)
-        var d_b = v1.load[width=width](i + width) - fma_mad[width](v2.load[width=width](i + width).cast[DType.float32](), scale_v, offset_v)
+        var d_b = v1.unsafe_load[width=width](i + width) - fma_mad[width](v2.unsafe_load[width=width](i + width).cast[DType.float32](), scale_v, offset_v)
         sum_b = fma_mad[width](d_b, d_b, sum_b)
         i += width * 2
     while i + width <= dim:
-        var d = v1.load[width=width](i) - fma_mad[width](v2.load[width=width](i).cast[DType.float32](), scale_v, offset_v)
+        var d = v1.unsafe_load[width=width](i) - fma_mad[width](v2.unsafe_load[width=width](i).cast[DType.float32](), scale_v, offset_v)
         sum_a = fma_mad[width](d, d, sum_a)
         i += width
 
     var result = (sum_a + sum_b).reduce_add()
     for j in range(i, dim):
-        var f2 = fma_mad[1](v2[j].cast[DType.float32](), scale, 127.0 * scale + min_val)
-        var d = v1[j] - f2
+        var f2 = fma_mad[1](v2[unsafe_offset=j].cast[DType.float32](), scale, 127.0 * scale + min_val)
+        var d = v1[unsafe_offset=j] - f2
         result += d * d
 
     return result
 
 @always_inline
-def l2_distance_int8_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+def l2_distance_int8_jit[dim: Int](v1: Pointer[Int8, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     comptime width = simd_width_of[DType.int8]()
     # Two independent accumulator chains to hide INT32 multiply-add latency (3-4 cycles on M4).
     # sum_a and sum_b are updated in alternating iterations; neither depends on the other,
@@ -471,9 +470,9 @@ def l2_distance_int8_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigin], 
     var sum_b = SIMD[DType.int32, width](0)
 
     for i in range(0, dim - 2 * width + 1, 2 * width):
-        var d_a = v1.load[width=width](i).cast[DType.int32]() - v2.load[width=width](i).cast[DType.int32]()
+        var d_a = v1.unsafe_load[width=width](i).cast[DType.int32]() - v2.unsafe_load[width=width](i).cast[DType.int32]()
         sum_a += d_a * d_a
-        var d_b = v1.load[width=width](i + width).cast[DType.int32]() - v2.load[width=width](i + width).cast[DType.int32]()
+        var d_b = v1.unsafe_load[width=width](i + width).cast[DType.int32]() - v2.unsafe_load[width=width](i + width).cast[DType.int32]()
         sum_b += d_b * d_b
 
     var total_sum = (sum_a + sum_b).reduce_add()
@@ -482,12 +481,12 @@ def l2_distance_int8_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigin], 
     comptime simd_tail = ((dim // width) // 2) * 2 * width
     comptime simd_end = (dim // width) * width
     for i in range(simd_tail, simd_end, width):
-        var d = v1.load[width=width](i).cast[DType.int32]() - v2.load[width=width](i).cast[DType.int32]()
+        var d = v1.unsafe_load[width=width](i).cast[DType.int32]() - v2.unsafe_load[width=width](i).cast[DType.int32]()
         total_sum += (d * d).reduce_add()
 
     # Scalar tail if dim is not a multiple of width
     for i in range(simd_end, dim):
-        var d = v1[i].cast[DType.int32]() - v2[i].cast[DType.int32]()
+        var d = v1[unsafe_offset=i].cast[DType.int32]() - v2[unsafe_offset=i].cast[DType.int32]()
         total_sum += d * d
 
     return total_sum.cast[DType.float32]()
@@ -508,8 +507,8 @@ def _udot_u8(acc: SIMD[DType.uint32, 4], a: SIMD[DType.uint8, 16], b: SIMD[DType
 
 
 @always_inline
-def l2_int8_sabd_udot[dim: Int](a: UnsafePointer[Int8, MutUntrackedOrigin],
-                                b: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+def l2_int8_sabd_udot[dim: Int](a: Pointer[Int8, MutUntrackedOrigin],
+                                b: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     """gh #395: squared L2 between two INT8 code vectors, exactly — the same
     integer `l2_distance_int8_jit` returns. |a-b| fits a u8 lane (<= 255), so
     UDOT(d, d) accumulates (a-b)^2 with no widening, in four independent
@@ -520,10 +519,10 @@ def l2_int8_sabd_udot[dim: Int](a: UnsafePointer[Int8, MutUntrackedOrigin],
         var s0 = SIMD[DType.uint32, 4](0); var s1 = SIMD[DType.uint32, 4](0)
         var s2 = SIMD[DType.uint32, 4](0); var s3 = SIMD[DType.uint32, 4](0)
         comptime for i in range(0, dim, 64):
-            var d0 = _sabd_u8(a.load[width=16](i), b.load[width=16](i)); s0 = _udot_u8(s0, d0, d0)
-            var d1 = _sabd_u8(a.load[width=16](i + 16), b.load[width=16](i + 16)); s1 = _udot_u8(s1, d1, d1)
-            var d2 = _sabd_u8(a.load[width=16](i + 32), b.load[width=16](i + 32)); s2 = _udot_u8(s2, d2, d2)
-            var d3 = _sabd_u8(a.load[width=16](i + 48), b.load[width=16](i + 48)); s3 = _udot_u8(s3, d3, d3)
+            var d0 = _sabd_u8(a.unsafe_load[width=16](i), b.unsafe_load[width=16](i)); s0 = _udot_u8(s0, d0, d0)
+            var d1 = _sabd_u8(a.unsafe_load[width=16](i + 16), b.unsafe_load[width=16](i + 16)); s1 = _udot_u8(s1, d1, d1)
+            var d2 = _sabd_u8(a.unsafe_load[width=16](i + 32), b.unsafe_load[width=16](i + 32)); s2 = _udot_u8(s2, d2, d2)
+            var d3 = _sabd_u8(a.unsafe_load[width=16](i + 48), b.unsafe_load[width=16](i + 48)); s3 = _udot_u8(s3, d3, d3)
         return ((s0 + s1) + (s2 + s3)).reduce_add().cast[DType.float32]()
     else:
         return l2_distance_int8_jit[dim](a, b)
@@ -531,27 +530,27 @@ def l2_int8_sabd_udot[dim: Int](a: UnsafePointer[Int8, MutUntrackedOrigin],
 
 @always_inline
 def _l2_sabd_udot_rows[dim: Int, rows: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v: Array[UnsafePointer[Int8, MutUntrackedOrigin], rows],
+    q: Pointer[Int8, MutUntrackedOrigin],
+    v: Array[Pointer[Int8, MutUntrackedOrigin], rows],
 ) -> SIMD[DType.float32, rows]:
     """gh #127: the SABD+UDOT microkernel behind `l2_int8_sabd_udot_batch8`
     (NEON +dotprod only): one query load per 16 lanes, `rows` UINT32 chains
     in a RegTile. `dim` must be a multiple of 16."""
     var acc = RegTile[DType.uint32, rows, 4]()
     for i in range(0, dim, 16):
-        var qv = q.load[width=16](i)
+        var qv = q.unsafe_load[width=16](i)
         comptime for r in range(rows):
-            var d = _sabd_u8(qv, v[r].load[width=16](i))
+            var d = _sabd_u8(qv, v[r].unsafe_load[width=16](i))
             acc[r] = _udot_u8(acc[r], d, d)
     return pack_rows[rows](acc.reduce_f32())
 
 @always_inline
 def l2_int8_sabd_udot_batch8[dim: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v0: UnsafePointer[Int8, MutUntrackedOrigin], v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin], v3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v4: UnsafePointer[Int8, MutUntrackedOrigin], v5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v6: UnsafePointer[Int8, MutUntrackedOrigin], v7: UnsafePointer[Int8, MutUntrackedOrigin],
+    q: Pointer[Int8, MutUntrackedOrigin],
+    v0: Pointer[Int8, MutUntrackedOrigin], v1: Pointer[Int8, MutUntrackedOrigin],
+    v2: Pointer[Int8, MutUntrackedOrigin], v3: Pointer[Int8, MutUntrackedOrigin],
+    v4: Pointer[Int8, MutUntrackedOrigin], v5: Pointer[Int8, MutUntrackedOrigin],
+    v6: Pointer[Int8, MutUntrackedOrigin], v7: Pointer[Int8, MutUntrackedOrigin],
 ) -> SIMD[DType.float32, 8]:
     """gh #395: `l2_int8_sabd_udot` against eight vectors at once — one query
     load per 16 lanes and eight independent chains, so the eight vectors' cache
@@ -562,7 +561,7 @@ def l2_int8_sabd_udot_batch8[dim: Int](
         return l2_distance_int8_int8_batch8_jit[dim](q, v0, v1, v2, v3, v4, v5, v6, v7)
 
 @always_inline
-def l2_distance_gpu(v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], dim: Int, min_val: Float32, range_val: Float32) -> Float32:
+def l2_distance_gpu(v1: Pointer[Float32, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin], dim: Int, min_val: Float32, range_val: Float32) -> Float32:
     comptime width = simd_width_of[DType.float32]()
     var scale = range_val / 254.0
     var scale_v = SIMD[DType.float32, width](scale)
@@ -582,7 +581,7 @@ def l2_distance_gpu(v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePo
     return result
 
 @always_inline
-def l2_distance_fp32_int8_jit[dim: Int](v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], min_val: Float32, range_val: Float32) -> Float32:
+def l2_distance_fp32_int8_jit[dim: Int](v1: Pointer[Float32, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin], min_val: Float32, range_val: Float32) -> Float32:
     comptime width = simd_width_of[DType.float32]()
     var sum = SIMD[DType.float32, width](0.0)
     
@@ -607,8 +606,8 @@ def l2_distance_fp32_int8_jit[dim: Int](v1: UnsafePointer[Float32, MutUntrackedO
 
 @always_inline
 def dot_product_simd[simd_width: Int](
-    a: UnsafePointer[Float32, MutUntrackedOrigin],
-    b: UnsafePointer[Float32, MutUntrackedOrigin],
+    a: Pointer[Float32, MutUntrackedOrigin],
+    b: Pointer[Float32, MutUntrackedOrigin],
     dim: Int
 ) -> Float32:
     # Two independent FMA chains to hide FMA latency (4 cycles on M4)
@@ -634,31 +633,31 @@ def dot_product_simd[simd_width: Int](
     return total
 
 @always_inline
-def hamming_distance(v1: UnsafePointer[UInt64, MutUntrackedOrigin], v2: UnsafePointer[UInt64, MutUntrackedOrigin], dim_u64: Int) -> Float32:
+def hamming_distance(v1: Pointer[UInt64, MutUntrackedOrigin], v2: Pointer[UInt64, MutUntrackedOrigin], dim_u64: Int) -> Float32:
     var total_popcount: Int = 0
     for i in range(dim_u64):
-        total_popcount += manual_popcount(v1[i] ^ v2[i])
+        total_popcount += manual_popcount(v1[unsafe_offset=i] ^ v2[unsafe_offset=i])
         
     return Float32(total_popcount)
 
 @always_inline
-def hamming_distance_jit[dim_u64: Int](v1: UnsafePointer[UInt64, MutUntrackedOrigin], v2: UnsafePointer[UInt64, MutUntrackedOrigin]) -> Float32:
+def hamming_distance_jit[dim_u64: Int](v1: Pointer[UInt64, MutUntrackedOrigin], v2: Pointer[UInt64, MutUntrackedOrigin]) -> Float32:
     var total_popcount: Int = 0
     for i in range(dim_u64):
-        total_popcount += manual_popcount(v1[i] ^ v2[i])
+        total_popcount += manual_popcount(v1[unsafe_offset=i] ^ v2[unsafe_offset=i])
         
     return Float32(total_popcount)
     
 @always_inline
-def l2_distance_int4(v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], dim: Int) -> Float32:
+def l2_distance_int4(v1: Pointer[Int8, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin], dim: Int) -> Float32:
     # dim is original dimensions, each byte stores 2 dimensions
     var bytes = dim // 2
     comptime width = simd_width_of[DType.int8]()
     var sum = SIMD[DType.int32, width](0)
     
     for i in range(0, bytes - width + 1, width):
-        var b1 = v1.load[width=width](i)
-        var b2 = v2.load[width=width](i)
+        var b1 = v1.unsafe_load[width=width](i)
+        var b2 = v2.unsafe_load[width=width](i)
         
         # Low nibbles
         var l1 = (b1 & 0x0F).cast[DType.int32]()
@@ -676,8 +675,8 @@ def l2_distance_int4(v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePoin
     
     # Tail
     for i in range(bytes - (bytes % width), bytes):
-        var b1 = v1[i]
-        var b2 = v2[i]
+        var b1 = v1[unsafe_offset=i]
+        var b2 = v2[unsafe_offset=i]
         var l1 = (b1 & 0x0F).cast[DType.int32]()
         var l2 = (b2 & 0x0F).cast[DType.int32]()
         var dl = l1 - l2
@@ -690,14 +689,14 @@ def l2_distance_int4(v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePoin
     return Float32(total_sum)
 
 @always_inline
-def l2_distance_int4_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+def l2_distance_int4_jit[dim: Int](v1: Pointer[Int8, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     comptime bytes = dim // 2
     comptime width = simd_width_of[DType.int8]()
     var sum = SIMD[DType.int32, width](0)
     
     for i in range(0, bytes - width + 1, width):
-        var b1 = v1.load[width=width](i)
-        var b2 = v2.load[width=width](i)
+        var b1 = v1.unsafe_load[width=width](i)
+        var b2 = v2.unsafe_load[width=width](i)
         
         var l1 = (b1 & 0x0F).cast[DType.int32]()
         var l2 = (b2 & 0x0F).cast[DType.int32]()
@@ -714,8 +713,8 @@ def l2_distance_int4_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigin], 
     # Tail
     comptime tail_start = (bytes // width) * width
     for i in range(tail_start, bytes):
-        var b1 = v1[i]
-        var b2 = v2[i]
+        var b1 = v1[unsafe_offset=i]
+        var b2 = v2[unsafe_offset=i]
         var l1 = (b1 & 0x0F).cast[DType.int32]()
         var l2 = (b2 & 0x0F).cast[DType.int32]()
         var dl = l1 - l2
@@ -728,26 +727,26 @@ def l2_distance_int4_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigin], 
     return Float32(total_sum)
 
 @always_inline
-def l2_distance_fp32_int4(v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], dim: Int, min_val: Float32, range_val: Float32) -> Float32:
+def l2_distance_fp32_int4(v1: Pointer[Float32, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin], dim: Int, min_val: Float32, range_val: Float32) -> Float32:
     var total_sum: Float32 = 0.0
     for i in range(0, dim, 2):
-        var b2 = v2[i // 2]
+        var b2 = v2[unsafe_offset=i // 2]
         var q2_low = (b2 & 0x0F).cast[DType.float32]()
         var q2_high = ((b2 >> 4) & 0x0F).cast[DType.float32]()
         
         var f2_low = q2_low / 15.0 * range_val + min_val
         var f2_high = q2_high / 15.0 * range_val + min_val
         
-        var d_low = v1[i] - f2_low
+        var d_low = v1[unsafe_offset=i] - f2_low
         total_sum += d_low * d_low
         
         if i + 1 < dim:
-            var d_high = v1[i + 1] - f2_high
+            var d_high = v1[unsafe_offset=i + 1] - f2_high
             total_sum += d_high * d_high
     return total_sum
 
 @always_inline
-def l2_distance_fp32_int4_jit[dim: Int](v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], min_val: Float32, range_val: Float32) -> Float32:
+def l2_distance_fp32_int4_jit[dim: Int](v1: Pointer[Float32, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin], min_val: Float32, range_val: Float32) -> Float32:
     # INT4 compact buffer: byte b_i → lo nibble = element[2*b_i], hi nibble = element[2*b_i+1].
     # Optimized scalar JIT: compile-time dim eliminates i//2 and i+1<dim from scalar kernel.
     # The Mojo compiler auto-vectorizes this loop (no branch, stride-2 FP32 access pattern).
@@ -755,16 +754,16 @@ def l2_distance_fp32_int4_jit[dim: Int](v1: UnsafePointer[Float32, MutUntrackedO
     var total_sum: Float32 = 0.0
     var scale = range_val / 15.0
     for b_i in range(bytes):
-        var b = Int(v2[b_i])
+        var b = Int(v2[unsafe_offset=b_i])
         var q_lo = Float32(b & 0xF)
         var q_hi = Float32((b >> 4) & 0xF)
-        var d0 = v1[2 * b_i]     - (q_lo * scale + min_val)
-        var d1 = v1[2 * b_i + 1] - (q_hi * scale + min_val)
+        var d0 = v1[unsafe_offset=2 * b_i]     - (q_lo * scale + min_val)
+        var d1 = v1[unsafe_offset=2 * b_i + 1] - (q_hi * scale + min_val)
         total_sum += d0 * d0 + d1 * d1
     return total_sum
 
 @always_inline
-def l2_distance_fp32_int8_fused_jit[dim: Int](v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin], min_val: Float32, range_val: Float32) -> Float32:
+def l2_distance_fp32_int8_fused_jit[dim: Int](v1: Pointer[Float32, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin], min_val: Float32, range_val: Float32) -> Float32:
     comptime width = simd_width_of[DType.float32]()
     var sum = SIMD[DType.float32, width](0.0)
     
@@ -776,8 +775,8 @@ def l2_distance_fp32_int8_fused_jit[dim: Int](v1: UnsafePointer[Float32, MutUntr
     var offset_simd = SIMD[DType.float32, width](127.0 * scale + min_val)
 
     for i in range(0, dim - width + 1, width):
-        var f1 = v1.load[width=width](i)
-        var q2 = v2.load[width=width](i).cast[DType.float32]()
+        var f1 = v1.unsafe_load[width=width](i)
+        var q2 = v2.unsafe_load[width=width](i).cast[DType.float32]()
         
         # Dequantize and compute distance in two FMAs
         var f2_scaled = fma_mad[width](q2, scale_simd, offset_simd)
@@ -788,8 +787,8 @@ def l2_distance_fp32_int8_fused_jit[dim: Int](v1: UnsafePointer[Float32, MutUntr
 
     comptime tail_start = (dim // width) * width
     for i in range(tail_start, dim):
-        var f1 = v1[i]
-        var q2 = v2[i].cast[DType.float32]()
+        var f1 = v1[unsafe_offset=i]
+        var q2 = v2[unsafe_offset=i].cast[DType.float32]()
         var f2 = fma_mad[1](q2, scale, 127.0 * scale + min_val)
         var d = f1 - f2
         total_sum += d * d
@@ -798,10 +797,10 @@ def l2_distance_fp32_int8_fused_jit[dim: Int](v1: UnsafePointer[Float32, MutUntr
 
 @always_inline
 def l2_distance_fp32_int8_sq8_jit[dim: Int](
-    v1: UnsafePointer[Float32, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin],
-    sq8_scale: UnsafePointer[Float32, MutUntrackedOrigin],
-    sq8_offset: UnsafePointer[Float32, MutUntrackedOrigin]) -> Float32:
+    v1: Pointer[Float32, MutUntrackedOrigin],
+    v2: Pointer[Int8, MutUntrackedOrigin],
+    sq8_scale: Pointer[Float32, MutUntrackedOrigin],
+    sq8_offset: Pointer[Float32, MutUntrackedOrigin]) -> Float32:
     """SQ8 per-dimension: dequant = q * sq8_scale[d] + sq8_offset[d]. 7.9 effective bits."""
     comptime width = simd_width_of[DType.float32]()
     var sum = SIMD[DType.float32, width](0.0)
@@ -821,8 +820,8 @@ def l2_distance_fp32_int8_sq8_jit[dim: Int](
 
 @always_inline
 def _l2_fp32_int8_pervec_rows[rows: Int](
-    v1: UnsafePointer[Float32, MutUntrackedOrigin],
-    v: Array[UnsafePointer[Int8, MutUntrackedOrigin], rows],
+    v1: Pointer[Float32, MutUntrackedOrigin],
+    v: Array[Pointer[Int8, MutUntrackedOrigin], rows],
     dim: Int,
     mins: Array[Float32, rows],
     ranges: Array[Float32, rows],
@@ -842,29 +841,29 @@ def _l2_fp32_int8_pervec_rows[rows: Int](
     var n_simd = (dim // width) * width
     var i = 0
     while i < n_simd:
-        var f1 = v1.load[width=width](i)
+        var f1 = v1.unsafe_load[width=width](i)
         comptime for r in range(rows):
-            var dq = fma_mad[width](v[r].load[width=width](i).cast[DType.float32](),
+            var dq = fma_mad[width](v[r].unsafe_load[width=width](i).cast[DType.float32](),
                                     SIMD[DType.float32, width](s[r]), SIMD[DType.float32, width](o[r]))
             var d = f1 - dq
             acc[r] = fma_mad[width](d, d, acc[r])
         i += width
     var red = acc.reduce_f32()
     while i < dim:
-        var f1 = v1[i]
+        var f1 = v1[unsafe_offset=i]
         comptime for r in range(rows):
-            var d = f1 - (v[r][i].cast[DType.float32]() * s[r] + o[r])
+            var d = f1 - (v[r][unsafe_offset=i].cast[DType.float32]() * s[r] + o[r])
             red[r] += d * d
         i += 1
     return pack_rows[rows](red)
 
 @always_inline
 def l2_distance_fp32_int8_pervec_batch4(
-    v1:   UnsafePointer[Float32, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
+    v1:   Pointer[Float32, MutUntrackedOrigin],
+    v2_0: Pointer[Int8, MutUntrackedOrigin],
+    v2_1: Pointer[Int8, MutUntrackedOrigin],
+    v2_2: Pointer[Int8, MutUntrackedOrigin],
+    v2_3: Pointer[Int8, MutUntrackedOrigin],
     dim: Int,
     min0: Float32, range0: Float32,
     min1: Float32, range1: Float32,
@@ -886,8 +885,8 @@ def l2_distance_fp32_int8_pervec_batch4(
 
 @always_inline
 def _l2_int8_int8_rows[dim: Int, rows: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v: Array[UnsafePointer[Int8, MutUntrackedOrigin], rows],
+    q: Pointer[Int8, MutUntrackedOrigin],
+    v: Array[Pointer[Int8, MutUntrackedOrigin], rows],
 ) -> SIMD[DType.float32, rows]:
     """gh #127: the INT8-INT8 L2 microkernel behind the batch-4 and batch-8
     entry points: one query load per 16 lanes, `rows` INT32 chains in a
@@ -896,30 +895,30 @@ def _l2_int8_int8_rows[dim: Int, rows: Int](
     comptime width = 16
     var acc = RegTile[DType.int32, rows, width]()
     for i in range(0, dim - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
+        var qv = q.unsafe_load[width=width](i).cast[DType.int32]()
         comptime for r in range(rows):
-            var d = qv - v[r].load[width=width](i).cast[DType.int32]()
+            var d = qv - v[r].unsafe_load[width=width](i).cast[DType.int32]()
             acc[r] += d * d
     var red = acc.reduce_f32()
     comptime tail_start = (dim // width) * width
     for i in range(tail_start, dim):
-        var qi = q[i].cast[DType.int32]()
+        var qi = q[unsafe_offset=i].cast[DType.int32]()
         comptime for r in range(rows):
-            var di = qi - v[r][i].cast[DType.int32]()
+            var di = qi - v[r][unsafe_offset=i].cast[DType.int32]()
             red[r] += Float32(di * di)
     return pack_rows[rows](red)
 
 @always_inline
 def l2_distance_int8_int8_batch8_jit[dim: Int](
-    q:    UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_4: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_6: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_7: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
+    q:    Pointer[Int8, MutUntrackedOrigin],
+    v2_0: Pointer[Int8, MutUntrackedOrigin],
+    v2_1: Pointer[Int8, MutUntrackedOrigin],
+    v2_2: Pointer[Int8, MutUntrackedOrigin],
+    v2_3: Pointer[Int8, MutUntrackedOrigin],
+    v2_4: Pointer[Int8, MutUntrackedOrigin],
+    v2_5: Pointer[Int8, MutUntrackedOrigin],
+    v2_6: Pointer[Int8, MutUntrackedOrigin],
+    v2_7: Pointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
     """INT8-INT8 L2 batch-8: no dequantization, matches graph build metric.
     Query quantized to INT8 once per search call; ~1.3x faster than FP32-INT8.
     Accumulates in INT32 (max: 1536 * 254^2 = 99M < INT32_MAX)."""
@@ -927,7 +926,7 @@ def l2_distance_int8_int8_batch8_jit[dim: Int](
         q, ptr_rows8(v2_0, v2_1, v2_2, v2_3, v2_4, v2_5, v2_6, v2_7))
 
 @always_inline
-def cosine_distance_int8_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+def cosine_distance_int8_jit[dim: Int](v1: Pointer[Int8, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     comptime width = 16
     var sum = SIMD[DType.int32, width](0)
     for i in range(0, dim - width + 1, width):
@@ -944,25 +943,25 @@ def cosine_distance_int8_jit[dim: Int](v1: UnsafePointer[Int8, MutUntrackedOrigi
 
 @always_inline
 def l2_distance_int8_int8_batch4_jit[dim: Int](
-    q:    UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 4]:
+    q:    Pointer[Int8, MutUntrackedOrigin],
+    v2_0: Pointer[Int8, MutUntrackedOrigin],
+    v2_1: Pointer[Int8, MutUntrackedOrigin],
+    v2_2: Pointer[Int8, MutUntrackedOrigin],
+    v2_3: Pointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 4]:
     """INT8-INT8 L2 batch-4: no dequantization, matches graph build metric."""
     return _l2_int8_int8_rows[dim, 4](q, ptr_rows4(v2_0, v2_1, v2_2, v2_3))
 
 @always_inline
 def pq_distance_8way[nsub: Int, pq_k: Int](
-    pq_table: UnsafePointer[Float32, MutUntrackedOrigin],
-    codes0: UnsafePointer[UInt8, MutUntrackedOrigin],
-    codes1: UnsafePointer[UInt8, MutUntrackedOrigin],
-    codes2: UnsafePointer[UInt8, MutUntrackedOrigin],
-    codes3: UnsafePointer[UInt8, MutUntrackedOrigin],
-    codes4: UnsafePointer[UInt8, MutUntrackedOrigin],
-    codes5: UnsafePointer[UInt8, MutUntrackedOrigin],
-    codes6: UnsafePointer[UInt8, MutUntrackedOrigin],
-    codes7: UnsafePointer[UInt8, MutUntrackedOrigin]
+    pq_table: Pointer[Float32, MutUntrackedOrigin],
+    codes0: Pointer[UInt8, MutUntrackedOrigin],
+    codes1: Pointer[UInt8, MutUntrackedOrigin],
+    codes2: Pointer[UInt8, MutUntrackedOrigin],
+    codes3: Pointer[UInt8, MutUntrackedOrigin],
+    codes4: Pointer[UInt8, MutUntrackedOrigin],
+    codes5: Pointer[UInt8, MutUntrackedOrigin],
+    codes6: Pointer[UInt8, MutUntrackedOrigin],
+    codes7: Pointer[UInt8, MutUntrackedOrigin]
 ) -> SIMD[DType.float32, 8]:
     var dists = SIMD[DType.float32, 8](0.0)
     for m in range(nsub):
@@ -979,7 +978,7 @@ def pq_distance_8way[nsub: Int, pq_k: Int](
 # l2_distance_int8_suffix_early_exit_jit: tuned batch kernel, closed in libpion_vector (D11).
 
 @no_inline
-def wht_fp32_inplace_512(data: UnsafePointer[Float32, MutUntrackedOrigin]):
+def wht_fp32_inplace_512(data: Pointer[Float32, MutUntrackedOrigin]):
     """In-place Fast Walsh-Hadamard Transform for a 512-element FP32 block.
     O(N log N) butterfly: 9 stages × 512 ops = 4608 add/subs.
     Normalizes by 1/sqrt(512) to preserve L2 norm."""
@@ -991,37 +990,37 @@ def wht_fp32_inplace_512(data: UnsafePointer[Float32, MutUntrackedOrigin]):
             if h >= 4:
                 var j = 0
                 while j < h:
-                    var x = (data + i + j).load[width=4]()
-                    var y = (data + i + j + h).load[width=4]()
-                    (data + i + j).store[width=4](x + y)
-                    (data + i + j + h).store[width=4](x - y)
+                    var x = (data.unsafe_offset(i).unsafe_offset(j)).unsafe_load[width=4]()
+                    var y = (data.unsafe_offset(i).unsafe_offset(j).unsafe_offset(h)).unsafe_load[width=4]()
+                    (data.unsafe_offset(i).unsafe_offset(j)).unsafe_store[width=4](x + y)
+                    (data.unsafe_offset(i).unsafe_offset(j).unsafe_offset(h)).unsafe_store[width=4](x - y)
                     j += 4
             else:
                 for j in range(h):
-                    var x = data[i + j]
-                    var y = data[i + j + h]
-                    data[i + j] = x + y
-                    data[i + j + h] = x - y
+                    var x = data[unsafe_offset=i + j]
+                    var y = data[unsafe_offset=i + j + h]
+                    data[unsafe_offset=i + j] = x + y
+                    data[unsafe_offset=i + j + h] = x - y
             i += h * 2
         h *= 2
     # Normalize: 1/sqrt(512) ≈ 0.044194173824159216
     var norm_v = SIMD[DType.float32, 4](0.044194173824159216)
     for i in range(0, 512, 4):
-        (data + i).store[width=4]((data + i).load[width=4]() * norm_v)
+        (data.unsafe_offset(i)).unsafe_store[width=4]((data.unsafe_offset(i)).unsafe_load[width=4]() * norm_v)
 
 @no_inline
-def wht_fp32_1536(data: UnsafePointer[Float32, MutUntrackedOrigin]):
+def wht_fp32_1536(data: Pointer[Float32, MutUntrackedOrigin]):
     """Block-diagonal WHT for 1536 dims: 3 independent 512-dim blocks.
     1536 = 3 × 512 = 3 × 2^9. Each block gets full WHT decorrelation.
     Preserves L2 norm: ||WHT(x)||² = ||x||² (orthogonal transform)."""
     wht_fp32_inplace_512(data)
-    wht_fp32_inplace_512(data + 512)
-    wht_fp32_inplace_512(data + 1024)
+    wht_fp32_inplace_512(data.unsafe_offset(512))
+    wht_fp32_inplace_512(data.unsafe_offset(1024))
 
 @always_inline
 def quantize_fp32_to_int4_simd(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Int8, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Int8, MutUntrackedOrigin],
     dim: Int,
     qmin: Float32,
     scale: Float32):
@@ -1060,7 +1059,7 @@ def quantize_fp32_to_int4_simd(
         dst[di // 2] = Int8(Int(v0))
 
 @no_inline
-def norm_sq_int4_jit[dim: Int](v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+def norm_sq_int4_jit[dim: Int](v: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     """INT4 norm squared: sum(v_i^2) where v is packed INT4 (dim/2 bytes).
     Values in [0,15]. Max per-dim contribution: 225. Max total: dim×225."""
     comptime bytes = dim // 2
@@ -1084,8 +1083,8 @@ def norm_sq_int4_jit[dim: Int](v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Fl
 
 @no_inline
 def l2_distance_int4_suffix_early_exit_jit[suffix: Int, block: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v: UnsafePointer[Int8, MutUntrackedOrigin],
+    q: Pointer[Int8, MutUntrackedOrigin],
+    v: Pointer[Int8, MutUntrackedOrigin],
     prefix_dist: Float32,
     threshold: Float32) -> Float32:
     """INT4 suffix L2 with block-wise early exit. q/v are packed INT4 pointers
@@ -1121,8 +1120,8 @@ comptime VEC_BYTES_1536 = 868  # 4B norm + 48 * 18B
 
 @no_inline
 def quantize_fp32_to_block_int4(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Int8, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Int8, MutUntrackedOrigin],
     dim: Int):
     """Block-wise symmetric INT4 quantization.
     Layout per vector: [FP32 norm (4B)] [block0: FP16 scale (2B) + INT4 data (16B)] × 48
@@ -1138,7 +1137,7 @@ def quantize_fp32_to_block_int4(
         # Find block absmax for symmetric quantization
         var absmax: Float32 = 0.0
         for i in range(BLOCK_DIM):
-            var v = src[base + i]
+            var v = src[unsafe_offset=base + i]
             var av = v if v >= 0 else -v
             if av > absmax: absmax = av
         # Scale: maps [-absmax, absmax] → [-8, 7] (symmetric, 16 levels)
@@ -1148,7 +1147,7 @@ def quantize_fp32_to_block_int4(
 
         # Write FP16 scale
         var scale_f16 = scale.cast[DType.float16]()
-        (dst + out_off).bitcast[Float16]()[0] = scale_f16
+        (dst.unsafe_offset(out_off)).unsafe_bitcast[Float16]()[unsafe_offset=0] = scale_f16
         out_off += 2
 
         # Quantize 32 dims and pack in SDOT-friendly layout:
@@ -1157,7 +1156,7 @@ def quantize_fp32_to_block_int4(
         # This aligns directly with query INT8 layout → enables SDOT without deinterleave.
         var q_vals = Array[Int, 32](uninitialized=True)
         for i in range(BLOCK_DIM):
-            var q_f = src[base + i] * inv_scale
+            var q_f = src[unsafe_offset=base + i] * inv_scale
             var q = Int(q_f + Float32(0.5)) if q_f >= 0 else Int(q_f - Float32(0.5))
             if q > 7: q = 7
             if q < -8: q = -8
@@ -1168,16 +1167,16 @@ def quantize_fp32_to_block_int4(
         for i in range(16):
             var u_lo = UInt8(q_vals[i] + 8)       # dims 0..15
             var u_hi = UInt8(q_vals[i + 16] + 8)  # dims 16..31
-            dst[out_off] = ((u_hi << 4) | u_lo).cast[DType.int8]()
+            dst[unsafe_offset=out_off] = ((u_hi << 4) | u_lo).cast[DType.int8]()
             out_off += 1
 
     # Write reconstructed norm at offset 0
-    dst.bitcast[Float32]()[0] = recon_norm
+    dst.unsafe_bitcast[Float32]()[unsafe_offset=0] = recon_norm
 
 @no_inline
 def dequantize_block_int4_to_fp32(
-    src: UnsafePointer[Int8, MutUntrackedOrigin],
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Int8, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     dim: Int):
     """M4: Inverse of quantize_fp32_to_block_int4 — used by ATTEND.QUERY to return
     FP32 V vectors from turbo4-packed storage.
@@ -1189,29 +1188,29 @@ def dequantize_block_int4_to_fp32(
     var num_blocks = dim // BLOCK_DIM
     var in_off = 4  # skip FP32 norm header
     for b in range(num_blocks):
-        var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+        var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
         in_off += 2
         var base = b * BLOCK_DIM
         # Unpack 16 bytes → 32 dims
         for i in range(16):
-            var byte = UInt8(src[in_off + i])
+            var byte = UInt8(src[unsafe_offset=in_off + i])
             var lo_u = Int((byte & UInt8(0x0F)))      # 0..15
             var hi_u = Int((byte >> 4) & UInt8(0x0F))  # 0..15
             var lo_q = lo_u - 8                        # -8..7
             var hi_q = hi_u - 8
-            dst[base + i]      = Float32(lo_q) * scale
-            dst[base + i + 16] = Float32(hi_q) * scale
+            dst[unsafe_offset=base + i]      = Float32(lo_q) * scale
+            dst[unsafe_offset=base + i + 16] = Float32(hi_q) * scale
         in_off += 16
 
 
 @no_inline
 def fused_topk_dequant_v_turbo4(
-    token_ids: UnsafePointer[Int, MutUntrackedOrigin],
+    token_ids: Pointer[Int, MutUntrackedOrigin],
     k: Int,
-    v_blob: UnsafePointer[Int8, MutUntrackedOrigin],
+    v_blob: Pointer[Int8, MutUntrackedOrigin],
     bytes_per_token: Int,
     dim: Int,
-    dst_fp32: UnsafePointer[Float32, MutUntrackedOrigin],
+    dst_fp32: Pointer[Float32, MutUntrackedOrigin],
 ):
     """M4: Fused scatter-gather dequant — takes k token IDs, gathers their turbo4-packed
     V vectors from the blob, and writes all k results as contiguous FP32 in one pass.
@@ -1219,145 +1218,145 @@ def fused_topk_dequant_v_turbo4(
     dst_fp32 must have space for k * dim Float32 values."""
     var num_blocks = dim // BLOCK_DIM
     for ri in range(k):
-        var tid = token_ids[ri]
-        var src = v_blob + tid * bytes_per_token
-        var dst = dst_fp32 + ri * dim
+        var tid = token_ids[unsafe_offset=ri]
+        var src = v_blob.unsafe_offset(tid * bytes_per_token)
+        var dst = dst_fp32.unsafe_offset(ri * dim)
         # Prefetch next token's data to overlap with current decode
         if ri + 1 < k:
-            var next_src = v_blob + token_ids[ri + 1] * bytes_per_token
+            var next_src = v_blob.unsafe_offset(token_ids[unsafe_offset=ri + 1] * bytes_per_token)
             prefetch(next_src)
-            prefetch(next_src + 64)
+            prefetch(next_src.unsafe_offset(64))
         # Dequant this token: skip 4B norm, then decode blocks
         var in_off = 4
         for b in range(num_blocks):
-            var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+            var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
             in_off += 2
             var base = b * BLOCK_DIM
             for i in range(16):
-                var byte = UInt8(src[in_off + i])
+                var byte = UInt8(src[unsafe_offset=in_off + i])
                 var lo_u = Int((byte & UInt8(0x0F)))
                 var hi_u = Int((byte >> 4) & UInt8(0x0F))
-                dst[base + i]      = Float32(lo_u - 8) * scale
-                dst[base + i + 16] = Float32(hi_u - 8) * scale
+                dst[unsafe_offset=base + i]      = Float32(lo_u - 8) * scale
+                dst[unsafe_offset=base + i + 16] = Float32(hi_u - 8) * scale
             in_off += 16
 
 
 def fused_topk_dequant_v_turbo3(
-    token_ids: UnsafePointer[Int, MutUntrackedOrigin],
+    token_ids: Pointer[Int, MutUntrackedOrigin],
     k: Int,
-    v_blob: UnsafePointer[Int8, MutUntrackedOrigin],
+    v_blob: Pointer[Int8, MutUntrackedOrigin],
     bytes_per_token: Int,
     dim: Int,
-    dst_fp32: UnsafePointer[Float32, MutUntrackedOrigin],
+    dst_fp32: Pointer[Float32, MutUntrackedOrigin],
 ):
     """gh #131 §5.3: fused scatter-gather dequant for turbo3 (block-INT3), mirroring
     fused_topk_dequant_v_turbo4 — gathers k tokens' packed V vectors with a tight
     prefetch pattern and inlines the INT3 decode, avoiding per-result call overhead."""
     var num_blocks = dim // BLOCK_DIM
     for ri in range(k):
-        var tid = token_ids[ri]
-        var src = v_blob + tid * bytes_per_token
-        var dst = dst_fp32 + ri * dim
+        var tid = token_ids[unsafe_offset=ri]
+        var src = v_blob.unsafe_offset(tid * bytes_per_token)
+        var dst = dst_fp32.unsafe_offset(ri * dim)
         if ri + 1 < k:
-            var next_src = v_blob + token_ids[ri + 1] * bytes_per_token
+            var next_src = v_blob.unsafe_offset(token_ids[unsafe_offset=ri + 1] * bytes_per_token)
             prefetch(next_src)
-            prefetch(next_src + 64)
+            prefetch(next_src.unsafe_offset(64))
         var in_off = 4
         for b in range(num_blocks):
-            var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+            var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
             in_off += 2
             var base = b * BLOCK_DIM
             for half in range(2):  # 0=lo(dims 0-15), 1=hi(dims 16-31)
                 for g in range(2):  # 2 groups of 8 per half
                     var goff = in_off + half * 6 + g * 3
-                    var b0 = Int(src[goff].cast[DType.uint8]())
-                    var b1 = Int(src[goff + 1].cast[DType.uint8]())
-                    var b2 = Int(src[goff + 2].cast[DType.uint8]())
+                    var b0 = Int(src[unsafe_offset=goff].cast[DType.uint8]())
+                    var b1 = Int(src[unsafe_offset=goff + 1].cast[DType.uint8]())
+                    var b2 = Int(src[unsafe_offset=goff + 2].cast[DType.uint8]())
                     var word = b0 | (b1 << 8) | (b2 << 16)
                     var dim_base = base + half * 16 + g * 8
-                    dst[dim_base]     = Float32((word & 7) - 4) * scale
-                    dst[dim_base + 1] = Float32(((word >> 3) & 7) - 4) * scale
-                    dst[dim_base + 2] = Float32(((word >> 6) & 7) - 4) * scale
-                    dst[dim_base + 3] = Float32(((word >> 9) & 7) - 4) * scale
-                    dst[dim_base + 4] = Float32(((word >> 12) & 7) - 4) * scale
-                    dst[dim_base + 5] = Float32(((word >> 15) & 7) - 4) * scale
-                    dst[dim_base + 6] = Float32(((word >> 18) & 7) - 4) * scale
-                    dst[dim_base + 7] = Float32(((word >> 21) & 7) - 4) * scale
+                    dst[unsafe_offset=dim_base]     = Float32((word & 7) - 4) * scale
+                    dst[unsafe_offset=dim_base + 1] = Float32(((word >> 3) & 7) - 4) * scale
+                    dst[unsafe_offset=dim_base + 2] = Float32(((word >> 6) & 7) - 4) * scale
+                    dst[unsafe_offset=dim_base + 3] = Float32(((word >> 9) & 7) - 4) * scale
+                    dst[unsafe_offset=dim_base + 4] = Float32(((word >> 12) & 7) - 4) * scale
+                    dst[unsafe_offset=dim_base + 5] = Float32(((word >> 15) & 7) - 4) * scale
+                    dst[unsafe_offset=dim_base + 6] = Float32(((word >> 18) & 7) - 4) * scale
+                    dst[unsafe_offset=dim_base + 7] = Float32(((word >> 21) & 7) - 4) * scale
             in_off += 12
 
 
 def fused_topk_dequant_v_turbo2(
-    token_ids: UnsafePointer[Int, MutUntrackedOrigin],
+    token_ids: Pointer[Int, MutUntrackedOrigin],
     k: Int,
-    v_blob: UnsafePointer[Int8, MutUntrackedOrigin],
+    v_blob: Pointer[Int8, MutUntrackedOrigin],
     bytes_per_token: Int,
     dim: Int,
-    dst_fp32: UnsafePointer[Float32, MutUntrackedOrigin],
+    dst_fp32: Pointer[Float32, MutUntrackedOrigin],
 ):
     """gh #131 §5.3: fused scatter-gather dequant for turbo2 (block-INT2), mirroring
     fused_topk_dequant_v_turbo4 with an inlined INT2 decode."""
     var num_blocks = dim // BLOCK_DIM
     for ri in range(k):
-        var tid = token_ids[ri]
-        var src = v_blob + tid * bytes_per_token
-        var dst = dst_fp32 + ri * dim
+        var tid = token_ids[unsafe_offset=ri]
+        var src = v_blob.unsafe_offset(tid * bytes_per_token)
+        var dst = dst_fp32.unsafe_offset(ri * dim)
         if ri + 1 < k:
-            var next_src = v_blob + token_ids[ri + 1] * bytes_per_token
+            var next_src = v_blob.unsafe_offset(token_ids[unsafe_offset=ri + 1] * bytes_per_token)
             prefetch(next_src)
-            prefetch(next_src + 64)
+            prefetch(next_src.unsafe_offset(64))
         var in_off = 4
         for b in range(num_blocks):
-            var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+            var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
             in_off += 2
             var base = b * BLOCK_DIM
             for half in range(2):  # 0=lo(dims 0-15), 1=hi(dims 16-31)
                 var off = in_off + half * 4
-                var b0 = Int(src[off].cast[DType.uint8]())
-                var b1 = Int(src[off + 1].cast[DType.uint8]())
-                var b2 = Int(src[off + 2].cast[DType.uint8]())
-                var b3 = Int(src[off + 3].cast[DType.uint8]())
+                var b0 = Int(src[unsafe_offset=off].cast[DType.uint8]())
+                var b1 = Int(src[unsafe_offset=off + 1].cast[DType.uint8]())
+                var b2 = Int(src[unsafe_offset=off + 2].cast[DType.uint8]())
+                var b3 = Int(src[unsafe_offset=off + 3].cast[DType.uint8]())
                 var word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
                 var dim_base = base + half * 16
                 for i in range(16):
                     var val = ((word >> (i * 2)) & 3) * 2 - 3  # {-3,-1,1,3}
-                    dst[dim_base + i] = Float32(val) * scale
+                    dst[unsafe_offset=dim_base + i] = Float32(val) * scale
             in_off += 8
 
 
 def fused_topk_dequant_v_fp8(
-    token_ids: UnsafePointer[Int, MutUntrackedOrigin],
+    token_ids: Pointer[Int, MutUntrackedOrigin],
     k: Int,
-    v_blob: UnsafePointer[Int8, MutUntrackedOrigin],
+    v_blob: Pointer[Int8, MutUntrackedOrigin],
     bytes_per_token: Int,
     dim: Int,
-    dst_fp32: UnsafePointer[Float32, MutUntrackedOrigin],
+    dst_fp32: Pointer[Float32, MutUntrackedOrigin],
 ):
     """gh #131 §5.3: fused scatter-gather dequant for fp8 (block E4M3), mirroring
     fused_topk_dequant_v_turbo4 with an inlined FP8 decode."""
     var num_blocks = dim // BLOCK_DIM
     for ri in range(k):
-        var tid = token_ids[ri]
-        var src = v_blob + tid * bytes_per_token
-        var dst = dst_fp32 + ri * dim
+        var tid = token_ids[unsafe_offset=ri]
+        var src = v_blob.unsafe_offset(tid * bytes_per_token)
+        var dst = dst_fp32.unsafe_offset(ri * dim)
         if ri + 1 < k:
-            var next_src = v_blob + token_ids[ri + 1] * bytes_per_token
+            var next_src = v_blob.unsafe_offset(token_ids[unsafe_offset=ri + 1] * bytes_per_token)
             prefetch(next_src)
-            prefetch(next_src + 64)
+            prefetch(next_src.unsafe_offset(64))
         var in_off = 4
         for b in range(num_blocks):
-            var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+            var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
             in_off += 2
             var base = b * BLOCK_DIM
             for i in range(BLOCK_DIM):
-                var v_e4m3 = (src + in_off + i).bitcast[Scalar[DType.float8_e4m3fn]]()[0]
-                dst[base + i] = v_e4m3.cast[DType.float32]() * scale
+                var v_e4m3 = (src.unsafe_offset(in_off).unsafe_offset(i)).unsafe_bitcast[Scalar[DType.float8_e4m3fn]]()[unsafe_offset=0]
+                dst[unsafe_offset=base + i] = v_e4m3.cast[DType.float32]() * scale
             in_off += BLOCK_DIM
 
 
 @no_inline
 def dequantize_block_int3_to_fp32(
-    src: UnsafePointer[Int8, MutUntrackedOrigin],
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Int8, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     dim: Int):
     """M4: Inverse of quantize_fp32_to_block_int3.
     Layout per vector: [FP32 norm (4B)] [block: FP16 scale (2B) + 6B lo + 6B hi] × (dim/32)
@@ -1365,7 +1364,7 @@ def dequantize_block_int3_to_fp32(
     var num_blocks = dim // BLOCK_DIM
     var in_off = 4  # skip norm header
     for b in range(num_blocks):
-        var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+        var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
         in_off += 2
         var base = b * BLOCK_DIM
         # Decode all 32 dims from 12 packed bytes (4 groups of 8 values × 3 bytes each)
@@ -1374,26 +1373,26 @@ def dequantize_block_int3_to_fp32(
         for half in range(2):  # 0=lo(dims 0-15), 1=hi(dims 16-31)
             for g in range(2):  # 2 groups of 8 per half
                 var goff = in_off + half * 6 + g * 3
-                var b0 = Int(src[goff].cast[DType.uint8]())
-                var b1 = Int(src[goff + 1].cast[DType.uint8]())
-                var b2 = Int(src[goff + 2].cast[DType.uint8]())
+                var b0 = Int(src[unsafe_offset=goff].cast[DType.uint8]())
+                var b1 = Int(src[unsafe_offset=goff + 1].cast[DType.uint8]())
+                var b2 = Int(src[unsafe_offset=goff + 2].cast[DType.uint8]())
                 var word = b0 | (b1 << 8) | (b2 << 16)
                 var dim_base = base + half * 16 + g * 8
-                dst[dim_base]     = Float32((word & 7) - 4) * scale
-                dst[dim_base + 1] = Float32(((word >> 3) & 7) - 4) * scale
-                dst[dim_base + 2] = Float32(((word >> 6) & 7) - 4) * scale
-                dst[dim_base + 3] = Float32(((word >> 9) & 7) - 4) * scale
-                dst[dim_base + 4] = Float32(((word >> 12) & 7) - 4) * scale
-                dst[dim_base + 5] = Float32(((word >> 15) & 7) - 4) * scale
-                dst[dim_base + 6] = Float32(((word >> 18) & 7) - 4) * scale
-                dst[dim_base + 7] = Float32(((word >> 21) & 7) - 4) * scale
+                dst[unsafe_offset=dim_base]     = Float32((word & 7) - 4) * scale
+                dst[unsafe_offset=dim_base + 1] = Float32(((word >> 3) & 7) - 4) * scale
+                dst[unsafe_offset=dim_base + 2] = Float32(((word >> 6) & 7) - 4) * scale
+                dst[unsafe_offset=dim_base + 3] = Float32(((word >> 9) & 7) - 4) * scale
+                dst[unsafe_offset=dim_base + 4] = Float32(((word >> 12) & 7) - 4) * scale
+                dst[unsafe_offset=dim_base + 5] = Float32(((word >> 15) & 7) - 4) * scale
+                dst[unsafe_offset=dim_base + 6] = Float32(((word >> 18) & 7) - 4) * scale
+                dst[unsafe_offset=dim_base + 7] = Float32(((word >> 21) & 7) - 4) * scale
         in_off += 12
 
 
 @no_inline
 def dequantize_block_int2_to_fp32(
-    src: UnsafePointer[Int8, MutUntrackedOrigin],
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Int8, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     dim: Int):
     """M4: Inverse of quantize_fp32_to_block_int2.
     Layout per vector: [FP32 norm (4B)] [block: FP16 scale (2B) + 4B lo + 4B hi] × (dim/32)
@@ -1401,29 +1400,29 @@ def dequantize_block_int2_to_fp32(
     var num_blocks = dim // BLOCK_DIM
     var in_off = 4  # skip norm header
     for b in range(num_blocks):
-        var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+        var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
         in_off += 2
         var base = b * BLOCK_DIM
         # Decode all 32 dims from 8 packed bytes (4B lo + 4B hi)
         for half in range(2):  # 0=lo(dims 0-15), 1=hi(dims 16-31)
             var off = in_off + half * 4
-            var b0 = Int(src[off].cast[DType.uint8]())
-            var b1 = Int(src[off + 1].cast[DType.uint8]())
-            var b2 = Int(src[off + 2].cast[DType.uint8]())
-            var b3 = Int(src[off + 3].cast[DType.uint8]())
+            var b0 = Int(src[unsafe_offset=off].cast[DType.uint8]())
+            var b1 = Int(src[unsafe_offset=off + 1].cast[DType.uint8]())
+            var b2 = Int(src[unsafe_offset=off + 2].cast[DType.uint8]())
+            var b3 = Int(src[unsafe_offset=off + 3].cast[DType.uint8]())
             var word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
             var dim_base = base + half * 16
             for i in range(16):
                 var val = ((word >> (i * 2)) & 3) * 2 - 3  # {-3,-1,1,3}
-                dst[dim_base + i] = Float32(val) * scale
+                dst[unsafe_offset=dim_base + i] = Float32(val) * scale
         in_off += 8
 
 
 @no_inline
 def quantize_fp32_to_block_int8(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst_int8: UnsafePointer[Int8, MutUntrackedOrigin],
-    dst_scales: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst_int8: Pointer[Int8, MutUntrackedOrigin],
+    dst_scales: Pointer[Float32, MutUntrackedOrigin],
     dim: Int) -> Float32:
     """Block-wise symmetric INT8 quantization for the QUERY vector.
     Each 32-dim block → FP32 scale + 32 × INT8 values in [-127, 127].
@@ -1436,19 +1435,19 @@ def quantize_fp32_to_block_int8(
         var base = b * BLOCK_DIM
         var absmax: Float32 = 0.0
         for i in range(BLOCK_DIM):
-            var v = src[base + i]
+            var v = src[unsafe_offset=base + i]
             var av = v if v >= 0 else -v
             if av > absmax: absmax = av
         var scale = absmax / Float32(127.0) if absmax > 0 else Float32(1.0)
         var inv_scale = Float32(1.0) / scale
-        dst_scales[b] = scale
+        dst_scales[unsafe_offset=b] = scale
 
         for i in range(BLOCK_DIM):
-            var q_f = src[base + i] * inv_scale
+            var q_f = src[unsafe_offset=base + i] * inv_scale
             var q = Int(q_f + Float32(0.5)) if q_f >= 0 else Int(q_f - Float32(0.5))
             if q > 127: q = 127
             if q < -127: q = -127
-            dst_int8[base + i] = Int8(q)
+            dst_int8[unsafe_offset=base + i] = Int8(q)
             var r = Float32(q) * scale
             recon_norm += r * r
 
@@ -1456,9 +1455,9 @@ def quantize_fp32_to_block_int8(
 
 @no_inline
 def block_int4_dot_single_simd(
-    q_int8: UnsafePointer[Int8, MutUntrackedOrigin],
-    q_scales: UnsafePointer[Float32, MutUntrackedOrigin],
-    v_block: UnsafePointer[Int8, MutUntrackedOrigin],
+    q_int8: Pointer[Int8, MutUntrackedOrigin],
+    q_scales: Pointer[Float32, MutUntrackedOrigin],
+    v_block: Pointer[Int8, MutUntrackedOrigin],
 ) -> Float32:
     """SDOT-optimized asymmetric dot: INT8 query × block-INT4 vector.
     SDOT-friendly layout: byte[i] = (dim[i+16]<<4) | dim[i].
@@ -1468,19 +1467,19 @@ def block_int4_dot_single_simd(
     var v_off = 4  # skip norm header
 
     for b in range(NUM_BLOCKS_1536):
-        var scale_v = (v_block + v_off).bitcast[Float16]()[0].cast[DType.float32]()
+        var scale_v = (v_block.unsafe_offset(v_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
         v_off += 2
-        var combined_scale = q_scales[b] * scale_v
+        var combined_scale = q_scales[unsafe_offset=b] * scale_v
 
         # Load 16 packed bytes, unpack to 2×16 INT8
-        var packed = (v_block + v_off).load[width=16]()
+        var packed = (v_block.unsafe_offset(v_off)).unsafe_load[width=16]()
         var v_lo = (packed & SIMD[DType.int8, 16](0x0F)) - SIMD[DType.int8, 16](8)  # dims 0..15
         var v_hi = ((packed >> 4) & SIMD[DType.int8, 16](0x0F)) - SIMD[DType.int8, 16](8)  # dims 16..31
 
         # Query halves align directly with unpacked vectors
         var q_base = b * BLOCK_DIM
-        var q_lo = (q_int8 + q_base).load[width=16]()       # dims 0..15
-        var q_hi = (q_int8 + q_base + 16).load[width=16]()  # dims 16..31
+        var q_lo = (q_int8.unsafe_offset(q_base)).unsafe_load[width=16]()       # dims 0..15
+        var q_hi = (q_int8.unsafe_offset(q_base).unsafe_offset(16)).unsafe_load[width=16]()  # dims 16..31
 
         # 2× SDOT: each produces 4 int32 partial sums from 16 int8×int8 products
         var acc = SIMD[DType.int32, 4](0)
@@ -1508,20 +1507,20 @@ comptime QJL_U64S_1536 = 24        # 1536 bits / 64
 comptime QJL_BYTES_1536 = 192      # 1536 bits / 8
 
 @always_inline
-def _pack_8_int3(vals: Array[Int, 8], dst: UnsafePointer[Int8, MutUntrackedOrigin], off: Int):
+def _pack_8_int3(vals: Array[Int, 8], dst: Pointer[Int8, MutUntrackedOrigin], off: Int):
     """Pack 8 unsigned 3-bit values [0,7] into 3 bytes.
     Layout: byte[0] = v0|(v1<<3)|((v2&3)<<6), byte[1] = (v2>>2)|(v3<<1)|(v4<<4)|((v5&1)<<7),
             byte[2] = (v5>>1)|(v6<<2)|(v7<<5)."""
     var v0 = UInt8(vals[0]); var v1 = UInt8(vals[1]); var v2 = UInt8(vals[2]); var v3 = UInt8(vals[3])
     var v4 = UInt8(vals[4]); var v5 = UInt8(vals[5]); var v6 = UInt8(vals[6]); var v7 = UInt8(vals[7])
-    dst[off]     = (v0 | (v1 << 3) | ((v2 & 3) << 6)).cast[DType.int8]()
-    dst[off + 1] = ((v2 >> 2) | (v3 << 1) | (v4 << 4) | ((v5 & 1) << 7)).cast[DType.int8]()
-    dst[off + 2] = ((v5 >> 1) | (v6 << 2) | (v7 << 5)).cast[DType.int8]()
+    dst[unsafe_offset=off]     = (v0 | (v1 << 3) | ((v2 & 3) << 6)).cast[DType.int8]()
+    dst[unsafe_offset=off + 1] = ((v2 >> 2) | (v3 << 1) | (v4 << 4) | ((v5 & 1) << 7)).cast[DType.int8]()
+    dst[unsafe_offset=off + 2] = ((v5 >> 1) | (v6 << 2) | (v7 << 5)).cast[DType.int8]()
 
 
 
 @always_inline
-def _byte_u64(p: UnsafePointer[Int8, MutUntrackedOrigin], i: Int) -> UInt64:
+def _byte_u64(p: Pointer[Int8, MutUntrackedOrigin], i: Int) -> UInt64:
     """Byte i of p as an UNSIGNED UInt64 (0..255).
 
     Do not write `UInt64(p[i].cast[DType.uint8]())`: Mojo 1.0 folds that
@@ -1530,11 +1529,11 @@ def _byte_u64(p: UnsafePointer[Int8, MutUntrackedOrigin], i: Int) -> UInt64:
     every neighbouring packed code. That silently corrupted every INT3/INT2
     unpack (TurboQuant/NanoQuant search, the QJL residual at build).
     Widening through Int and masking cannot be folded wrong."""
-    return UInt64(Int(p[i]) & 0xFF)
+    return UInt64(Int(p[unsafe_offset=i]) & 0xFF)
 
 
 @always_inline
-def _unpack16_int3(src: UnsafePointer[Int8, MutUntrackedOrigin], off: Int) -> SIMD[DType.int8, 16]:
+def _unpack16_int3(src: Pointer[Int8, MutUntrackedOrigin], off: Int) -> SIMD[DType.int8, 16]:
     """`_unpack_16_int3` returning the 16 values in a register instead of
     writing a caller buffer — the dot kernels used to heap-alloc that buffer
     per call (D11: a closed routine must not allocate)."""
@@ -1554,7 +1553,7 @@ def _tbl16(t: SIMD[DType.uint8, 16], idx: SIMD[DType.uint8, 16]) -> SIMD[DType.u
 
 
 @always_inline
-def unpack32_int3(v: UnsafePointer[Int8, MutUntrackedOrigin], blk: Int
+def unpack32_int3(v: Pointer[Int8, MutUntrackedOrigin], blk: Int
                   ) -> Tuple[SIMD[DType.int8, 16], SIMD[DType.int8, 16]]:
     """gh #396: all 32 codes of one block-INT3 block, as (dims 0-15, dims 16-31).
     `blk` is the byte offset of the block's FP16 scale; its 12 data bytes follow.
@@ -1568,7 +1567,7 @@ def unpack32_int3(v: UnsafePointer[Int8, MutUntrackedOrigin], blk: Int
     Outputs are bit-identical to two `_unpack16_int3` calls; non-NEON targets
     use exactly those."""
     comptime if CompilationTarget.has_neon():
-        var raw = bitcast[DType.uint8, 16]((v + blk - 2).load[width=16]())
+        var raw = bitcast[DType.uint8, 16](v.unsafe_offset(blk - 2).unsafe_load[width=16]())
         # Code k of a 3-byte group starts at bit 3k: byte 3k//8, shift 3k%8.
         comptime I0 = SIMD[DType.uint8, 16](4, 5, 4, 5, 4, 5, 5, 6, 5, 6, 5, 6, 6, 7, 6, 7)
         comptime I1 = SIMD[DType.uint8, 16](7, 8, 7, 8, 7, 8, 8, 9, 8, 9, 8, 9, 9, 10, 9, 10)
@@ -1588,8 +1587,8 @@ def unpack32_int3(v: UnsafePointer[Int8, MutUntrackedOrigin], blk: Int
 
 @no_inline
 def quantize_fp32_to_block_int3(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Int8, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Int8, MutUntrackedOrigin],
     dim: Int):
     """Block-wise symmetric INT3 quantization.
     Layout per vector: [FP32 norm (4B)] [block0: FP16 scale (2B) + 3-bit packed (12B)] × 48
@@ -1605,7 +1604,7 @@ def quantize_fp32_to_block_int3(
         # Find block absmax for symmetric quantization
         var absmax: Float32 = 0.0
         for i in range(BLOCK_DIM):
-            var v = src[base + i]
+            var v = src[unsafe_offset=base + i]
             var av = v if v >= 0 else -v
             if av > absmax: absmax = av
         # Scale: maps [-absmax, absmax] → [-4, 3] (8 levels, symmetric)
@@ -1613,13 +1612,13 @@ def quantize_fp32_to_block_int3(
         var inv_scale = Float32(1.0) / scale
 
         # Write FP16 scale
-        (dst + out_off).bitcast[Float16]()[0] = scale.cast[DType.float16]()
+        (dst.unsafe_offset(out_off)).unsafe_bitcast[Float16]()[unsafe_offset=0] = scale.cast[DType.float16]()
         out_off += 2
 
         # Quantize 32 dims
         var q_vals = Array[Int, 32](uninitialized=True)
         for i in range(BLOCK_DIM):
-            var q_f = src[base + i] * inv_scale
+            var q_f = src[unsafe_offset=base + i] * inv_scale
             var q = Int(q_f + Float32(0.5)) if q_f >= 0 else Int(q_f - Float32(0.5))
             if q > 3: q = 3
             if q < -4: q = -4
@@ -1648,13 +1647,13 @@ def quantize_fp32_to_block_int3(
         out_off += 6
 
     # Write reconstructed norm at offset 0
-    dst.bitcast[Float32]()[0] = recon_norm
+    dst.unsafe_bitcast[Float32]()[unsafe_offset=0] = recon_norm
 
 @no_inline
 def int3_dot_single_simd(
-    q_int8: UnsafePointer[Int8, MutUntrackedOrigin],
-    q_scales: UnsafePointer[Float32, MutUntrackedOrigin],
-    v_block: UnsafePointer[Int8, MutUntrackedOrigin],
+    q_int8: Pointer[Int8, MutUntrackedOrigin],
+    q_scales: Pointer[Float32, MutUntrackedOrigin],
+    v_block: Pointer[Int8, MutUntrackedOrigin],
 ) -> Float32:
     """Asymmetric dot: INT8 query × block-INT3 vector.
     Unpacks 3-bit → Int8, then 2× SDOT per 32-dim block = 96 SDOT calls for 1536 dims.
@@ -1663,14 +1662,14 @@ def int3_dot_single_simd(
     var v_off = 4  # skip norm header
 
     for b in range(NUM_BLOCKS_1536):
-        var scale_v = (v_block + v_off).bitcast[Float16]()[0].cast[DType.float32]()
-        var combined_scale = q_scales[b] * scale_v
+        var scale_v = (v_block.unsafe_offset(v_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
+        var combined_scale = q_scales[unsafe_offset=b] * scale_v
         var q_base = b * BLOCK_DIM
 
         # All 32 codes of the block (gh #396: one load + TBL on NEON)
         var v32 = unpack32_int3(v_block, v_off)
-        var q_lo = (q_int8 + q_base).load[width=16]()
-        var q_hi = (q_int8 + q_base + 16).load[width=16]()
+        var q_lo = (q_int8.unsafe_offset(q_base)).unsafe_load[width=16]()
+        var q_hi = (q_int8.unsafe_offset(q_base).unsafe_offset(16)).unsafe_load[width=16]()
         v_off += INT3_BLOCK_BYTES
 
         var acc = SIMD[DType.int32, 4](0)
@@ -1684,10 +1683,10 @@ def int3_dot_single_simd(
 
 @no_inline
 def qjl_compute_signs(
-    residual: UnsafePointer[Float32, MutUntrackedOrigin],
-    random_signs: UnsafePointer[UInt64, MutUntrackedOrigin],
-    wht_scratch: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst_signs: UnsafePointer[UInt64, MutUntrackedOrigin],
+    residual: Pointer[Float32, MutUntrackedOrigin],
+    random_signs: Pointer[UInt64, MutUntrackedOrigin],
+    wht_scratch: Pointer[Float32, MutUntrackedOrigin],
+    dst_signs: Pointer[UInt64, MutUntrackedOrigin],
     dim: Int) -> Float32:
     """QJL sign computation: apply random sign flips to residual, WHT, store signs.
     Returns residual L2 norm squared.
@@ -1696,10 +1695,10 @@ def qjl_compute_signs(
     var res_norm_sq: Float32 = 0.0
     # Apply random sign flips and copy to wht_scratch
     for i in range(dim):
-        var bit = (random_signs[i >> 6] >> UInt64(i & 63)) & UInt64(1)
+        var bit = (random_signs[unsafe_offset=i >> 6] >> UInt64(i & 63)) & UInt64(1)
         var sign_val = Float32(1.0) if bit == UInt64(1) else Float32(-1.0)
-        var r = residual[i]
-        wht_scratch[i] = r * sign_val
+        var r = residual[unsafe_offset=i]
+        wht_scratch[unsafe_offset=i] = r * sign_val
         res_norm_sq += r * r
     # Apply WHT (block-diagonal 3×512)
     wht_fp32_1536(wht_scratch)
@@ -1707,9 +1706,9 @@ def qjl_compute_signs(
     for w in range(dim >> 6):  # 24 words
         var bits: UInt64 = 0
         for b in range(64):
-            if wht_scratch[w * 64 + b] > 0:
+            if wht_scratch[unsafe_offset=w * 64 + b] > 0:
                 bits |= (UInt64(1) << UInt64(b))
-        dst_signs[w] = bits
+        dst_signs[unsafe_offset=w] = bits
     return res_norm_sq
 
 # qjl_hamming_batch8: tuned batch kernel, closed in libpion_vector (D11).
@@ -1727,22 +1726,22 @@ comptime INT2_BLOCK_BYTES = 10      # 2B scale + 8B data
 comptime INT2_VEC_BYTES_1536 = 484  # 4B norm + 48 * 10B
 
 @always_inline
-def _pack_16_int2(vals: Array[Int, 16], dst: UnsafePointer[Int8, MutUntrackedOrigin], off: Int):
+def _pack_16_int2(vals: Array[Int, 16], dst: Pointer[Int8, MutUntrackedOrigin], off: Int):
     """Pack 16 unsigned 2-bit values [0,3] into 4 bytes.
     Layout: byte[0] = v0|(v1<<2)|(v2<<4)|(v3<<6), etc."""
     var b0 = UInt8(vals[0]) | (UInt8(vals[1]) << 2) | (UInt8(vals[2]) << 4) | (UInt8(vals[3]) << 6)
     var b1 = UInt8(vals[4]) | (UInt8(vals[5]) << 2) | (UInt8(vals[6]) << 4) | (UInt8(vals[7]) << 6)
     var b2 = UInt8(vals[8]) | (UInt8(vals[9]) << 2) | (UInt8(vals[10]) << 4) | (UInt8(vals[11]) << 6)
     var b3 = UInt8(vals[12]) | (UInt8(vals[13]) << 2) | (UInt8(vals[14]) << 4) | (UInt8(vals[15]) << 6)
-    dst[off]     = b0.cast[DType.int8]()
-    dst[off + 1] = b1.cast[DType.int8]()
-    dst[off + 2] = b2.cast[DType.int8]()
-    dst[off + 3] = b3.cast[DType.int8]()
+    dst[unsafe_offset=off]     = b0.cast[DType.int8]()
+    dst[unsafe_offset=off + 1] = b1.cast[DType.int8]()
+    dst[unsafe_offset=off + 2] = b2.cast[DType.int8]()
+    dst[unsafe_offset=off + 3] = b3.cast[DType.int8]()
 
 
 
 @always_inline
-def _unpack16_int2(src: UnsafePointer[Int8, MutUntrackedOrigin], off: Int) -> SIMD[DType.int8, 16]:
+def _unpack16_int2(src: Pointer[Int8, MutUntrackedOrigin], off: Int) -> SIMD[DType.int8, 16]:
     """`_unpack_16_int2` returning the 16 values in a register (see
     `_unpack16_int3`)."""
     var packed = _byte_u64(src, off) | (_byte_u64(src, off + 1) << 8) | (_byte_u64(src, off + 2) << 16) | (_byte_u64(src, off + 3) << 24)
@@ -1752,7 +1751,7 @@ def _unpack16_int2(src: UnsafePointer[Int8, MutUntrackedOrigin], off: Int) -> SI
     return r
 
 @always_inline
-def unpack32_int2(v: UnsafePointer[Int8, MutUntrackedOrigin], blk: Int
+def unpack32_int2(v: Pointer[Int8, MutUntrackedOrigin], blk: Int
                   ) -> Tuple[SIMD[DType.int8, 16], SIMD[DType.int8, 16]]:
     """gh #396: all 32 codes of one block-INT2 block, as (dims 0-15, dims 16-31),
     decoded to {-3,-1,1,3}. `blk` is the byte offset of the block's FP16
@@ -1761,7 +1760,7 @@ def unpack32_int2(v: UnsafePointer[Int8, MutUntrackedOrigin], blk: Int
     instead of 16 scalar steps and a multiply per lane, twice per block.
     Bit-identical to two `_unpack16_int2` calls; non-NEON targets use those."""
     comptime if CompilationTarget.has_neon():
-        var raw8 = bitcast[DType.uint8, 8]((v + blk + 2).load[width=8]())
+        var raw8 = bitcast[DType.uint8, 8]((v.unsafe_offset(blk).unsafe_offset(2)).unsafe_load[width=8]())
         var raw = raw8.join(raw8)
         comptime J0 = SIMD[DType.uint8, 16](0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3)
         comptime J1 = SIMD[DType.uint8, 16](4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7)
@@ -1775,8 +1774,8 @@ def unpack32_int2(v: UnsafePointer[Int8, MutUntrackedOrigin], blk: Int
 
 @no_inline
 def quantize_fp32_to_block_int2(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Int8, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Int8, MutUntrackedOrigin],
     dim: Int):
     """Block-wise symmetric INT2 quantization.
     Layout per vector: [FP32 norm (4B)] [block0: FP16 scale (2B) + 2-bit packed (8B)] × 48
@@ -1792,7 +1791,7 @@ def quantize_fp32_to_block_int2(
         # Find block absmax for symmetric quantization
         var absmax: Float32 = 0.0
         for i in range(BLOCK_DIM):
-            var v = src[base + i]
+            var v = src[unsafe_offset=base + i]
             var av = v if v >= 0 else -v
             if av > absmax: absmax = av
         # Scale: maps [-absmax, absmax] → signed {-3,-1,1,3} (4 levels)
@@ -1808,13 +1807,13 @@ def quantize_fp32_to_block_int2(
         # `q_norm + v_norm - 2·dot` over-weighted the norm term 2× and
         # NanoQuant scored recall 0.06 on the gate dataset.
         var stored_scale = scale * Float32(0.5)
-        (dst + out_off).bitcast[Float16]()[0] = stored_scale.cast[DType.float16]()
+        (dst.unsafe_offset(out_off)).unsafe_bitcast[Float16]()[unsafe_offset=0] = stored_scale.cast[DType.float16]()
         out_off += 2
 
         # Quantize 32 dims: val → round(val/scale + 1.5) → clamp [0,3]
         var q_vals = Array[Int, 32](uninitialized=True)
         for i in range(BLOCK_DIM):
-            var q_f = src[base + i] * inv_scale + Float32(1.5)
+            var q_f = src[unsafe_offset=base + i] * inv_scale + Float32(1.5)
             var q = Int(q_f + Float32(0.5)) if q_f >= 0 else Int(q_f - Float32(0.5))
             if q > 3: q = 3
             if q < 0: q = 0
@@ -1839,13 +1838,13 @@ def quantize_fp32_to_block_int2(
         out_off += 4
 
     # Write reconstructed norm at offset 0
-    dst.bitcast[Float32]()[0] = recon_norm
+    dst.unsafe_bitcast[Float32]()[unsafe_offset=0] = recon_norm
 
 @no_inline
 def int2_dot_single_simd(
-    q_int8: UnsafePointer[Int8, MutUntrackedOrigin],
-    q_scales: UnsafePointer[Float32, MutUntrackedOrigin],
-    v_block: UnsafePointer[Int8, MutUntrackedOrigin],
+    q_int8: Pointer[Int8, MutUntrackedOrigin],
+    q_scales: Pointer[Float32, MutUntrackedOrigin],
+    v_block: Pointer[Int8, MutUntrackedOrigin],
 ) -> Float32:
     """Asymmetric dot: INT8 query × block-INT2 vector.
     Unpacks 2-bit → Int8 {-3,-1,1,3}, then 2× SDOT per 32-dim block.
@@ -1854,8 +1853,8 @@ def int2_dot_single_simd(
     var v_off = 4  # skip norm header
 
     for b in range(NUM_BLOCKS_1536):
-        var scale_v = (v_block + v_off).bitcast[Float16]()[0].cast[DType.float32]()
-        var combined_scale = q_scales[b] * scale_v
+        var scale_v = (v_block.unsafe_offset(v_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
+        var combined_scale = q_scales[unsafe_offset=b] * scale_v
         v_off += 2
 
         var q_base = b * BLOCK_DIM
@@ -1863,9 +1862,9 @@ def int2_dot_single_simd(
 
         # All 32 codes of the block (gh #396: one load + TBL on NEON)
         var v32 = unpack32_int2(v_block, v_off - 2)
-        var q_lo = (q_int8 + q_base).load[width=16]()
+        var q_lo = (q_int8.unsafe_offset(q_base)).unsafe_load[width=16]()
         acc = sdot_int8(acc, q_lo, v32[0])
-        var q_hi = (q_int8 + q_base + 16).load[width=16]()
+        var q_hi = (q_int8.unsafe_offset(q_base).unsafe_offset(16)).unsafe_load[width=16]()
         acc = sdot_int8(acc, q_hi, v32[1])
         v_off += INT2_BLOCK_DATA
 
@@ -1902,8 +1901,8 @@ comptime FP8_BLOCK_SCALE_MAX = Float32(240.0)
 
 @no_inline
 def quantize_fp32_to_block_fp8(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Int8, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Int8, MutUntrackedOrigin],
     dim: Int):
     """A2: FP8 (E4M3) per-block-of-32 quantization.
 
@@ -1920,7 +1919,7 @@ def quantize_fp32_to_block_fp8(
         var base = b * BLOCK_DIM
         var absmax: Float32 = 0.0
         for i in range(BLOCK_DIM):
-            var v = src[base + i]
+            var v = src[unsafe_offset=base + i]
             var av = v if v >= 0 else -v
             if av > absmax:
                 absmax = av
@@ -1928,42 +1927,42 @@ def quantize_fp32_to_block_fp8(
         var inv_scale = Float32(1.0) / scale
 
         var scale_f16 = scale.cast[DType.float16]()
-        (dst + out_off).bitcast[Float16]()[0] = scale_f16
+        (dst.unsafe_offset(out_off)).unsafe_bitcast[Float16]()[unsafe_offset=0] = scale_f16
         out_off += 2
 
         for i in range(BLOCK_DIM):
-            var v_scaled = src[base + i] * inv_scale
+            var v_scaled = src[unsafe_offset=base + i] * inv_scale
             var v_e4m3 = v_scaled.cast[DType.float8_e4m3fn]()
-            (dst + out_off + i).bitcast[Scalar[DType.float8_e4m3fn]]()[0] = v_e4m3
+            (dst.unsafe_offset(out_off).unsafe_offset(i)).unsafe_bitcast[Scalar[DType.float8_e4m3fn]]()[unsafe_offset=0] = v_e4m3
             var v_back = v_e4m3.cast[DType.float32]() * scale
             recon_norm += v_back * v_back
         out_off += BLOCK_DIM
 
-    dst.bitcast[Float32]()[0] = recon_norm
+    dst.unsafe_bitcast[Float32]()[unsafe_offset=0] = recon_norm
 
 
 @no_inline
 def dequantize_block_fp8_to_fp32(
-    src: UnsafePointer[Int8, MutUntrackedOrigin],
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Int8, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     dim: Int):
     """A2: Inverse of quantize_fp32_to_block_fp8."""
     var num_blocks = dim // BLOCK_DIM
     var in_off = 4
     for b in range(num_blocks):
-        var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+        var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
         in_off += 2
         var base = b * BLOCK_DIM
         for i in range(BLOCK_DIM):
-            var v_e4m3 = (src + in_off + i).bitcast[Scalar[DType.float8_e4m3fn]]()[0]
-            dst[base + i] = v_e4m3.cast[DType.float32]() * scale
+            var v_e4m3 = (src.unsafe_offset(in_off).unsafe_offset(i)).unsafe_bitcast[Scalar[DType.float8_e4m3fn]]()[unsafe_offset=0]
+            dst[unsafe_offset=base + i] = v_e4m3.cast[DType.float32]() * scale
         in_off += BLOCK_DIM
 
 
 @no_inline
 def quantize_fp32_to_bf16_rope_fp8_body(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Int8, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Int8, MutUntrackedOrigin],
     dim: Int,
     rope_dim: Int):
     """A2: BF16/FP8 hybrid quant — first `rope_dim` values stored as BF16
@@ -1978,38 +1977,38 @@ def quantize_fp32_to_bf16_rope_fp8_body(
     if (dim - rope_dim) % BLOCK_DIM != 0:
         return
 
-    var bf16_dst = dst.bitcast[BFloat16]()
+    var bf16_dst = dst.unsafe_bitcast[BFloat16]()
     for i in range(rope_dim):
-        bf16_dst[i] = src[i].cast[DType.bfloat16]()
+        bf16_dst[unsafe_offset=i] = src[unsafe_offset=i].cast[DType.bfloat16]()
 
     var body_dim = dim - rope_dim
     var num_blocks = body_dim // BLOCK_DIM
     var out_off = rope_dim * 2
-    var src_body = src + rope_dim
+    var src_body = src.unsafe_offset(rope_dim)
 
     for b in range(num_blocks):
         var base = b * BLOCK_DIM
         var absmax: Float32 = 0.0
         for i in range(BLOCK_DIM):
-            var v = src_body[base + i]
+            var v = src_body[unsafe_offset=base + i]
             var av = v if v >= 0 else -v
             if av > absmax:
                 absmax = av
         var scale = absmax / FP8_BLOCK_SCALE_MAX if absmax > 0 else Float32(1.0)
         var inv_scale = Float32(1.0) / scale
-        (dst + out_off).bitcast[Float16]()[0] = scale.cast[DType.float16]()
+        (dst.unsafe_offset(out_off)).unsafe_bitcast[Float16]()[unsafe_offset=0] = scale.cast[DType.float16]()
         out_off += 2
         for i in range(BLOCK_DIM):
-            var v_scaled = src_body[base + i] * inv_scale
+            var v_scaled = src_body[unsafe_offset=base + i] * inv_scale
             var v_e4m3 = v_scaled.cast[DType.float8_e4m3fn]()
-            (dst + out_off + i).bitcast[Scalar[DType.float8_e4m3fn]]()[0] = v_e4m3
+            (dst.unsafe_offset(out_off).unsafe_offset(i)).unsafe_bitcast[Scalar[DType.float8_e4m3fn]]()[unsafe_offset=0] = v_e4m3
         out_off += BLOCK_DIM
 
 
 @no_inline
 def dequantize_bf16_rope_fp8_body_to_fp32(
-    src: UnsafePointer[Int8, MutUntrackedOrigin],
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Int8, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     dim: Int,
     rope_dim: Int):
     """A2: Inverse of quantize_fp32_to_bf16_rope_fp8_body."""
@@ -2018,21 +2017,21 @@ def dequantize_bf16_rope_fp8_body_to_fp32(
     if (dim - rope_dim) % BLOCK_DIM != 0:
         return
 
-    var bf16_src = src.bitcast[BFloat16]()
+    var bf16_src = src.unsafe_bitcast[BFloat16]()
     for i in range(rope_dim):
-        dst[i] = bf16_src[i].cast[DType.float32]()
+        dst[unsafe_offset=i] = bf16_src[unsafe_offset=i].cast[DType.float32]()
 
     var body_dim = dim - rope_dim
     var num_blocks = body_dim // BLOCK_DIM
     var in_off = rope_dim * 2
-    var dst_body = dst + rope_dim
+    var dst_body = dst.unsafe_offset(rope_dim)
     for b in range(num_blocks):
-        var scale = (src + in_off).bitcast[Float16]()[0].cast[DType.float32]()
+        var scale = (src.unsafe_offset(in_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
         in_off += 2
         var base = b * BLOCK_DIM
         for i in range(BLOCK_DIM):
-            var v_e4m3 = (src + in_off + i).bitcast[Scalar[DType.float8_e4m3fn]]()[0]
-            dst_body[base + i] = v_e4m3.cast[DType.float32]() * scale
+            var v_e4m3 = (src.unsafe_offset(in_off).unsafe_offset(i)).unsafe_bitcast[Scalar[DType.float8_e4m3fn]]()[unsafe_offset=0]
+            dst_body[unsafe_offset=base + i] = v_e4m3.cast[DType.float32]() * scale
         in_off += BLOCK_DIM
 
 
@@ -2064,21 +2063,21 @@ def mlx4g32_bytes_per_token(dim: Int) -> Int:
 
 @no_inline
 def quantize_fp32_to_mlx4_g32(
-    src: UnsafePointer[Float32, MutUntrackedOrigin],
-    dst: UnsafePointer[Int8, MutUntrackedOrigin],
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Int8, MutUntrackedOrigin],
     dim: Int):
     """fp32 → mlx int4/g32 affine. dst needs mlx4g32_bytes_per_token(dim) bytes."""
     var groups = dim // MLX_Q_GROUP
-    var packed = dst.bitcast[UInt32]()
-    var scales = (dst + (dim // 2)).bitcast[Float16]()
-    var biases = (dst + (dim // 2) + groups * 2).bitcast[Float16]()
+    var packed = dst.unsafe_bitcast[UInt32]()
+    var scales = (dst.unsafe_offset((dim // 2))).unsafe_bitcast[Float16]()
+    var biases = (dst.unsafe_offset((dim // 2)).unsafe_offset(groups * 2)).unsafe_bitcast[Float16]()
 
     for g in range(groups):
         var base = g * MLX_Q_GROUP
-        var lo = src[base]
-        var hi = src[base]
+        var lo = src[unsafe_offset=base]
+        var hi = src[unsafe_offset=base]
         for i in range(1, MLX_Q_GROUP):
-            var v = src[base + i]
+            var v = src[unsafe_offset=base + i]
             if v < lo: lo = v
             if v > hi: hi = v
         # 4 bits → 16 levels; bias is the group minimum, matching mlx's
@@ -2091,8 +2090,8 @@ def quantize_fp32_to_mlx4_g32(
         # costs up to half a level on every element.
         var s16 = scale.cast[DType.float16]()
         var b16 = lo.cast[DType.float16]()
-        scales[g] = s16
-        biases[g] = b16
+        scales[unsafe_offset=g] = s16
+        biases[unsafe_offset=g] = b16
         var s = s16.cast[DType.float32]()
         var b = b16.cast[DType.float32]()
         var inv = Float32(1.0) / s
@@ -2100,31 +2099,31 @@ def quantize_fp32_to_mlx4_g32(
         for w in range(MLX_Q_GROUP // 8):
             var word = UInt32(0)
             for j in range(8):
-                var q_f = (src[base + w * 8 + j] - b) * inv
+                var q_f = (src[unsafe_offset=base + w * 8 + j] - b) * inv
                 var q = Int(q_f + Float32(0.5))
                 if q > 15: q = 15
                 if q < 0: q = 0
                 word |= UInt32(q) << UInt32(4 * j)
-            packed[g * (MLX_Q_GROUP // 8) + w] = word
+            packed[unsafe_offset=g * (MLX_Q_GROUP // 8) + w] = word
 
 
 @no_inline
 def dequantize_mlx4_g32_to_fp32(
-    src: UnsafePointer[Int8, MutUntrackedOrigin],
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Int8, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     dim: Int):
     """mlx int4/g32 affine → fp32. Inverse of quantize_fp32_to_mlx4_g32."""
     var groups = dim // MLX_Q_GROUP
-    var packed = src.bitcast[UInt32]()
-    var scales = (src + (dim // 2)).bitcast[Float16]()
-    var biases = (src + (dim // 2) + groups * 2).bitcast[Float16]()
+    var packed = src.unsafe_bitcast[UInt32]()
+    var scales = (src.unsafe_offset((dim // 2))).unsafe_bitcast[Float16]()
+    var biases = (src.unsafe_offset((dim // 2)).unsafe_offset(groups * 2)).unsafe_bitcast[Float16]()
 
     for g in range(groups):
         var base = g * MLX_Q_GROUP
-        var s = scales[g].cast[DType.float32]()
-        var b = biases[g].cast[DType.float32]()
+        var s = scales[unsafe_offset=g].cast[DType.float32]()
+        var b = biases[unsafe_offset=g].cast[DType.float32]()
         for w in range(MLX_Q_GROUP // 8):
-            var word = packed[g * (MLX_Q_GROUP // 8) + w]
+            var word = packed[unsafe_offset=g * (MLX_Q_GROUP // 8) + w]
             for j in range(8):
                 var q = (word >> UInt32(4 * j)) & UInt32(0xF)
-                dst[base + w * 8 + j] = Float32(Int(q)) * s + b
+                dst[unsafe_offset=base + w * 8 + j] = Float32(Int(q)) * s + b

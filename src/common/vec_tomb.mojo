@@ -26,7 +26,6 @@ loaded, so a restart neither revives a dead slot nor kills one of a later
 build. This module imports nothing from Pion, so hash_map.mojo can use it.
 """
 
-from std.memory.unsafe_pointer import Pointer
 from std.collections import List
 from std.atomic import Atomic, Ordering
 
@@ -59,13 +58,13 @@ struct VecTomb(Movable):
         self.gen = gen
         self.seen_gen = gen[] if Int(gen) != 0 else UInt64(0)
 
-    def __init__(out self, *, deinit take: Self):
-        self.dead = take.dead
-        self.dead_count = take.dead_count
-        self.n = take.n
-        self.pending = take.pending^
-        self.gen = take.gen
-        self.seen_gen = take.seen_gen
+    def __init__(out self, *, deinit move: Self):
+        self.dead = move.dead
+        self.dead_count = move.dead_count
+        self.n = move.n
+        self.pending = move.pending^
+        self.gen = move.gen
+        self.seen_gen = move.seen_gen
 
     @always_inline
     def generation(self) -> UInt64:
@@ -76,9 +75,9 @@ struct VecTomb(Movable):
         document."""
         if slot < 0 or slot >= self.n or Int(self.dead) == 0 or gen != self.generation():
             return
-        if self.dead[slot] != 0:
+        if self.dead[unsafe_offset=slot] != 0:
             return
-        self.dead[slot] = 1
+        self.dead[unsafe_offset=slot] = 1
         _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](self.dead_count, UInt64(1))
         self.pending.append(slot)
 

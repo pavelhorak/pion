@@ -1,4 +1,4 @@
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.memory import unsafe_memset, unsafe_memcpy
 
@@ -34,7 +34,7 @@ def getbit(bitmap: Pointer[UInt8, MutUntrackedOrigin], byte_len: Int, bit_offset
     if bit_offset < 0 or byte_index >= byte_len:
         return 0
     var bit_index = _bit_in_byte(bit_offset)
-    var byte = bitmap.load(byte_index)
+    var byte = bitmap.unsafe_load(byte_index)
     return Int((byte >> UInt8(bit_index)) & 1)
 
 def setbit(byte_len_val: Int, bitmap: Pointer[UInt8, MutUntrackedOrigin], bit_offset: Int, value: Int) -> SetBitResult:
@@ -50,7 +50,7 @@ def setbit(byte_len_val: Int, bitmap: Pointer[UInt8, MutUntrackedOrigin], bit_of
     var current_ptr = bitmap
     if needed_bytes > byte_len:
         var old_len = byte_len
-        var new_ptr = alloc[UInt8](needed_bytes)
+        var new_ptr = unsafe_alloc[UInt8](needed_bytes)
         unsafe_memcpy(dest=new_ptr, src=bitmap, count=old_len)
         unsafe_memset(new_ptr.unsafe_offset(old_len), 0, needed_bytes - old_len)
         current_ptr = new_ptr
@@ -58,20 +58,20 @@ def setbit(byte_len_val: Int, bitmap: Pointer[UInt8, MutUntrackedOrigin], bit_of
 
     var byte_index = bit_offset // 8
     var bit_index = _bit_in_byte(bit_offset)
-    var byte = current_ptr.load(byte_index)
+    var byte = current_ptr.unsafe_load(byte_index)
 
     if value == 1:
         byte |= UInt8(1 << bit_index)
     else:
         byte &= ~UInt8(1 << bit_index)
     
-    current_ptr.store(byte_index, byte)
+    current_ptr.unsafe_store(byte_index, byte)
     return SetBitResult(current_ptr, byte_len)
 
 def bitcount(bitmap: Pointer[UInt8, MutUntrackedOrigin], byte_len: Int) -> Int:
     var count = 0
     for i in range(byte_len):
-        var byte = bitmap.load(i)
+        var byte = bitmap.unsafe_load(i)
         while byte > 0:
             byte &= (byte - 1)
             count += 1

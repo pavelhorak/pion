@@ -65,8 +65,8 @@ def geohash_decode_score(score: Float64, mut lon: Float64, mut lat: Float64):
     """A stored score's point: the centre of its cell, clamped."""
     var out = stack_allocation[2, Float64]()
     external_call["pion_geo_point", NoneType](score, out)
-    lon = out[0]
-    lat = out[1]
+    lon = out[unsafe_offset=0]
+    lat = out[unsafe_offset=1]
 
 
 @always_inline
@@ -83,9 +83,9 @@ def geohash_within(x1: Float64, y1: Float64, x2: Float64, y2: Float64, radius_m:
                    width_m: Float64, height_m: Float64, mut dist: Float64) -> Bool:
     """Is (x2, y2) inside the circle (width_m < 0) or box centred on (x1, y1)?"""
     var d = stack_allocation[1, Float64]()
-    d[0] = 0
+    d[unsafe_offset=0] = 0
     var r = external_call["pion_geo_within", Int32](x1, y1, x2, y2, radius_m, width_m, height_m, d)
-    dist = d[0]
+    dist = d[unsafe_offset=0]
     return r != 0
 
 
@@ -98,5 +98,5 @@ def geohash_search_cells(lon: Float64, lat: Float64, radius_m: Float64, width_m:
     external_call["pion_geo_areas", NoneType](lon, lat, radius_m, width_m, height_m, bits, steps)
     var out = List[GeoHashBits]()
     for k in range(9):
-        out.append(GeoHashBits(Int(steps[k]), bits[k]))
+        out.append(GeoHashBits(Int(steps[unsafe_offset=k]), bits[unsafe_offset=k]))
     return out^

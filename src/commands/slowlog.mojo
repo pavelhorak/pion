@@ -21,7 +21,6 @@ any worker); each worker keeps its own entries.
 """
 
 from std.collections import List
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from src.network.resp3 import RESP3Token
 from src.network.response_writer import ResponseWriter
@@ -61,10 +60,10 @@ struct SlowLog(Movable):
         self.next_id = 0
         self.ticks_per_us = external_call["pion_ticks_per_us", Float64]()
 
-    def __init__(out self, *, deinit take: Self):
-        self.entries = take.entries^
-        self.next_id = take.next_id
-        self.ticks_per_us = take.ticks_per_us
+    def __init__(out self, *, deinit move: Self):
+        self.entries = move.entries^
+        self.next_id = move.next_id
+        self.ticks_per_us = move.ticks_per_us
 
     @always_inline
     def threshold_us(self) -> Int64:
@@ -90,7 +89,7 @@ struct SlowLog(Movable):
             if shown != argc and k == shown - 1:
                 args.append(String("... (") + String(argc - shown + 1) + " more arguments)")
                 break
-            var t = tokens[first + k]
+            var t = tokens[unsafe_offset=first + k]
             if redact_from >= 0 and first + k >= redact_from and _redacted(tokens, first, first + k):
                 args.append("(redacted)")
                 continue
@@ -135,17 +134,17 @@ def _ci(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, lit: StaticString) -> Boo
         return False
     var lp = lit.unsafe_ptr()
     for k in range(n):
-        var c = p[k]
+        var c = p[unsafe_offset=k]
         if c >= 65 and c <= 90:
             c += 32
-        if c != lp[k]:
+        if c != lp[unsafe_offset=k]:
             return False
     return True
 
 
 def _redact_from(tokens: Pointer[RESP3Token, MutUntrackedOrigin], first: Int, end: Int) -> Int:
     """The first argument that may be redacted, -1 when none is."""
-    var c = tokens[first]
+    var c = tokens[unsafe_offset=first]
     if _ci(c.ptr, c.length, "auth"):
         return first + 1
     if _ci(c.ptr, c.length, "hello") or _ci(c.ptr, c.length, "migrate") or _ci(c.ptr, c.length, "config"):
@@ -157,16 +156,16 @@ def _redacted(tokens: Pointer[RESP3Token, MutUntrackedOrigin], first: Int, k: In
     """Is tokens[k] a credential? AUTH: every argument. HELLO: the two after
     AUTH. MIGRATE: the one after AUTH, the two after AUTH2. CONFIG SET: the
     value of requirepass or masterauth."""
-    var c = tokens[first]
+    var c = tokens[unsafe_offset=first]
     if _ci(c.ptr, c.length, "auth"):
         return True
     if _ci(c.ptr, c.length, "config"):
-        var p = tokens[k - 1]
+        var p = tokens[unsafe_offset=k - 1]
         return k - 1 > first + 1 and (_ci(p.ptr, p.length, "requirepass") or _ci(p.ptr, p.length, "masterauth"))
     for back in range(1, 3):
         if k - back <= first:
             break
-        var p = tokens[k - back]
+        var p = tokens[unsafe_offset=k - back]
         if _ci(p.ptr, p.length, "auth"):
             if _ci(c.ptr, c.length, "hello"):
                 return back <= 2
@@ -182,7 +181,7 @@ def handle_slowlog(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end:
     if end - i < 2:
         writer.append_error_response("ERR wrong number of arguments for 'slowlog' command")
         return
-    var sub = tokens[i + 1]
+    var sub = tokens[unsafe_offset=i + 1]
     var argc = end - i
     if _ci(sub.ptr, sub.length, "get"):
         if argc > 3:
@@ -193,7 +192,7 @@ def handle_slowlog(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end:
             return
         var count = 10
         if argc == 3:
-            var c = tokens[i + 2]
+            var c = tokens[unsafe_offset=i + 2]
             var v = Int64(0)
             var ok = _parse_ll(c.ptr, c.length, v)
             if not ok or v < -1:
@@ -244,16 +243,16 @@ def _parse_ll(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, mut out: Int64) -> 
         return False
     var k = 0
     var neg = False
-    if p[0] == 45:
+    if p[unsafe_offset=0] == 45:
         neg = True
         k = 1
         if n == 1:
             return False
-    if p[k] == 48 and n - k > 1:
+    if p[unsafe_offset=k] == 48 and n - k > 1:
         return False
     var v = UInt64(0)
     while k < n:
-        var c = p[k]
+        var c = p[unsafe_offset=k]
         if c < 48 or c > 57:
             return False
         var d = UInt64(c - 48)

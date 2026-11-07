@@ -1,3 +1,4 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.utils import acc_digit_checked
 from src.common.ptr import null_ptr, is_not_null, is_null
 from src.common.hash_map import evict_policy_name
@@ -5,7 +6,6 @@ from src.vector.vector_abi import vector_backend_line
 from src.common.container_free import free_container, hash_get_live
 from src.common.version import PION_VERSION, PION_BUILD_SHA
 from std.ffi import external_call
-from std.memory.unsafe_pointer import Pointer
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.value import GenericValue
 from src.common.value import ValueType
@@ -181,7 +181,7 @@ struct CommandDispatcher:
             list_ptr = val.as_list().unsafe_bitcast[SlabList]()
         else:
             return -1
-        var buf = alloc[UInt8](64)
+        var buf = unsafe_alloc[UInt8](64)
         var vl = 0
         var vp = gv_bytes(val_gv, buf, vl)
         _ = self.wal[].append_kv(6, key.unsafe_ptr(), key.byte_length(), vp, vl)
@@ -205,7 +205,7 @@ struct CommandDispatcher:
             list_ptr = val.as_list().unsafe_bitcast[SlabList]()
         else:
             return -1
-        var buf = alloc[UInt8](64)
+        var buf = unsafe_alloc[UInt8](64)
         var vl = 0
         var vp = gv_bytes(val_gv, buf, vl)
         _ = self.wal[].append_kv(7, key.unsafe_ptr(), key.byte_length(), vp, vl)
@@ -432,7 +432,7 @@ struct CommandDispatcher:
                 return IntCmdResult(0, False)
             new_val = cur + 1
         elif val.is_string():
-            var _sbuf = alloc[UInt8](24)
+            var _sbuf = unsafe_alloc[UInt8](24)
             var ptr = val.as_string_safe(_sbuf)
             var length = val.string_len()
             var parsed_val: Int64 = 0
@@ -480,7 +480,7 @@ struct CommandDispatcher:
                 return IntCmdResult(0, False)
             new_val = cur - 1
         elif val.is_string():
-            var _sbuf = alloc[UInt8](24)
+            var _sbuf = unsafe_alloc[UInt8](24)
             var ptr = val.as_string_safe(_sbuf)
             var length = val.string_len()
             var parsed_val: Int64 = 0
@@ -535,7 +535,7 @@ struct CommandDispatcher:
         var val = self.keyspace[].get(key)
         if val.is_none():
             var byte_len = offset // 8 + 1
-            var bitmap_ptr = alloc[UInt8](byte_len)
+            var bitmap_ptr = unsafe_alloc[UInt8](byte_len)
             unsafe_memset(bitmap_ptr, 0, byte_len)
             
             var old_val = getbit(bitmap_ptr, byte_len, offset)
@@ -592,7 +592,7 @@ struct CommandDispatcher:
             if self.hash_map_pool[].head < self.hash_map_pool[].capacity:
                 hash_ptr = self.hash_map_pool[].acquire(); hash_ptr[].reset()
             else:
-                hash_ptr = alloc[SlabHashMap](1); hash_ptr.unsafe_write(SlabHashMap(16))
+                hash_ptr = unsafe_alloc[SlabHashMap](1); hash_ptr.unsafe_write(SlabHashMap(16))
             var new_val = GenericValue()
             new_val.type = ValueType(ValueType.HASH)
             new_val.set_ptr(hash_ptr.unsafe_bitcast[NoneType]())
@@ -635,7 +635,7 @@ struct CommandDispatcher:
         var val_val = GenericValue.borrow(val_str.unsafe_ptr(), val_str.byte_length())
         
         if val.is_none():
-            set_ptr = alloc[SlabHashMap](1)
+            set_ptr = unsafe_alloc[SlabHashMap](1)
             set_ptr.unsafe_write(SlabHashMap(16, 100))
             var new_val = GenericValue()
             new_val.type = ValueType(ValueType.SET)
@@ -670,7 +670,7 @@ struct CommandDispatcher:
             var popped = set_ptr[].pop_random(self.prng)
             if not popped.is_none():
                 # gh #170: non-deterministic — log the resolved effect (SREM)
-                var buf = alloc[UInt8](64)
+                var buf = unsafe_alloc[UInt8](64)
                 var ml = 0
                 var mp = gv_bytes(popped, buf, ml)
                 _ = self.wal[].append_kv(11, key.unsafe_ptr(), key.byte_length(), mp, ml)
@@ -807,7 +807,7 @@ struct CommandDispatcher:
         var hll_ptr: Pointer[UInt8, MutUntrackedOrigin]
 
         if val.is_none():
-            hll_ptr = alloc[UInt8](HLL_REGISTERS)
+            hll_ptr = unsafe_alloc[UInt8](HLL_REGISTERS)
             unsafe_memset(hll_ptr, 0, HLL_REGISTERS)
             var new_val = GenericValue()
             new_val.type = ValueType(ValueType.HLL)
@@ -858,7 +858,7 @@ struct CommandDispatcher:
         else:
             var first_key = keys[0]
             var val = self.keyspace[].get(first_key)
-            var temp_hll = alloc[UInt8](HLL_REGISTERS)
+            var temp_hll = unsafe_alloc[UInt8](HLL_REGISTERS)
             
             if val.is_none():
                 unsafe_memset(temp_hll, 0, HLL_REGISTERS)

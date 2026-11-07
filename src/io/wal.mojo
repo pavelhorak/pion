@@ -140,9 +140,9 @@ does an append drop — and that drop is counted, logged once, and reported in
 INFO Persistence (`wal_dropped_entries`), never silent.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import remove_and_free
-from std.memory.unsafe_pointer import Pointer
 from std.memory import unsafe_memcpy, unsafe_memset, alloc
 from std.ffi import external_call
 from std.collections import List, Span
@@ -188,7 +188,7 @@ comptime WAL_SYNC_PAGE = 16384
 def _file_exists(path: String) -> Bool:
     """access(path, F_OK) — probe without creating (pion_wal_open would create)."""
     var p = path
-    return external_call["access", Int32](p.as_c_string_slice(), Int32(0)) == 0
+    return external_call["access", Int32](p.as_c_string_span(), Int32(0)) == 0
 
 
 # ── gh #170: aggregate record replay (shared by WAL replay + snapshot load) ──
@@ -214,7 +214,7 @@ def _replay_hash(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     if val.is_none():
         if not create:
             return null_ptr[SlabHashMap, MutUntrackedOrigin]()
-        var hp = alloc[SlabHashMap](1)
+        var hp = unsafe_alloc[SlabHashMap](1)
         hp.unsafe_write(SlabHashMap(16))
         var nv = GenericValue()
         nv.type = ValueType(ValueType.HASH)
@@ -233,7 +233,7 @@ def _replay_stream(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     if val.is_none():
         if not create:
             return null_ptr[StreamData, MutUntrackedOrigin]()
-        var sp = alloc[StreamData](1)
+        var sp = unsafe_alloc[StreamData](1)
         sp.unsafe_write(StreamData())
         var nv = GenericValue()
         nv.type = ValueType(ValueType.STREAM)
@@ -251,7 +251,7 @@ def _replay_set(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     if val.is_none():
         if not create:
             return null_ptr[SlabHashMap, MutUntrackedOrigin]()
-        var sp = alloc[SlabHashMap](1)
+        var sp = unsafe_alloc[SlabHashMap](1)
         sp.unsafe_write(SlabHashMap(16, 100))
         var nv = GenericValue()
         nv.type = ValueType(ValueType.SET)
@@ -269,7 +269,7 @@ def _replay_list(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     if val.is_none():
         if not create:
             return null_ptr[SlabList, MutUntrackedOrigin]()
-        var lp = alloc[SlabList](1)
+        var lp = unsafe_alloc[SlabList](1)
         lp.unsafe_write(SlabList())
         var nv = GenericValue()
         nv.type = ValueType(ValueType.LIST)
@@ -290,7 +290,7 @@ def _replay_zset(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     if val.is_none():
         if not create:
             return null_ptr[SlabSkipList, MutUntrackedOrigin]()
-        var zp = alloc[SlabSkipList](1)
+        var zp = unsafe_alloc[SlabSkipList](1)
         zp.unsafe_write(SlabSkipList(16))
         var nv = GenericValue()
         nv.type = ValueType(vtype)
@@ -346,7 +346,7 @@ def _owned_list_elems(lp: Pointer[SlabList, MutUntrackedOrigin]) -> List[Generic
     (the gh #170 replay corruption). from_ptr materializes owned copies."""
     var elems = lp[].get_all()
     var out = List[GenericValue]()
-    var buf = alloc[UInt8](64)
+    var buf = unsafe_alloc[UInt8](64)
     for j in range(len(elems)):
         var ml = 0
         var mp = gv_bytes(elems[j], buf, ml)
@@ -643,7 +643,7 @@ def wal_apply_aggregate(cmd_id: UInt8,
     elif cmd_id == 16:   # BITMAP image
         if vl <= 0:
             return False
-        var bp = alloc[UInt8](vl)
+        var bp = unsafe_alloc[UInt8](vl)
         unsafe_memcpy(dest=bp, src=vp, count=vl)
         var nv = GenericValue()
         nv.type = ValueType(ValueType.BITMAP)
@@ -655,7 +655,7 @@ def wal_apply_aggregate(cmd_id: UInt8,
     elif cmd_id == 17:   # HLL image
         if vl != HLL_REGISTERS:
             return False
-        var hll = alloc[UInt8](HLL_REGISTERS)
+        var hll = unsafe_alloc[UInt8](HLL_REGISTERS)
         unsafe_memcpy(dest=hll, src=vp, count=HLL_REGISTERS)
         var nv = GenericValue()
         nv.type = ValueType(ValueType.HLL)
@@ -672,7 +672,7 @@ def wal_apply_aggregate(cmd_id: UInt8,
         var val = keyspace[].get(key)
         if val.is_none():
             var byte_len = offset // 8 + 1
-            var bmp = alloc[UInt8](byte_len)
+            var bmp = unsafe_alloc[UInt8](byte_len)
             unsafe_memset(bmp, 0, byte_len)
             var result = setbit(byte_len, bmp, offset, bit)
             var nv = GenericValue()
@@ -854,7 +854,7 @@ def wal_apply_aggregate(cmd_id: UInt8,
         # frees it), so the record bytes must be copied out of the mmap — the
         # WAL mapping is unmapped after replay and the snapshot buffer is
         # reused per record. Copy the `nf` whole pairs, as u32 lengths.
-        var pack = alloc[UInt8](out_len if out_len > 0 else 1)
+        var pack = unsafe_alloc[UInt8](out_len if out_len > 0 else 1)
         var r = 0
         var o = 0
         for _ in range(nf):
@@ -871,7 +871,7 @@ def wal_apply_aggregate(cmd_id: UInt8,
         var val = keyspace[].get(key)
         var regs: Pointer[UInt8, MutUntrackedOrigin]
         if val.is_none():
-            regs = alloc[UInt8](HLL_REGISTERS)
+            regs = unsafe_alloc[UInt8](HLL_REGISTERS)
             unsafe_memset(regs, 0, HLL_REGISTERS)
             var nv = GenericValue()
             nv.type = ValueType(ValueType.HLL)
@@ -897,7 +897,7 @@ def wal_apply_aggregate(cmd_id: UInt8,
         if is_null(vs):
             if not keyspace[].get(key).is_none():
                 return False           # another type holds the key
-            vs = alloc[VectorSet](1)
+            vs = unsafe_alloc[VectorSet](1)
             vs.unsafe_write(VectorSet(dim))
             var nv = GenericValue()
             nv.type = ValueType(ValueType.VSET)
@@ -1073,7 +1073,7 @@ struct WAL(Movable):
         # open / create WAL file via C helper (handles variadic open + mode)
         # IMPORTANT: use self.path.as_c_string_slice() — ensures null-terminated C string
         # (unsafe_ptr() does NOT guarantee null at len; use unsafe_cstr_ptr() for all path args)
-        var fd = external_call["pion_wal_open", Int32](self.path.as_c_string_slice())
+        var fd = external_call["pion_wal_open", Int32](self.path.as_c_string_span())
         self.fd = fd
 
         if fd < 0:
@@ -1177,10 +1177,10 @@ struct WAL(Movable):
         var n = len(q)
         var off = 0
         while off + 4 <= n:
-            var kl = Int(p[off]) | (Int(p[off + 1]) << 8) | (Int(p[off + 2]) << 16) | (Int(p[off + 3]) << 24)
+            var kl = Int(p[unsafe_offset=off]) | (Int(p[unsafe_offset=off + 1]) << 8) | (Int(p[unsafe_offset=off + 2]) << 16) | (Int(p[unsafe_offset=off + 3]) << 24)
             if off + 4 + kl > n:
                 break
-            _ = self.append(2, p + (off + 4), kl)
+            _ = self.append(2, p.unsafe_offset((off + 4)), kl)
             off += 4 + kl
         _ = q^
 
@@ -1393,7 +1393,7 @@ struct WAL(Movable):
         """gh #392: cmd 32 — a hash field's absolute deadline (unix ns). The
         8 bytes go through a heap scratch: a stack buffer crossing into the
         out-of-line append is the gh #349 hazard."""
-        var d = alloc[UInt8](8)
+        var d = unsafe_alloc[UInt8](8)
         d.unsafe_bitcast[UInt64]()[unsafe_offset=0] = UInt64(deadline_ns)
         var ok = self.append_field_kv(32, key_ptr, key_len, f_ptr, f_len, d, 8)
         d.unsafe_free()
@@ -1571,7 +1571,7 @@ struct WAL(Movable):
                           vs: Pointer[VectorSet, MutUntrackedOrigin]):
         """gh #378: a whole vector set as VADD (+ VSETATTR) records, live slots
         in slot order so VSIM's tie order survives the rewrite."""
-        var payload = alloc[UInt8](vs[].payload_len())
+        var payload = unsafe_alloc[UInt8](vs[].payload_len())
         for s in range(vs[].n):
             if vs[].alive[unsafe_offset=s] == 0:
                 continue
@@ -1665,7 +1665,7 @@ struct WAL(Movable):
 
         var sealed_path = self._segment_path(self.sealed + 1)
         var rc = external_call["rename", Int32](
-            self.path.as_c_string_slice(), sealed_path.as_c_string_slice())
+            self.path.as_c_string_span(), sealed_path.as_c_string_span())
         if rc != 0:
             # Rename failed (disk full / permissions). Re-open the file we just
             # closed so the log keeps working, and report the drop.
@@ -1684,7 +1684,7 @@ struct WAL(Movable):
 
     def _reopen_active(mut self, tail: Int, seq: UInt64) -> Bool:
         """(Re)create the active segment at self.path and map it."""
-        var fd = external_call["pion_wal_open", Int32](self.path.as_c_string_slice())
+        var fd = external_call["pion_wal_open", Int32](self.path.as_c_string_span())
         if fd < 0:
             return False
         var tr = external_call["pion_wal_ftruncate", Int32](fd, Int(self.file_size))
@@ -1895,7 +1895,7 @@ struct WAL(Movable):
         """Map one sealed segment read-write, replay it, unmap. Sealed segments are
         never written again; the mapping exists only for the replay walk."""
         var sp = seg_path
-        var fd = external_call["pion_wal_open", Int32](sp.as_c_string_slice())
+        var fd = external_call["pion_wal_open", Int32](sp.as_c_string_span())
         if fd < 0:
             return 0
         var mp = external_call["pion_wal_mmap", Pointer[UInt8, MutUntrackedOrigin]](
@@ -2017,7 +2017,7 @@ struct WAL(Movable):
         self._repl_detach()   # gh #390: every stream offset is about to reset
         for n in range(1, self.sealed + 1):
             var seg = self._segment_path(n)
-            _ = external_call["unlink", Int32](seg.as_c_string_slice())
+            _ = external_call["unlink", Int32](seg.as_c_string_span())
         self.sealed = 0
         self.dropped = 0
         self.dropped_bytes = 0
@@ -2051,8 +2051,8 @@ struct WAL(Movable):
 
         One serializer for BGREWRITEAOF and for log_key_image. The rewrite's
         own copy had no STREAM branch, so BGREWRITEAOF dropped every stream."""
-        var vbuf = alloc[UInt8](64)   # scalar serialization scratch (gv_bytes)
-        var fbuf = alloc[UInt8](64)
+        var vbuf = unsafe_alloc[UInt8](64)   # scalar serialization scratch (gv_bytes)
+        var fbuf = unsafe_alloc[UInt8](64)
         var t = Int(val.type.value)
         if val.is_string():
             var vl = val.string_len()
@@ -2124,7 +2124,7 @@ struct WAL(Movable):
                 var e = sd[].entries[unsafe_offset=ei]
                 if e.deleted:
                     continue
-                var rec = alloc[UInt8](8 + e.data_len)
+                var rec = unsafe_alloc[UInt8](8 + e.data_len)
                 rec.unsafe_bitcast[UInt64]()[unsafe_offset=0] = e.id_seq
                 if e.data_len > 0:
                     unsafe_memcpy(dest=rec.unsafe_offset(8), src=e.data, count=e.data_len)
@@ -2193,7 +2193,7 @@ struct WAL(Movable):
         if is_null(self.map):
             return
         self.checkpoint()
-        var kbuf = alloc[UInt8](64)
+        var kbuf = unsafe_alloc[UInt8](64)
         for si in range(8):
             var shard = keyspace[].shards.unsafe_offset(si)
             for i in range(shard[].capacity):
@@ -2221,9 +2221,9 @@ struct WAL(Movable):
         same records."""
         if is_null(self.map) or not keyspace[].has_vec():
             return
-        var sbuf = alloc[UInt8](64)
-        var kbuf = alloc[UInt8](64)
-        sbuf[0] = UInt8(VEC_CLEAR_DEAD | VEC_CLEAR_KEYS)
+        var sbuf = unsafe_alloc[UInt8](64)
+        var kbuf = unsafe_alloc[UInt8](64)
+        sbuf[unsafe_offset=0] = UInt8(VEC_CLEAR_DEAD | VEC_CLEAR_KEYS)
         _ = self.append(VEC_CLEAR_REC, sbuf, 1)
         for si in range(VEC_KEY_SHARDS):
             var mp = keyspace[].vec_keys_shard(si)

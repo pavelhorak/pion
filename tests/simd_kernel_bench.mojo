@@ -12,7 +12,7 @@ Compare across Mojo versions (0.26.2 vs 0.26.3+) to detect regressions.
 Filed as: https://github.com/modular/modular/issues/XXXX (update when filed)
 """
 
-from std.memory.unsafe_pointer import UnsafePointer, alloc
+from std.memory.unsafe_pointer import alloc
 from std.memory import unsafe_memset
 from std.sys import simd_width_of
 from std.sys import CompilationTarget
@@ -51,8 +51,8 @@ fn sdot_int8(acc: SIMD[DType.int32, 4], a: SIMD[DType.int8, 16], b: SIMD[DType.i
 # Kernel 1: Simple L2 distance (no early exit)
 @no_inline
 fn l2_distance_int8_simple[dim: Int](
-    v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+    v1: Pointer[Int8, MutUntrackedOrigin],
+    v2: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     """Basic INT8 L2 distance. Single accumulator, no unrolling tricks."""
     comptime width = 16
     var acc = SIMD[DType.int32, width](0)
@@ -65,8 +65,8 @@ fn l2_distance_int8_simple[dim: Int](
 # Kernel 2: 2x-unrolled L2 distance (the pattern used in suffix early-exit)
 @no_inline
 fn l2_distance_int8_unrolled[dim: Int](
-    v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+    v1: Pointer[Int8, MutUntrackedOrigin],
+    v2: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     """2x-unrolled INT8 L2 distance. Two accumulator chains to hide latency."""
     comptime width = 16
     var sum_a = SIMD[DType.int32, width](0)
@@ -82,8 +82,8 @@ fn l2_distance_int8_unrolled[dim: Int](
 # Kernel 3: comptime-for unrolled L2 with early exit (the actual hot kernel)
 @no_inline
 fn l2_distance_int8_suffix_early_exit[suffix: Int, block: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v: UnsafePointer[Int8, MutUntrackedOrigin],
+    q: Pointer[Int8, MutUntrackedOrigin],
+    v: Pointer[Int8, MutUntrackedOrigin],
     prefix_dist: Float32,
     threshold: Float32) -> Float32:
     """Suffix L2 with early exit at each block boundary.
@@ -111,15 +111,15 @@ fn l2_distance_int8_suffix_early_exit[suffix: Int, block: Int](
 # Kernel 4: Batch-8 dot product (prefix pruning kernel)
 @no_inline
 fn dot_int8_batch8[dim: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v4: UnsafePointer[Int8, MutUntrackedOrigin],
-    v5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v6: UnsafePointer[Int8, MutUntrackedOrigin],
-    v7: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
+    q: Pointer[Int8, MutUntrackedOrigin],
+    v0: Pointer[Int8, MutUntrackedOrigin],
+    v1: Pointer[Int8, MutUntrackedOrigin],
+    v2: Pointer[Int8, MutUntrackedOrigin],
+    v3: Pointer[Int8, MutUntrackedOrigin],
+    v4: Pointer[Int8, MutUntrackedOrigin],
+    v5: Pointer[Int8, MutUntrackedOrigin],
+    v6: Pointer[Int8, MutUntrackedOrigin],
+    v7: Pointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
     """SDOT-based batch-8 dot products."""
     var acc0 = SIMD[DType.int32, 4](0); var acc1 = SIMD[DType.int32, 4](0)
     var acc2 = SIMD[DType.int32, 4](0); var acc3 = SIMD[DType.int32, 4](0)
@@ -145,7 +145,7 @@ fn dot_int8_batch8[dim: Int](
 
 # ── Benchmark Harness ───────────────────────────────────────────────────────
 
-fn fill_random(ptr: UnsafePointer[Int8, MutUntrackedOrigin], n: Int):
+fn fill_random(ptr: Pointer[Int8, MutUntrackedOrigin], n: Int):
     """Fill buffer with pseudo-random INT8 values."""
     for i in range(0, n, 8):
         var r = random_ui64(0, 255)
@@ -193,7 +193,7 @@ fn main():
 
     # Allocate N different target vectors to prevent loop hoisting
     alias N_VECS = 64
-    var targets = alloc[UnsafePointer[Int8, MutUntrackedOrigin]](N_VECS)
+    var targets = alloc[Pointer[Int8, MutUntrackedOrigin]](N_VECS)
     for i in range(N_VECS):
         targets[i] = alloc[Int8](DIM)
         fill_random(targets[i], DIM)

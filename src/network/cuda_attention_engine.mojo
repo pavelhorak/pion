@@ -23,7 +23,6 @@ config.mojo + main.mojo + state.mojo + attend.mojo patches.
 
 from src.common.ptr import null_ptr
 from std.ffi import external_call
-from std.memory.unsafe_pointer import Pointer
 from std.sys.info import CompilationTarget
 from std.sys import is_defined
 from src.common.config import PionConfig

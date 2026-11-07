@@ -1,7 +1,7 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
 from std.ffi import external_call
 from std.sys import CompilationTarget
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memset, unsafe_memcpy, stack_allocation
 
@@ -29,7 +29,7 @@ def create_listen_socket(port: Int) -> Int32:
         print("Failed to create shared listen socket")
         return -1
 
-    var opt_ptr = alloc[Int32](1)
+    var opt_ptr = unsafe_alloc[Int32](1)
     opt_ptr[unsafe_offset=0] = 1
     comptime if CompilationTarget.is_linux():
         _ = external_call["setsockopt", Int32](socket_fd, Int32(1), Int32(2), opt_ptr, Int32(4))      # SOL_SOCKET=1, SO_REUSEADDR=2
@@ -41,7 +41,7 @@ def create_listen_socket(port: Int) -> Int32:
     # Set nonblocking using C wrapper (avoids variadic FFI bug on macOS arm64)
     _ = external_call["set_nonblock_c", Int32](socket_fd)
 
-    var addr = alloc[UInt8](16)
+    var addr = unsafe_alloc[UInt8](16)
     unsafe_memset(addr, 0, 16)
     comptime if CompilationTarget.is_linux():
         # Linux sockaddr_in: no sin_len byte; sin_family is uint16 at offset 0 (little-endian)
@@ -121,21 +121,21 @@ comptime EPOLL_EV_DATA = 4 if CompilationTarget.is_x86() else 8
 @always_inline
 def epoll_ev_events(evs: Pointer[UInt8, MutUntrackedOrigin], i: Int) -> UInt32:
     """The `events` mask of event i in an epoll_wait buffer."""
-    return evs.unsafe_offset(i * EPOLL_EV_SIZE).bitcast[UInt32]()[]
+    return evs.unsafe_offset(i * EPOLL_EV_SIZE).unsafe_bitcast[UInt32]()[]
 
 
 @always_inline
 def epoll_ev_fd(evs: Pointer[UInt8, MutUntrackedOrigin], i: Int) -> Int32:
     """The fd stored in the low 32 bits of event i's `data`."""
-    return Int32(evs.unsafe_offset(i * EPOLL_EV_SIZE + EPOLL_EV_DATA).bitcast[UInt32]()[])
+    return Int32(evs.unsafe_offset(i * EPOLL_EV_SIZE + EPOLL_EV_DATA).unsafe_bitcast[UInt32]()[])
 
 
 def epoll_ctl_fd(epfd: Int32, op: Int32, fd: Int32, events: UInt32) -> Int32:
     """epoll_ctl with `data` = fd, laid out for this target."""
     var ev = stack_allocation[16, UInt8]()
     unsafe_memset(ev, 0, 16)
-    ev.bitcast[UInt32]()[] = events
-    ev.unsafe_offset(EPOLL_EV_DATA).bitcast[UInt32]()[] = UInt32(fd)
+    ev.unsafe_bitcast[UInt32]()[] = events
+    ev.unsafe_offset(EPOLL_EV_DATA).unsafe_bitcast[UInt32]()[] = UInt32(fd)
     return external_call["epoll_ctl", Int32](epfd, op, fd, ev)
 
 
@@ -193,7 +193,7 @@ struct TCPServer(Copyable, Movable):
             print("Failed to create socket")
             return False
 
-        var opt_ptr = alloc[Int32](1)
+        var opt_ptr = unsafe_alloc[Int32](1)
         opt_ptr[unsafe_offset=0] = 1
         comptime if CompilationTarget.is_linux():
             # SOL_SOCKET=1, SO_REUSEADDR=2, SO_REUSEPORT=15
@@ -209,7 +209,7 @@ struct TCPServer(Copyable, Movable):
 
         self.set_nonblocking(socket_fd)
 
-        var addr = alloc[UInt8](16)
+        var addr = unsafe_alloc[UInt8](16)
         unsafe_memset(addr, 0, 16)
         comptime if CompilationTarget.is_linux():
             addr[unsafe_offset=0] = 2; addr[unsafe_offset=1] = 0  # sin_family = AF_INET as uint16 LE (no sin_len on Linux)
@@ -251,7 +251,7 @@ struct TCPServer(Copyable, Movable):
 
     def set_tcp_nodelay(self, fd: Int32):
         # IPPROTO_TCP = 6, TCP_NODELAY = 0x0001
-        var opt = alloc[Int32](1)
+        var opt = unsafe_alloc[Int32](1)
         opt[unsafe_offset=0] = 1
         _ = external_call["setsockopt", Int32](fd, Int32(6), Int32(0x0001), opt, Int32(4))
         opt.unsafe_free()

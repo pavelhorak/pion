@@ -4,7 +4,7 @@
 #
 # Shape: H=8 N=2048 d_head=128 — same as the multi-head bench so deltas line up.
 
-from std.memory.unsafe_pointer import UnsafePointer, alloc
+from std.memory.unsafe_pointer import alloc
 from std.math import sqrt
 from std.random import random_float64
 from std.time import perf_counter_ns
@@ -18,13 +18,13 @@ from src.vector.metal_attention_kernels import (
 )
 
 
-def fill_random(p: UnsafePointer[Float32, MutAnyOrigin], n: Int):
+def fill_random(p: Pointer[Float32, MutAnyOrigin], n: Int):
     for i in range(n):
         p[i] = Float32(random_float64() * 2.0 - 1.0)
 
 
-def cosine(a: UnsafePointer[Float32, MutAnyOrigin],
-           b: UnsafePointer[Float32, MutAnyOrigin], n: Int) -> Float32:
+def cosine(a: Pointer[Float32, MutAnyOrigin],
+           b: Pointer[Float32, MutAnyOrigin], n: Int) -> Float32:
     var dot: Float32 = 0.0
     var na: Float32 = 0.0
     var nb: Float32 = 0.0
@@ -35,7 +35,7 @@ def cosine(a: UnsafePointer[Float32, MutAnyOrigin],
     return dot / (sqrt(na) * sqrt(nb))
 
 
-def insertion_sort(a: UnsafePointer[Float64, MutAnyOrigin], n: Int):
+def insertion_sort(a: Pointer[Float64, MutAnyOrigin], n: Int):
     for i in range(1, n):
         var key = a[i]
         var j = i - 1

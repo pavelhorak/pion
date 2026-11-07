@@ -11,8 +11,8 @@ makes `src/common/` the right home — the same reason `SlabList` and
 `stream.mojo` re-exports both names, so every existing `from src.commands.stream
 import StreamData` keeps working.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.collections import List
 
@@ -258,7 +258,7 @@ struct StreamGroup(Copyable, Movable):
             return self.by_name[k]
         var name = List[UInt8](capacity=n)
         for b in range(n):
-            name.append(p[b])
+            name.append(p[unsafe_offset=b])
         var slot = len(self.consumers)
         self.consumers.append(StreamConsumer(slot + 1, name^, now_ms))
         if k == len(self.by_name):
@@ -319,8 +319,8 @@ def _bytes_cmp(a: List[UInt8], p: Pointer[UInt8, MutUntrackedOrigin], n: Int) ->
     """memcmp order, shorter first on a common prefix."""
     var m = len(a) if len(a) < n else n
     for k in range(m):
-        if a[k] != p[k]:
-            return -1 if a[k] < p[k] else 1
+        if a[k] != p[unsafe_offset=k]:
+            return -1 if a[k] < p[unsafe_offset=k] else 1
     if len(a) == n:
         return 0
     return -1 if len(a) < n else 1
@@ -357,7 +357,7 @@ struct StreamData(Copyable, Movable):
 
     def __init__(out self):
         self.capacity = 64
-        self.entries = alloc[StreamEntry](self.capacity)
+        self.entries = unsafe_alloc[StreamEntry](self.capacity)
         self.count = 0; self.alive = 0
         self.last_id_ms = 0; self.last_id_seq = 0
         self.entries_added = 0
@@ -367,7 +367,7 @@ struct StreamData(Copyable, Movable):
     def append(mut self, id_ms: UInt64, id_seq: UInt64, data: Pointer[UInt8, MutUntrackedOrigin], data_len: Int, num_fields: Int):
         if self.count >= self.capacity:
             var new_cap = self.capacity * 2
-            var new_entries = alloc[StreamEntry](new_cap)
+            var new_entries = unsafe_alloc[StreamEntry](new_cap)
             for i in range(self.count):
                 (new_entries.unsafe_offset(i)).unsafe_write(self.entries[unsafe_offset=i])
             self.entries.unsafe_free()
@@ -434,7 +434,7 @@ struct StreamData(Copyable, Movable):
             var e = self.entries[unsafe_offset=i]
             if e.deleted:
                 continue
-            var d = alloc[UInt8](max(e.data_len, 1))
+            var d = unsafe_alloc[UInt8](max(e.data_len, 1))
             for b in range(e.data_len):
                 d[unsafe_offset=b] = e.data[unsafe_offset=b]
             out.append(e.id_ms, e.id_seq, d, e.data_len, e.num_fields)
@@ -513,7 +513,7 @@ struct StreamData(Copyable, Movable):
             if len(self.groups[k].name) == n:
                 var same = True
                 for b in range(n):
-                    if self.groups[k].name[b] != p[b]:
+                    if self.groups[k].name[b] != p[unsafe_offset=b]:
                         same = False
                         break
                 if same:
@@ -619,7 +619,7 @@ def _put_u64(mut out: List[UInt8], v: UInt64):
 def _put_bytes(mut out: List[UInt8], p: Pointer[UInt8, MutUntrackedOrigin], n: Int):
     _put_u32(out, n)
     for k in range(n):
-        out.append(p[k])
+        out.append(p[unsafe_offset=k])
 
 
 def _put_list(mut out: List[UInt8], b: List[UInt8]):
@@ -696,7 +696,7 @@ def rec_u32(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, mut at: Int, mut ok: 
     if at + 4 > n:
         ok = False
         return 0
-    var v = Int(p[at]) | (Int(p[at + 1]) << 8) | (Int(p[at + 2]) << 16) | (Int(p[at + 3]) << 24)
+    var v = Int(p[unsafe_offset=at]) | (Int(p[unsafe_offset=at + 1]) << 8) | (Int(p[unsafe_offset=at + 2]) << 16) | (Int(p[unsafe_offset=at + 3]) << 24)
     at += 4
     return v
 
@@ -707,7 +707,7 @@ def rec_u64(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, mut at: Int, mut ok: 
         return 0
     var v = UInt64(0)
     for k in range(8):
-        v |= UInt64(Int(p[at + k])) << UInt64(8 * k)
+        v |= UInt64(Int(p[unsafe_offset=at + k])) << UInt64(8 * k)
     at += 8
     return v
 
@@ -751,7 +751,7 @@ def apply_stream_group_record(cmd_id: UInt8, sd: Pointer[StreamData, MutUntracke
     var gl = rec_name(p, n, at, ok, g_at)
     if not ok:
         return False
-    var gp = p + g_at
+    var gp = p.unsafe_offset(g_at)
     var g = sd[].group_index(gp, gl)
     if cmd_id == 38 or cmd_id == 39:
         var lm = rec_u64(p, n, at, ok)
@@ -762,7 +762,7 @@ def apply_stream_group_record(cmd_id: UInt8, sd: Pointer[StreamData, MutUntracke
         if g < 0:
             var name = List[UInt8](capacity=gl)
             for b in range(gl):
-                name.append(gp[b])
+                name.append(gp[unsafe_offset=b])
             sd[].groups.append(StreamGroup(name^, lm, ls, Int64(er)))
         else:
             sd[].groups[g].last_ms = lm
@@ -789,7 +789,7 @@ def apply_stream_group_record(cmd_id: UInt8, sd: Pointer[StreamData, MutUntracke
     var cl = rec_name(p, n, at, ok, c_at)
     if not ok:
         return False
-    var cp = p + c_at
+    var cp = p.unsafe_offset(c_at)
     if cmd_id == 42:
         var ci = sd[].groups[g].consumer_index(cp, cl)
         if ci >= 0:

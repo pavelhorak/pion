@@ -10,7 +10,6 @@ SWIM port = main port + 20000 (UDP). Raft port = main port + 30000 (TCP).
 """
 
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from src.network.cluster import ClusterState
 
@@ -25,7 +24,7 @@ struct GossipManager(Movable):
     def __moveinit__(out self, deinit take: Self):
         self.handle = take.handle
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if is_not_null(self.handle):
             external_call["pion_gossip_stop", NoneType](self.handle)
 

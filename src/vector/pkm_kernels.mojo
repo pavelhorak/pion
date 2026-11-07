@@ -51,7 +51,6 @@ from std.collections import Array
 from std.math import exp
 from src.vector.fma_mad import fma_mad
 from std.memory import unsafe_memset
-from std.memory.unsafe_pointer import Pointer
 
 from std.ffi import external_call
 from src.vector.vector_abi import HELD_VECTOR

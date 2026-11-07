@@ -1,5 +1,5 @@
 from src.vector.hnsw import HNSWGraph
-from std.memory.unsafe_pointer import alloc, UnsafePointer
+from std.memory.unsafe_pointer import alloc
 from std.time import perf_counter_ns
 from std.random import random_float64
 

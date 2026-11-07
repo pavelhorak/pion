@@ -12,8 +12,8 @@
 # tail, on random codes and on the extreme codes (-128 / 127).
 #
 #   pixi run mojo build -I . tests/test_reg_tile_kernels.mojo -o /tmp/rt && /tmp/rt
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
-from std.memory.unsafe_pointer import UnsafePointer
 from std.random import random_si64, random_float64, seed
 from std.sys import simd_width_of, CompilationTarget
 from std.sys.intrinsics import llvm_intrinsic
@@ -31,15 +31,15 @@ from src.vector.kernels import (
 
 @always_inline
 def _old_l2_distance_int8_int8_batch8_jit[dim: Int](
-    q:    UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_4: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_6: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_7: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
+    q:    Pointer[Int8, MutUntrackedOrigin],
+    v2_0: Pointer[Int8, MutUntrackedOrigin],
+    v2_1: Pointer[Int8, MutUntrackedOrigin],
+    v2_2: Pointer[Int8, MutUntrackedOrigin],
+    v2_3: Pointer[Int8, MutUntrackedOrigin],
+    v2_4: Pointer[Int8, MutUntrackedOrigin],
+    v2_5: Pointer[Int8, MutUntrackedOrigin],
+    v2_6: Pointer[Int8, MutUntrackedOrigin],
+    v2_7: Pointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 8]:
     """INT8-INT8 L2 batch-8: no dequantization, matches graph build metric.
     Query quantized to INT8 once per search call; ~1.3x faster than FP32-INT8.
     Accumulates in INT32 (max: 1536 * 254^2 = 99M < INT32_MAX)."""
@@ -49,69 +49,69 @@ def _old_l2_distance_int8_int8_batch8_jit[dim: Int](
     var sum4 = SIMD[DType.int32, width](0); var sum5 = SIMD[DType.int32, width](0)
     var sum6 = SIMD[DType.int32, width](0); var sum7 = SIMD[DType.int32, width](0)
     for i in range(0, dim - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
-        var d0 = qv - v2_0.load[width=width](i).cast[DType.int32](); sum0 += d0 * d0
-        var d1 = qv - v2_1.load[width=width](i).cast[DType.int32](); sum1 += d1 * d1
-        var d2 = qv - v2_2.load[width=width](i).cast[DType.int32](); sum2 += d2 * d2
-        var d3 = qv - v2_3.load[width=width](i).cast[DType.int32](); sum3 += d3 * d3
-        var d4 = qv - v2_4.load[width=width](i).cast[DType.int32](); sum4 += d4 * d4
-        var d5 = qv - v2_5.load[width=width](i).cast[DType.int32](); sum5 += d5 * d5
-        var d6 = qv - v2_6.load[width=width](i).cast[DType.int32](); sum6 += d6 * d6
-        var d7 = qv - v2_7.load[width=width](i).cast[DType.int32](); sum7 += d7 * d7
+        var qv = q.unsafe_load[width=width](i).cast[DType.int32]()
+        var d0 = qv - v2_0.unsafe_load[width=width](i).cast[DType.int32](); sum0 += d0 * d0
+        var d1 = qv - v2_1.unsafe_load[width=width](i).cast[DType.int32](); sum1 += d1 * d1
+        var d2 = qv - v2_2.unsafe_load[width=width](i).cast[DType.int32](); sum2 += d2 * d2
+        var d3 = qv - v2_3.unsafe_load[width=width](i).cast[DType.int32](); sum3 += d3 * d3
+        var d4 = qv - v2_4.unsafe_load[width=width](i).cast[DType.int32](); sum4 += d4 * d4
+        var d5 = qv - v2_5.unsafe_load[width=width](i).cast[DType.int32](); sum5 += d5 * d5
+        var d6 = qv - v2_6.unsafe_load[width=width](i).cast[DType.int32](); sum6 += d6 * d6
+        var d7 = qv - v2_7.unsafe_load[width=width](i).cast[DType.int32](); sum7 += d7 * d7
     var r0 = sum0.reduce_add().cast[DType.float32](); var r1 = sum1.reduce_add().cast[DType.float32]()
     var r2 = sum2.reduce_add().cast[DType.float32](); var r3 = sum3.reduce_add().cast[DType.float32]()
     var r4 = sum4.reduce_add().cast[DType.float32](); var r5 = sum5.reduce_add().cast[DType.float32]()
     var r6 = sum6.reduce_add().cast[DType.float32](); var r7 = sum7.reduce_add().cast[DType.float32]()
     comptime tail_start = (dim // width) * width
     for i in range(tail_start, dim):
-        var qi = q[i].cast[DType.int32]()
-        var d0i = qi - v2_0[i].cast[DType.int32](); r0 += Float32(d0i * d0i)
-        var d1i = qi - v2_1[i].cast[DType.int32](); r1 += Float32(d1i * d1i)
-        var d2i = qi - v2_2[i].cast[DType.int32](); r2 += Float32(d2i * d2i)
-        var d3i = qi - v2_3[i].cast[DType.int32](); r3 += Float32(d3i * d3i)
-        var d4i = qi - v2_4[i].cast[DType.int32](); r4 += Float32(d4i * d4i)
-        var d5i = qi - v2_5[i].cast[DType.int32](); r5 += Float32(d5i * d5i)
-        var d6i = qi - v2_6[i].cast[DType.int32](); r6 += Float32(d6i * d6i)
-        var d7i = qi - v2_7[i].cast[DType.int32](); r7 += Float32(d7i * d7i)
+        var qi = q[unsafe_offset=i].cast[DType.int32]()
+        var d0i = qi - v2_0[unsafe_offset=i].cast[DType.int32](); r0 += Float32(d0i * d0i)
+        var d1i = qi - v2_1[unsafe_offset=i].cast[DType.int32](); r1 += Float32(d1i * d1i)
+        var d2i = qi - v2_2[unsafe_offset=i].cast[DType.int32](); r2 += Float32(d2i * d2i)
+        var d3i = qi - v2_3[unsafe_offset=i].cast[DType.int32](); r3 += Float32(d3i * d3i)
+        var d4i = qi - v2_4[unsafe_offset=i].cast[DType.int32](); r4 += Float32(d4i * d4i)
+        var d5i = qi - v2_5[unsafe_offset=i].cast[DType.int32](); r5 += Float32(d5i * d5i)
+        var d6i = qi - v2_6[unsafe_offset=i].cast[DType.int32](); r6 += Float32(d6i * d6i)
+        var d7i = qi - v2_7[unsafe_offset=i].cast[DType.int32](); r7 += Float32(d7i * d7i)
     return SIMD[DType.float32, 8](r0, r1, r2, r3, r4, r5, r6, r7)
 
 
 @always_inline
 def _old_l2_distance_int8_int8_batch4_jit[dim: Int](
-    q:    UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 4]:
+    q:    Pointer[Int8, MutUntrackedOrigin],
+    v2_0: Pointer[Int8, MutUntrackedOrigin],
+    v2_1: Pointer[Int8, MutUntrackedOrigin],
+    v2_2: Pointer[Int8, MutUntrackedOrigin],
+    v2_3: Pointer[Int8, MutUntrackedOrigin]) -> SIMD[DType.float32, 4]:
     """INT8-INT8 L2 batch-4: no dequantization, matches graph build metric."""
     comptime width = 16
     var sum0 = SIMD[DType.int32, width](0); var sum1 = SIMD[DType.int32, width](0)
     var sum2 = SIMD[DType.int32, width](0); var sum3 = SIMD[DType.int32, width](0)
     for i in range(0, dim - width + 1, width):
-        var qv = q.load[width=width](i).cast[DType.int32]()
-        var d0 = qv - v2_0.load[width=width](i).cast[DType.int32](); sum0 += d0 * d0
-        var d1 = qv - v2_1.load[width=width](i).cast[DType.int32](); sum1 += d1 * d1
-        var d2 = qv - v2_2.load[width=width](i).cast[DType.int32](); sum2 += d2 * d2
-        var d3 = qv - v2_3.load[width=width](i).cast[DType.int32](); sum3 += d3 * d3
+        var qv = q.unsafe_load[width=width](i).cast[DType.int32]()
+        var d0 = qv - v2_0.unsafe_load[width=width](i).cast[DType.int32](); sum0 += d0 * d0
+        var d1 = qv - v2_1.unsafe_load[width=width](i).cast[DType.int32](); sum1 += d1 * d1
+        var d2 = qv - v2_2.unsafe_load[width=width](i).cast[DType.int32](); sum2 += d2 * d2
+        var d3 = qv - v2_3.unsafe_load[width=width](i).cast[DType.int32](); sum3 += d3 * d3
     var r0 = sum0.reduce_add().cast[DType.float32](); var r1 = sum1.reduce_add().cast[DType.float32]()
     var r2 = sum2.reduce_add().cast[DType.float32](); var r3 = sum3.reduce_add().cast[DType.float32]()
     comptime tail_start = (dim // width) * width
     for i in range(tail_start, dim):
-        var qi = q[i].cast[DType.int32]()
-        var d0i = qi - v2_0[i].cast[DType.int32](); r0 += Float32(d0i * d0i)
-        var d1i = qi - v2_1[i].cast[DType.int32](); r1 += Float32(d1i * d1i)
-        var d2i = qi - v2_2[i].cast[DType.int32](); r2 += Float32(d2i * d2i)
-        var d3i = qi - v2_3[i].cast[DType.int32](); r3 += Float32(d3i * d3i)
+        var qi = q[unsafe_offset=i].cast[DType.int32]()
+        var d0i = qi - v2_0[unsafe_offset=i].cast[DType.int32](); r0 += Float32(d0i * d0i)
+        var d1i = qi - v2_1[unsafe_offset=i].cast[DType.int32](); r1 += Float32(d1i * d1i)
+        var d2i = qi - v2_2[unsafe_offset=i].cast[DType.int32](); r2 += Float32(d2i * d2i)
+        var d3i = qi - v2_3[unsafe_offset=i].cast[DType.int32](); r3 += Float32(d3i * d3i)
     return SIMD[DType.float32, 4](r0, r1, r2, r3)
 
 
 @always_inline
 def _old_l2_int8_sabd_udot_batch8[dim: Int](
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    v0: UnsafePointer[Int8, MutUntrackedOrigin], v1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2: UnsafePointer[Int8, MutUntrackedOrigin], v3: UnsafePointer[Int8, MutUntrackedOrigin],
-    v4: UnsafePointer[Int8, MutUntrackedOrigin], v5: UnsafePointer[Int8, MutUntrackedOrigin],
-    v6: UnsafePointer[Int8, MutUntrackedOrigin], v7: UnsafePointer[Int8, MutUntrackedOrigin],
+    q: Pointer[Int8, MutUntrackedOrigin],
+    v0: Pointer[Int8, MutUntrackedOrigin], v1: Pointer[Int8, MutUntrackedOrigin],
+    v2: Pointer[Int8, MutUntrackedOrigin], v3: Pointer[Int8, MutUntrackedOrigin],
+    v4: Pointer[Int8, MutUntrackedOrigin], v5: Pointer[Int8, MutUntrackedOrigin],
+    v6: Pointer[Int8, MutUntrackedOrigin], v7: Pointer[Int8, MutUntrackedOrigin],
 ) -> SIMD[DType.float32, 8]:
     """gh #395: `l2_int8_sabd_udot` against eight vectors at once — one query
     load per 16 lanes and eight independent chains, so the eight vectors' cache
@@ -122,15 +122,15 @@ def _old_l2_int8_sabd_udot_batch8[dim: Int](
         var s4 = SIMD[DType.uint32, 4](0); var s5 = SIMD[DType.uint32, 4](0)
         var s6 = SIMD[DType.uint32, 4](0); var s7 = SIMD[DType.uint32, 4](0)
         for i in range(0, dim, 16):
-            var qv = q.load[width=16](i)
-            var d0 = _sabd_u8(qv, v0.load[width=16](i)); s0 = _udot_u8(s0, d0, d0)
-            var d1 = _sabd_u8(qv, v1.load[width=16](i)); s1 = _udot_u8(s1, d1, d1)
-            var d2 = _sabd_u8(qv, v2.load[width=16](i)); s2 = _udot_u8(s2, d2, d2)
-            var d3 = _sabd_u8(qv, v3.load[width=16](i)); s3 = _udot_u8(s3, d3, d3)
-            var d4 = _sabd_u8(qv, v4.load[width=16](i)); s4 = _udot_u8(s4, d4, d4)
-            var d5 = _sabd_u8(qv, v5.load[width=16](i)); s5 = _udot_u8(s5, d5, d5)
-            var d6 = _sabd_u8(qv, v6.load[width=16](i)); s6 = _udot_u8(s6, d6, d6)
-            var d7 = _sabd_u8(qv, v7.load[width=16](i)); s7 = _udot_u8(s7, d7, d7)
+            var qv = q.unsafe_load[width=16](i)
+            var d0 = _sabd_u8(qv, v0.unsafe_load[width=16](i)); s0 = _udot_u8(s0, d0, d0)
+            var d1 = _sabd_u8(qv, v1.unsafe_load[width=16](i)); s1 = _udot_u8(s1, d1, d1)
+            var d2 = _sabd_u8(qv, v2.unsafe_load[width=16](i)); s2 = _udot_u8(s2, d2, d2)
+            var d3 = _sabd_u8(qv, v3.unsafe_load[width=16](i)); s3 = _udot_u8(s3, d3, d3)
+            var d4 = _sabd_u8(qv, v4.unsafe_load[width=16](i)); s4 = _udot_u8(s4, d4, d4)
+            var d5 = _sabd_u8(qv, v5.unsafe_load[width=16](i)); s5 = _udot_u8(s5, d5, d5)
+            var d6 = _sabd_u8(qv, v6.unsafe_load[width=16](i)); s6 = _udot_u8(s6, d6, d6)
+            var d7 = _sabd_u8(qv, v7.unsafe_load[width=16](i)); s7 = _udot_u8(s7, d7, d7)
         return SIMD[DType.float32, 8](
             s0.reduce_add().cast[DType.float32](), s1.reduce_add().cast[DType.float32](),
             s2.reduce_add().cast[DType.float32](), s3.reduce_add().cast[DType.float32](),
@@ -143,11 +143,11 @@ def _old_l2_int8_sabd_udot_batch8[dim: Int](
 
 @always_inline
 def _old_l2_distance_fp32_int8_pervec_batch4(
-    v1:   UnsafePointer[Float32, MutUntrackedOrigin],
-    v2_0: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_1: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_2: UnsafePointer[Int8, MutUntrackedOrigin],
-    v2_3: UnsafePointer[Int8, MutUntrackedOrigin],
+    v1:   Pointer[Float32, MutUntrackedOrigin],
+    v2_0: Pointer[Int8, MutUntrackedOrigin],
+    v2_1: Pointer[Int8, MutUntrackedOrigin],
+    v2_2: Pointer[Int8, MutUntrackedOrigin],
+    v2_3: Pointer[Int8, MutUntrackedOrigin],
     dim: Int,
     min0: Float32, range0: Float32,
     min1: Float32, range1: Float32,
@@ -176,11 +176,11 @@ def _old_l2_distance_fp32_int8_pervec_batch4(
     var n_simd = (dim // width) * width
     var i = 0
     while i < n_simd:
-        var f1 = v1.load[width=width](i)
-        var dq0 = fma_mad[width](v2_0.load[width=width](i).cast[DType.float32](), sv0, ov0)
-        var dq1 = fma_mad[width](v2_1.load[width=width](i).cast[DType.float32](), sv1, ov1)
-        var dq2 = fma_mad[width](v2_2.load[width=width](i).cast[DType.float32](), sv2, ov2)
-        var dq3 = fma_mad[width](v2_3.load[width=width](i).cast[DType.float32](), sv3, ov3)
+        var f1 = v1.unsafe_load[width=width](i)
+        var dq0 = fma_mad[width](v2_0.unsafe_load[width=width](i).cast[DType.float32](), sv0, ov0)
+        var dq1 = fma_mad[width](v2_1.unsafe_load[width=width](i).cast[DType.float32](), sv1, ov1)
+        var dq2 = fma_mad[width](v2_2.unsafe_load[width=width](i).cast[DType.float32](), sv2, ov2)
+        var dq3 = fma_mad[width](v2_3.unsafe_load[width=width](i).cast[DType.float32](), sv3, ov3)
         var d0 = f1 - dq0; sum0 = fma_mad[width](d0, d0, sum0)
         var d1 = f1 - dq1; sum1 = fma_mad[width](d1, d1, sum1)
         var d2 = f1 - dq2; sum2 = fma_mad[width](d2, d2, sum2)
@@ -191,11 +191,11 @@ def _old_l2_distance_fp32_int8_pervec_batch4(
     var r2 = sum2.reduce_add()
     var r3 = sum3.reduce_add()
     while i < dim:
-        var f1 = v1[i]
-        var d0 = f1 - (v2_0[i].cast[DType.float32]() * s0 + o0); r0 += d0 * d0
-        var d1 = f1 - (v2_1[i].cast[DType.float32]() * s1 + o1); r1 += d1 * d1
-        var d2 = f1 - (v2_2[i].cast[DType.float32]() * s2 + o2); r2 += d2 * d2
-        var d3 = f1 - (v2_3[i].cast[DType.float32]() * s3 + o3); r3 += d3 * d3
+        var f1 = v1[unsafe_offset=i]
+        var d0 = f1 - (v2_0[unsafe_offset=i].cast[DType.float32]() * s0 + o0); r0 += d0 * d0
+        var d1 = f1 - (v2_1[unsafe_offset=i].cast[DType.float32]() * s1 + o1); r1 += d1 * d1
+        var d2 = f1 - (v2_2[unsafe_offset=i].cast[DType.float32]() * s2 + o2); r2 += d2 * d2
+        var d3 = f1 - (v2_3[unsafe_offset=i].cast[DType.float32]() * s3 + o3); r3 += d3 * d3
         i += 1
     return SIMD[DType.float32, 4](r0, r1, r2, r3)
 
@@ -204,44 +204,44 @@ def _old_l2_distance_fp32_int8_pervec_batch4(
 
 # ── checks ───────────────────────────────────────────────────────────────────
 
-def fill_i8(v: UnsafePointer[Int8, MutUntrackedOrigin], n: Int, mode: Int):
+def fill_i8(v: Pointer[Int8, MutUntrackedOrigin], n: Int, mode: Int):
     for i in range(n):
         if mode == 0:
-            v[i] = Int8(random_si64(-128, 127))
+            v[unsafe_offset=i] = Int8(random_si64(-128, 127))
         elif mode == 1:
-            v[i] = Int8(-128) if (i % 2) == 0 else Int8(127)
+            v[unsafe_offset=i] = Int8(-128) if (i % 2) == 0 else Int8(127)
         else:
-            v[i] = Int8(127) if (i % 2) == 0 else Int8(-128)
+            v[unsafe_offset=i] = Int8(127) if (i % 2) == 0 else Int8(-128)
 
 
-def ref_l2(q: UnsafePointer[Int8, MutUntrackedOrigin], v: UnsafePointer[Int8, MutUntrackedOrigin], dim: Int) -> Int:
+def ref_l2(q: Pointer[Int8, MutUntrackedOrigin], v: Pointer[Int8, MutUntrackedOrigin], dim: Int) -> Int:
     var s = 0
     for i in range(dim):
-        var d = Int(q[i]) - Int(v[i])
+        var d = Int(q[unsafe_offset=i]) - Int(v[unsafe_offset=i])
         s += d * d
     return s
 
 
 def check_int8[dim: Int](trials: Int) -> Int:
-    var q = alloc[Int8](dim)
-    var vs = alloc[Int8](dim * 8)
+    var q = unsafe_alloc[Int8](dim)
+    var vs = unsafe_alloc[Int8](dim * 8)
     var bad = 0
     for t in range(trials):
         var mq = 1 if t % 5 == 0 else 0
         fill_i8(q, dim, mq)
         for j in range(8):
-            fill_i8(vs + j * dim, dim, 2 if (t % 5 == 0 and j % 2 == 0) else 0)
+            fill_i8(vs.unsafe_offset(j * dim), dim, 2 if (t % 5 == 0 and j % 2 == 0) else 0)
         var p = vs
-        var n8 = l2_distance_int8_int8_batch8_jit[dim](q, p, p + dim, p + 2 * dim, p + 3 * dim,
-                                                       p + 4 * dim, p + 5 * dim, p + 6 * dim, p + 7 * dim)
-        var o8 = _old_l2_distance_int8_int8_batch8_jit[dim](q, p, p + dim, p + 2 * dim, p + 3 * dim,
-                                                            p + 4 * dim, p + 5 * dim, p + 6 * dim, p + 7 * dim)
-        var n4 = l2_distance_int8_int8_batch4_jit[dim](q, p, p + dim, p + 2 * dim, p + 3 * dim)
-        var o4 = _old_l2_distance_int8_int8_batch4_jit[dim](q, p, p + dim, p + 2 * dim, p + 3 * dim)
-        var s8 = l2_int8_sabd_udot_batch8[dim](q, p, p + dim, p + 2 * dim, p + 3 * dim,
-                                               p + 4 * dim, p + 5 * dim, p + 6 * dim, p + 7 * dim)
-        var so8 = _old_l2_int8_sabd_udot_batch8[dim](q, p, p + dim, p + 2 * dim, p + 3 * dim,
-                                                     p + 4 * dim, p + 5 * dim, p + 6 * dim, p + 7 * dim)
+        var n8 = l2_distance_int8_int8_batch8_jit[dim](q, p, p.unsafe_offset(dim), p.unsafe_offset(2 * dim), p.unsafe_offset(3 * dim),
+                                                       p.unsafe_offset(4 * dim), p.unsafe_offset(5 * dim), p.unsafe_offset(6 * dim), p.unsafe_offset(7 * dim))
+        var o8 = _old_l2_distance_int8_int8_batch8_jit[dim](q, p, p.unsafe_offset(dim), p.unsafe_offset(2 * dim), p.unsafe_offset(3 * dim),
+                                                            p.unsafe_offset(4 * dim), p.unsafe_offset(5 * dim), p.unsafe_offset(6 * dim), p.unsafe_offset(7 * dim))
+        var n4 = l2_distance_int8_int8_batch4_jit[dim](q, p, p.unsafe_offset(dim), p.unsafe_offset(2 * dim), p.unsafe_offset(3 * dim))
+        var o4 = _old_l2_distance_int8_int8_batch4_jit[dim](q, p, p.unsafe_offset(dim), p.unsafe_offset(2 * dim), p.unsafe_offset(3 * dim))
+        var s8 = l2_int8_sabd_udot_batch8[dim](q, p, p.unsafe_offset(dim), p.unsafe_offset(2 * dim), p.unsafe_offset(3 * dim),
+                                               p.unsafe_offset(4 * dim), p.unsafe_offset(5 * dim), p.unsafe_offset(6 * dim), p.unsafe_offset(7 * dim))
+        var so8 = _old_l2_int8_sabd_udot_batch8[dim](q, p, p.unsafe_offset(dim), p.unsafe_offset(2 * dim), p.unsafe_offset(3 * dim),
+                                                     p.unsafe_offset(4 * dim), p.unsafe_offset(5 * dim), p.unsafe_offset(6 * dim), p.unsafe_offset(7 * dim))
         for j in range(8):
             if n8[j].to_bits() != o8[j].to_bits(): bad += 1
             if s8[j].to_bits() != so8[j].to_bits(): bad += 1
@@ -250,23 +250,23 @@ def check_int8[dim: Int](trials: Int) -> Int:
             # (one cast of an exact INT32). With a tail the kernels add it in
             # Float32, which rounds once a row passes 2^24, by design.
             comptime if dim % 16 == 0:
-                var want = Float32(ref_l2(q, p + j * dim, dim))
+                var want = Float32(ref_l2(q, p.unsafe_offset(j * dim), dim))
                 if n8[j].to_bits() != want.to_bits(): bad += 1
                 if s8[j].to_bits() != want.to_bits(): bad += 1
                 if j < 4 and n4[j].to_bits() != want.to_bits(): bad += 1
-    q.free(); vs.free()
+    q.unsafe_free(); vs.unsafe_free()
     if bad > 0:
         print("  FAIL int8 batch dim=" + String(dim) + ": " + String(bad) + " mismatches")
     return bad
 
 
 def check_pervec(dim: Int, trials: Int) -> Int:
-    var q = alloc[Float32](dim)
-    var vs = alloc[Int8](dim * 4)
+    var q = unsafe_alloc[Float32](dim)
+    var vs = unsafe_alloc[Int8](dim * 4)
     var bad = 0
     for t in range(trials):
         for i in range(dim):
-            q[i] = Float32(random_float64(-3.0, 3.0))
+            q[unsafe_offset=i] = Float32(random_float64(-3.0, 3.0))
         fill_i8(vs, dim * 4, 1 if t % 7 == 0 else 0)
         var mins = SIMD[DType.float32, 4](0)
         var ranges = SIMD[DType.float32, 4](0)
@@ -274,13 +274,13 @@ def check_pervec(dim: Int, trials: Int) -> Int:
             mins[j] = Float32(random_float64(-2.0, 0.0))
             ranges[j] = Float32(random_float64(0.01, 4.0))
         var p = vs
-        var n = l2_distance_fp32_int8_pervec_batch4(q, p, p + dim, p + 2 * dim, p + 3 * dim, dim,
+        var n = l2_distance_fp32_int8_pervec_batch4(q, p, p.unsafe_offset(dim), p.unsafe_offset(2 * dim), p.unsafe_offset(3 * dim), dim,
             mins[0], ranges[0], mins[1], ranges[1], mins[2], ranges[2], mins[3], ranges[3])
-        var o = _old_l2_distance_fp32_int8_pervec_batch4(q, p, p + dim, p + 2 * dim, p + 3 * dim, dim,
+        var o = _old_l2_distance_fp32_int8_pervec_batch4(q, p, p.unsafe_offset(dim), p.unsafe_offset(2 * dim), p.unsafe_offset(3 * dim), dim,
             mins[0], ranges[0], mins[1], ranges[1], mins[2], ranges[2], mins[3], ranges[3])
         for j in range(4):
             if n[j].to_bits() != o[j].to_bits(): bad += 1
-    q.free(); vs.free()
+    q.unsafe_free(); vs.unsafe_free()
     if bad > 0:
         print("  FAIL pervec dim=" + String(dim) + ": " + String(bad) + " mismatches")
     return bad

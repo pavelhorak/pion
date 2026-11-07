@@ -15,7 +15,6 @@ Equivalence to the tuned kernels:
   - top-k / combine: the same bounded min-heap and heapsort as the tuned
     code, minus the SIMD prefilter and the early breaks — identical output.
 """
-from std.memory.unsafe_pointer import Pointer
 
 comptime _NEG_INF = Float32(-3.4028235e38)
 
@@ -28,7 +27,7 @@ def ref_pkm_scores_f32(
         for r in range(s_rows):
             var acc = SIMD[DType.float32, 8](0.0)
             for i in range(0, d_pad, 8):
-                acc += keys.unsafe_offset(r * d_pad + i).load[width=8]() * q.unsafe_offset(t * d_pad + i).load[width=8]()
+                acc += keys.unsafe_offset(r * d_pad + i).unsafe_load[width=8]() * q.unsafe_offset(t * d_pad + i).unsafe_load[width=8]()
             dst[unsafe_offset=t * s_rows + r] = acc.reduce_add()
 
 
@@ -41,7 +40,7 @@ def ref_pkm_rescore_f32(
         var row = Int(idx[unsafe_offset=t]) * d_pad
         var acc = SIMD[DType.float32, 8](0.0)
         for i in range(0, d_pad, 8):
-            acc += keys.unsafe_offset(row + i).load[width=8]() * q.load[width=8](i)
+            acc += keys.unsafe_offset(row + i).unsafe_load[width=8]() * q.unsafe_load[width=8](i)
         dst[unsafe_offset=t] = acc.reduce_add()
 
 
@@ -55,8 +54,8 @@ def ref_pkm_scores_i8(
         for r in range(s_rows):
             var acc = SIMD[DType.int32, 16](0)
             for i in range(0, d_pad, 16):
-                acc += (keys.unsafe_offset(r * d_pad + i).load[width=16]().cast[DType.int32]()
-                        * q.unsafe_offset(t * d_pad + i).load[width=16]().cast[DType.int32]())
+                acc += (keys.unsafe_offset(r * d_pad + i).unsafe_load[width=16]().cast[DType.int32]()
+                        * q.unsafe_offset(t * d_pad + i).unsafe_load[width=16]().cast[DType.int32]())
             dst[unsafe_offset=t * s_rows + r] = (
                 acc.reduce_add().cast[DType.float32]() * row_scale[unsafe_offset=r] * q_scale[unsafe_offset=t])
 

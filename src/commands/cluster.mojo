@@ -1,6 +1,6 @@
 """Cluster commands: CLUSTER INFO/NODES/MYID/KEYSLOT/SLOTS/SHARDS/MEET/FORGET/REPLICATE/FAILOVER/RESET/SETSLOT/STATS."""
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.collections import Array
 from std.atomic import Atomic, Ordering
@@ -28,16 +28,15 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         var sub_tok = tokens[unsafe_offset=i + 1]
         var sub_ptr = sub_tok.ptr
         var sub_len = sub_tok.length
-        var sub0 = sub_ptr[unsafe_offset=0] | 0x20
         consumed += 1  # consume subcommand token
 
         if arg_eq(sub_ptr, sub_len, "info"):
             # CLUSTER INFO (i=105,n=110,f=102,o=111)
-            var ci_buf = alloc[UInt8](600)
+            var ci_buf = unsafe_alloc[UInt8](600)
             var ci_mb = ci_buf
             var ci_off = 0
             def _ci_sl(s: StringLiteral, b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                var sl = s.byte_length(); unsafe_memcpy(dest=b.unsafe_offset(o), src=s.unsafe_ptr(), count=sl); o += sl
+                var sl = s.byte_length(); unsafe_memcpy(dest=b.unsafe_offset(o), src=s.ptr(), count=sl); o += sl
             def _ci_in(n: Int, b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):
                 o += format_int_to_buf(b.unsafe_offset(o), 0, Int64(n))
             def _ci_nl2(b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):
@@ -91,7 +90,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
 
         elif arg_eq(sub_ptr, sub_len, "nodes"):
             # CLUSTER NODES (n=110,o=111,d=100,e=101,s=115)
-            var nb_buf = alloc[UInt8](4096)
+            var nb_buf = unsafe_alloc[UInt8](4096)
             var nb_mb = nb_buf
             var nb_off = 0
             if cluster_enabled:
@@ -454,7 +453,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                         if m != 0x80 and m != 0xFF:  # not EMPTY, not DELETED
                             var key = shard[].keys[unsafe_offset=slot_idx]
                             if not key.is_none():
-                                var sso_buf = alloc[UInt8](24)
+                                var sso_buf = unsafe_alloc[UInt8](24)
                                 var kp = key.as_string_safe(sso_buf)
                                 var kl = key.string_len()
                                 var ks = cluster[].keyslot(kp, kl)
@@ -481,7 +480,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                         if m != 0x80 and m != 0xFF:
                             var key = shard[].keys[unsafe_offset=slot_idx]
                             if not key.is_none():
-                                var sso_buf = alloc[UInt8](24)
+                                var sso_buf = unsafe_alloc[UInt8](24)
                                 var kp = key.as_string_safe(sso_buf)
                                 var kl = key.string_len()
                                 var ks = cluster[].keyslot(kp, kl)
@@ -583,11 +582,11 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             # under `--kvcache -w >1` see only the handling worker's slice
             # for V-Store / ATTEND counters; KV.PREFIX residence is full.
             var st_cap = 2048
-            var st_buf = alloc[UInt8](st_cap)
+            var st_buf = unsafe_alloc[UInt8](st_cap)
             var st_mb = st_buf
             var st_off = 0
             def _st_sl(s: StringLiteral, b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                var sl = s.byte_length(); unsafe_memcpy(dest=b.unsafe_offset(o), src=s.unsafe_ptr(), count=sl); o += sl
+                var sl = s.byte_length(); unsafe_memcpy(dest=b.unsafe_offset(o), src=s.ptr(), count=sl); o += sl
             def _st_in(n: Int, b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):
                 o += format_int_to_buf(b.unsafe_offset(o), 0, Int64(n))
             def _st_nl(b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):

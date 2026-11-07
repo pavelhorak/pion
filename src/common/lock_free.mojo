@@ -1,6 +1,6 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
 from std.atomic import Atomic, Ordering
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memset
 from std.ffi import external_call
 from std.collections import List
@@ -33,7 +33,7 @@ struct LockFreeRingBuffer:
     def __init__(out self, power_of_two_capacity: Int):
         self.capacity = power_of_two_capacity
         self.mask = power_of_two_capacity - 1
-        self.buffer = alloc[AITask](self.capacity)
+        self.buffer = unsafe_alloc[AITask](self.capacity)
         for i in range(self.capacity):
             self.buffer[unsafe_offset=i] = AITask("", "", 0, "")
             
@@ -119,14 +119,14 @@ struct ShardQueryBus(Movable):
         self.num_workers = num_workers
         self.max_dim = 2048 # Pre-allocate with max dim 2048
         var nn = num_workers * num_workers
-        self.query_slots  = alloc[ShardQuerySlot](nn)
-        self.query_ready  = alloc[UInt64](nn)
-        self.query_fp32_buf = alloc[Float32](nn * self.max_dim)
-        self.result_ids   = alloc[Int32](nn * MAX_SHARD_K)
-        self.result_scores = alloc[Float32](nn * MAX_SHARD_K)
-        self.result_counts = alloc[Int32](nn)
-        self.result_ready  = alloc[UInt64](nn)
-        self.result_seq    = alloc[UInt64](nn)
+        self.query_slots  = unsafe_alloc[ShardQuerySlot](nn)
+        self.query_ready  = unsafe_alloc[UInt64](nn)
+        self.query_fp32_buf = unsafe_alloc[Float32](nn * self.max_dim)
+        self.result_ids   = unsafe_alloc[Int32](nn * MAX_SHARD_K)
+        self.result_scores = unsafe_alloc[Float32](nn * MAX_SHARD_K)
+        self.result_counts = unsafe_alloc[Int32](nn)
+        self.result_ready  = unsafe_alloc[UInt64](nn)
+        self.result_seq    = unsafe_alloc[UInt64](nn)
         unsafe_memset(self.query_ready.unsafe_bitcast[UInt8](), 0, nn * 8)
         unsafe_memset(self.result_ready.unsafe_bitcast[UInt8](), 0, nn * 8)
         unsafe_memset(self.result_seq.unsafe_bitcast[UInt8](), 0, nn * 8)

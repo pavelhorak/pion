@@ -3,8 +3,8 @@
 Kept apart from src/commands/vset.mojo (the command handlers) so that
 container_free.mojo can free a set without importing the network layer.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.collections import List, Span
@@ -36,9 +36,9 @@ struct VectorSet(Movable):
         self.cap = 16
         self.n = 0
         self.live = 0
-        self.vecs = alloc[Float32](self.cap * dim)
-        self.norms = alloc[Float32](self.cap)
-        self.alive = alloc[UInt8](self.cap)
+        self.vecs = unsafe_alloc[Float32](self.cap * dim)
+        self.norms = unsafe_alloc[Float32](self.cap)
+        self.alive = unsafe_alloc[UInt8](self.cap)
         self.names = List[String]()
         self.attrs = List[String]()
         self.index = SlabHashMap(16)
@@ -60,9 +60,9 @@ struct VectorSet(Movable):
     def release(mut self):
         """Free the flat buffers. The Lists and the index are freed by the
         owner's unsafe_deinit_pointee()."""
-        if is_not_null(self.vecs): self.vecs.free()
-        if is_not_null(self.norms): self.norms.free()
-        if is_not_null(self.alive): self.alive.free()
+        if is_not_null(self.vecs): self.vecs.unsafe_free()
+        if is_not_null(self.norms): self.norms.unsafe_free()
+        if is_not_null(self.alive): self.alive.unsafe_free()
         self.vecs = null_ptr[Float32, MutUntrackedOrigin]()
         self.norms = null_ptr[Float32, MutUntrackedOrigin]()
         self.alive = null_ptr[UInt8, MutUntrackedOrigin]()
@@ -75,17 +75,17 @@ struct VectorSet(Movable):
 
     def _grow(mut self):
         var ncap = self.cap * 2
-        var nv = alloc[Float32](ncap * self.dim)
+        var nv = unsafe_alloc[Float32](ncap * self.dim)
         unsafe_memcpy(dest=nv, src=self.vecs, count=self.n * self.dim)
-        self.vecs.free()
+        self.vecs.unsafe_free()
         self.vecs = nv
-        var nn = alloc[Float32](ncap)
+        var nn = unsafe_alloc[Float32](ncap)
         unsafe_memcpy(dest=nn, src=self.norms, count=self.n)
-        self.norms.free()
+        self.norms.unsafe_free()
         self.norms = nn
-        var na = alloc[UInt8](ncap)
+        var na = unsafe_alloc[UInt8](ncap)
         unsafe_memcpy(dest=na, src=self.alive, count=self.n)
-        self.alive.free()
+        self.alive.unsafe_free()
         self.alive = na
         self.cap = ncap
 
@@ -95,7 +95,7 @@ struct VectorSet(Movable):
             ss += v[unsafe_offset=d] * v[unsafe_offset=d]
         var norm = sqrt(ss)
         var inv = Float32(1.0) / norm if norm > 0.0 else Float32(0.0)
-        var dst = self.vecs + slot * self.dim
+        var dst = self.vecs.unsafe_offset(slot * self.dim)
         for d in range(self.dim):
             dst[unsafe_offset=d] = v[unsafe_offset=d] * inv
         self.norms[unsafe_offset=slot] = norm
@@ -140,15 +140,15 @@ struct VectorSet(Movable):
             self.attrs.append(String(""))
             self.index.set(GenericValue.borrow(name_p, name_l), GenericValue.from_int(Int64(slot)))
             self.live += 1
-        unsafe_memcpy(dest=self.vecs + slot * self.dim, src=unit, count=self.dim)
+        unsafe_memcpy(dest=self.vecs.unsafe_offset(slot * self.dim), src=unit, count=self.dim)
         self.norms[unsafe_offset=slot] = norm
 
     def stored_payload(self, slot: Int, out_buf: Pointer[UInt8, MutUntrackedOrigin]) -> Int:
         """gh #378: the VADD record payload for `slot` — [4B f32 norm][dim x f32
         unit vector] — written into out_buf (needs `payload_len()` bytes).
         One encoding for the WAL, the snapshot and BGREWRITEAOF."""
-        out_buf.bitcast[Float32]()[unsafe_offset=0] = self.norms[unsafe_offset=slot]
-        unsafe_memcpy(dest=out_buf + 4, src=(self.vecs + slot * self.dim).bitcast[UInt8](),
+        out_buf.unsafe_bitcast[Float32]()[unsafe_offset=0] = self.norms[unsafe_offset=slot]
+        unsafe_memcpy(dest=out_buf.unsafe_offset(4), src=(self.vecs.unsafe_offset(slot * self.dim)).unsafe_bitcast[UInt8](),
                       count=self.dim * 4)
         return self.payload_len()
 
@@ -180,7 +180,7 @@ struct VectorSet(Movable):
         are scored and skipped."""
         if self.n == 0 or count <= 0:
             return
-        var dots = alloc[Float32](self.n)
+        var dots = unsafe_alloc[Float32](self.n)
         scan_dot_f32(self.vecs, self.n, self.dim, q, dots)
         for s in range(self.n):
             if self.alive[unsafe_offset=s] == 0:
@@ -200,7 +200,7 @@ struct VectorSet(Movable):
                 var ts = out_scores[j]; out_scores[j] = out_scores[j - 1]; out_scores[j - 1] = ts
                 var ti = out_slots[j]; out_slots[j] = out_slots[j - 1]; out_slots[j - 1] = ti
                 j -= 1
-        dots.free()
+        dots.unsafe_free()
 
 
 def free_vset(vs: Pointer[VectorSet, MutUntrackedOrigin]):
@@ -208,4 +208,4 @@ def free_vset(vs: Pointer[VectorSet, MutUntrackedOrigin]):
     if is_null(vs): return
     vs[].release()
     vs.unsafe_deinit_pointee()
-    vs.free()
+    vs.unsafe_free()

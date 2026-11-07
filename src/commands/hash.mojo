@@ -1,10 +1,10 @@
 """Hash commands: HMGET, HGETALL, HKEYS, HVALS, HLEN, HDEL, HEXISTS, HINCRBY, HINCRBYFLOAT, HRANDFIELD, HSCAN, HSETNX.
 R3: Hash field expiration: HEXPIRE, HPEXPIRE, HEXPIREAT, HPEXPIREAT, HTTL, HPTTL, HPERSIST, HEXPIRETIME, HPEXPIRETIME."""
+from std.memory.alloc import unsafe_alloc
 from src.common.vec_tomb import VecTomb
 from src.common.container_free import remove_and_free, hash_get_live
 from std.ffi import external_call
 from src.common.ptr import is_not_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.collections import Array
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
@@ -26,7 +26,6 @@ from src.network.vector_ingest import ingest_hash_vector
 def handle_hmget(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin] = null_ptr[SlabHashMap, MutUntrackedOrigin]()) raises -> Int:
     """HMGET key field [field ...] — returns number of extra tokens consumed."""
     if i + 2 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
         var num_fields = num_tokens - i - 2
@@ -67,7 +66,6 @@ def handle_hmget(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 def handle_hgetall(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin] = null_ptr[SlabHashMap, MutUntrackedOrigin]()) raises -> Int:
     """HGETALL key — returns number of extra tokens consumed."""
     if i + 1 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered
@@ -100,7 +98,6 @@ def handle_hgetall(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
 def handle_hkeys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """HKEYS key — returns number of extra tokens consumed."""
     if i + 1 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered
@@ -134,7 +131,6 @@ def handle_hkeys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 def handle_hvals(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """HVALS key — returns number of extra tokens consumed."""
     if i + 1 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered
@@ -168,7 +164,6 @@ def handle_hvals(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 def handle_hlen(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """HLEN key — returns number of extra tokens consumed."""
     if i + 1 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
         if val.is_none(): writer.append_int_response(Int64(0))
@@ -227,7 +222,6 @@ def handle_hdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 def handle_hexists(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """HEXISTS key field — returns number of extra tokens consumed."""
     if i + 2 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
         # gh #232: a MISSING key and a key of the WRONG TYPE were answered
@@ -241,7 +235,6 @@ def handle_hexists(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             writer.append_int_response(Int64(0))
         else:
             var hash_ptr = val.as_hash().unsafe_bitcast[SlabHashMap]()
-            var field_str = tokens[unsafe_offset=i+2].value()
             var field_v = GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
             var fv2 = hash_ptr[].get(field_v)
             writer.append_int_response(Int64(0) if fv2.is_none() else Int64(1))
@@ -288,7 +281,7 @@ def handle_hincrby(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 if cur_fv.type.value == ValueType.INT: old_hval = cur_fv.as_int()
                 elif cur_fv.is_string():
                     var flen3 = cur_fv.string_len()
-                    var _sbuf = alloc[UInt8](24)
+                    var _sbuf = unsafe_alloc[UInt8](24)
                     var fptr = cur_fv.as_string_safe(_sbuf)
                     # The STORED value needs the same strictness as the delta:
                     # `HSET h f abc; HINCRBY h f 1` used to read "abc" as 0 and
@@ -307,7 +300,7 @@ def handle_hincrby(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 return 3
             var new_hval = old_hval + hdelta
             hash_ptr[].set(field_v2, GenericValue.from_int(new_hval))
-            var _hb = alloc[UInt8](32)
+            var _hb = unsafe_alloc[UInt8](32)
             var _hl = format_int_to_buf(_hb, 0, new_hval)
             _ = dispatcher.wal[].append_field_kv(5, key_str.unsafe_ptr(), key_str.byte_length(),
                                                  field_str.unsafe_ptr(), field_str.byte_length(),
@@ -350,7 +343,7 @@ def handle_hincrbyfloat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int,
             var cur_kind = 0
             var cur_d: Float64 = 0.0
             var cur_l = 0
-            var cbuf = alloc[UInt8](32)
+            var cbuf = unsafe_alloc[UInt8](32)
             var cur_p = cbuf
             if not val.is_none():
                 var hash_ptr0 = val.as_hash().unsafe_bitcast[SlabHashMap]()
@@ -366,7 +359,7 @@ def handle_hincrbyfloat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int,
                         cur_kind = 1
                         cur_p = cur_fv2.as_string_safe(cbuf)
                         cur_l = cur_fv2.string_len()
-            var hfp = alloc[UInt8](5200)
+            var hfp = unsafe_alloc[UInt8](5200)
             var hfftrim = Int(external_call["pion_ld_incr", Int64](
                 Int32(cur_kind), cur_p, Int64(cur_l), cur_d,
                 inc_t.ptr, Int64(inc_t.length), hfp, Int64(5200)))
@@ -387,7 +380,7 @@ def handle_hincrbyfloat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int,
                 if dispatcher.hash_map_pool[].head < dispatcher.hash_map_pool[].capacity:
                     hash_ptr = dispatcher.hash_map_pool[].acquire(); hash_ptr[].reset()
                 else:
-                    hash_ptr = alloc[SlabHashMap](1); hash_ptr.unsafe_write(SlabHashMap(16))
+                    hash_ptr = unsafe_alloc[SlabHashMap](1); hash_ptr.unsafe_write(SlabHashMap(16))
                 var new_val = GenericValue()
                 new_val.type = ValueType(ValueType.HASH)
                 new_val.set_ptr(hash_ptr.unsafe_bitcast[NoneType]())
@@ -414,7 +407,6 @@ def handle_hincrbyfloat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int,
 def handle_hrandfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """HRANDFIELD key [count [WITHVALUES]] — returns number of extra tokens consumed."""
     if i + 1 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = hash_get_live(keyspace, key_v)   # gh #392: expired fields never show
         var extra = 1
@@ -500,7 +492,6 @@ def handle_hrandfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
 def handle_hscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """HSCAN key cursor [MATCH pattern] [COUNT count] — returns number of extra tokens consumed."""
     if i + 2 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var hs_cursor = scan_cursor(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
         var extra = num_tokens - 1 - i
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
@@ -524,7 +515,7 @@ def handle_hscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
         else:
             var hash_ptr = val.as_hash().unsafe_bitcast[SlabHashMap]()
             var hs_all = not so.has_match or _glob_all(hs_pat_p, hs_pat_l)
-            var hs_mb = alloc[UInt8](24)
+            var hs_mb = unsafe_alloc[UInt8](24)
             # #50: a COUNT-bounded step from the cursor, not the whole hash.
             var hs_w = List[Int]()
             var hs_next = walk_map(hash_ptr, hs_cursor, so.count, hs_w)

@@ -1,10 +1,10 @@
 """Key management commands: TYPE, RENAME, RENAMENX, COPY, OBJECT, SORT, SCAN, KEYS, RANDOMKEY, TOUCH, WAIT."""
+from std.memory.alloc import unsafe_alloc
 from src.common.container_free import deep_clone, free_container, remove_and_free, index_field_ttls
 from src.commands.scan_opts import parse_scan_opts
 from src.commands.scan_walk import walk_keyspace, append_scan_header
 from src.common.utils import strict_atol, _glob_match, _glob_all, arg_eq, parse_int64_strict, is_valid_float_arg, parse_float64, scan_cursor, scan_count
 from src.common.ptr import is_not_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.sys import CompilationTarget
 from std.collections import Array, Span, List
@@ -24,7 +24,6 @@ from src.network.cluster import ClusterState
 def handle_type(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
     """TYPE key — return type name as status reply."""
     if i + 1 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
         var type_resp: String
@@ -205,8 +204,8 @@ def _is_redis_int(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
     zeros, no '+', at most 20 bytes)?"""
     if n == 0 or n > 20:
         return False
-    var k = 1 if p[0] == 45 else 0
-    if k >= n or (p[k] == 48 and n - k > 1) or (k == 1 and p[1] == 48):
+    var k = 1 if p[unsafe_offset=0] == 45 else 0
+    if k >= n or (p[unsafe_offset=k] == 48 and n - k > 1) or (k == 1 and p[unsafe_offset=1] == 48):
         return False
     return parse_int64_strict(p, n).ok
 
@@ -235,7 +234,7 @@ def object_encoding(val: GenericValue, key_len: Int) -> String:
     short members, else a hashtable. Redis also keeps the encoding a
     value grew into until it is rewritten, which Pion does not track."""
     var t = val.type.value
-    var buf = alloc[UInt8](64)
+    var buf = unsafe_alloc[UInt8](64)
     var out = String("raw")
     if t == ValueType.INT:
         out = "int"
@@ -251,7 +250,7 @@ def object_encoding(val: GenericValue, key_len: Int) -> String:
     elif t == ValueType.FLOAT:
         out = "embstr"
     elif t == ValueType.LIST:
-        var l = val.as_list().bitcast[SlabList]()
+        var l = val.as_list().unsafe_bitcast[SlabList]()
         out = "quicklist"
         if l[].size <= 8192:
             var elems = l[].get_all()
@@ -261,19 +260,19 @@ def object_encoding(val: GenericValue, key_len: Int) -> String:
             if bytes <= 8192:
                 out = "listpack"
     elif t == ValueType.HASH or t == ValueType.SET:
-        var m = (val.as_hash() if t == ValueType.HASH else val.as_set()).bitcast[SlabHashMap]()
+        var m = (val.as_hash() if t == ValueType.HASH else val.as_set()).unsafe_bitcast[SlabHashMap]()
         var all_int = t == ValueType.SET
         var short = True
         if m[].size <= 512:
             for slot in range(m[].capacity):
-                var md = m[].metadata[slot]
+                var md = m[].metadata[unsafe_offset=slot]
                 if md == 0x80 or md == 0xFF:
                     continue
-                if not _member_fits(m[].keys[slot], buf, all_int):
+                if not _member_fits(m[].keys[unsafe_offset=slot], buf, all_int):
                     short = False
                 if t == ValueType.HASH:
                     var no_int = False
-                    if not _member_fits(m[].values[slot], buf, no_int):
+                    if not _member_fits(m[].values[unsafe_offset=slot], buf, no_int):
                         short = False
         var lp_max = 512 if t == ValueType.HASH else 128   # Redis 8: hash-max-listpack-entries 512
         if t == ValueType.SET and all_int and m[].size <= 512:
@@ -283,22 +282,22 @@ def object_encoding(val: GenericValue, key_len: Int) -> String:
         else:
             out = "hashtable"
     elif t == ValueType.ZSET or t == ValueType.GEO:
-        var z = val.as_zset().bitcast[SlabSkipList]()
+        var z = val.as_zset().unsafe_bitcast[SlabSkipList]()
         var short = z[].length <= 128
         if short:
             var no_int = False
             var mm = z[].members.capacity
             for slot in range(mm):
-                var md = z[].members.metadata[slot]
+                var md = z[].members.metadata[unsafe_offset=slot]
                 if md == 0x80 or md == 0xFF:
                     continue
-                if not _member_fits(z[].members.keys[slot], buf, no_int):
+                if not _member_fits(z[].members.keys[unsafe_offset=slot], buf, no_int):
                     short = False
                     break
         out = "listpack" if short else "skiplist"
     elif t == ValueType.STREAM:
         out = "stream"
-    buf.free()
+    buf.unsafe_free()
     return out^
 
 
@@ -307,7 +306,6 @@ def handle_object(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     """OBJECT subcommand key — inspect object internals."""
     if i + 2 < num_tokens:
         var sub_obj = tokens[unsafe_offset=i+1]
-        var key_str = tokens[unsafe_offset=i+2].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
         var val = keyspace[].get(key_v)
         var sub_p2 = sub_obj.ptr
@@ -539,12 +537,12 @@ def _sort_impl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_toke
             var owned_out = List[GenericValue]()
             for e in range(start, start + count):
                 owned_out.append(GenericValue.from_string(elems[idx[e]]))
-            var lp = alloc[SlabList](1)
+            var lp = unsafe_alloc[SlabList](1)
             lp.unsafe_write(SlabList())
             lp[].replace_all(owned_out)
             var lv = GenericValue()
             lv.type = ValueType(ValueType.LIST)
-            lv.set_ptr(lp.bitcast[NoneType]())
+            lv.set_ptr(lp.unsafe_bitcast[NoneType]())
             keyspace[].set(dst, lv)
         else:
             dst.free_str_payload()
@@ -615,7 +613,6 @@ def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     gh #101: when ns_len > 0 (tenant connection), only keys with the tenant
     prefix are returned, with the prefix stripped."""
     if i + 1 < num_tokens:
-        var cursor_str = tokens[unsafe_offset=i+1].value()
         var cursor_i2 = scan_cursor(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)   # gh #393
         var consumed = num_tokens - 1 - i
         var so = parse_scan_opts(tokens, i + 2, num_tokens, writer, True, False)
@@ -625,8 +622,8 @@ def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         # the cursor where the last call stopped (0 when done), as Redis does.
         # It returned the whole keyspace in one reply with cursor 0 whatever
         # COUNT said, which also ran into the 4 MB reply cap past ~200K keys.
-        var kbuf = alloc[UInt8](24)
-        var smbuf = alloc[UInt8](24)
+        var kbuf = unsafe_alloc[UInt8](24)
+        var smbuf = unsafe_alloc[UInt8](24)
         # An empty MATCH pattern matches only the empty key, as in Redis;
         # "no MATCH" is what matches everything.
         var scan_all = not so.has_match or _glob_all(so.pat_p, so.pat_l)
@@ -686,8 +683,8 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         pat_l = tokens[unsafe_offset=i+1].length
     # `*` is the overwhelmingly common argument; skip the matcher entirely.
     var match_all = pat_l == 0 or _glob_all(pat_p, pat_l)
-    var kbuf = alloc[UInt8](24)
-    var mbuf = alloc[UInt8](24)
+    var kbuf = unsafe_alloc[UInt8](24)
+    var mbuf = unsafe_alloc[UInt8](24)
     var total_keys2 = 0
     for shard_i in range(8):
         var sp2 = keyspace[].shards.unsafe_offset(shard_i)
@@ -784,7 +781,6 @@ def handle_touch(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     var touch_count = 0
     var j_tc = i + 1
     while j_tc < num_tokens:
-        var k_str2 = tokens[unsafe_offset=j_tc].value()
         var k_v2 = GenericValue.borrow(tokens[unsafe_offset=j_tc].ptr, tokens[unsafe_offset=j_tc].length)
         if not keyspace[].get(k_v2).is_none(): touch_count += 1
         j_tc += 1
@@ -821,7 +817,7 @@ struct ParkedWaits(Movable):
 
     def __init__(out self):
         self.entries = List[ParkedWait]()
-        self.flags = alloc[UInt8](65536)
+        self.flags = unsafe_alloc[UInt8](65536)
         for i in range(65536):
             self.flags[unsafe_offset=i] = 0
         self.fd_parks = 0

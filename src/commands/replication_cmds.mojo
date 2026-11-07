@@ -19,9 +19,9 @@ own stream: a snapshot, then the WAL. So:
   not a replica: nothing to record, since Pion's replicas use their own port.
 """
 
+from std.memory.alloc import unsafe_alloc
 from std.ffi import external_call
 from std.memory import alloc
-from std.memory.unsafe_pointer import Pointer
 from src.common.ptr import is_not_null, is_null
 from src.network.resp3 import RESP3Token
 from src.network.response_writer import ResponseWriter
@@ -93,19 +93,19 @@ def handle_role(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     var ips = List[String]()
     var ports = List[Int]()
     var acks = List[Int64]()
-    var ipbuf = alloc[UInt8](64)
-    var pport = alloc[Int32](1)
-    var pack = alloc[UInt64](1)
+    var ipbuf = unsafe_alloc[UInt8](64)
+    var pport = unsafe_alloc[Int32](1)
+    var pack = unsafe_alloc[UInt64](1)
     var k = 0
     while k < 8 and external_call["pion_repl_primary_replica_info", Int32](h, Int32(k), ipbuf, Int32(64), pport, pack) == 1:
         var ip = String("")
         var n = 0
-        while n < 63 and ipbuf[n] != 0:
-            ip += chr(Int(ipbuf[n]))
+        while n < 63 and ipbuf[unsafe_offset=n] != 0:
+            ip += chr(Int(ipbuf[unsafe_offset=n]))
             n += 1
         ips.append(ip)
-        ports.append(Int(pport[0]))
-        acks.append(Int64(pack[0]))
+        ports.append(Int(pport[unsafe_offset=0]))
+        acks.append(Int64(pack[unsafe_offset=0]))
         k += 1
     ipbuf.unsafe_free()
     pport.unsafe_free()
@@ -121,15 +121,15 @@ def handle_role(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 def handle_replicaof(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
                      mut writer: ResponseWriter, cluster: Pointer[ClusterState, MutUntrackedOrigin]):
     """REPLICAOF / SLAVEOF host port | NO ONE (Redis's replicaofCommand)."""
-    var name = tokens[i].value().lower()
+    var name = tokens[unsafe_offset=i].value().lower()
     if num_tokens - i != 3:
         writer.append_error_response("ERR wrong number of arguments for '" + name + "' command")
         return
     if is_not_null(cluster) and cluster[].enabled:
         writer.append_error_response("ERR REPLICAOF not allowed in cluster mode.")
         return
-    var h = tokens[i + 1]
-    var p = tokens[i + 2]
+    var h = tokens[unsafe_offset=i + 1]
+    var p = tokens[unsafe_offset=i + 2]
     if arg_eq(h.ptr, h.length, "no") and arg_eq(p.ptr, p.length, "one"):
         writer.append_ok_response()        # already a primary: nothing to do
         return
@@ -150,7 +150,7 @@ def handle_failover(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
         writer.append_error_response("ERR FAILOVER not allowed in cluster mode.")
         return
     var argc = num_tokens - i
-    if argc == 2 and arg_eq(tokens[i + 1].ptr, tokens[i + 1].length, "abort"):
+    if argc == 2 and arg_eq(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length, "abort"):
         writer.append_error_response("ERR No failover in progress.")
         return
     var timeout = Int64(0)
@@ -158,9 +158,9 @@ def handle_failover(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
     var have_host = False
     var j = 1
     while j < argc:
-        var t = tokens[i + j]
+        var t = tokens[unsafe_offset=i + j]
         if arg_eq(t.ptr, t.length, "timeout") and j + 1 < argc and timeout == 0:
-            var v = parse_int64_strict(tokens[i + j + 1].ptr, tokens[i + j + 1].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=i + j + 1].ptr, tokens[unsafe_offset=i + j + 1].length)
             if not v.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return
@@ -170,7 +170,7 @@ def handle_failover(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
             timeout = v.value
             j += 1
         elif arg_eq(t.ptr, t.length, "to") and j + 2 < argc and not have_host:
-            var v = parse_int64_strict(tokens[i + j + 2].ptr, tokens[i + j + 2].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=i + j + 2].ptr, tokens[unsafe_offset=i + j + 2].length)
             if not v.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return
@@ -189,7 +189,7 @@ def handle_sync(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
                 mut writer: ResponseWriter):
     """SYNC / PSYNC: refused. A Redis primary answers them by streaming an RDB
     file and then its commands; Pion's replicas use their own stream."""
-    var name = tokens[i].value().lower()
+    var name = tokens[unsafe_offset=i].value().lower()
     var argc = num_tokens - i
     if (name == "sync" and argc != 1) or (name == "psync" and argc < 3):
         writer.append_error_response("ERR wrong number of arguments for '" + name + "' command")
@@ -208,8 +208,8 @@ def handle_replconf(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
         return
     var j = 1
     while j < argc:
-        var o = tokens[i + j]
-        var v = tokens[i + j + 1]
+        var o = tokens[unsafe_offset=i + j]
+        var v = tokens[unsafe_offset=i + j + 1]
         if arg_eq(o.ptr, o.length, "listening-port"):
             if not parse_int64_strict(v.ptr, v.length).ok:
                 writer.append_error_response("ERR value is not an integer or out of range")

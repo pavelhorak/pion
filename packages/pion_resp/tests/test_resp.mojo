@@ -1,4 +1,5 @@
 # pion_resp: parse pipelined RESP requests the way Pion's server does.
+from std.memory.alloc import unsafe_alloc
 from pion_resp import RESP3Parser, RESP3Token, MAX_CMD_TOKENS, MAX_CMD_ENDS, PROTOCOL_ERROR, PE_MULTIBULK_LEN
 from std.memory import alloc
 from std.testing import assert_equal, assert_true
@@ -17,14 +18,14 @@ struct Parsed:
 
     def __init__(out self, text: String) raises:
         self.parser = RESP3Parser()
-        self.tokens = alloc[RESP3Token](MAX_CMD_TOKENS)
-        self.cmd_ends = alloc[Int](MAX_CMD_ENDS)
-        self.cmd_byte_ends = alloc[Int](MAX_CMD_ENDS)
+        self.tokens = unsafe_alloc[RESP3Token](MAX_CMD_TOKENS)
+        self.cmd_ends = unsafe_alloc[Int](MAX_CMD_ENDS)
+        self.cmd_byte_ends = unsafe_alloc[Int](MAX_CMD_ENDS)
         var n = text.byte_length()
-        self.buf = alloc[UInt8](n + 1)
+        self.buf = unsafe_alloc[UInt8](n + 1)
         var src = text.unsafe_ptr()
         for i in range(n):
-            self.buf[i] = src[i]
+            self.buf[unsafe_offset=i] = src[unsafe_offset=i]
         self.num_tokens = 0
         self.consumed = 0
         self.num_cmds = 0
@@ -33,7 +34,7 @@ struct Parsed:
                                  self.cmd_ends, self.cmd_byte_ends, self.num_cmds, self.need)
 
     def token(self, i: Int) -> String:
-        return self.tokens[i].value()
+        return self.tokens[unsafe_offset=i].value()
 
 
 def test_pipelined_arrays() raises:
@@ -45,8 +46,8 @@ def test_pipelined_arrays() raises:
     assert_equal(p.token(1), "key")
     assert_equal(p.token(2), "value")
     assert_equal(p.token(3), "PING")
-    assert_equal(p.cmd_ends[0], 3)
-    assert_equal(p.cmd_ends[1], 4)
+    assert_equal(p.cmd_ends[unsafe_offset=0], 3)
+    assert_equal(p.cmd_ends[unsafe_offset=1], 4)
     assert_equal(p.consumed, req.byte_length())
 
 
@@ -72,7 +73,7 @@ def test_binary_safe_bulk() raises:
     # A bulk string carries any bytes, CR LF included.
     var p = Parsed(String("*2\r\n$4\r\nECHO\r\n$4\r\na\r\nb\r\n"))
     assert_equal(p.num_cmds, 1)
-    assert_equal(p.tokens[1].length, 4)
+    assert_equal(p.tokens[unsafe_offset=1].length, 4)
 
 
 def test_protocol_error() raises:

@@ -3,8 +3,8 @@
 Implements a persistent append-only log per key (ValueType.STREAM = 13).
 Consumer groups remain stubs.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, stack_allocation
 from std.collections import Array, List, Span
 from std.memory import unsafe_memcpy, unsafe_memset
@@ -64,7 +64,7 @@ struct BlockedReaderRegistry(Movable):
 
     def __init__(out self):
         self.readers = List[BlockedReader]()
-        self.count_ptr = alloc[Int](1)
+        self.count_ptr = unsafe_alloc[Int](1)
         self.count_ptr[unsafe_offset=0] = 0
 
     def add(mut self, var reader: BlockedReader) -> Bool:
@@ -109,7 +109,7 @@ def _bytes_eq(s: String, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
         return False
     var sp = s.unsafe_ptr()
     for j in range(n):
-        if sp[j] != p[unsafe_offset=j]:
+        if sp[unsafe_offset=j] != p[unsafe_offset=j]:
             return False
     return True
 
@@ -253,7 +253,7 @@ def parse_add_trim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, 
     var limit_given = False
     var j = start
     while j < end:
-        var t = tokens[j]
+        var t = tokens[unsafe_offset=j]
         var more = end - 1 - j
         if xadd and t.length == 1 and t.ptr[unsafe_offset=0] == 42:     # "*"
             break
@@ -263,13 +263,13 @@ def parse_add_trim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, 
                 return a
             var is_max = arg_eq(t.ptr, t.length, "maxlen")
             a.approx = False
-            var nx = tokens[j + 1]
+            var nx = tokens[unsafe_offset=j + 1]
             if more >= 2 and nx.length == 1 and nx.ptr[unsafe_offset=0] == 126:     # "~"
                 a.approx = True
                 j += 1
             elif more >= 2 and nx.length == 1 and nx.ptr[unsafe_offset=0] == 61:    # "="
                 j += 1
-            var th = tokens[j + 1]
+            var th = tokens[unsafe_offset=j + 1]
             if is_max:
                 var v = parse_int64_strict(th.ptr, th.length)
                 if not v.ok:
@@ -291,7 +291,7 @@ def parse_add_trim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, 
             j += 2
             continue
         elif arg_eq(t.ptr, t.length, "limit") and more > 0:
-            var lv = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var lv = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not lv.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return a
@@ -411,11 +411,11 @@ def _format_u64(buf: Pointer[UInt8, MutUntrackedOrigin], at: Int, v: UInt64) -> 
     var n = 0
     var x = v
     while x > 0:
-        tmp[n] = UInt8(48 + Int(x % 10))
+        tmp[unsafe_offset=n] = UInt8(48 + Int(x % 10))
         x //= 10
         n += 1
     for k in range(n):
-        buf[unsafe_offset=at + k] = tmp[n - 1 - k]
+        buf[unsafe_offset=at + k] = tmp[unsafe_offset=n - 1 - k]
     return at + n
 
 
@@ -456,7 +456,7 @@ def get_or_create_stream(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], 
         outcome = STREAM_NOMKSTREAM
         return null_ptr[StreamData, MutUntrackedOrigin]()
     # Create new stream
-    var sd_ptr = alloc[StreamData](1)
+    var sd_ptr = unsafe_alloc[StreamData](1)
     sd_ptr.unsafe_write(StreamData())
     var new_val = GenericValue()
     new_val.type = ValueType(ValueType.STREAM)
@@ -510,9 +510,9 @@ def _pack_len(p: Pointer[UInt8, MutUntrackedOrigin]) -> Int:
 def write_entry_to_response(e: StreamEntry, mut writer: ResponseWriter):
     """Write a stream entry as: *2\\r\\n $<id_len>\\r\\n<id>\\r\\n *<2*nf>\\r\\n [field value]..."""
     # Array of 2 elements: [id, fields_array]
-    writer.append_to_response("*2\r\n".unsafe_ptr(), 4)
+    writer.append_to_response("*2\r\n".ptr(), 4)
     # ID
-    var id_buf = alloc[UInt8](48)      # "<u64>-<u64>" is up to 41 bytes
+    var id_buf = unsafe_alloc[UInt8](48)      # "<u64>-<u64>" is up to 41 bytes
     var id_len = format_stream_id(id_buf, e.id_ms, e.id_seq)
     writer.append_bulk_string_response(id_buf, id_len)
     id_buf.unsafe_free()
@@ -581,7 +581,7 @@ def handle_xadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     for fi in range(nf):
         pack_size += (2 * STREAM_LEN_BYTES + tokens[unsafe_offset=field_start + fi * 2].length
                       + tokens[unsafe_offset=field_start + fi * 2 + 1].length)
-    var pack_buf = alloc[UInt8](pack_size)
+    var pack_buf = unsafe_alloc[UInt8](pack_size)
     var poff = 0
     for fi in range(nf):
         var ft = tokens[unsafe_offset=field_start + fi * 2]

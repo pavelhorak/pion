@@ -17,7 +17,6 @@ guards. Same pattern as MetalAttentionEngine.
 """
 
 from std.ffi import external_call
-from std.memory.unsafe_pointer import Pointer
 from std.sys.info import CompilationTarget
 
 

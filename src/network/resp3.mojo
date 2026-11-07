@@ -1,7 +1,7 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr, is_not_null
 from std.memory import alloc
 from std.collections import List, Array, Span
-from std.memory.unsafe_pointer import Pointer
 from std.sys import simd_width_of
 
 # gh #102 (C4): RESP length bounds — a `proto-max-bulk-len` equivalent.
@@ -158,7 +158,7 @@ struct RESP3Token(Copyable, Movable, ImplicitlyCopyable):
         var i = 0
         var has_high = False
         while i + W <= self.length:
-            var chunk = (self.ptr.unsafe_offset(i)).load[width=W]()
+            var chunk = (self.ptr.unsafe_offset(i)).unsafe_load[width=W]()
             if (chunk & UInt8(0x80)).reduce_max() != UInt8(0):
                 has_high = True
                 break
@@ -316,7 +316,7 @@ struct RESP3Parser:
         comptime simd_width = 16
         
         while pos + simd_width <= length:
-            var chunk = (buffer.unsafe_offset(pos)).load[width=simd_width]()
+            var chunk = (buffer.unsafe_offset(pos)).unsafe_load[width=simd_width]()
             # Fast check if any newline (10) exists in this chunk
             if (chunk ^ 10).reduce_min() == 0:
                 for i in range(simd_width):
@@ -400,8 +400,8 @@ struct RESP3Parser:
                 # decode into the scratch (never longer than the raw argument)
                 if self.scratch_cap < length:
                     if is_not_null(self.scratch):
-                        self.scratch.free()
-                    self.scratch = alloc[UInt8](length)
+                        self.scratch.unsafe_free()
+                    self.scratch = unsafe_alloc[UInt8](length)
                     self.scratch_cap = length
                 var out = self.scratch.unsafe_offset(self.scratch_used)
                 var o = 0

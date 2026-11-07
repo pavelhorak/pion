@@ -72,8 +72,8 @@ EXPLICIT = {
 NAME_CONJUNCT = re.compile(
     r"^\(?\s*(?:"
     r"tl\s*==\s*\d+"
-    r"|\(\s*tp\[\s*\d+\s*\]\s*\|\s*0x20\s*\)\s*==\s*\d+"
-    r"|tp\[\s*\d+\s*\]\s*==\s*\d+"
+    r"|\(\s*tp\[\s*(?:unsafe_offset=\s*)?\d+\s*\]\s*\|\s*0x20\s*\)\s*==\s*\d+"
+    r"|tp\[\s*(?:unsafe_offset=\s*)?\d+\s*\]\s*==\s*\d+"
     r"|cmd_matches_\d+\s*\(\s*tp\s*,[^()]*\)"
     r")\s*\)?$"
 )

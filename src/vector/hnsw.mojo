@@ -1,6 +1,6 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.memory.slab_allocator import SlabAllocator
-from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 from src.common.heap import HeapNode, MinHeap, MaxHeap, LinearPool
@@ -89,10 +89,10 @@ def fma_or_muladd(a: Float32, b: Float32, c: Float32) -> Float32:
 struct HNSWGraph(Movable):
     var max_elements: Int
     var dim: Int
-    var nodes: UnsafePointer[HNSWNode, MutUntrackedOrigin]
+    var nodes: Pointer[HNSWNode, MutUntrackedOrigin]
     var num_nodes: Int
-    var node_map: UnsafePointer[Int, MutUntrackedOrigin]
-    var neighbor_pool: UnsafePointer[UInt32, MutUntrackedOrigin]
+    var node_map: Pointer[Int, MutUntrackedOrigin]
+    var neighbor_pool: Pointer[UInt32, MutUntrackedOrigin]
     var neighbor_pool_per_node: Int
     var vector_allocator: SlabAllocator[Int8]
     var node_allocator: SlabAllocator[HNSWNode]
@@ -106,13 +106,13 @@ struct HNSWGraph(Movable):
     # Visit Filter Trick (gh #118: epoch-stamped visited set — no per-query memset).
     # A node is "visited this query" iff visited_epoch[nid] == cur_epoch; _reset_visited
     # just bumps cur_epoch (memset only every 65535 queries on UInt16 wrap).
-    var visited_epoch: UnsafePointer[UInt16, MutUntrackedOrigin]
+    var visited_epoch: Pointer[UInt16, MutUntrackedOrigin]
     var cur_epoch: UInt16
     var visited_bitset_bytes: Int  # still sizes deleted_bitset
-    var visited_map: UnsafePointer[UInt32, MutUntrackedOrigin] # Kept for struct compatibility
+    var visited_map: Pointer[UInt32, MutUntrackedOrigin] # Kept for struct compatibility
     var cur_num: UInt32
     # A1b: Tombstone deletion support
-    var deleted_bitset: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var deleted_bitset: Pointer[UInt8, MutUntrackedOrigin]
     var deleted_count: Int
     var compact_dirty: Bool
     var use_int4: Bool
@@ -126,28 +126,28 @@ struct HNSWGraph(Movable):
     var vector_field_len: Int
     var index_ready: Bool
     # V2.2B: FP32 staging buffer for two-phase calibrated ingest
-    var fp32_buffer: UnsafePointer[Float32, MutUntrackedOrigin]
-    var fp32_ids: UnsafePointer[Int32, MutUntrackedOrigin]
+    var fp32_buffer: Pointer[Float32, MutUntrackedOrigin]
+    var fp32_ids: Pointer[Int32, MutUntrackedOrigin]
     var fp32_count: Int
     var streaming_mode: Bool  # When True, add_vector() inserts directly (no fp32_buffer)
     var streaming_calibrated: Bool  # True after first 1000 vectors calibrate global_min/max
     # V2.3: BFS-compacted contiguous vector buffer (set by compact_vectors)
-    var compact_buffer: UnsafePointer[Int8, MutUntrackedOrigin]
+    var compact_buffer: Pointer[Int8, MutUntrackedOrigin]
     var compact_is_int4: Bool
-    var node_norms: UnsafePointer[Float32, MutUntrackedOrigin]         # [num_nodes] full 1536-dim INT8 norm_sq, indexed by node idx
-    var node_prefix_norms: UnsafePointer[Float32, MutUntrackedOrigin]  # [num_nodes] first-256-dim INT8 norm_sq, indexed by node idx
+    var node_norms: Pointer[Float32, MutUntrackedOrigin]         # [num_nodes] full 1536-dim INT8 norm_sq, indexed by node idx
+    var node_prefix_norms: Pointer[Float32, MutUntrackedOrigin]  # [num_nodes] first-256-dim INT8 norm_sq, indexed by node idx
     var ef_runtime: Int
     var index_name: Array[UInt8, 64]
     var index_name_len: Int
     # V8.1: INT8 query scratch buffer — quantized once per search, used for INT8-INT8 batch kernels
-    var query_int8: UnsafePointer[Int8, MutUntrackedOrigin]
+    var query_int8: Pointer[Int8, MutUntrackedOrigin]
     # Instrumentation counters — nodes evaluated and queries run (for diagnosing prefix pruning impact)
     var stat_query_count: Int
     var stat_total_evals: Int
     # gh #199: per-node spinlocks for the parallel FT.OPTIMIZE link phase.
     # 0 = free, 1 = held. Only the MT build path touches them; runtime searches
     # never lock (post-build reads are ordered by the pool's pthread_join).
-    var node_locks: UnsafePointer[UInt32, MutUntrackedOrigin]
+    var node_locks: Pointer[UInt32, MutUntrackedOrigin]
     # Phase 3.2: Pre-allocated search heaps and lists to eliminate per-query allocation
     var candidates: MinHeap
     var results: MaxHeap
@@ -157,49 +157,49 @@ struct HNSWGraph(Movable):
     var final_results: List[Int]
     var rerank_ids: List[Int]
     # Random projection: 1536 → proj_dim to shrink compact_buffer from 77MB to ~12.8MB (fits M4 SLC)
-    var proj_matrix: UnsafePointer[Int8, MutUntrackedOrigin]    # [proj_dim × original_dim] ±1 entries
+    var proj_matrix: Pointer[Int8, MutUntrackedOrigin]    # [proj_dim × original_dim] ±1 entries
     var proj_dim: Int                                            # projected dim (0 = disabled)
     var original_dim: Int                                        # original FP32 input dim before projection
-    var proj_scratch: UnsafePointer[Float32, MutUntrackedOrigin] # [proj_dim] temp buffer per vector/query
+    var proj_scratch: Pointer[Float32, MutUntrackedOrigin] # [proj_dim] temp buffer per vector/query
     # V33: compact level-0 neighbor list — 33 UInt32/node = 6.6MB vs 61MB neighbor_pool
     # [count, id0, ..., id31] per node; built by compact_vectors(), shared read-only by borrowers.
-    var l0_compact: UnsafePointer[UInt32, MutUntrackedOrigin]
+    var l0_compact: Pointer[UInt32, MutUntrackedOrigin]
     # V34: prefix_buffer — separate 12.8MB buffer holding only first 256 INT8 dims per node.
     # Fits in M4 SLC (12MB) better than 77MB compact_buffer → fewer DRAM misses in prune phase.
     # Layout: prefix_buffer[nidx × 256 .. nidx × 256 + 255] = first 256 dims of node nidx.
-    var prefix_buffer: UnsafePointer[Int8, MutUntrackedOrigin]
+    var prefix_buffer: Pointer[Int8, MutUntrackedOrigin]
     # §7: GPU brute-force search support
     # compact_buffer slot i → gpu_slot_ext_ids[i] = external ID of the vector in that slot.
     # Required because compact_buffer is BFS-ordered, not insertion-ordered.
-    var gpu_slot_ext_ids: UnsafePointer[Int32, MutUntrackedOrigin]
+    var gpu_slot_ext_ids: Pointer[Int32, MutUntrackedOrigin]
     # Pre-allocated scratch buffers for GPU search (avoid per-query alloc)
-    var gpu_distances: UnsafePointer[Float32, MutUntrackedOrigin]
-    var gpu_topk_ids: UnsafePointer[Int32, MutUntrackedOrigin]
-    var gpu_topk_dists: UnsafePointer[Float32, MutUntrackedOrigin]
+    var gpu_distances: Pointer[Float32, MutUntrackedOrigin]
+    var gpu_topk_ids: Pointer[Int32, MutUntrackedOrigin]
+    var gpu_topk_dists: Pointer[Float32, MutUntrackedOrigin]
     # §7v2: FP32 re-rank buffer — BFS-ordered FP32 vectors for GPU oversample re-ranking
     # Same slot ordering as compact_buffer. Built during compact_vectors() from fp32_buffer.
-    var gpu_rerank_fp32: UnsafePointer[Float32, MutUntrackedOrigin]
+    var gpu_rerank_fp32: Pointer[Float32, MutUntrackedOrigin]
     # §7v2: Native Mojo GPU context — zero ObjC overhead, direct GPU dispatch
     var gpu_ctx: GPUSearchContext
     # Phase 3.2: BM25 inverted index — built from TEXT schema fields after FT.OPTIMIZE
     # term_hashes[] sorted ascending for O(log V) binary search at query time.
-    var bm25_term_hashes:    UnsafePointer[UInt32, MutUntrackedOrigin]   # sorted unique FNV-1a hashes [bm25_vocab_count]
-    var bm25_term_idf:       UnsafePointer[Float32, MutUntrackedOrigin]  # cached IDF per term [bm25_vocab_count]
-    var bm25_postings_start: UnsafePointer[UInt32, MutUntrackedOrigin]   # per-term start in postings_buf [bm25_vocab_count]
-    var bm25_postings_count: UnsafePointer[UInt32, MutUntrackedOrigin]   # per-term pair count [bm25_vocab_count]
-    var bm25_postings_buf:   UnsafePointer[UInt32, MutUntrackedOrigin]   # packed [ext_id, tf, ...] all terms
-    var bm25_doc_lengths:    UnsafePointer[UInt16, MutUntrackedOrigin]   # token count per ext_id [max_elements]
-    var bm25_scores_scratch: UnsafePointer[Float32, MutUntrackedOrigin]  # [max_elements] per-search reuse (always owned)
+    var bm25_term_hashes:    Pointer[UInt32, MutUntrackedOrigin]   # sorted unique FNV-1a hashes [bm25_vocab_count]
+    var bm25_term_idf:       Pointer[Float32, MutUntrackedOrigin]  # cached IDF per term [bm25_vocab_count]
+    var bm25_postings_start: Pointer[UInt32, MutUntrackedOrigin]   # per-term start in postings_buf [bm25_vocab_count]
+    var bm25_postings_count: Pointer[UInt32, MutUntrackedOrigin]   # per-term pair count [bm25_vocab_count]
+    var bm25_postings_buf:   Pointer[UInt32, MutUntrackedOrigin]   # packed [ext_id, tf, ...] all terms
+    var bm25_doc_lengths:    Pointer[UInt16, MutUntrackedOrigin]   # token count per ext_id [max_elements]
+    var bm25_scores_scratch: Pointer[Float32, MutUntrackedOrigin]  # [max_elements] per-search reuse (always owned)
     var bm25_vocab_count:    Int
     var bm25_total_tokens:   Int
     var bm25_is_built:       Bool
     # gh #139: BM25's document set is NOT the HNSW node set. FT.ADDTEXT registers
     # text-only docs (no vector, hence no node) here so build_bm25 can index them;
     # bm25_doc_ids is the union it actually indexed, and what search_bm25 scans.
-    var bm25_text_ids:       UnsafePointer[Int32, MutUntrackedOrigin]    # FT.ADDTEXT-registered ext_ids [bm25_text_cap]
+    var bm25_text_ids:       Pointer[Int32, MutUntrackedOrigin]    # FT.ADDTEXT-registered ext_ids [bm25_text_cap]
     var bm25_text_count:     Int
     var bm25_text_cap:       Int
-    var bm25_doc_ids:        UnsafePointer[Int32, MutUntrackedOrigin]    # docs in the built index [bm25_doc_count]
+    var bm25_doc_ids:        Pointer[Int32, MutUntrackedOrigin]    # docs in the built index [bm25_doc_count]
     var bm25_doc_count:      Int
     # gh #145: which index these postings were built for. A server holds ONE
     # index, so FT.OPTIMIZE on index B replaces the postings that were serving
@@ -210,20 +210,20 @@ struct HNSWGraph(Movable):
     var bm25_index_name_len: Int
     # M6 PolarQuant: WHT rotation + INT4 quantization
     var polarquant: Bool                                       # enable block-wise INT4 in compact_vectors/search
-    var query_int4: UnsafePointer[Int8, MutUntrackedOrigin]     # INT4 query scratch (dim/2 bytes)
-    var wht_scratch: UnsafePointer[Float32, MutUntrackedOrigin] # per-query FP32 scratch for WHT rotation
+    var query_int4: Pointer[Int8, MutUntrackedOrigin]     # INT4 query scratch (dim/2 bytes)
+    var wht_scratch: Pointer[Float32, MutUntrackedOrigin] # per-query FP32 scratch for WHT rotation
     var wht_global_min: Float32                                # post-WHT calibration min
     var wht_global_max: Float32                                # post-WHT calibration max
-    var query_block_int8: UnsafePointer[Int8, MutUntrackedOrigin]     # M6b: block-INT8 query (dim bytes)
-    var query_block_scales: UnsafePointer[Float32, MutUntrackedOrigin] # M6b: per-block FP32 scales (num_blocks × 4B)
+    var query_block_int8: Pointer[Int8, MutUntrackedOrigin]     # M6b: block-INT8 query (dim bytes)
+    var query_block_scales: Pointer[Float32, MutUntrackedOrigin] # M6b: per-block FP32 scales (num_blocks × 4B)
     var query_block_norm: Float32                                     # M6b: reconstructed query norm squared
     # M7 TurboQuant: 3-bit block quantization + QJL error correction
     var turboquant: Bool                                               # enable block-3bit + QJL in compact/search
     var compact_is_3bit: Bool                                          # compact_buffer format flag
-    var qjl_buffer: UnsafePointer[UInt64, MutUntrackedOrigin]          # [num_nodes × 24] QJL sign bits
-    var qjl_res_norms: UnsafePointer[Float32, MutUntrackedOrigin]      # [num_nodes] residual norm squared
-    var qjl_random_signs: UnsafePointer[UInt64, MutUntrackedOrigin]    # [24] fixed random ±1 bits (seeded)
-    var qjl_query_signs: UnsafePointer[UInt64, MutUntrackedOrigin]     # [24] per-query QJL signs
+    var qjl_buffer: Pointer[UInt64, MutUntrackedOrigin]          # [num_nodes × 24] QJL sign bits
+    var qjl_res_norms: Pointer[Float32, MutUntrackedOrigin]      # [num_nodes] residual norm squared
+    var qjl_random_signs: Pointer[UInt64, MutUntrackedOrigin]    # [24] fixed random ±1 bits (seeded)
+    var qjl_query_signs: Pointer[UInt64, MutUntrackedOrigin]     # [24] per-query QJL signs
     var qjl_query_res_norm: Float32                                    # per-query residual norm squared
     var qjl_lambda: Float32                                            # QJL correction weight
     # N4 NanoQuant
@@ -231,8 +231,8 @@ struct HNSWGraph(Movable):
     var compact_is_2bit: Bool                                          # compact buffer uses INT2 format
     # Per-group calibration (Q8_K-style): each 32-dim group gets independent min/scale.
     # Stored once per index (not per vector). Improves quantization precision at large scale.
-    var group_qmins: UnsafePointer[Float32, MutUntrackedOrigin]         # [num_groups] per-group qmin
-    var group_scales: UnsafePointer[Float32, MutUntrackedOrigin]        # [num_groups] per-group scale = 254/(qmax-qmin)
+    var group_qmins: Pointer[Float32, MutUntrackedOrigin]         # [num_groups] per-group qmin
+    var group_scales: Pointer[Float32, MutUntrackedOrigin]        # [num_groups] per-group scale = 254/(qmax-qmin)
     var num_groups: Int                                                 # dim // 32 (0 = grouped quant disabled)
     var grouped_calibrated: Bool                                       # True after grouped calibration completes
     # K1 beam kernel: l0_slots mirrors
@@ -244,7 +244,7 @@ struct HNSWGraph(Movable):
     # `_beam_search_1536` self-time measured 2026-08-05).
     # SLOT_NONE entries fall back to the nodes[] dereference.
     # New fields at the END of the struct (gh #149 layout discipline).
-    var l0_slots: UnsafePointer[UInt32, MutUntrackedOrigin]
+    var l0_slots: Pointer[UInt32, MutUntrackedOrigin]
     var compact_stride: Int   # bytes per compact slot (INT8: dim+8 64B-padded; polar: 868; turbo: 676; ...)
     var compact_hdr: Int      # byte offset of vector data within a slot (INT8: 8, quant variants: 0)
     # gh #197: single sorted pool for the 1536 query beam (replaces the
@@ -256,7 +256,7 @@ struct HNSWGraph(Movable):
     # atomics. Counts links the serial algorithm would have kept but the
     # concurrent build lost (own-list full of backlinks AND the pruned pick
     # not closer than the current worst). Reset per build, reported after join.
-    var link_drops: UnsafePointer[UInt64, MutUntrackedOrigin]
+    var link_drops: Pointer[UInt64, MutUntrackedOrigin]
     # gh #271: FT.CREATE DISTANCE_METRIC. 0 = L2 (what this engine has always
     # computed — squared L2 over affinely-quantized codes), 1 = COSINE (the
     # same search, over vectors L2-normalized at ingest and at query time).
@@ -270,15 +270,15 @@ struct HNSWGraph(Movable):
     # the same graph. The PARALLEL build lanes (`_insert_to_graph_mt`) do NOT
     # touch it — they read `fp32_buffer`, which was already normalized at
     # staging time, so there is no race to have.
-    var fp32_norm_scratch: UnsafePointer[Float32, MutUntrackedOrigin]
+    var fp32_norm_scratch: Pointer[Float32, MutUntrackedOrigin]
     # D11: the 1536 beam's argument block, rewritten every query. Heap, not
     # stack: under Mojo 1.0 -O3, stores into a `stack_allocation` that is then
     # passed to a @no_inline Mojo function were eliminated (the callee read
     # zeros — tests/test_vector_differential.mojo reproduced it). At END of
     # struct per the field-ordering rule.
-    var beam_view: UnsafePointer[BeamView1536, MutUntrackedOrigin]
+    var beam_view: Pointer[BeamView1536, MutUntrackedOrigin]
     # D11: same for the three quantized beams (quant_beam_view.mojo).
-    var quant_beam_view: UnsafePointer[QuantBeamView1536, MutUntrackedOrigin]
+    var quant_beam_view: Pointer[QuantBeamView1536, MutUntrackedOrigin]
     # Floats fp32_norm_scratch holds. The scratch used to be allocated once, at
     # the dim of the first COSINE vector, and reused forever: after FT.CREATE
     # changed dim (4 -> 384) l2_normalize_fp32 wrote 380 floats past the end.
@@ -288,7 +288,7 @@ struct HNSWGraph(Movable):
     # alloc + free on every query. Lazily sized like fp32_norm_scratch; it
     # cannot share that buffer, which may hold the (normalized) query itself.
     # At END of struct per the field-ordering rule.
-    var residual_scratch: UnsafePointer[Float32, MutUntrackedOrigin]
+    var residual_scratch: Pointer[Float32, MutUntrackedOrigin]
     var residual_scratch_cap: Int
     # #46: this build's id, random per FT.OPTIMIZE (index header word 31; 0
     # for a file that predates it). Tombstones record it, so replay applies
@@ -299,10 +299,10 @@ struct HNSWGraph(Movable):
     # another worker's index never builds into, resets or frees that worker's
     # buffers (it used to: is_borrowed was cleared and the pointers kept).
     # `borrow_seq` is the shared publish_seq of the index borrowed. At END.
-    var own_nodes: UnsafePointer[HNSWNode, MutUntrackedOrigin]
-    var own_node_map: UnsafePointer[Int, MutUntrackedOrigin]
-    var own_neighbor_pool: UnsafePointer[UInt32, MutUntrackedOrigin]
-    var own_deleted_bitset: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var own_nodes: Pointer[HNSWNode, MutUntrackedOrigin]
+    var own_node_map: Pointer[Int, MutUntrackedOrigin]
+    var own_neighbor_pool: Pointer[UInt32, MutUntrackedOrigin]
+    var own_deleted_bitset: Pointer[UInt8, MutUntrackedOrigin]
     var borrow_seq: UInt64
     # This graph is an automatic build (vector_auto.mojo), which leaves ingest
     # open: HSETs after it are indexed. Saved in the index file (word 25, bit
@@ -316,7 +316,7 @@ struct HNSWGraph(Movable):
     # publish_to_shared, which runs while workers route HSETs by the list.
     # PREFIX_MAX slots of PREFIX_SLOT bytes; 0 = every key. At END.
     var prefix_count: Int
-    var prefixes: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var prefixes: Pointer[UInt8, MutUntrackedOrigin]
     # FT.CREATE's schema fields (types, options, names), carried like the
     # PREFIX list: adopted by the build, saved in the index file (word 25,
     # bit 10), put back by a warm load. Without it a restart lost the schema,
@@ -324,20 +324,20 @@ struct HNSWGraph(Movable):
     # SCHEMA_REC bytes. `schema_known`: the file had one. At END.
     var schema_count: Int
     var schema_known: Bool
-    var schema_rec: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var schema_rec: Pointer[UInt8, MutUntrackedOrigin]
 
     def __init__(out self, max_elements: Int, dim: Int, M: Int = 16, ef_construction: Int = 100, use_int4: Bool = False, use_bq: Bool = False, has_gpu: Bool = False, use_huge_pages: Bool = False, polarquant: Bool = False, turboquant: Bool = False, nanoquant: Bool = False):
         self.max_elements = max_elements
         self.dim = dim
-        self.nodes = alloc[HNSWNode](max_elements)
+        self.nodes = unsafe_alloc[HNSWNode](max_elements)
         self.num_nodes = 0
-        self.node_map = alloc[Int](max_elements)
+        self.node_map = unsafe_alloc[Int](max_elements)
         for i in range(max_elements):
-            self.node_map[i] = -1
+            self.node_map[unsafe_offset=i] = -1
 
         # Neighbor Pool Allocation
         self.neighbor_pool_per_node = (2 * M) + (6 * M) + 7 # Max level 6: supports M^6=16.7M nodes; saves ~34MB at N=50K
-        self.neighbor_pool = alloc[UInt32](max_elements * self.neighbor_pool_per_node)
+        self.neighbor_pool = unsafe_alloc[UInt32](max_elements * self.neighbor_pool_per_node)
 
         # Vector Allocation Strategy
         # PolarQuant/TurboQuant: graph construction always uses INT8 (block quantization applied in compact_vectors)
@@ -362,13 +362,13 @@ struct HNSWGraph(Movable):
         # Initialize epoch-stamped visited set (gh #118). Epoch 0 = "never visited";
         # first _reset_visited() bumps cur_epoch to 1, so the zeroed array reads as unvisited.
         self.visited_bitset_bytes = (max_elements + 7) // 8
-        self.visited_epoch = alloc[UInt16](max_elements)
-        unsafe_memset(self.visited_epoch.bitcast[UInt8](), 0, max_elements * 2)
+        self.visited_epoch = unsafe_alloc[UInt16](max_elements)
+        unsafe_memset(self.visited_epoch.unsafe_bitcast[UInt8](), 0, max_elements * 2)
         self.cur_epoch = 0
         self.visited_map = null_ptr[UInt32, MutUntrackedOrigin]()
         self.cur_num = 1
         # A1b: Tombstone deletion
-        self.deleted_bitset = alloc[UInt8](self.visited_bitset_bytes)
+        self.deleted_bitset = unsafe_alloc[UInt8](self.visited_bitset_bytes)
         unsafe_memset(self.deleted_bitset, 0, self.visited_bitset_bytes)
         self.deleted_count = 0
         self.compact_dirty = False
@@ -397,13 +397,13 @@ struct HNSWGraph(Movable):
         self.node_norms = null_ptr[Float32, MutUntrackedOrigin]()
         self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
         # Pre-allocate query_int8 scratch buffer (1536 bytes, reused every search call)
-        self.query_int8 = alloc[Int8](max(dim, 1536))
+        self.query_int8 = unsafe_alloc[Int8](max(dim, 1536))
         self.stat_query_count = 0
         self.stat_total_evals = 0
-        self.node_locks = alloc[UInt32](max_elements)
-        unsafe_memset(self.node_locks.bitcast[UInt8](), 0, max_elements * 4)
-        self.link_drops = alloc[UInt64](1)
-        self.link_drops[0] = 0
+        self.node_locks = unsafe_alloc[UInt32](max_elements)
+        unsafe_memset(self.node_locks.unsafe_bitcast[UInt8](), 0, max_elements * 4)
+        self.link_drops = unsafe_alloc[UInt64](1)
+        self.link_drops[unsafe_offset=0] = 0
         self.is_borrowed = False # Ensure explicitly owned if created via __init__
         self.candidates = MinHeap()
         self.results = MaxHeap()
@@ -423,19 +423,19 @@ struct HNSWGraph(Movable):
         self.compact_stride = 0
         self.compact_hdr = 0
         self.distance_metric = 0        # gh #271: 0 = L2 (default), 1 = COSINE
-        self.beam_view = alloc[BeamView1536](1)
-        self.quant_beam_view = alloc[QuantBeamView1536](1)
+        self.beam_view = unsafe_alloc[BeamView1536](1)
+        self.quant_beam_view = unsafe_alloc[QuantBeamView1536](1)
         self.fp32_norm_scratch_cap = 0
         self.fp32_norm_scratch = null_ptr[Float32, MutUntrackedOrigin]()
         self.residual_scratch_cap = 0
         self.build_id = 0
         self.auto_built = False
         self.prefix_count = 0
-        self.prefixes = alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
+        self.prefixes = unsafe_alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
         unsafe_memset(self.prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
         self.schema_count = 0
         self.schema_known = False
-        self.schema_rec = alloc[UInt8](SCHEMA_MAX * SCHEMA_REC)
+        self.schema_rec = unsafe_alloc[UInt8](SCHEMA_MAX * SCHEMA_REC)
         unsafe_memset(self.schema_rec, 0, SCHEMA_MAX * SCHEMA_REC)
         self.own_nodes = self.nodes
         self.own_node_map = self.node_map
@@ -455,7 +455,7 @@ struct HNSWGraph(Movable):
         self.bm25_postings_count = null_ptr[UInt32, MutUntrackedOrigin]()
         self.bm25_postings_buf   = null_ptr[UInt32, MutUntrackedOrigin]()
         self.bm25_doc_lengths    = null_ptr[UInt16, MutUntrackedOrigin]()
-        self.bm25_scores_scratch = alloc[Float32](max_elements)
+        self.bm25_scores_scratch = unsafe_alloc[Float32](max_elements)
         self.bm25_vocab_count    = 0
         self.bm25_total_tokens   = 0
         self.bm25_is_built       = False
@@ -468,26 +468,26 @@ struct HNSWGraph(Movable):
         self.bm25_index_name_len = 0
         # M6 PolarQuant
         self.polarquant = polarquant
-        self.query_int4 = alloc[Int8](max(dim // 2, 768)) if polarquant else null_ptr[Int8, MutUntrackedOrigin]()
-        self.wht_scratch = alloc[Float32](max(dim, 1536)) if polarquant else null_ptr[Float32, MutUntrackedOrigin]()
+        self.query_int4 = unsafe_alloc[Int8](max(dim // 2, 768)) if polarquant else null_ptr[Int8, MutUntrackedOrigin]()
+        self.wht_scratch = unsafe_alloc[Float32](max(dim, 1536)) if polarquant else null_ptr[Float32, MutUntrackedOrigin]()
         self.wht_global_min = Float32(0.0)
         self.wht_global_max = Float32(0.0)
         # M6b: Block-wise INT4 query scratch
         var need_block_query = polarquant or turboquant or nanoquant
-        self.query_block_int8 = alloc[Int8](max(dim, 1536)) if need_block_query else null_ptr[Int8, MutUntrackedOrigin]()
-        self.query_block_scales = alloc[Float32](max(dim // 32, 48)) if need_block_query else null_ptr[Float32, MutUntrackedOrigin]()
+        self.query_block_int8 = unsafe_alloc[Int8](max(dim, 1536)) if need_block_query else null_ptr[Int8, MutUntrackedOrigin]()
+        self.query_block_scales = unsafe_alloc[Float32](max(dim // 32, 48)) if need_block_query else null_ptr[Float32, MutUntrackedOrigin]()
         self.query_block_norm = Float32(0.0)
         # M7 TurboQuant
         self.turboquant = turboquant
         self.compact_is_3bit = False
         self.qjl_buffer = null_ptr[UInt64, MutUntrackedOrigin]()
         self.qjl_res_norms = null_ptr[Float32, MutUntrackedOrigin]()
-        self.qjl_query_signs = alloc[UInt64](QJL_U64S_1536) if turboquant else null_ptr[UInt64, MutUntrackedOrigin]()
+        self.qjl_query_signs = unsafe_alloc[UInt64](QJL_U64S_1536) if turboquant else null_ptr[UInt64, MutUntrackedOrigin]()
         self.qjl_query_res_norm = Float32(0.0)
         self.qjl_lambda = Float32(1.0)  # calibrated after first benchmark
         # Generate fixed random signs for QJL (seeded PRNG, same for all vectors)
         if turboquant:
-            self.qjl_random_signs = alloc[UInt64](QJL_U64S_1536)
+            self.qjl_random_signs = unsafe_alloc[UInt64](QJL_U64S_1536)
             # Simple LCG seeded at 42 for reproducibility
             var rng_state = UInt64(42)
             for w in range(QJL_U64S_1536):
@@ -496,27 +496,27 @@ struct HNSWGraph(Movable):
                     rng_state = rng_state * 6364136223846793005 + 1442695040888963407
                     if (rng_state >> UInt64(33)) & UInt64(1):
                         bits |= (UInt64(1) << UInt64(b))
-                self.qjl_random_signs[w] = bits
+                self.qjl_random_signs[unsafe_offset=w] = bits
             # Also allocate WHT scratch for QJL (reuse polarquant scratch if available)
             if is_null(self.wht_scratch):
-                self.wht_scratch = alloc[Float32](max(dim, 1536))
+                self.wht_scratch = unsafe_alloc[Float32](max(dim, 1536))
         else:
             self.qjl_random_signs = null_ptr[UInt64, MutUntrackedOrigin]()
         # N4 NanoQuant
         self.nanoquant = nanoquant
         self.compact_is_2bit = False
         if nanoquant and is_null(self.wht_scratch):
-            self.wht_scratch = alloc[Float32](max(dim, 1536))
+            self.wht_scratch = unsafe_alloc[Float32](max(dim, 1536))
         # Per-group calibration (Q8_K-style)
         var ng = dim // 32 if dim >= 32 else 0
         self.num_groups = ng
         self.grouped_calibrated = False
         if ng > 0:
-            self.group_qmins = alloc[Float32](ng)
-            self.group_scales = alloc[Float32](ng)
+            self.group_qmins = unsafe_alloc[Float32](ng)
+            self.group_scales = unsafe_alloc[Float32](ng)
             for gi in range(ng):
-                self.group_qmins[gi] = Float32(-0.20)
-                self.group_scales[gi] = Float32(254.0 / 0.40)
+                self.group_qmins[unsafe_offset=gi] = Float32(-0.20)
+                self.group_scales[unsafe_offset=gi] = Float32(254.0 / 0.40)
         else:
             self.group_qmins = null_ptr[Float32, MutUntrackedOrigin]()
             self.group_scales = null_ptr[Float32, MutUntrackedOrigin]()
@@ -539,7 +539,7 @@ struct HNSWGraph(Movable):
         self.proj_scratch = alloc[Float32](proj_dim)
 
     @always_inline
-    def _project_vector(self, input: UnsafePointer[Float32, MutUntrackedOrigin], output: UnsafePointer[Float32, MutUntrackedOrigin]):
+    def _project_vector(self, input: Pointer[Float32, MutUntrackedOrigin], output: Pointer[Float32, MutUntrackedOrigin]):
         """Project original_dim-FP32 → proj_dim-FP32, scale by 1/sqrt(proj_dim)=1/16 for proj_dim=256."""
         var scale = Float32(0.0625)  # 1/16 = 1/sqrt(256)
         for r in range(self.proj_dim):
@@ -556,7 +556,7 @@ struct HNSWGraph(Movable):
         if level > 6: level = 6
         return level
 
-    def _calibrate(mut self, data: UnsafePointer[Float32, MutUntrackedOrigin],
+    def _calibrate(mut self, data: Pointer[Float32, MutUntrackedOrigin],
                    count: Int) -> Tuple[Float32, Float32]:
         """gh #376: the one calibration every build runs — a single global
         INT8 range over mean ± 8 sigma of `count` row-major vectors (Welford).
@@ -592,22 +592,22 @@ struct HNSWGraph(Movable):
               + "] from " + String(count) + " vectors")
         return cal
 
-    def quantize(mut self, vector: UnsafePointer[Float32, MutUntrackedOrigin]) -> UnsafePointer[Int8, MutUntrackedOrigin]:
+    def quantize(mut self, vector: Pointer[Float32, MutUntrackedOrigin]) -> Pointer[Int8, MutUntrackedOrigin]:
         var range_val = self.global_max - self.global_min
         if range_val <= 0: range_val = 1.0
 
         if self.use_int4 and not self.polarquant:
             var q_vector = self.vector_allocator.allocate()
             for i in range(0, self.dim, 2):
-                var val1 = vector[i]
-                var val2 = vector[i+1] if i + 1 < self.dim else 0.0
+                var val1 = vector[unsafe_offset=i]
+                var val2 = vector[unsafe_offset=i+1] if i + 1 < self.dim else 0.0
                 var q1 = Int8(Int((val1 - self.global_min) / range_val * 15.0))
                 var q2 = Int8(Int((val2 - self.global_min) / range_val * 15.0))
                 if q1 > 15: q1 = 15
                 if q1 < 0: q1 = 0
                 if q2 > 15: q2 = 15
                 if q2 < 0: q2 = 0
-                q_vector[i // 2] = (q2 << 4) | q1
+                q_vector[unsafe_offset=i // 2] = (q2 << 4) | q1
             return q_vector
 
         var q_vector = self.vector_allocator.allocate()
@@ -615,27 +615,27 @@ struct HNSWGraph(Movable):
             # Per-group Q8_K quantization: each 32-dim group uses its own qmin/scale
             for g in range(self.num_groups):
                 var goff = g * 32
-                var gmin = self.group_qmins[g]
-                var gscale = self.group_scales[g]
+                var gmin = self.group_qmins[unsafe_offset=g]
+                var gscale = self.group_scales[unsafe_offset=g]
                 for j in range(32):
                     var idx = goff + j
                     if idx >= self.dim: break
-                    var norm = (vector[idx] - gmin) * gscale
+                    var norm = (vector[unsafe_offset=idx] - gmin) * gscale
                     var r = Int(norm + 0.5) if norm >= 0 else Int(norm - 0.5)
                     if r > 254: r = 254
                     if r < 0: r = 0
-                    q_vector[idx] = Int8(r - 127)
+                    q_vector[unsafe_offset=idx] = Int8(r - 127)
         else:
             for i in range(self.dim):
-                var val = vector[i]
+                var val = vector[unsafe_offset=i]
                 var normalized = (val - self.global_min) / range_val
                 if normalized > 1.0: normalized = 1.0
                 if normalized < 0: normalized = 0
-                q_vector[i] = Int8(Int(normalized * 254.0) - 127)
+                q_vector[unsafe_offset=i] = Int8(Int(normalized * 254.0) - 127)
         return q_vector
 
     @always_inline
-    def _quantize_query_to_int8(mut self, query_in: UnsafePointer[Float32, MutUntrackedOrigin]):
+    def _quantize_query_to_int8(mut self, query_in: Pointer[Float32, MutUntrackedOrigin]):
         """Quantize FP32 query to self.query_int8 using per-group scales if calibrated.
 
         gh #271: under DISTANCE_METRIC COSINE the stored vectors were normalized
@@ -652,15 +652,15 @@ struct HNSWGraph(Movable):
         if self.grouped_calibrated and self.num_groups > 0:
             for g in range(self.num_groups):
                 quantize_fp32_to_int8_simd(
-                    query + g * 32, self.query_int8 + g * 32, 32,
-                    self.group_qmins[g], self.group_scales[g])
+                    query.unsafe_offset(g * 32), self.query_int8.unsafe_offset(g * 32), 32,
+                    self.group_qmins[unsafe_offset=g], self.group_scales[unsafe_offset=g])
         else:
             var range_val = self.global_max - self.global_min
             if range_val <= 0.0: range_val = 1.0
             var scale = Float32(254.0) / range_val
             quantize_fp32_to_int8_simd(query, self.query_int8, self.dim, self.global_min, scale)
 
-    def _search_layer(mut self, query: UnsafePointer[Int8, MutUntrackedOrigin], entry_point_idx: Int, ef: Int, level: Int) raises:
+    def _search_layer(mut self, query: Pointer[Int8, MutUntrackedOrigin], entry_point_idx: Int, ef: Int, level: Int) raises:
         # Reuse pre-allocated self.candidates / self.results (no heap alloc per call)
         self._reset_visited()
         self.candidates.clear()
@@ -670,10 +670,10 @@ struct HNSWGraph(Movable):
         self.candidates.reserve(ef + 32)
         self.results.reserve(ef + 32)
 
-        var dist = self._dist_int8_int8(query, self.nodes[entry_point_idx].vector)
+        var dist = self._dist_int8_int8(query, self.nodes[unsafe_offset=entry_point_idx].vector)
         self.candidates.push(HeapNode(dist, entry_point_idx))
         self.results.push(HeapNode(dist, entry_point_idx))
-        self.visited_epoch[entry_point_idx] = self.cur_epoch
+        self.visited_epoch[unsafe_offset=entry_point_idx] = self.cur_epoch
 
         if self._int8_batchable():
             self._search_layer_batched(query, ef, level)
@@ -685,25 +685,25 @@ struct HNSWGraph(Movable):
             if c.distance > self.results.peek_distance() and len(self.results.data) >= ef:
                 break
 
-            var neighbor_count = self.nodes[c.id].get_neighbor_count(level)
+            var neighbor_count = self.nodes[unsafe_offset=c.id].get_neighbor_count(level)
             for i in range(neighbor_count):
-                var neighbor_idx = self.nodes[c.id].get_neighbor(level, i) # 3.1: internal index
+                var neighbor_idx = self.nodes[unsafe_offset=c.id].get_neighbor(level, i) # 3.1: internal index
                 if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                 if self.is_deleted(neighbor_idx): continue
 
                 # Software Prefetching: Prefetch next neighbor's vector
                 if i + 1 < neighbor_count:
-                    var next_idx = self.nodes[c.id].get_neighbor(level, i + 1)
+                    var next_idx = self.nodes[unsafe_offset=c.id].get_neighbor(level, i + 1)
                     if next_idx >= 0 and next_idx < self.num_nodes:
-                        prefetch((self.nodes + next_idx).bitcast[Int8]())
-                        var nvptr = self.nodes[next_idx].vector
-                        prefetch(nvptr); prefetch(nvptr + 64); prefetch(nvptr + 128); prefetch(nvptr + 192)
-                        prefetch(self.nodes[next_idx].neighbors.bitcast[Int8]())
-                if (self.visited_epoch[neighbor_idx] == self.cur_epoch):
+                        prefetch((self.nodes.unsafe_offset(next_idx)).unsafe_bitcast[Int8]())
+                        var nvptr = self.nodes[unsafe_offset=next_idx].vector
+                        prefetch(nvptr); prefetch(nvptr.unsafe_offset(64)); prefetch(nvptr.unsafe_offset(128)); prefetch(nvptr.unsafe_offset(192))
+                        prefetch(self.nodes[unsafe_offset=next_idx].neighbors.unsafe_bitcast[Int8]())
+                if (self.visited_epoch[unsafe_offset=neighbor_idx] == self.cur_epoch):
                     continue
 
-                self.visited_epoch[neighbor_idx] = self.cur_epoch
-                var d = self._dist_int8_int8(query, self.nodes[neighbor_idx].vector)
+                self.visited_epoch[unsafe_offset=neighbor_idx] = self.cur_epoch
+                var d = self._dist_int8_int8(query, self.nodes[unsafe_offset=neighbor_idx].vector)
                 if self.results.push_bounded(d, neighbor_idx, ef):
                     self.candidates.push(HeapNode(d, neighbor_idx))
 
@@ -719,8 +719,8 @@ struct HNSWGraph(Movable):
         return (self.dim == 1536 or self.dim == 1024 or self.dim == 768 or self.dim == 512
                 or self.dim == 384 or self.dim == 256 or self.dim == 128)
 
-    def _farthest_batched(self, base: UnsafePointer[Int8, MutUntrackedOrigin],
-                          node_ptr: UnsafePointer[HNSWNode, MutUntrackedOrigin],
+    def _farthest_batched(self, base: Pointer[Int8, MutUntrackedOrigin],
+                          node_ptr: Pointer[HNSWNode, MutUntrackedOrigin],
                           off: Int, nc: Int, mut worst_dist: Float32) -> Int:
         """gh #399: position of the existing neighbor farthest from `base`, its
         distances computed eight at a time. Same scan order and tie rule (the
@@ -730,29 +730,29 @@ struct HNSWGraph(Movable):
         loop unchanged."""
         if not self._int8_batchable() or is_null(base): return -1
         for ni in range(nc):
-            var ex = Int(node_ptr[].neighbors[off + ni])
+            var ex = Int(node_ptr[].neighbors[unsafe_offset=off + ni])
             if ex < 0 or ex >= self.num_nodes: return -1
-            if is_null(self.nodes[ex].vector): return -1
+            if is_null(self.nodes[unsafe_offset=ex].vector): return -1
         var ids8 = Array[Int, 8](fill=0)
         var worst_pos = 0
         worst_dist = Float32(-1.0)
         var ni = 0
         while ni + 8 <= nc:
             comptime for j in range(8):
-                ids8[j] = Int(node_ptr[].neighbors[off + ni + j])
+                ids8[j] = Int(node_ptr[].neighbors[unsafe_offset=off + ni + j])
             var d8 = self._code_dist8(base, ids8)
             comptime for j in range(8):
                 if worst_dist < 0 or d8[j] > worst_dist:
                     worst_dist = d8[j]; worst_pos = ni + j
             ni += 8
         while ni < nc:
-            var d = self._code_dist(base, self.nodes[Int(node_ptr[].neighbors[off + ni])].vector)
+            var d = self._code_dist(base, self.nodes[unsafe_offset=Int(node_ptr[].neighbors[unsafe_offset=off + ni])].vector)
             if worst_dist < 0 or d > worst_dist:
                 worst_dist = d; worst_pos = ni
             ni += 1
         return worst_pos
 
-    def _search_layer_batched(mut self, query: UnsafePointer[Int8, MutUntrackedOrigin], ef: Int, level: Int):
+    def _search_layer_batched(mut self, query: Pointer[Int8, MutUntrackedOrigin], ef: Int, level: Int):
         """gh #399: `_search_layer`'s loop with each node's unvisited neighbors
         scored eight at a time. A node's neighbors are marked visited and
         pushed in their original order, and a distance does not depend on the
@@ -763,21 +763,21 @@ struct HNSWGraph(Movable):
             if c.distance > self.results.peek_distance() and len(self.results.data) >= ef:
                 break
             var np = 0
-            var neighbor_count = self.nodes[c.id].get_neighbor_count(level)
+            var neighbor_count = self.nodes[unsafe_offset=c.id].get_neighbor_count(level)
             for i in range(neighbor_count):
-                var neighbor_idx = self.nodes[c.id].get_neighbor(level, i)
+                var neighbor_idx = self.nodes[unsafe_offset=c.id].get_neighbor(level, i)
                 if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                 if self.is_deleted(neighbor_idx): continue
-                if self.visited_epoch[neighbor_idx] == self.cur_epoch: continue
-                self.visited_epoch[neighbor_idx] = self.cur_epoch
-                if is_null(self.nodes[neighbor_idx].vector):
+                if self.visited_epoch[unsafe_offset=neighbor_idx] == self.cur_epoch: continue
+                self.visited_epoch[unsafe_offset=neighbor_idx] = self.cur_epoch
+                if is_null(self.nodes[unsafe_offset=neighbor_idx].vector):
                     # keep the push order: drain what is pending first
                     for j in range(np):
-                        var dj = self._dist_int8_int8(query, self.nodes[pend[j]].vector)
+                        var dj = self._dist_int8_int8(query, self.nodes[unsafe_offset=pend[j]].vector)
                         if self.results.push_bounded(dj, pend[j], ef):
                             self.candidates.push(HeapNode(dj, pend[j]))
                     np = 0
-                    var dn = self._dist_int8_int8(query, self.nodes[neighbor_idx].vector)
+                    var dn = self._dist_int8_int8(query, self.nodes[unsafe_offset=neighbor_idx].vector)
                     if self.results.push_bounded(dn, neighbor_idx, ef):
                         self.candidates.push(HeapNode(dn, neighbor_idx))
                     continue
@@ -790,37 +790,37 @@ struct HNSWGraph(Movable):
                             self.candidates.push(HeapNode(d8[j], pend[j]))
                     np = 0
             for j in range(np):
-                var dj = self._code_dist(query, self.nodes[pend[j]].vector)
+                var dj = self._code_dist(query, self.nodes[unsafe_offset=pend[j]].vector)
                 if self.results.push_bounded(dj, pend[j], ef):
                     self.candidates.push(HeapNode(dj, pend[j]))
 
     @always_inline
     def is_deleted(self, idx: Int) -> Bool:
-        return Bool((self.deleted_bitset[idx >> 3] >> UInt8(idx & 7)) & 1)
+        return Bool((self.deleted_bitset[unsafe_offset=idx >> 3] >> UInt8(idx & 7)) & 1)
 
     @always_inline
     def mark_deleted(mut self, idx: Int):
-        self.deleted_bitset[idx >> 3] |= UInt8(1 << (idx & 7))
+        self.deleted_bitset[unsafe_offset=idx >> 3] |= UInt8(1 << (idx & 7))
         self.deleted_count += 1
 
     @always_inline
-    def _norm_scratch(mut self) -> UnsafePointer[Float32, MutUntrackedOrigin]:
+    def _norm_scratch(mut self) -> Pointer[Float32, MutUntrackedOrigin]:
         """COSINE normalization scratch, at least `dim` floats. Grows when an
         FT.CREATE raised dim after the first allocation (never shrinks)."""
         if self.fp32_norm_scratch_cap < self.dim:
             if is_not_null(self.fp32_norm_scratch):
-                self.fp32_norm_scratch.free()
-            self.fp32_norm_scratch = alloc[Float32](self.dim)
+                self.fp32_norm_scratch.unsafe_free()
+            self.fp32_norm_scratch = unsafe_alloc[Float32](self.dim)
             self.fp32_norm_scratch_cap = self.dim
         return self.fp32_norm_scratch
 
     @always_inline
-    def _residual_scratch(mut self) -> UnsafePointer[Float32, MutUntrackedOrigin]:
+    def _residual_scratch(mut self) -> Pointer[Float32, MutUntrackedOrigin]:
         """gh #396: the QJL residual scratch, at least `dim` floats."""
         if self.residual_scratch_cap < self.dim:
             if is_not_null(self.residual_scratch):
-                self.residual_scratch.free()
-            self.residual_scratch = alloc[Float32](self.dim)
+                self.residual_scratch.unsafe_free()
+            self.residual_scratch = unsafe_alloc[Float32](self.dim)
             self.residual_scratch_cap = self.dim
         return self.residual_scratch
 
@@ -867,14 +867,14 @@ struct HNSWGraph(Movable):
         self.borrow_seq = 0
 
     def _reset_bm25(mut self):
-        if is_not_null(self.bm25_term_hashes):    self.bm25_term_hashes.free()
-        if is_not_null(self.bm25_term_idf):       self.bm25_term_idf.free()
-        if is_not_null(self.bm25_postings_start): self.bm25_postings_start.free()
-        if is_not_null(self.bm25_postings_count): self.bm25_postings_count.free()
-        if is_not_null(self.bm25_postings_buf):   self.bm25_postings_buf.free()
-        if is_not_null(self.bm25_doc_lengths):    self.bm25_doc_lengths.free()
-        if is_not_null(self.bm25_doc_ids):        self.bm25_doc_ids.free()
-        if is_not_null(self.bm25_text_ids):       self.bm25_text_ids.free()
+        if is_not_null(self.bm25_term_hashes):    self.bm25_term_hashes.unsafe_free()
+        if is_not_null(self.bm25_term_idf):       self.bm25_term_idf.unsafe_free()
+        if is_not_null(self.bm25_postings_start): self.bm25_postings_start.unsafe_free()
+        if is_not_null(self.bm25_postings_count): self.bm25_postings_count.unsafe_free()
+        if is_not_null(self.bm25_postings_buf):   self.bm25_postings_buf.unsafe_free()
+        if is_not_null(self.bm25_doc_lengths):    self.bm25_doc_lengths.unsafe_free()
+        if is_not_null(self.bm25_doc_ids):        self.bm25_doc_ids.unsafe_free()
+        if is_not_null(self.bm25_text_ids):       self.bm25_text_ids.unsafe_free()
         self.bm25_term_hashes    = null_ptr[UInt32, MutUntrackedOrigin]()
         self.bm25_term_idf       = null_ptr[Float32, MutUntrackedOrigin]()
         self.bm25_postings_start = null_ptr[UInt32, MutUntrackedOrigin]()
@@ -907,30 +907,30 @@ struct HNSWGraph(Movable):
         self.deleted_count = 0
         self.compact_dirty = False
         for i in range(self.max_elements):
-            self.node_map[i] = -1
+            self.node_map[unsafe_offset=i] = -1
         self.index_ready = False
         self.global_min = -0.20
         self.global_max = 0.20
 
-        if is_not_null(self.fp32_buffer): self.fp32_buffer.free()
-        if is_not_null(self.fp32_ids): self.fp32_ids.free()
+        if is_not_null(self.fp32_buffer): self.fp32_buffer.unsafe_free()
+        if is_not_null(self.fp32_ids): self.fp32_ids.unsafe_free()
         self.fp32_buffer = null_ptr[Float32, MutUntrackedOrigin]()
         self.fp32_ids = null_ptr[Int32, MutUntrackedOrigin]()
         self.fp32_count = 0
 
-        if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.free()
+        if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.unsafe_free()
         self.gpu_rerank_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
 
-        if is_not_null(self.compact_buffer): self.compact_buffer.free()
+        if is_not_null(self.compact_buffer): self.compact_buffer.unsafe_free()
         self.compact_buffer = null_ptr[Int8, MutUntrackedOrigin]()
         self.compact_is_int4 = False
-        if is_not_null(self.prefix_buffer): self.prefix_buffer.free()
+        if is_not_null(self.prefix_buffer): self.prefix_buffer.unsafe_free()
         self.prefix_buffer = null_ptr[Int8, MutUntrackedOrigin]()
-        if is_not_null(self.l0_slots): self.l0_slots.free()
+        if is_not_null(self.l0_slots): self.l0_slots.unsafe_free()
         self.l0_slots = null_ptr[UInt32, MutUntrackedOrigin]()
-        if is_not_null(self.node_norms): self.node_norms.free()
+        if is_not_null(self.node_norms): self.node_norms.unsafe_free()
         self.node_norms = null_ptr[Float32, MutUntrackedOrigin]()
-        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.free()
+        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.unsafe_free()
         self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
         self.vector_allocator.reset()
 
@@ -948,16 +948,16 @@ struct HNSWGraph(Movable):
         if ext_id < 0 or ext_id >= self.max_elements: return
         if self.bm25_text_count >= self.bm25_text_cap:
             var new_cap = self.bm25_text_cap * 2 if self.bm25_text_cap > 0 else 1024
-            var grown = alloc[Int32](new_cap)
+            var grown = unsafe_alloc[Int32](new_cap)
             if is_not_null(self.bm25_text_ids):
                 unsafe_memcpy(dest=grown, src=self.bm25_text_ids, count=self.bm25_text_count)
-                self.bm25_text_ids.free()
+                self.bm25_text_ids.unsafe_free()
             self.bm25_text_ids = grown
             self.bm25_text_cap = new_cap
-        self.bm25_text_ids[self.bm25_text_count] = Int32(ext_id)
+        self.bm25_text_ids[unsafe_offset=self.bm25_text_count] = Int32(ext_id)
         self.bm25_text_count += 1
 
-    def adopt_schema(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
+    def adopt_schema(mut self, shared: Pointer[SharedHNSWView, MutUntrackedOrigin]):
         """The shared view's schema (FT.CREATE's), packed for the index file."""
         unsafe_memset(self.schema_rec, 0, SCHEMA_MAX * SCHEMA_REC)
         self.schema_count = 0
@@ -965,17 +965,17 @@ struct HNSWGraph(Movable):
         var n = shared[].schema_field_count
         if n > SCHEMA_MAX: n = SCHEMA_MAX
         for f in range(n):
-            var r = self.schema_rec + f * SCHEMA_REC
-            r[0] = shared[].schema_field_types[f]
-            r[1] = shared[].schema_field_flags[f]
-            r[2] = shared[].schema_field_seps[f]
+            var r = self.schema_rec.unsafe_offset(f * SCHEMA_REC)
+            r[unsafe_offset=0] = shared[].schema_field_types[f]
+            r[unsafe_offset=1] = shared[].schema_field_flags[f]
+            r[unsafe_offset=2] = shared[].schema_field_seps[f]
             var l = Int(shared[].schema_field_name_lens[f])
             if l > SCHEMA_NAME_MAX: l = SCHEMA_NAME_MAX
-            r[3] = UInt8(l)
-            for b in range(l): r[4 + b] = shared[].schema_field_names[f][b]
+            r[unsafe_offset=3] = UInt8(l)
+            for b in range(l): r[unsafe_offset=4 + b] = shared[].schema_field_names[f][b]
         self.schema_count = n
 
-    def publish_schema(self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
+    def publish_schema(self, shared: Pointer[SharedHNSWView, MutUntrackedOrigin]):
         """A warm load's schema back into the shared view (reopen_after_load,
         before any worker serves). A file without one leaves the view's
         schema unknown: its filters read any hash field, as they used to."""
@@ -983,16 +983,16 @@ struct HNSWGraph(Movable):
         if not self.schema_known:
             return
         for f in range(self.schema_count):
-            var r = self.schema_rec + f * SCHEMA_REC
-            shared[].schema_field_types[f] = r[0]
-            shared[].schema_field_flags[f] = r[1]
-            shared[].schema_field_seps[f] = r[2]
-            var l = Int(r[3])
+            var r = self.schema_rec.unsafe_offset(f * SCHEMA_REC)
+            shared[].schema_field_types[f] = r[unsafe_offset=0]
+            shared[].schema_field_flags[f] = r[unsafe_offset=1]
+            shared[].schema_field_seps[f] = r[unsafe_offset=2]
+            var l = Int(r[unsafe_offset=3])
             shared[].schema_field_name_lens[f] = UInt8(l)
-            for b in range(l): shared[].schema_field_names[f][b] = r[4 + b]
+            for b in range(l): shared[].schema_field_names[f][b] = r[unsafe_offset=4 + b]
         shared[].schema_field_count = self.schema_count
 
-    def publish_to_shared(self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], owner: Int = -1):
+    def publish_to_shared(self, shared: Pointer[SharedHNSWView, MutUntrackedOrigin], owner: Int = -1):
         # V2.6: after build_index()+compact_vectors(), publish read-only pointers for other workers.
         # Drop-in: `owner` is the publishing worker (its graph holds these
         # buffers), and publish_seq moves on, so a borrow of an earlier index
@@ -1032,8 +1032,8 @@ struct HNSWGraph(Movable):
         shared[].grouped_calibrated = self.grouped_calibrated
         if self.grouped_calibrated and self.num_groups > 0:
             for gi in range(self.num_groups):
-                shared[].group_qmins[gi] = self.group_qmins[gi]
-                shared[].group_scales[gi] = self.group_scales[gi]
+                shared[].group_qmins[gi] = self.group_qmins[unsafe_offset=gi]
+                shared[].group_scales[gi] = self.group_scales[unsafe_offset=gi]
         shared[].ef_runtime = self.ef_runtime
         # Only overwrite index_name if this worker actually saw FT.CREATE
         if self.index_name_len > 0:
@@ -1075,7 +1075,7 @@ struct HNSWGraph(Movable):
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                 shared[].ready_atomic, UInt64(1))
 
-    def borrow_from_shared(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]):
+    def borrow_from_shared(mut self, shared: Pointer[SharedHNSWView, MutUntrackedOrigin]):
         # V2.6: lazy one-time init — borrow read-only pointers from the index-owning worker.
         # All pointers are shared read-only after ready=True; visited_map stays per-worker private.
         self.nodes = shared[].nodes
@@ -1096,7 +1096,7 @@ struct HNSWGraph(Movable):
         if is_not_null(shared[].qjl_random_signs):
             self.qjl_random_signs = shared[].qjl_random_signs
             if is_null(self.qjl_query_signs):
-                self.qjl_query_signs = alloc[UInt64](QJL_U64S_1536)
+                self.qjl_query_signs = unsafe_alloc[UInt64](QJL_U64S_1536)
             self.turboquant = True
         self.node_norms = shared[].node_norms
         self.node_prefix_norms = shared[].node_prefix_norms
@@ -1113,8 +1113,8 @@ struct HNSWGraph(Movable):
         self.grouped_calibrated = shared[].grouped_calibrated
         if shared[].grouped_calibrated and self.num_groups > 0:
             for gi in range(self.num_groups):
-                self.group_qmins[gi] = shared[].group_qmins[gi]
-                self.group_scales[gi] = shared[].group_scales[gi]
+                self.group_qmins[unsafe_offset=gi] = shared[].group_qmins[gi]
+                self.group_scales[unsafe_offset=gi] = shared[].group_scales[gi]
         self.ef_runtime = shared[].ef_runtime
         self.index_name_len = shared[].index_name_len
         for i in range(shared[].index_name_len):
@@ -1131,7 +1131,7 @@ struct HNSWGraph(Movable):
         self.proj_matrix = shared[].proj_matrix  # read-only borrow, coordinator owns memory
         # Allocate per-worker proj_scratch if projection is active
         if self.proj_dim > 0 and is_null(self.proj_scratch):
-            self.proj_scratch = alloc[Float32](self.proj_dim)
+            self.proj_scratch = unsafe_alloc[Float32](self.proj_dim)
         # V33: borrow compact level-0 neighbor array
         self.l0_compact = shared[].l0_compact
         # V34: borrow prefix buffer
@@ -1144,7 +1144,7 @@ struct HNSWGraph(Movable):
 
     # ── Disk persistence (Phase 1) ────────────────────────────────────────────
 
-    def _pion_write_all(self, fd: Int32, ptr: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int):
+    def _pion_write_all(self, fd: Int32, ptr: Pointer[UInt8, MutUntrackedOrigin], n: Int):
         """Write exactly n bytes, retrying on short writes."""
         var remaining = n
         var p = ptr
@@ -1152,10 +1152,10 @@ struct HNSWGraph(Movable):
             var written = external_call["pion_write", Int](fd, p, remaining)
             if written <= 0:
                 break
-            p = p + written
+            p = p.unsafe_offset(written)
             remaining -= written
 
-    def _pion_read_all(self, fd: Int32, ptr: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    def _pion_read_all(self, fd: Int32, ptr: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
         """Read exactly n bytes. Returns False on short read or error."""
         var remaining = n
         var p = ptr
@@ -1163,12 +1163,12 @@ struct HNSWGraph(Movable):
             var got = external_call["pion_read", Int](fd, p, remaining)
             if got <= 0:
                 return False
-            p = p + got
+            p = p.unsafe_offset(got)
             remaining -= got
         return True
 
     def save_to_disk(self, path: String,
-                     hk_keys: UnsafePointer[UInt8, MutUntrackedOrigin] = null_ptr[UInt8, MutUntrackedOrigin](),
+                     hk_keys: Pointer[UInt8, MutUntrackedOrigin] = null_ptr[UInt8, MutUntrackedOrigin](),
                      hk_max: Int = 0):
         """Persist compact_buffer, neighbor graph, and metadata to disk.
         Called after FT.OPTIMIZE. Enables instant recovery on restart (skips FT.OPTIMIZE).
@@ -1179,7 +1179,7 @@ struct HNSWGraph(Movable):
             return
 
         var cpath = path
-        var path_bytes = cpath.as_c_string_slice()
+        var path_bytes = cpath.as_c_string_span()
         var fd = external_call["pion_creat", Int32](path_bytes)
         if fd < 0:
             print("HNSW save: cannot open " + path)
@@ -1188,12 +1188,12 @@ struct HNSWGraph(Movable):
         _ = external_call["close", Int32](fd)
 
     def _save_body(self, fd: Int32,
-                   hk_keys: UnsafePointer[UInt8, MutUntrackedOrigin],
+                   hk_keys: Pointer[UInt8, MutUntrackedOrigin],
                    hk_max: Int):
         # Header (256 bytes)
-        var hdr = alloc[UInt64](32)  # 32 × 8 = 256 bytes
-        unsafe_memset(hdr.bitcast[UInt8](), 0, 256)
-        hdr[0] = UInt64(0x574E534E4F494E50)  # "PIONHNSW" LE
+        var hdr = unsafe_alloc[UInt64](32)  # 32 × 8 = 256 bytes
+        unsafe_memset(hdr.unsafe_bitcast[UInt8](), 0, 256)
+        hdr[unsafe_offset=0] = UInt64(0x574E534E4F494E50)  # "PIONHNSW" LE
         # v2 (K1, 2026-08-05): the compact section is now written with the TRUE
         # slot stride. v1 wrote `num_nodes * dim` bytes, but the INT8 layout is
         # `num_nodes * (dim + 8)` (8B norm header/slot) — the file silently
@@ -1214,33 +1214,33 @@ struct HNSWGraph(Movable):
         # records 46-48, not in the keys `__hk__<slot>` an older server reads
         # it from: a server before 1.0.5 refuses the file (it wants 3 or 4)
         # rather than load it and answer with keys it cannot resolve.
-        hdr[1] = UInt64(5)                   # version (v4: node_map and pool trimmed to the index)
-        hdr[2] = UInt64(self.num_nodes)
-        hdr[3] = UInt64(self.dim)
-        hdr[4] = UInt64(self.M)
-        hdr[5] = UInt64(self.ef_construction)
-        hdr[6] = UInt64(self.entry_point_id)
-        hdr[7] = UInt64(self.max_level)
+        hdr[unsafe_offset=1] = UInt64(5)                   # version (v4: node_map and pool trimmed to the index)
+        hdr[unsafe_offset=2] = UInt64(self.num_nodes)
+        hdr[unsafe_offset=3] = UInt64(self.dim)
+        hdr[unsafe_offset=4] = UInt64(self.M)
+        hdr[unsafe_offset=5] = UInt64(self.ef_construction)
+        hdr[unsafe_offset=6] = UInt64(self.entry_point_id)
+        hdr[unsafe_offset=7] = UInt64(self.max_level)
         # global_min / global_max stored as Float32 via bitcast into UInt8 header bytes
-        (hdr.bitcast[UInt8]() + 64).bitcast[Float32]()[0] = self.global_min
-        (hdr.bitcast[UInt8]() + 68).bitcast[Float32]()[0] = self.global_max
-        hdr[9]  = UInt64(self.neighbor_pool_per_node)
-        hdr[10] = UInt64(self.max_elements)
-        hdr[11] = UInt64(self.index_name_len)
+        (hdr.unsafe_bitcast[UInt8]().unsafe_offset(64)).unsafe_bitcast[Float32]()[unsafe_offset=0] = self.global_min
+        (hdr.unsafe_bitcast[UInt8]().unsafe_offset(68)).unsafe_bitcast[Float32]()[unsafe_offset=0] = self.global_max
+        hdr[unsafe_offset=9]  = UInt64(self.neighbor_pool_per_node)
+        hdr[unsafe_offset=10] = UInt64(self.max_elements)
+        hdr[unsafe_offset=11] = UInt64(self.index_name_len)
         # v2 fields live at words 20-22 (bytes 160-183): the 64-byte index name
         # occupies bytes 96-159 = words 12-19, so anything written there gets
         # stomped by the name copy below (found the hard way: hdr[12] loaded
         # back as the ASCII bytes of "index" → a 517 GB compact alloc).
-        hdr[20] = UInt64(self.compact_stride)
-        hdr[21] = UInt64(self.compact_hdr)
+        hdr[unsafe_offset=20] = UInt64(self.compact_stride)
+        hdr[unsafe_offset=21] = UInt64(self.compact_hdr)
         # Compact format bits: 1=int4, 2=3bit, 4=2bit (0 = plain INT8+hdr)
         var _fmt: UInt64 = 0
         if self.compact_is_int4: _fmt |= 1
         if self.compact_is_3bit: _fmt |= 2
         if self.compact_is_2bit: _fmt |= 4
-        hdr[22] = _fmt
+        hdr[unsafe_offset=22] = _fmt
         # v3: number of calibration groups persisted (0 = not group-calibrated)
-        hdr[23] = UInt64(self.num_groups) if self.grouped_calibrated else UInt64(0)
+        hdr[unsafe_offset=23] = UInt64(self.num_groups) if self.grouped_calibrated else UInt64(0)
         # gh #271: DISTANCE_METRIC (0 = L2, 1 = COSINE). Word 24 is free and the
         # header is memset to 0 above, so a file written before this field
         # existed loads as 0 — which is precisely what those indexes are. That
@@ -1248,7 +1248,7 @@ struct HNSWGraph(Movable):
         # It has to be persisted at all because the metric decides whether the
         # QUERY gets normalized, and a warm restart that forgot it would query
         # a normalized graph with an unnormalized query.
-        hdr[24] = UInt64(self.distance_metric)
+        hdr[unsafe_offset=24] = UInt64(self.distance_metric)
         # gh #350: optional quant sections, appended after the v3 key map.
         # bit 0 = FP32 re-rank buffer (num_nodes × dim Float32), bit 1 = QJL
         # signs + residual norms (TurboQuant). Every quant search is "beam over
@@ -1282,30 +1282,30 @@ struct HNSWGraph(Movable):
             for i in range(self.num_nodes):
                 var lkp = null_ptr[UInt8, MutUntrackedOrigin]()
                 var lkl = 0
-                if hk_get(hk_keys, hk_max, self.nodes[i].id, lkp, lkl) and lkl > HK_INLINE_MAX:
+                if hk_get(hk_keys, hk_max, self.nodes[unsafe_offset=i].id, lkp, lkl) and lkl > HK_INLINE_MAX:
                     long_n += 1
         if long_n > 0: _qsec |= 2048
-        hdr[25] = _qsec
+        hdr[unsafe_offset=25] = _qsec
         # gh #407: the vector field name — word 26 = length, bytes 216-247 (words
         # 27-30) = up to 32 bytes. Same no-bump reasoning as words 24/25: an
         # older file reads length 0 and keeps the default field.
-        hdr[26] = UInt64(self.vector_field_len) if self.vector_field_len <= 32 else UInt64(0)
-        hdr[31] = self.build_id                  # #46
-        var vf_dst = hdr.bitcast[UInt8]() + 216
+        hdr[unsafe_offset=26] = UInt64(self.vector_field_len) if self.vector_field_len <= 32 else UInt64(0)
+        hdr[unsafe_offset=31] = self.build_id                  # #46
+        var vf_dst = hdr.unsafe_bitcast[UInt8]().unsafe_offset(216)
         if self.vector_field_len <= 32:
             for i in range(self.vector_field_len):
-                vf_dst[i] = self.vector_field_name[i]
+                vf_dst[unsafe_offset=i] = self.vector_field_name[i]
         # index_name: 64 bytes at offset 96
-        var name_dst = hdr.bitcast[UInt8]() + 96
+        var name_dst = hdr.unsafe_bitcast[UInt8]().unsafe_offset(96)
         for i in range(self.index_name_len):
-            name_dst[i] = self.index_name[i]
+            name_dst[unsafe_offset=i] = self.index_name[i]
 
-        self._pion_write_all(fd, hdr.bitcast[UInt8](), 256)
-        hdr.free()
+        self._pion_write_all(fd, hdr.unsafe_bitcast[UInt8](), 256)
+        hdr.unsafe_free()
 
         # Data sections — v2: TRUE slot stride (see version note above)
         var compact_bytes = self.num_nodes * self.compact_stride
-        self._pion_write_all(fd, self.compact_buffer.bitcast[UInt8](), compact_bytes)
+        self._pion_write_all(fd, self.compact_buffer.unsafe_bitcast[UInt8](), compact_bytes)
 
         # v4: node_map up to the highest external id the index holds (its
         # count first), and the neighbor blocks of its num_nodes nodes. v3
@@ -1314,29 +1314,29 @@ struct HNSWGraph(Movable):
         # build, and multi-second stalls on a busy disk.
         var map_ids = 0
         for i in range(self.num_nodes):
-            if self.nodes[i].id + 1 > map_ids:
-                map_ids = self.nodes[i].id + 1
+            if self.nodes[unsafe_offset=i].id + 1 > map_ids:
+                map_ids = self.nodes[unsafe_offset=i].id + 1
         if map_ids > self.max_elements:
             map_ids = self.max_elements
-        var map_count = alloc[UInt64](1)
-        map_count[0] = UInt64(map_ids)
-        self._pion_write_all(fd, map_count.bitcast[UInt8](), 8)
-        map_count.free()
-        self._pion_write_all(fd, self.node_map.bitcast[UInt8](), map_ids * 8)
+        var map_count = unsafe_alloc[UInt64](1)
+        map_count[unsafe_offset=0] = UInt64(map_ids)
+        self._pion_write_all(fd, map_count.unsafe_bitcast[UInt8](), 8)
+        map_count.unsafe_free()
+        self._pion_write_all(fd, self.node_map.unsafe_bitcast[UInt8](), map_ids * 8)
 
         var l0_bytes = self.num_nodes * 33 * 4
-        self._pion_write_all(fd, self.l0_compact.bitcast[UInt8](), l0_bytes)
+        self._pion_write_all(fd, self.l0_compact.unsafe_bitcast[UInt8](), l0_bytes)
 
         var pool_bytes = self.num_nodes * self.neighbor_pool_per_node * 4
-        self._pion_write_all(fd, self.neighbor_pool.bitcast[UInt8](), pool_bytes)
+        self._pion_write_all(fd, self.neighbor_pool.unsafe_bitcast[UInt8](), pool_bytes)
 
         # Node id+level array (2×Int per node = 16 bytes per node)
-        var id_buf = alloc[Int](self.num_nodes * 2)
+        var id_buf = unsafe_alloc[Int](self.num_nodes * 2)
         for i in range(self.num_nodes):
-            id_buf[i * 2]     = self.nodes[i].id
-            id_buf[i * 2 + 1] = self.nodes[i].max_level
-        self._pion_write_all(fd, id_buf.bitcast[UInt8](), self.num_nodes * 16)
-        id_buf.free()
+            id_buf[unsafe_offset=i * 2]     = self.nodes[unsafe_offset=i].id
+            id_buf[unsafe_offset=i * 2 + 1] = self.nodes[unsafe_offset=i].max_level
+        self._pion_write_all(fd, id_buf.unsafe_bitcast[UInt8](), self.num_nodes * 16)
+        id_buf.unsafe_free()
 
         # v3 (gh #211 root cause): per-node compact SLOT (UInt32 × num_nodes).
         # nodes[] is insertion-ordered but compact_buffer is BFS-ordered by
@@ -1346,38 +1346,38 @@ struct HNSWGraph(Movable):
         # vector set, near-identical distances), so a warm restart found the
         # RIGHT neighbors and returned them under the WRONG ids: the silent
         # recall ≈ 0.002 with healthy-looking logs.
-        var slot_buf = alloc[UInt32](self.num_nodes)
+        var slot_buf = unsafe_alloc[UInt32](self.num_nodes)
         for i in range(self.num_nodes):
-            slot_buf[i] = UInt32(
-                (Int(self.nodes[i].vector) - Int(self.compact_buffer) - self.compact_hdr)
+            slot_buf[unsafe_offset=i] = UInt32(
+                (Int(self.nodes[unsafe_offset=i].vector) - Int(self.compact_buffer) - self.compact_hdr)
                 // self.compact_stride)
-        self._pion_write_all(fd, slot_buf.bitcast[UInt8](), self.num_nodes * 4)
-        slot_buf.free()
+        self._pion_write_all(fd, slot_buf.unsafe_bitcast[UInt8](), self.num_nodes * 4)
+        slot_buf.unsafe_free()
 
         # node_norms (Float32 × num_nodes)
         if is_not_null(self.node_norms):
-            self._pion_write_all(fd, self.node_norms.bitcast[UInt8](), self.num_nodes * 4)
+            self._pion_write_all(fd, self.node_norms.unsafe_bitcast[UInt8](), self.num_nodes * 4)
         else:
-            var zeros = alloc[UInt8](self.num_nodes * 4)
+            var zeros = unsafe_alloc[UInt8](self.num_nodes * 4)
             unsafe_memset(zeros, 0, self.num_nodes * 4)
             self._pion_write_all(fd, zeros, self.num_nodes * 4)
-            zeros.free()
+            zeros.unsafe_free()
 
         # node_prefix_norms (Float32 × num_nodes)
         if is_not_null(self.node_prefix_norms):
-            self._pion_write_all(fd, self.node_prefix_norms.bitcast[UInt8](), self.num_nodes * 4)
+            self._pion_write_all(fd, self.node_prefix_norms.unsafe_bitcast[UInt8](), self.num_nodes * 4)
         else:
-            var zeros2 = alloc[UInt8](self.num_nodes * 4)
+            var zeros2 = unsafe_alloc[UInt8](self.num_nodes * 4)
             unsafe_memset(zeros2, 0, self.num_nodes * 4)
             self._pion_write_all(fd, zeros2, self.num_nodes * 4)
-            zeros2.free()
+            zeros2.unsafe_free()
 
         # v3 section 1: per-group calibration (hdr[23] floats × 2) — the INT8
         # codes above were quantized with these; a query quantized with the
         # global fallback scores against mismatched codes.
         if self.grouped_calibrated and self.num_groups > 0:
-            self._pion_write_all(fd, self.group_qmins.bitcast[UInt8](), self.num_groups * 4)
-            self._pion_write_all(fd, self.group_scales.bitcast[UInt8](), self.num_groups * 4)
+            self._pion_write_all(fd, self.group_qmins.unsafe_bitcast[UInt8](), self.num_groups * 4)
+            self._pion_write_all(fd, self.group_scales.unsafe_bitcast[UInt8](), self.num_groups * 4)
 
         # v3 section 2 (gh #211): slot→original-key map, one 32-byte record per
         # node in node order — record i belongs to external id nodes[i].id
@@ -1388,68 +1388,68 @@ struct HNSWGraph(Movable):
         # (rebuilt by WAL replay).
         # A longer key's entry holds an address (hnsw_types.mojo): the record
         # stays zero, and the key goes in the long-key section (bit 11).
-        var hk_section = alloc[UInt8](self.num_nodes * 32)
+        var hk_section = unsafe_alloc[UInt8](self.num_nodes * 32)
         unsafe_memset(hk_section, 0, self.num_nodes * 32)
         if is_not_null(hk_keys):
             for i in range(self.num_nodes):
-                var ext_id = self.nodes[i].id
+                var ext_id = self.nodes[unsafe_offset=i].id
                 if ext_id >= 0 and ext_id < hk_max:
-                    var ent = hk_keys + ext_id * HK_ENTRY
-                    if Int(ent[0]) <= HK_INLINE_MAX:
-                        unsafe_memcpy(dest=hk_section + i * 32, src=ent, count=32)
+                    var ent = hk_keys.unsafe_offset(ext_id * HK_ENTRY)
+                    if Int(ent[unsafe_offset=0]) <= HK_INLINE_MAX:
+                        unsafe_memcpy(dest=hk_section.unsafe_offset(i * 32), src=ent, count=32)
         self._pion_write_all(fd, hk_section, self.num_nodes * 32)
-        hk_section.free()
+        hk_section.unsafe_free()
 
         # gh #350 quant sections (flagged in header word 25, see above).
         if _qsec & 1:
-            self._pion_write_all(fd, self.gpu_rerank_fp32.bitcast[UInt8](),
+            self._pion_write_all(fd, self.gpu_rerank_fp32.unsafe_bitcast[UInt8](),
                                  self.num_nodes * self.dim * 4)
         if _qsec & 2:
-            self._pion_write_all(fd, self.qjl_buffer.bitcast[UInt8](),
+            self._pion_write_all(fd, self.qjl_buffer.unsafe_bitcast[UInt8](),
                                  self.num_nodes * QJL_BYTES_1536)
-            self._pion_write_all(fd, self.qjl_res_norms.bitcast[UInt8](),
+            self._pion_write_all(fd, self.qjl_res_norms.unsafe_bitcast[UInt8](),
                                  self.num_nodes * 4)
         if _qsec & 512:
-            var pc = alloc[UInt64](1)
-            pc[0] = UInt64(self.prefix_count)
-            self._pion_write_all(fd, pc.bitcast[UInt8](), 8)
-            pc.free()
+            var pc = unsafe_alloc[UInt64](1)
+            pc[unsafe_offset=0] = UInt64(self.prefix_count)
+            self._pion_write_all(fd, pc.unsafe_bitcast[UInt8](), 8)
+            pc.unsafe_free()
             self._pion_write_all(fd, self.prefixes, self.prefix_count * PREFIX_SLOT)
         if _qsec & 1024:
-            var sc = alloc[UInt64](1)
-            sc[0] = UInt64(self.schema_count)
-            self._pion_write_all(fd, sc.bitcast[UInt8](), 8)
-            sc.free()
+            var sc = unsafe_alloc[UInt64](1)
+            sc[unsafe_offset=0] = UInt64(self.schema_count)
+            self._pion_write_all(fd, sc.unsafe_bitcast[UInt8](), 8)
+            sc.unsafe_free()
             if self.schema_count > 0:
                 self._pion_write_all(fd, self.schema_rec, self.schema_count * SCHEMA_REC)
         if _qsec & 2048:
-            var lw = alloc[UInt64](2)
-            lw[0] = UInt64(long_n)
-            self._pion_write_all(fd, lw.bitcast[UInt8](), 8)
+            var lw = unsafe_alloc[UInt64](2)
+            lw[unsafe_offset=0] = UInt64(long_n)
+            self._pion_write_all(fd, lw.unsafe_bitcast[UInt8](), 8)
             var written = 0
             for i in range(self.num_nodes):
                 var lkp = null_ptr[UInt8, MutUntrackedOrigin]()
                 var lkl = 0
-                if written < long_n and hk_get(hk_keys, hk_max, self.nodes[i].id, lkp, lkl) \
+                if written < long_n and hk_get(hk_keys, hk_max, self.nodes[unsafe_offset=i].id, lkp, lkl) \
                         and lkl > HK_INLINE_MAX:
-                    lw[0] = UInt64(self.nodes[i].id)
-                    lw[1] = UInt64(lkl)
-                    self._pion_write_all(fd, lw.bitcast[UInt8](), 16)
+                    lw[unsafe_offset=0] = UInt64(self.nodes[unsafe_offset=i].id)
+                    lw[unsafe_offset=1] = UInt64(lkl)
+                    self._pion_write_all(fd, lw.unsafe_bitcast[UInt8](), 16)
                     self._pion_write_all(fd, lkp, lkl)
                     written += 1
-            lw.free()
+            lw.unsafe_free()
 
         print("HNSW saved: " + String(self.num_nodes) + " nodes → pion.hnsw.0")
 
     def load_from_disk(mut self, path: String,
-                       hk_keys: UnsafePointer[UInt8, MutUntrackedOrigin] = null_ptr[UInt8, MutUntrackedOrigin](),
+                       hk_keys: Pointer[UInt8, MutUntrackedOrigin] = null_ptr[UInt8, MutUntrackedOrigin](),
                        hk_max: Int = 0) -> Bool:
         """Load persisted HNSW index from disk. Returns True if loaded, False if file absent/corrupt.
         On success: index_ready=True, no FT.OPTIMIZE needed.
         gh #211: pass the SharedHNSWView's hk_keys_buf/hk_max_elements so the
         persisted slot→key map is restored into the cross-worker resolver."""
         var cpath = path
-        var path_bytes = cpath.as_c_string_slice()
+        var path_bytes = cpath.as_c_string_span()
         var fd = external_call["pion_open_rdonly", Int32](path_bytes)
         if fd < 0:
             return False  # No saved index — normal cold start
@@ -1464,24 +1464,24 @@ struct HNSWGraph(Movable):
         return ok
 
     def _load_body(mut self, fd: Int32,
-                   hk_keys: UnsafePointer[UInt8, MutUntrackedOrigin],
+                   hk_keys: Pointer[UInt8, MutUntrackedOrigin],
                    hk_max: Int) -> Bool:
         # Read and validate 256-byte header
-        var hdr = alloc[UInt64](32)
-        if not self._pion_read_all(fd, hdr.bitcast[UInt8](), 256):
-            hdr.free(); return False
-        if hdr[0] != UInt64(0x574E534E4F494E50):  # magic check
-            hdr.free(); return False
-        var version = Int(hdr[1])
+        var hdr = unsafe_alloc[UInt64](32)
+        if not self._pion_read_all(fd, hdr.unsafe_bitcast[UInt8](), 256):
+            hdr.unsafe_free(); return False
+        if hdr[unsafe_offset=0] != UInt64(0x574E534E4F494E50):  # magic check
+            hdr.unsafe_free(); return False
+        var version = Int(hdr[unsafe_offset=1])
         if version < 3 or version > 5:  # v3 = group calibration + slot→key map; v4 = trimmed sections; v5 = v4
             # v1 files were tail-corrupt; v2 files lack the slot→key map, so a
             # warm restart serves recall ≈ 0.002 silently (gh #211) — refuse
             # both loudly rather than load an index that returns wrong keys.
-            print("HNSW snapshot version " + String(hdr[1]) + " unsupported (want 3 to 5) — cold rebuild (re-ingest + FT.OPTIMIZE)")
-            hdr.free(); return False
-        var saved_stride = Int(hdr[20])
-        var saved_slot_hdr = Int(hdr[21])
-        var saved_fmt = hdr[22]
+            print("HNSW snapshot version " + String(hdr[unsafe_offset=1]) + " unsupported (want 3 to 5) — cold rebuild (re-ingest + FT.OPTIMIZE)")
+            hdr.unsafe_free(); return False
+        var saved_stride = Int(hdr[unsafe_offset=20])
+        var saved_slot_hdr = Int(hdr[unsafe_offset=21])
+        var saved_fmt = hdr[unsafe_offset=22]
         var _cur_fmt: UInt64 = 0
         if self.polarquant: _cur_fmt |= 1
         if self.turboquant: _cur_fmt |= 2
@@ -1489,101 +1489,101 @@ struct HNSWGraph(Movable):
         if self.use_int4:   _cur_fmt |= 1
         if saved_fmt != _cur_fmt:
             print("HNSW snapshot quant format mismatch (file=" + String(saved_fmt) + " server=" + String(_cur_fmt) + ") — cold rebuild")
-            hdr.free(); return False
+            hdr.unsafe_free(); return False
         if saved_stride <= 0:
-            hdr.free(); return False
+            hdr.unsafe_free(); return False
 
-        var saved_num_nodes = Int(hdr[2])
-        var saved_dim       = Int(hdr[3])
-        var saved_M         = Int(hdr[4])
-        var saved_entry     = Int(hdr[6])
-        var saved_max_level = Int(hdr[7])
-        var saved_pool_per  = Int(hdr[9])
-        var saved_max_elem  = Int(hdr[10])
-        var saved_name_len  = Int(hdr[11])
-        var saved_groups    = Int(hdr[23])   # v3: calibration groups (0 = none)
-        var saved_metric    = UInt8(hdr[24]) if hdr[24] <= 1 else UInt8(0)  # gh #271
-        var saved_qsec      = hdr[25]        # gh #350: optional quant sections
-        var saved_vf_len    = Int(hdr[26])   # gh #407: 0 = file predates the field
-        self.build_id = hdr[31]                  # #46: 0 = file predates it
+        var saved_num_nodes = Int(hdr[unsafe_offset=2])
+        var saved_dim       = Int(hdr[unsafe_offset=3])
+        var saved_M         = Int(hdr[unsafe_offset=4])
+        var saved_entry     = Int(hdr[unsafe_offset=6])
+        var saved_max_level = Int(hdr[unsafe_offset=7])
+        var saved_pool_per  = Int(hdr[unsafe_offset=9])
+        var saved_max_elem  = Int(hdr[unsafe_offset=10])
+        var saved_name_len  = Int(hdr[unsafe_offset=11])
+        var saved_groups    = Int(hdr[unsafe_offset=23])   # v3: calibration groups (0 = none)
+        var saved_metric    = UInt8(hdr[unsafe_offset=24]) if hdr[unsafe_offset=24] <= 1 else UInt8(0)  # gh #271
+        var saved_qsec      = hdr[unsafe_offset=25]        # gh #350: optional quant sections
+        var saved_vf_len    = Int(hdr[unsafe_offset=26])   # gh #407: 0 = file predates the field
+        self.build_id = hdr[unsafe_offset=31]                  # #46: 0 = file predates it
 
         # Sanity checks: must match this worker's config
         if saved_dim != self.dim or saved_M != self.M or saved_max_elem != self.max_elements:
             print("HNSW load: config mismatch (saved dim=" + String(saved_dim) + " M=" + String(saved_M) + ")")
-            hdr.free(); return False
+            hdr.unsafe_free(); return False
         if saved_num_nodes > self.max_elements or saved_num_nodes <= 0:
-            hdr.free(); return False
+            hdr.unsafe_free(); return False
 
         # global_min/max
-        var gmin_bytes = hdr.bitcast[UInt8]() + 64
-        var gmax_bytes = hdr.bitcast[UInt8]() + 68
-        self.global_min = gmin_bytes.bitcast[Float32]()[0]
-        self.global_max = gmax_bytes.bitcast[Float32]()[0]
+        var gmin_bytes = hdr.unsafe_bitcast[UInt8]().unsafe_offset(64)
+        var gmax_bytes = hdr.unsafe_bitcast[UInt8]().unsafe_offset(68)
+        self.global_min = gmin_bytes.unsafe_bitcast[Float32]()[unsafe_offset=0]
+        self.global_max = gmax_bytes.unsafe_bitcast[Float32]()[unsafe_offset=0]
 
         # index_name
-        var name_src = hdr.bitcast[UInt8]() + 96
+        var name_src = hdr.unsafe_bitcast[UInt8]().unsafe_offset(96)
         self.index_name_len = saved_name_len
         for i in range(saved_name_len):
-            self.index_name[i] = name_src[i]
+            self.index_name[i] = name_src[unsafe_offset=i]
         # gh #407: vector field name
         if saved_vf_len > 0 and saved_vf_len <= 32:
-            var vf_src = hdr.bitcast[UInt8]() + 216
+            var vf_src = hdr.unsafe_bitcast[UInt8]().unsafe_offset(216)
             self.vector_field_len = saved_vf_len
             for i in range(saved_vf_len):
-                self.vector_field_name[i] = vf_src[i]
+                self.vector_field_name[i] = vf_src[unsafe_offset=i]
 
-        hdr.free()
+        hdr.unsafe_free()
 
         # Allocate / reset compact_buffer — v2: TRUE slot stride from the header
         # (v1 used `dim` here while pointers stepped by dim+8: tail corruption).
         if is_not_null(self.compact_buffer):
-            self.compact_buffer.free()
+            self.compact_buffer.unsafe_free()
         # gh #196.2: keep the 64B base alignment on the load path too, or a
         # warm restart silently re-introduces the line-straddling the padded
         # stride paid to remove.
-        self.compact_buffer = alloc[Int8](saved_num_nodes * saved_stride, alignment=64)
-        if not self._pion_read_all(fd, self.compact_buffer.bitcast[UInt8](), saved_num_nodes * saved_stride):
+        self.compact_buffer = unsafe_alloc[Int8](saved_num_nodes * saved_stride, alignment=64)
+        if not self._pion_read_all(fd, self.compact_buffer.unsafe_bitcast[UInt8](), saved_num_nodes * saved_stride):
             return False
 
         # node_map: v3 holds every element, v4 the ids up to the highest one
         # the index holds (the rest are -1, as a fresh graph has them)
         var map_ids = self.max_elements
         if version >= 4:
-            var map_count = alloc[UInt64](1)
-            if not self._pion_read_all(fd, map_count.bitcast[UInt8](), 8):
-                map_count.free(); return False
-            map_ids = Int(map_count[0])
-            map_count.free()
+            var map_count = unsafe_alloc[UInt64](1)
+            if not self._pion_read_all(fd, map_count.unsafe_bitcast[UInt8](), 8):
+                map_count.unsafe_free(); return False
+            map_ids = Int(map_count[unsafe_offset=0])
+            map_count.unsafe_free()
             if map_ids < 0 or map_ids > self.max_elements:
                 return False
-        if not self._pion_read_all(fd, self.node_map.bitcast[UInt8](), map_ids * 8):
+        if not self._pion_read_all(fd, self.node_map.unsafe_bitcast[UInt8](), map_ids * 8):
             return False
         for i in range(map_ids, self.max_elements):
-            self.node_map[i] = -1
+            self.node_map[unsafe_offset=i] = -1
 
         # l0_compact
         if is_not_null(self.l0_compact):
-            self.l0_compact.free()
-        self.l0_compact = alloc[UInt32](saved_num_nodes * 33)
-        if not self._pion_read_all(fd, self.l0_compact.bitcast[UInt8](), saved_num_nodes * 33 * 4):
+            self.l0_compact.unsafe_free()
+        self.l0_compact = unsafe_alloc[UInt32](saved_num_nodes * 33)
+        if not self._pion_read_all(fd, self.l0_compact.unsafe_bitcast[UInt8](), saved_num_nodes * 33 * 4):
             return False
 
         # neighbor_pool: v3 holds every element's block, v4 the index's nodes'
-        if not self._pion_read_all(fd, self.neighbor_pool.bitcast[UInt8](),
+        if not self._pion_read_all(fd, self.neighbor_pool.unsafe_bitcast[UInt8](),
                                    (self.max_elements if version < 4 else saved_num_nodes) * saved_pool_per * 4):
             return False
 
         # Node id+level
-        var id_buf = alloc[Int](saved_num_nodes * 2)
-        if not self._pion_read_all(fd, id_buf.bitcast[UInt8](), saved_num_nodes * 16):
-            id_buf.free(); return False
+        var id_buf = unsafe_alloc[Int](saved_num_nodes * 2)
+        if not self._pion_read_all(fd, id_buf.unsafe_bitcast[UInt8](), saved_num_nodes * 16):
+            id_buf.unsafe_free(); return False
 
         # v3: per-node compact slot — see _save_body. The vector pointer MUST
         # go through this indirection; assuming node i ↔ slot i (v1/v2) loads
         # a BFS-permuted labeling that silently returns wrong keys.
-        var slot_buf = alloc[UInt32](saved_num_nodes)
-        if not self._pion_read_all(fd, slot_buf.bitcast[UInt8](), saved_num_nodes * 4):
-            slot_buf.free(); id_buf.free(); return False
+        var slot_buf = unsafe_alloc[UInt32](saved_num_nodes)
+        if not self._pion_read_all(fd, slot_buf.unsafe_bitcast[UInt8](), saved_num_nodes * 4):
+            slot_buf.unsafe_free(); id_buf.unsafe_free(); return False
 
         # Reconstruct nodes[i].vector pointer into compact_buffer.
         # v2+: stride and in-slot header offset come from the file header —
@@ -1592,42 +1592,42 @@ struct HNSWGraph(Movable):
         var bpv_total = saved_stride
 
         for i in range(saved_num_nodes):
-            var node_id    = id_buf[i * 2]
-            var node_level = id_buf[i * 2 + 1]
-            var nb_block   = self.neighbor_pool + i * saved_pool_per
-            var vslot      = Int(slot_buf[i])
+            var node_id    = id_buf[unsafe_offset=i * 2]
+            var node_level = id_buf[unsafe_offset=i * 2 + 1]
+            var nb_block   = self.neighbor_pool.unsafe_offset(i * saved_pool_per)
+            var vslot      = Int(slot_buf[unsafe_offset=i])
             if vslot < 0 or vslot >= saved_num_nodes:
                 print("HNSW load: slot index out of range (node " + String(i) + " slot " + String(vslot) + ") — cold rebuild")
-                slot_buf.free(); id_buf.free(); return False
-            var vec_ptr    = self.compact_buffer + vslot * bpv_total + slot_hdr
+                slot_buf.unsafe_free(); id_buf.unsafe_free(); return False
+            var vec_ptr    = self.compact_buffer.unsafe_offset(vslot * bpv_total).unsafe_offset(slot_hdr)
             # gh #405: the per-level neighbor COUNTS live in this block (after
             # the 8*M list slots) and were just read from the file — and the
             # HNSWNode constructor zeroes them. Every warm load therefore ran
             # with empty neighbor lists at every level: level 0 still worked
             # (the beam reads l0_compact) but the upper layers were gone and
             # each search started at the entry point. Keep them.
-            var cnt_base = nb_block + 8 * self.M
+            var cnt_base = nb_block.unsafe_offset(8 * self.M)
             var saved_cnts = Array[UInt32, 8](fill=UInt32(0))
             var nl = node_level + 1 if node_level + 1 <= 7 else 7
-            for li in range(nl): saved_cnts[li] = cnt_base[li]
-            (self.nodes + i).unsafe_write(
+            for li in range(nl): saved_cnts[li] = cnt_base[unsafe_offset=li]
+            (self.nodes.unsafe_offset(i)).unsafe_write(
                 HNSWNode(node_id, vec_ptr, node_level, self.M, nb_block))
-            for li in range(nl): cnt_base[li] = saved_cnts[li]
-        id_buf.free()
-        slot_buf.free()
+            for li in range(nl): cnt_base[unsafe_offset=li] = saved_cnts[li]
+        id_buf.unsafe_free()
+        slot_buf.unsafe_free()
 
         # node_norms
         if is_not_null(self.node_norms):
-            self.node_norms.free()
-        self.node_norms = alloc[Float32](saved_num_nodes)
-        if not self._pion_read_all(fd, self.node_norms.bitcast[UInt8](), saved_num_nodes * 4):
+            self.node_norms.unsafe_free()
+        self.node_norms = unsafe_alloc[Float32](saved_num_nodes)
+        if not self._pion_read_all(fd, self.node_norms.unsafe_bitcast[UInt8](), saved_num_nodes * 4):
             return False
 
         # node_prefix_norms
         if is_not_null(self.node_prefix_norms):
-            self.node_prefix_norms.free()
-        self.node_prefix_norms = alloc[Float32](saved_num_nodes)
-        if not self._pion_read_all(fd, self.node_prefix_norms.bitcast[UInt8](), saved_num_nodes * 4):
+            self.node_prefix_norms.unsafe_free()
+        self.node_prefix_norms = unsafe_alloc[Float32](saved_num_nodes)
+        if not self._pion_read_all(fd, self.node_prefix_norms.unsafe_bitcast[UInt8](), saved_num_nodes * 4):
             return False
 
         # V34 prefix_buffer: not persisted; reconstruct from compact_buffer.
@@ -1638,11 +1638,11 @@ struct HNSWGraph(Movable):
         # Plain INT8 only: a quant slot holds block scales + packed codes, not
         # INT8 dims, and no quant search reads prefix_buffer.
         if not self.use_int4 and saved_dim >= 256 and saved_fmt == 0:
-            if is_not_null(self.prefix_buffer): self.prefix_buffer.free()
-            self.prefix_buffer = alloc[Int8](saved_num_nodes * 256)
+            if is_not_null(self.prefix_buffer): self.prefix_buffer.unsafe_free()
+            self.prefix_buffer = unsafe_alloc[Int8](saved_num_nodes * 256)
             for i in range(saved_num_nodes):
-                unsafe_memcpy(dest=self.prefix_buffer + i * 256,
-                       src=self.nodes[i].vector, count=256)
+                unsafe_memcpy(dest=self.prefix_buffer.unsafe_offset(i * 256),
+                       src=self.nodes[unsafe_offset=i].vector, count=256)
 
         # v3 section 1: per-group calibration — restore so query quantization
         # matches the persisted INT8 codes (global-scale fallback silently
@@ -1651,54 +1651,54 @@ struct HNSWGraph(Movable):
             if saved_groups != self.num_groups:
                 print("HNSW load: calibration group count mismatch (file=" + String(saved_groups) + " server=" + String(self.num_groups) + ") — cold rebuild")
                 return False
-            if not self._pion_read_all(fd, self.group_qmins.bitcast[UInt8](), saved_groups * 4):
+            if not self._pion_read_all(fd, self.group_qmins.unsafe_bitcast[UInt8](), saved_groups * 4):
                 return False
-            if not self._pion_read_all(fd, self.group_scales.bitcast[UInt8](), saved_groups * 4):
+            if not self._pion_read_all(fd, self.group_scales.unsafe_bitcast[UInt8](), saved_groups * 4):
                 return False
             self.grouped_calibrated = True
 
         # v3 section 2 (gh #211): slot→original-key map, scattered back into the
         # cross-worker resolver buffer by external id. Without this every
         # FT.SEARCH after a warm restart falls through to raw slot numbers.
-        var hk_section = alloc[UInt8](saved_num_nodes * 32)
+        var hk_section = unsafe_alloc[UInt8](saved_num_nodes * 32)
         if not self._pion_read_all(fd, hk_section, saved_num_nodes * 32):
-            hk_section.free(); return False
+            hk_section.unsafe_free(); return False
         if is_not_null(hk_keys):
             for i in range(saved_num_nodes):
-                var ext_id = self.nodes[i].id
-                var klen = Int(hk_section[i * 32])
+                var ext_id = self.nodes[unsafe_offset=i].id
+                var klen = Int(hk_section[unsafe_offset=i * 32])
                 if ext_id >= 0 and ext_id < hk_max and klen > 0 and klen <= 31:
-                    unsafe_memcpy(dest=hk_keys + ext_id * 32, src=hk_section + i * 32, count=32)
-        hk_section.free()
+                    unsafe_memcpy(dest=hk_keys.unsafe_offset(ext_id * 32), src=hk_section.unsafe_offset(i * 32), count=32)
+        hk_section.unsafe_free()
 
         # gh #350 quant sections. A file that carries a section this server
         # has no use for is still read (it has to be consumed either way).
         if saved_qsec & 1:
-            if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.free()
-            self.gpu_rerank_fp32 = alloc[Float32](saved_num_nodes * saved_dim)
-            if not self._pion_read_all(fd, self.gpu_rerank_fp32.bitcast[UInt8](),
+            if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.unsafe_free()
+            self.gpu_rerank_fp32 = unsafe_alloc[Float32](saved_num_nodes * saved_dim)
+            if not self._pion_read_all(fd, self.gpu_rerank_fp32.unsafe_bitcast[UInt8](),
                                        saved_num_nodes * saved_dim * 4):
                 return False
         if saved_qsec & 2:
-            if is_not_null(self.qjl_buffer): self.qjl_buffer.free()
-            self.qjl_buffer = alloc[UInt64](saved_num_nodes * QJL_U64S_1536)
-            if not self._pion_read_all(fd, self.qjl_buffer.bitcast[UInt8](),
+            if is_not_null(self.qjl_buffer): self.qjl_buffer.unsafe_free()
+            self.qjl_buffer = unsafe_alloc[UInt64](saved_num_nodes * QJL_U64S_1536)
+            if not self._pion_read_all(fd, self.qjl_buffer.unsafe_bitcast[UInt8](),
                                        saved_num_nodes * QJL_BYTES_1536):
                 return False
-            if is_not_null(self.qjl_res_norms): self.qjl_res_norms.free()
-            self.qjl_res_norms = alloc[Float32](saved_num_nodes)
-            if not self._pion_read_all(fd, self.qjl_res_norms.bitcast[UInt8](),
+            if is_not_null(self.qjl_res_norms): self.qjl_res_norms.unsafe_free()
+            self.qjl_res_norms = unsafe_alloc[Float32](saved_num_nodes)
+            if not self._pion_read_all(fd, self.qjl_res_norms.unsafe_bitcast[UInt8](),
                                        saved_num_nodes * 4):
                 return False
         unsafe_memset(self.prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
         self.prefix_count = 0
         if saved_qsec & 512:
-            var pc = alloc[UInt64](1)
-            if not self._pion_read_all(fd, pc.bitcast[UInt8](), 8):
-                pc.free()
+            var pc = unsafe_alloc[UInt64](1)
+            if not self._pion_read_all(fd, pc.unsafe_bitcast[UInt8](), 8):
+                pc.unsafe_free()
                 return False
-            var npre = Int(pc[0])
-            pc.free()
+            var npre = Int(pc[unsafe_offset=0])
+            pc.unsafe_free()
             if npre > PREFIX_MAX or not self._pion_read_all(fd, self.prefixes, npre * PREFIX_SLOT):
                 return False
             self.prefix_count = npre
@@ -1706,52 +1706,52 @@ struct HNSWGraph(Movable):
         self.schema_count = 0
         self.schema_known = False
         if saved_qsec & 1024:
-            var sc = alloc[UInt64](1)
-            if not self._pion_read_all(fd, sc.bitcast[UInt8](), 8):
-                sc.free()
+            var sc = unsafe_alloc[UInt64](1)
+            if not self._pion_read_all(fd, sc.unsafe_bitcast[UInt8](), 8):
+                sc.unsafe_free()
                 return False
-            var nsc = Int(sc[0])
-            sc.free()
+            var nsc = Int(sc[unsafe_offset=0])
+            sc.unsafe_free()
             if nsc < 0 or nsc > SCHEMA_MAX or (nsc > 0 and not self._pion_read_all(fd, self.schema_rec, nsc * SCHEMA_REC)):
                 return False
             for f in range(nsc):
-                if Int(self.schema_rec[f * SCHEMA_REC + 3]) > SCHEMA_NAME_MAX:
+                if Int(self.schema_rec[unsafe_offset=f * SCHEMA_REC + 3]) > SCHEMA_NAME_MAX:
                     return False
             self.schema_count = nsc
             self.schema_known = True
         # 1.0.6: the keys over 31 bytes (bit 11), into the shared map once the
         # whole section has read: a file cut short leaves no copy behind.
         if saved_qsec & 2048:
-            var lw = alloc[UInt64](2)
-            if not self._pion_read_all(fd, lw.bitcast[UInt8](), 8):
-                lw.free()
+            var lw = unsafe_alloc[UInt64](2)
+            if not self._pion_read_all(fd, lw.unsafe_bitcast[UInt8](), 8):
+                lw.unsafe_free()
                 return False
-            var nlong = Int(lw[0])
+            var nlong = Int(lw[unsafe_offset=0])
             var ids = List[Int]()
             var lens = List[Int]()
             var bufs = List[Int]()               # addresses, freed below
             var ok = nlong >= 0 and nlong <= saved_num_nodes
             for _li in range(nlong if ok else 0):
-                if not self._pion_read_all(fd, lw.bitcast[UInt8](), 16):
+                if not self._pion_read_all(fd, lw.unsafe_bitcast[UInt8](), 16):
                     ok = False
                     break
-                var kl = Int(lw[1])
+                var kl = Int(lw[unsafe_offset=1])
                 if kl <= HK_INLINE_MAX or kl > (1 << 30):
                     ok = False
                     break
-                var kb = alloc[UInt8](kl)
+                var kb = unsafe_alloc[UInt8](kl)
                 bufs.append(Int(kb))
-                ids.append(Int(lw[0]))
+                ids.append(Int(lw[unsafe_offset=0]))
                 lens.append(kl)
                 if not self._pion_read_all(fd, kb, kl):
                     ok = False
                     break
-            lw.free()
+            lw.unsafe_free()
             for t in range(len(bufs)):
-                var kb = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=bufs[t])
+                var kb = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=bufs[t])
                 if ok and is_not_null(hk_keys) and ids[t] >= 0 and ids[t] < hk_max:
                     hk_put(hk_keys, hk_max, ids[t], kb, lens[t])
-                kb.free()
+                kb.unsafe_free()
             if not ok:
                 return False
         # gh #350: the format word was CHECKED above but never applied, so a
@@ -1776,7 +1776,7 @@ struct HNSWGraph(Movable):
         self._register_metal_rerank_buffer()  # needs num_nodes; no-op without GPU/buffer
         return True
 
-    def add_vector(mut self, id: Int, vector: UnsafePointer[Float32, MutUntrackedOrigin]) raises:
+    def add_vector(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) raises:
         if self.streaming_mode:
             # Streaming mode: insert directly into graph — no FP32 staging buffer.
             # Saves max_elements × dim × 4 bytes (33.8GB at 5M×1536D).
@@ -1784,28 +1784,28 @@ struct HNSWGraph(Movable):
             # then insert all 1000 and switch to direct insert for the rest.
             if not self.streaming_calibrated:
                 if is_null(self.fp32_buffer):
-                    self.fp32_buffer = alloc[Float32](1000 * self.dim)
-                    self.fp32_ids = alloc[Int32](1000)
+                    self.fp32_buffer = unsafe_alloc[Float32](1000 * self.dim)
+                    self.fp32_ids = unsafe_alloc[Int32](1000)
                 for i in range(self.dim):
-                    self.fp32_buffer[self.fp32_count * self.dim + i] = vector[i]
+                    self.fp32_buffer[unsafe_offset=self.fp32_count * self.dim + i] = vector[unsafe_offset=i]
                 # gh #271: normalize BEFORE calibration, not after. Welford runs
                 # over this buffer to pick the quantizer range, so calibrating
                 # on raw magnitudes and then storing unit vectors would size the
                 # range for values that never get stored.
                 if self.distance_metric == 1:
-                    var _slot = self.fp32_buffer + self.fp32_count * self.dim
+                    var _slot = self.fp32_buffer.unsafe_offset(self.fp32_count * self.dim)
                     l2_normalize_fp32(_slot, _slot, self.dim)
-                self.fp32_ids[self.fp32_count] = Int32(id)
+                self.fp32_ids[unsafe_offset=self.fp32_count] = Int32(id)
                 self.fp32_count += 1
                 if self.fp32_count >= 1000:
                     var cal = self._calibrate(self.fp32_buffer, 1000)
                     print("Streaming calibration from first 1000 vectors: [" + String(cal[0]) + ", " + String(cal[1]) + "]")
                     # Insert all buffered vectors with calibrated range
                     for bi in range(1000):
-                        self._insert_to_graph(Int(self.fp32_ids[bi]), self.fp32_buffer + bi * self.dim)
-                    self.fp32_buffer.free()
+                        self._insert_to_graph(Int(self.fp32_ids[unsafe_offset=bi]), self.fp32_buffer.unsafe_offset(bi * self.dim))
+                    self.fp32_buffer.unsafe_free()
                     self.fp32_buffer = null_ptr[Float32, MutUntrackedOrigin]()
-                    self.fp32_ids.free()
+                    self.fp32_ids.unsafe_free()
                     self.fp32_ids = null_ptr[Int32, MutUntrackedOrigin]()
                     self.fp32_count = 0
                     self.streaming_calibrated = True
@@ -1818,21 +1818,21 @@ struct HNSWGraph(Movable):
             return
         # V2.2B: buffer FP32 for two-phase calibrated build (triggered by FT.OPTIMIZE)
         if is_null(self.fp32_buffer):
-            self.fp32_buffer = alloc[Float32](self.max_elements * self.dim)
-            self.fp32_ids = alloc[Int32](self.max_elements)
+            self.fp32_buffer = unsafe_alloc[Float32](self.max_elements * self.dim)
+            self.fp32_ids = unsafe_alloc[Int32](self.max_elements)
         if self.fp32_count >= self.max_elements:
             raise Error("FP32 buffer full")
         var offset = self.fp32_count * self.dim
         for i in range(self.dim):
-            self.fp32_buffer[offset + i] = vector[i]
+            self.fp32_buffer[unsafe_offset=offset + i] = vector[unsafe_offset=i]
         # gh #271: COSINE stores unit vectors; FT.OPTIMIZE calibrates and builds
         # straight out of this buffer, so normalizing here covers both.
         if self.distance_metric == 1:
-            l2_normalize_fp32(self.fp32_buffer + offset, self.fp32_buffer + offset, self.dim)
-        self.fp32_ids[self.fp32_count] = Int32(id)
+            l2_normalize_fp32(self.fp32_buffer.unsafe_offset(offset), self.fp32_buffer.unsafe_offset(offset), self.dim)
+        self.fp32_ids[unsafe_offset=self.fp32_count] = Int32(id)
         self.fp32_count += 1
 
-    def add_and_insert(mut self, id: Int, vector: UnsafePointer[Float32, MutUntrackedOrigin]) raises:
+    def add_and_insert(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) raises:
         """Immediate insert for SemanticCache — bypasses FP32 staging, rebuilds compact_buffer after each insert.
         compact_vectors() allocates a new buffer but does not free the old one — free it here to avoid leaks."""
         self._insert_to_graph(id, vector)
@@ -1847,10 +1847,10 @@ struct HNSWGraph(Movable):
         var old_compact = self.compact_buffer
         self.compact_vectors()   # repoints every node into a fresh buffer, sets self.compact_buffer
         if is_not_null(old_compact):
-            old_compact.free()
+            old_compact.unsafe_free()
         self.index_ready = True
 
-    def insert_no_compact(mut self, id: Int, vector: UnsafePointer[Float32, MutUntrackedOrigin]) raises:
+    def insert_no_compact(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) raises:
         """Insert a vector into the HNSW graph without compacting. Call finalize_compact() after batch inserts."""
         self._insert_to_graph(id, vector)
 
@@ -1862,21 +1862,21 @@ struct HNSWGraph(Movable):
         var old_compact = self.compact_buffer
         self.compact_vectors()
         if is_not_null(old_compact):
-            old_compact.free()
+            old_compact.unsafe_free()
         self.index_ready = True
 
-    def _insert_to_graph(mut self, id: Int, vector: UnsafePointer[Float32, MutUntrackedOrigin]) raises:
+    def _insert_to_graph(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) raises:
         var level = self._random_level()
         var q_vector = self.quantize(vector)
 
         var internal_id = self.num_nodes
         self.num_nodes += 1
-        var neighbor_block = self.neighbor_pool + (internal_id * self.neighbor_pool_per_node)
-        (self.nodes + internal_id).unsafe_write(HNSWNode(id, q_vector, level, self.M, neighbor_block))
+        var neighbor_block = self.neighbor_pool.unsafe_offset((internal_id * self.neighbor_pool_per_node))
+        (self.nodes.unsafe_offset(internal_id)).unsafe_write(HNSWNode(id, q_vector, level, self.M, neighbor_block))
 
         if self.entry_point_id == -1:
             if id >= 0 and id < self.max_elements:
-                self.node_map[id] = internal_id
+                self.node_map[unsafe_offset=id] = internal_id
             self.entry_point_id = internal_id
             self.max_level = level
             return
@@ -1885,24 +1885,24 @@ struct HNSWGraph(Movable):
         var search_entry_point = self.entry_point_id
         for l in range(self.max_level, level, -1):
             var changed = True
-            var best_dist = self._dist_fp32_int8(vector, self.nodes[search_entry_point].vector)
+            var best_dist = self._dist_fp32_int8(vector, self.nodes[unsafe_offset=search_entry_point].vector)
             while changed:
                 changed = False
-                var neighbor_count = self.nodes[search_entry_point].get_neighbor_count(l)
+                var neighbor_count = self.nodes[unsafe_offset=search_entry_point].get_neighbor_count(l)
                 for i in range(neighbor_count):
-                    var neighbor_idx = self.nodes[search_entry_point].get_neighbor(l, i) # 3.1: internal index
+                    var neighbor_idx = self.nodes[unsafe_offset=search_entry_point].get_neighbor(l, i) # 3.1: internal index
                     if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                     if self.is_deleted(neighbor_idx): continue
 
                     # Software Prefetching
                     if i + 1 < neighbor_count:
-                        var next_idx = self.nodes[search_entry_point].get_neighbor(l, i + 1)
+                        var next_idx = self.nodes[unsafe_offset=search_entry_point].get_neighbor(l, i + 1)
                         if next_idx >= 0 and next_idx < self.num_nodes:
-                            prefetch((self.nodes + next_idx).bitcast[Int8]())
-                            var nvptr2 = self.nodes[next_idx].vector
-                            prefetch(nvptr2); prefetch(nvptr2 + 64); prefetch(nvptr2 + 128); prefetch(nvptr2 + 192)
-                            prefetch(self.nodes[next_idx].neighbors.bitcast[Int8]())
-                    var d = self._dist_fp32_int8(vector, self.nodes[neighbor_idx].vector)
+                            prefetch((self.nodes.unsafe_offset(next_idx)).unsafe_bitcast[Int8]())
+                            var nvptr2 = self.nodes[unsafe_offset=next_idx].vector
+                            prefetch(nvptr2); prefetch(nvptr2.unsafe_offset(64)); prefetch(nvptr2.unsafe_offset(128)); prefetch(nvptr2.unsafe_offset(192))
+                            prefetch(self.nodes[unsafe_offset=next_idx].neighbors.unsafe_bitcast[Int8]())
+                    var d = self._dist_fp32_int8(vector, self.nodes[unsafe_offset=neighbor_idx].vector)
                     if d < best_dist:
                         best_dist = d
                         search_entry_point = neighbor_idx
@@ -1924,13 +1924,13 @@ struct HNSWGraph(Movable):
                 var pruned = self._prune_neighbors(q_vector, all_neighbors, m_limit)
                 for i in range(len(pruned)):
                     var neighbor_idx = pruned[i] # 3.1: internal index
-                    var neighbor_node_ptr = self.nodes + neighbor_idx
+                    var neighbor_node_ptr = self.nodes.unsafe_offset(neighbor_idx)
                     var cap = 2 * self.M if l == 0 else self.M
-                    if Int(neighbor_node_ptr[].neighbor_counts[l]) < cap:
+                    if Int(neighbor_node_ptr[].neighbor_counts[unsafe_offset=l]) < cap:
                         neighbor_node_ptr[].add_neighbor(l, internal_id) # Store internal index
                     else:
                         # Shrink (O(M)): replace the farthest existing neighbor if new candidate is closer
-                        var nc = Int(neighbor_node_ptr[].neighbor_counts[l])
+                        var nc = Int(neighbor_node_ptr[].neighbor_counts[unsafe_offset=l])
                         var worst_dist = Float32(-1.0)
                         var off = neighbor_node_ptr[]._get_offset(l)
                         var worst_pos = self._farthest_batched(neighbor_node_ptr[].vector, neighbor_node_ptr,
@@ -1939,31 +1939,31 @@ struct HNSWGraph(Movable):
                             worst_pos = 0
                             worst_dist = Float32(-1.0)
                             for ni in range(nc):
-                                var ex_nidx = Int(neighbor_node_ptr[].neighbors[off + ni]) # 3.1: internal index
+                                var ex_nidx = Int(neighbor_node_ptr[].neighbors[unsafe_offset=off + ni]) # 3.1: internal index
                                 if ex_nidx == -1:
                                     worst_pos = ni; worst_dist = Float32(1e30); break
-                                var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[ex_nidx].vector)
+                                var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[unsafe_offset=ex_nidx].vector)
                                 if worst_dist < 0 or d > worst_dist:
                                     worst_dist = d; worst_pos = ni
-                        var d_new = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[internal_id].vector)
+                        var d_new = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[unsafe_offset=internal_id].vector)
                         if d_new < worst_dist:
                             # A1b: Capture evicted node before overwrite, remove stale backlink
-                            var evicted_idx = Int(neighbor_node_ptr[].neighbors[off + worst_pos])
-                            neighbor_node_ptr[].neighbors[off + worst_pos] = UInt32(internal_id)
+                            var evicted_idx = Int(neighbor_node_ptr[].neighbors[unsafe_offset=off + worst_pos])
+                            neighbor_node_ptr[].neighbors[unsafe_offset=off + worst_pos] = UInt32(internal_id)
                             # Remove evicted node's forward link to this neighbor (enforce bidirectionality)
                             if evicted_idx >= 0 and evicted_idx < self.num_nodes:
-                                var evicted_ptr = self.nodes + evicted_idx
+                                var evicted_ptr = self.nodes.unsafe_offset(evicted_idx)
                                 var evicted_off = evicted_ptr[]._get_offset(l)
-                                var evicted_nc = Int(evicted_ptr[].neighbor_counts[l])
+                                var evicted_nc = Int(evicted_ptr[].neighbor_counts[unsafe_offset=l])
                                 for ei in range(evicted_nc):
-                                    if Int(evicted_ptr[].neighbors[evicted_off + ei]) == neighbor_idx:
-                                        evicted_ptr[].neighbors[evicted_off + ei] = evicted_ptr[].neighbors[evicted_off + evicted_nc - 1]
-                                        evicted_ptr[].neighbor_counts[l] = UInt32(evicted_nc - 1)
+                                    if Int(evicted_ptr[].neighbors[unsafe_offset=evicted_off + ei]) == neighbor_idx:
+                                        evicted_ptr[].neighbors[unsafe_offset=evicted_off + ei] = evicted_ptr[].neighbors[unsafe_offset=evicted_off + evicted_nc - 1]
+                                        evicted_ptr[].neighbor_counts[unsafe_offset=l] = UInt32(evicted_nc - 1)
                                         break
-                    self.nodes[internal_id].add_neighbor(l, neighbor_idx)
+                    self.nodes[unsafe_offset=internal_id].add_neighbor(l, neighbor_idx)
 
         if id >= 0 and id < self.max_elements:
-            self.node_map[id] = internal_id
+            self.node_map[unsafe_offset=id] = internal_id
 
         if level > self.max_level:
             self.max_level = level
@@ -1986,7 +1986,7 @@ struct HNSWGraph(Movable):
 
     @always_inline
     def _node_lock(self, idx: Int):
-        var lp = self.node_locks + idx
+        var lp = self.node_locks.unsafe_offset(idx)
         while True:
             var expected: UInt32 = 0
             if Atomic[Scalar[DType.uint32]].compare_exchange(lp, expected, UInt32(1)):
@@ -1994,26 +1994,26 @@ struct HNSWGraph(Movable):
 
     @always_inline
     def _node_unlock(self, idx: Int):
-        Atomic[Scalar[DType.uint32]].store[ordering=Ordering.RELEASE](self.node_locks + idx, UInt32(0))
+        Atomic[Scalar[DType.uint32]].store[ordering=Ordering.RELEASE](self.node_locks.unsafe_offset(idx), UInt32(0))
 
     @always_inline
-    def _add_neighbor_published(self, node_ptr: UnsafePointer[HNSWNode, MutUntrackedOrigin], level: Int, neighbor_idx: Int):
+    def _add_neighbor_published(self, node_ptr: Pointer[HNSWNode, MutUntrackedOrigin], level: Int, neighbor_idx: Int):
         """add_neighbor with a release-published count. Caller holds the node's
         lock. Payload store first, then the count store with RELEASE so a
         concurrent acquire-load reader never sees an unwritten slot."""
         if level <= node_ptr[].max_level:
-            var count = node_ptr[].neighbor_counts[level]
+            var count = node_ptr[].neighbor_counts[unsafe_offset=level]
             var capacity = 2 * self.M if level == 0 else self.M
             if count < UInt32(capacity):
                 var offset = node_ptr[]._get_offset(level)
-                node_ptr[].neighbors[offset + Int(count)] = UInt32(neighbor_idx)
+                node_ptr[].neighbors[unsafe_offset=offset + Int(count)] = UInt32(neighbor_idx)
                 Atomic[Scalar[DType.uint32]].store[ordering=Ordering.RELEASE](
-                    node_ptr[].neighbor_counts + level, count + 1)
+                    node_ptr[].neighbor_counts.unsafe_offset(level), count + 1)
 
-    def _search_layer_mt(mut self, query: UnsafePointer[Int8, MutUntrackedOrigin],
+    def _search_layer_mt(mut self, query: Pointer[Int8, MutUntrackedOrigin],
                          entry_point_idx: Int, ef: Int, level: Int,
                          mut cand: MinHeap, mut res: MaxHeap,
-                         visited: UnsafePointer[UInt16, MutUntrackedOrigin],
+                         visited: Pointer[UInt16, MutUntrackedOrigin],
                          epoch: UInt16) raises:
         """_search_layer with caller-owned scratch and acquire-loaded neighbor
         counts (safe against concurrent lane publishes)."""
@@ -2021,10 +2021,10 @@ struct HNSWGraph(Movable):
         res.clear()
         cand.reserve(ef + 32)
         res.reserve(ef + 32)
-        var dist = self._dist_int8_int8(query, self.nodes[entry_point_idx].vector)
+        var dist = self._dist_int8_int8(query, self.nodes[unsafe_offset=entry_point_idx].vector)
         cand.push(HeapNode(dist, entry_point_idx))
         res.push(HeapNode(dist, entry_point_idx))
-        visited[entry_point_idx] = epoch
+        visited[unsafe_offset=entry_point_idx] = epoch
         if self._int8_batchable():
             self._search_layer_mt_batched(query, ef, level, cand, res, visited, epoch)
             return
@@ -2032,25 +2032,25 @@ struct HNSWGraph(Movable):
             var c = cand.pop()
             if c.distance > res.peek_distance() and len(res.data) >= ef:
                 break
-            var node_ptr = self.nodes + c.id
+            var node_ptr = self.nodes.unsafe_offset(c.id)
             if level > node_ptr[].max_level:
                 continue
             var neighbor_count = Int(Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](
-                node_ptr[].neighbor_counts + level))
+                node_ptr[].neighbor_counts.unsafe_offset(level)))
             var off = node_ptr[]._get_offset(level)
             for i in range(neighbor_count):
-                var neighbor_idx = Int(node_ptr[].neighbors[off + i])
+                var neighbor_idx = Int(node_ptr[].neighbors[unsafe_offset=off + i])
                 if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                 if self.is_deleted(neighbor_idx): continue
-                if visited[neighbor_idx] == epoch: continue
-                visited[neighbor_idx] = epoch
-                var d = self._dist_int8_int8(query, self.nodes[neighbor_idx].vector)
+                if visited[unsafe_offset=neighbor_idx] == epoch: continue
+                visited[unsafe_offset=neighbor_idx] = epoch
+                var d = self._dist_int8_int8(query, self.nodes[unsafe_offset=neighbor_idx].vector)
                 if res.push_bounded(d, neighbor_idx, ef):
                     cand.push(HeapNode(d, neighbor_idx))
 
-    def _search_layer_mt_batched(mut self, query: UnsafePointer[Int8, MutUntrackedOrigin],
+    def _search_layer_mt_batched(mut self, query: Pointer[Int8, MutUntrackedOrigin],
                                  ef: Int, level: Int, mut cand: MinHeap, mut res: MaxHeap,
-                                 visited: UnsafePointer[UInt16, MutUntrackedOrigin],
+                                 visited: Pointer[UInt16, MutUntrackedOrigin],
                                  epoch: UInt16):
         """gh #399: `_search_layer_mt` with each node's unvisited neighbors
         scored eight at a time; same push order, same graph."""
@@ -2059,26 +2059,26 @@ struct HNSWGraph(Movable):
             var c = cand.pop()
             if c.distance > res.peek_distance() and len(res.data) >= ef:
                 break
-            var node_ptr = self.nodes + c.id
+            var node_ptr = self.nodes.unsafe_offset(c.id)
             if level > node_ptr[].max_level:
                 continue
             var neighbor_count = Int(Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](
-                node_ptr[].neighbor_counts + level))
+                node_ptr[].neighbor_counts.unsafe_offset(level)))
             var off = node_ptr[]._get_offset(level)
             var np = 0
             for i in range(neighbor_count):
-                var neighbor_idx = Int(node_ptr[].neighbors[off + i])
+                var neighbor_idx = Int(node_ptr[].neighbors[unsafe_offset=off + i])
                 if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                 if self.is_deleted(neighbor_idx): continue
-                if visited[neighbor_idx] == epoch: continue
-                visited[neighbor_idx] = epoch
-                if is_null(self.nodes[neighbor_idx].vector):
+                if visited[unsafe_offset=neighbor_idx] == epoch: continue
+                visited[unsafe_offset=neighbor_idx] = epoch
+                if is_null(self.nodes[unsafe_offset=neighbor_idx].vector):
                     for j in range(np):
-                        var dj = self._dist_int8_int8(query, self.nodes[pend[j]].vector)
+                        var dj = self._dist_int8_int8(query, self.nodes[unsafe_offset=pend[j]].vector)
                         if res.push_bounded(dj, pend[j], ef):
                             cand.push(HeapNode(dj, pend[j]))
                     np = 0
-                    var dn = self._dist_int8_int8(query, self.nodes[neighbor_idx].vector)
+                    var dn = self._dist_int8_int8(query, self.nodes[unsafe_offset=neighbor_idx].vector)
                     if res.push_bounded(dn, neighbor_idx, ef):
                         cand.push(HeapNode(dn, neighbor_idx))
                     continue
@@ -2091,46 +2091,46 @@ struct HNSWGraph(Movable):
                             cand.push(HeapNode(d8[j], pend[j]))
                     np = 0
             for j in range(np):
-                var dj = self._code_dist(query, self.nodes[pend[j]].vector)
+                var dj = self._code_dist(query, self.nodes[unsafe_offset=pend[j]].vector)
                 if res.push_bounded(dj, pend[j], ef):
                     cand.push(HeapNode(dj, pend[j]))
 
     def _insert_to_graph_mt(mut self, internal_id: Int, level: Int,
-                            vector: UnsafePointer[Float32, MutUntrackedOrigin],
+                            vector: Pointer[Float32, MutUntrackedOrigin],
                             mut cand: MinHeap, mut res: MaxHeap,
-                            visited: UnsafePointer[UInt16, MutUntrackedOrigin],
-                            epoch_cell: UnsafePointer[UInt16, MutUntrackedOrigin]) raises:
+                            visited: Pointer[UInt16, MutUntrackedOrigin],
+                            epoch_cell: Pointer[UInt16, MutUntrackedOrigin]) raises:
         """Link phase of _insert_to_graph under the gh #199 locking rules.
         The node itself exists already (pre-pass)."""
-        var q_vector = self.nodes[internal_id].vector
+        var q_vector = self.nodes[unsafe_offset=internal_id].vector
         var search_entry_point = self.entry_point_id
         for l in range(self.max_level, level, -1):
             var changed = True
-            var best_dist = self._dist_fp32_int8(vector, self.nodes[search_entry_point].vector)
+            var best_dist = self._dist_fp32_int8(vector, self.nodes[unsafe_offset=search_entry_point].vector)
             while changed:
                 changed = False
-                var ep_ptr = self.nodes + search_entry_point
+                var ep_ptr = self.nodes.unsafe_offset(search_entry_point)
                 if l > ep_ptr[].max_level:
                     break
                 var neighbor_count = Int(Atomic[Scalar[DType.uint32]].load[ordering=Ordering.ACQUIRE](
-                    ep_ptr[].neighbor_counts + l))
+                    ep_ptr[].neighbor_counts.unsafe_offset(l)))
                 var ep_off = ep_ptr[]._get_offset(l)
                 for i in range(neighbor_count):
-                    var neighbor_idx = Int(ep_ptr[].neighbors[ep_off + i])
+                    var neighbor_idx = Int(ep_ptr[].neighbors[unsafe_offset=ep_off + i])
                     if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                     if self.is_deleted(neighbor_idx): continue
-                    var d = self._dist_fp32_int8(vector, self.nodes[neighbor_idx].vector)
+                    var d = self._dist_fp32_int8(vector, self.nodes[unsafe_offset=neighbor_idx].vector)
                     if d < best_dist:
                         best_dist = d
                         search_entry_point = neighbor_idx
                         changed = True
         for l in range(min(level, self.max_level), -1, -1):
-            epoch_cell[0] += 1
-            if epoch_cell[0] == 0:
-                unsafe_memset(visited.bitcast[UInt8](), 0, self.max_elements * 2)
-                epoch_cell[0] = 1
+            epoch_cell[unsafe_offset=0] += 1
+            if epoch_cell[unsafe_offset=0] == 0:
+                unsafe_memset(visited.unsafe_bitcast[UInt8](), 0, self.max_elements * 2)
+                epoch_cell[unsafe_offset=0] = 1
             self._search_layer_mt(q_vector, search_entry_point, self.ef_construction, l,
-                                  cand, res, visited, epoch_cell[0])
+                                  cand, res, visited, epoch_cell[unsafe_offset=0])
             if len(res.data) > 0:
                 var all_neighbors = List[HeapNode]()
                 while len(res.data) > 0:
@@ -2140,12 +2140,12 @@ struct HNSWGraph(Movable):
                 var pruned = self._prune_neighbors(q_vector, all_neighbors, m_limit)
                 for i in range(len(pruned)):
                     var neighbor_idx = pruned[i]
-                    var neighbor_node_ptr = self.nodes + neighbor_idx
+                    var neighbor_node_ptr = self.nodes.unsafe_offset(neighbor_idx)
                     var cap = 2 * self.M if l == 0 else self.M
                     # ── backlink into the neighbor, under its lock ──
                     var evicted_idx = -1
                     self._node_lock(neighbor_idx)
-                    var nc = Int(neighbor_node_ptr[].neighbor_counts[l])
+                    var nc = Int(neighbor_node_ptr[].neighbor_counts[unsafe_offset=l])
                     if nc < cap:
                         self._add_neighbor_published(neighbor_node_ptr, l, internal_id)
                     else:
@@ -2157,30 +2157,30 @@ struct HNSWGraph(Movable):
                             worst_pos = 0
                             worst_dist = Float32(-1.0)
                             for ni in range(nc):
-                                var ex_nidx = Int(neighbor_node_ptr[].neighbors[off + ni])
+                                var ex_nidx = Int(neighbor_node_ptr[].neighbors[unsafe_offset=off + ni])
                                 if ex_nidx < 0 or ex_nidx >= self.num_nodes:
                                     worst_pos = ni; worst_dist = Float32(1e30); break
-                                var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[ex_nidx].vector)
+                                var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[unsafe_offset=ex_nidx].vector)
                                 if worst_dist < 0 or d > worst_dist:
                                     worst_dist = d; worst_pos = ni
-                        var d_new = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[internal_id].vector)
+                        var d_new = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[unsafe_offset=internal_id].vector)
                         if d_new < worst_dist:
-                            evicted_idx = Int(neighbor_node_ptr[].neighbors[off + worst_pos])
-                            neighbor_node_ptr[].neighbors[off + worst_pos] = UInt32(internal_id)
+                            evicted_idx = Int(neighbor_node_ptr[].neighbors[unsafe_offset=off + worst_pos])
+                            neighbor_node_ptr[].neighbors[unsafe_offset=off + worst_pos] = UInt32(internal_id)
                     self._node_unlock(neighbor_idx)
                     # ── evicted node's stale backlink: separate lock, never
                     # nested (deadlock-freedom by single-lock discipline) ──
                     if evicted_idx >= 0 and evicted_idx < self.num_nodes:
                         self._node_lock(evicted_idx)
-                        var evicted_ptr = self.nodes + evicted_idx
+                        var evicted_ptr = self.nodes.unsafe_offset(evicted_idx)
                         if l <= evicted_ptr[].max_level:
                             var evicted_off = evicted_ptr[]._get_offset(l)
-                            var evicted_nc = Int(evicted_ptr[].neighbor_counts[l])
+                            var evicted_nc = Int(evicted_ptr[].neighbor_counts[unsafe_offset=l])
                             for ei in range(evicted_nc):
-                                if Int(evicted_ptr[].neighbors[evicted_off + ei]) == neighbor_idx:
-                                    evicted_ptr[].neighbors[evicted_off + ei] = evicted_ptr[].neighbors[evicted_off + evicted_nc - 1]
+                                if Int(evicted_ptr[].neighbors[unsafe_offset=evicted_off + ei]) == neighbor_idx:
+                                    evicted_ptr[].neighbors[unsafe_offset=evicted_off + ei] = evicted_ptr[].neighbors[unsafe_offset=evicted_off + evicted_nc - 1]
                                     Atomic[Scalar[DType.uint32]].store[ordering=Ordering.RELEASE](
-                                        evicted_ptr[].neighbor_counts + l, UInt32(evicted_nc - 1))
+                                        evicted_ptr[].neighbor_counts.unsafe_offset(l), UInt32(evicted_nc - 1))
                                     break
                         self._node_unlock(evicted_idx)
                     # ── own list, under our lock (other lanes backlink into us).
@@ -2209,8 +2209,8 @@ struct HNSWGraph(Movable):
                     # instead costs ~0.5pp (0.962) — the backlink shrink's
                     # removal is part of how the serial build gets its recall.
                     self._node_lock(internal_id)
-                    var own_ptr = self.nodes + internal_id
-                    var onc = Int(own_ptr[].neighbor_counts[l])
+                    var own_ptr = self.nodes.unsafe_offset(internal_id)
+                    var onc = Int(own_ptr[].neighbor_counts[unsafe_offset=l])
                     if onc < cap:
                         self._add_neighbor_published(own_ptr, l, neighbor_idx)
                     else:
@@ -2218,15 +2218,15 @@ struct HNSWGraph(Movable):
                         var o_worst_pos = 0
                         var o_off = own_ptr[]._get_offset(l)
                         for oi in range(onc):
-                            var o_nidx = Int(own_ptr[].neighbors[o_off + oi])
+                            var o_nidx = Int(own_ptr[].neighbors[unsafe_offset=o_off + oi])
                             if o_nidx < 0 or o_nidx >= self.num_nodes:
                                 o_worst_pos = oi; o_worst_dist = Float32(1e30); break
-                            var od = self._dist_int8_int8(own_ptr[].vector, self.nodes[o_nidx].vector)
+                            var od = self._dist_int8_int8(own_ptr[].vector, self.nodes[unsafe_offset=o_nidx].vector)
                             if o_worst_dist < 0 or od > o_worst_dist:
                                 o_worst_dist = od; o_worst_pos = oi
-                        var o_d_new = self._dist_int8_int8(own_ptr[].vector, self.nodes[neighbor_idx].vector)
+                        var o_d_new = self._dist_int8_int8(own_ptr[].vector, self.nodes[unsafe_offset=neighbor_idx].vector)
                         if o_d_new < o_worst_dist:
-                            own_ptr[].neighbors[o_off + o_worst_pos] = UInt32(neighbor_idx)
+                            own_ptr[].neighbors[unsafe_offset=o_off + o_worst_pos] = UInt32(neighbor_idx)
                         else:
                             _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](
                                 self.link_drops, UInt64(1))
@@ -2239,7 +2239,7 @@ struct HNSWGraph(Movable):
         semantics from _insert_to_graph."""
         if self.entry_point_id < 0 or self.num_nodes <= 1:
             return
-        var q = self.nodes[internal_id].vector
+        var q = self.nodes[unsafe_offset=internal_id].vector
         self._search_layer(q, self.entry_point_id, self.ef_construction, 0)
         if len(self.results.data) == 0:
             return
@@ -2248,7 +2248,7 @@ struct HNSWGraph(Movable):
             all_neighbors.append(self.results.pop())
         var m_limit = 2 * self.M
         var pruned = self._prune_neighbors(q, all_neighbors, m_limit)
-        var own_ptr = self.nodes + internal_id
+        var own_ptr = self.nodes.unsafe_offset(internal_id)
         var own_off = own_ptr[]._get_offset(0)
         for i in range(len(pruned)):
             var neighbor_idx = pruned[i]
@@ -2256,9 +2256,9 @@ struct HNSWGraph(Movable):
                 continue
             # Skip picks we already link to (backlinks from the MT phase).
             var already = False
-            var onc = Int(own_ptr[].neighbor_counts[0])
+            var onc = Int(own_ptr[].neighbor_counts[unsafe_offset=0])
             for oi in range(onc):
-                if Int(own_ptr[].neighbors[own_off + oi]) == neighbor_idx:
+                if Int(own_ptr[].neighbors[unsafe_offset=own_off + oi]) == neighbor_idx:
                     already = True
                     break
             if already:
@@ -2268,12 +2268,12 @@ struct HNSWGraph(Movable):
             own_ptr[].add_neighbor(0, neighbor_idx)
             # Backlink with the serial full-list shrink (mirror of
             # _insert_to_graph's A1b block, level 0 only).
-            var neighbor_node_ptr = self.nodes + neighbor_idx
-            var nc = Int(neighbor_node_ptr[].neighbor_counts[0])
+            var neighbor_node_ptr = self.nodes.unsafe_offset(neighbor_idx)
+            var nc = Int(neighbor_node_ptr[].neighbor_counts[unsafe_offset=0])
             var off = neighbor_node_ptr[]._get_offset(0)
             var has_back = False
             for bi in range(nc):
-                if Int(neighbor_node_ptr[].neighbors[off + bi]) == internal_id:
+                if Int(neighbor_node_ptr[].neighbors[unsafe_offset=off + bi]) == internal_id:
                     has_back = True
                     break
             if has_back:
@@ -2284,43 +2284,43 @@ struct HNSWGraph(Movable):
                 var worst_dist = Float32(-1.0)
                 var worst_pos = 0
                 for ni in range(nc):
-                    var ex_nidx = Int(neighbor_node_ptr[].neighbors[off + ni])
+                    var ex_nidx = Int(neighbor_node_ptr[].neighbors[unsafe_offset=off + ni])
                     if ex_nidx < 0 or ex_nidx >= self.num_nodes:
                         worst_pos = ni; worst_dist = Float32(1e30); break
-                    var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[ex_nidx].vector)
+                    var d = self._dist_int8_int8(neighbor_node_ptr[].vector, self.nodes[unsafe_offset=ex_nidx].vector)
                     if worst_dist < 0 or d > worst_dist:
                         worst_dist = d; worst_pos = ni
                 var d_new = self._dist_int8_int8(neighbor_node_ptr[].vector, own_ptr[].vector)
                 if d_new < worst_dist:
-                    var evicted_idx = Int(neighbor_node_ptr[].neighbors[off + worst_pos])
-                    neighbor_node_ptr[].neighbors[off + worst_pos] = UInt32(internal_id)
+                    var evicted_idx = Int(neighbor_node_ptr[].neighbors[unsafe_offset=off + worst_pos])
+                    neighbor_node_ptr[].neighbors[unsafe_offset=off + worst_pos] = UInt32(internal_id)
                     if evicted_idx >= 0 and evicted_idx < self.num_nodes:
-                        var evicted_ptr = self.nodes + evicted_idx
+                        var evicted_ptr = self.nodes.unsafe_offset(evicted_idx)
                         var evicted_off = evicted_ptr[]._get_offset(0)
-                        var evicted_nc = Int(evicted_ptr[].neighbor_counts[0])
+                        var evicted_nc = Int(evicted_ptr[].neighbor_counts[unsafe_offset=0])
                         for ei in range(evicted_nc):
-                            if Int(evicted_ptr[].neighbors[evicted_off + ei]) == neighbor_idx:
-                                evicted_ptr[].neighbors[evicted_off + ei] = evicted_ptr[].neighbors[evicted_off + evicted_nc - 1]
-                                evicted_ptr[].neighbor_counts[0] = UInt32(evicted_nc - 1)
+                            if Int(evicted_ptr[].neighbors[unsafe_offset=evicted_off + ei]) == neighbor_idx:
+                                evicted_ptr[].neighbors[unsafe_offset=evicted_off + ei] = evicted_ptr[].neighbors[unsafe_offset=evicted_off + evicted_nc - 1]
+                                evicted_ptr[].neighbor_counts[unsafe_offset=0] = UInt32(evicted_nc - 1)
                                 break
 
-    def _mark_reachable_l0(self, start: Int, reach: UnsafePointer[UInt8, MutUntrackedOrigin],
+    def _mark_reachable_l0(self, start: Int, reach: Pointer[UInt8, MutUntrackedOrigin],
                            mut queue: List[Int]):
         """BFS over level-0 lists from `start`, setting reach[] for every node
         it gets to (already-marked nodes are not re-expanded)."""
-        if reach[start] != 0: return
-        reach[start] = 1
+        if reach[unsafe_offset=start] != 0: return
+        reach[unsafe_offset=start] = 1
         queue.clear()
         queue.append(start)
         var head = 0
         while head < len(queue):
             var x = queue[head]; head += 1
-            var c = self.nodes[x].get_neighbor_count(0)
+            var c = self.nodes[unsafe_offset=x].get_neighbor_count(0)
             for k in range(c):
-                var nb = self.nodes[x].get_neighbor(0, k)
-                if nb < 0 or nb >= self.num_nodes or reach[nb] != 0: continue
+                var nb = self.nodes[unsafe_offset=x].get_neighbor(0, k)
+                if nb < 0 or nb >= self.num_nodes or reach[unsafe_offset=nb] != 0: continue
                 if self.is_deleted(nb): continue
-                reach[nb] = 1
+                reach[unsafe_offset=nb] = 1
                 queue.append(nb)
 
     def _repair_l0(mut self) raises:
@@ -2380,34 +2380,34 @@ struct HNSWGraph(Movable):
         of nodes re-linked."""
         var n = self.num_nodes
         if n <= 1 or self.entry_point_id < 0: return 0
-        var back = alloc[UInt8](n)
+        var back = unsafe_alloc[UInt8](n)
         unsafe_memset(back, 0, n)
-        back[self.entry_point_id] = 1
+        back[unsafe_offset=self.entry_point_id] = 1
         var changed = True
         while changed:
             changed = False
             for d in range(2):
                 for j in range(n):
                     var i = j if d == 0 else n - 1 - j
-                    if back[i] != 0 or self.is_deleted(i): continue
-                    var c = self.nodes[i].get_neighbor_count(0)
+                    if back[unsafe_offset=i] != 0 or self.is_deleted(i): continue
+                    var c = self.nodes[unsafe_offset=i].get_neighbor_count(0)
                     for k in range(c):
-                        var nb = self.nodes[i].get_neighbor(0, k)
-                        if nb >= 0 and nb < n and back[nb] != 0 and not self.is_deleted(nb):
-                            back[i] = 1
+                        var nb = self.nodes[unsafe_offset=i].get_neighbor(0, k)
+                        if nb >= 0 and nb < n and back[unsafe_offset=nb] != 0 and not self.is_deleted(nb):
+                            back[unsafe_offset=i] = 1
                             changed = True
                             break
         var closed = List[Int]()
         for i in range(n):
-            if back[i] == 0 and not self.is_deleted(i):
+            if back[unsafe_offset=i] == 0 and not self.is_deleted(i):
                 closed.append(i)
-        back.free()
+        back.unsafe_free()
         var relinked = 0
         var gave_up = 0
         for v in closed:
-            self.nodes[v].neighbor_counts[0] = UInt32(0)
+            self.nodes[unsafe_offset=v].neighbor_counts[unsafe_offset=0] = UInt32(0)
             self._relink_node_l0(v)
-            if self.nodes[v].get_neighbor_count(0) == 0:
+            if self.nodes[unsafe_offset=v].get_neighbor_count(0) == 0:
                 gave_up += 1   # nothing to link to; the next round sees it again
             else:
                 relinked += 1
@@ -2440,24 +2440,24 @@ struct HNSWGraph(Movable):
         var n = self.num_nodes
         if n <= 1 or self.entry_point_id < 0: return 0
         var cap = 2 * self.M
-        var reach = alloc[UInt8](n)
-        var indeg = alloc[Int32](n)
+        var reach = unsafe_alloc[UInt8](n)
+        var indeg = unsafe_alloc[Int32](n)
         var queue = List[Int]()
         var linked_total = 0
         for _pass in range(3):
             unsafe_memset(reach, 0, n)
-            unsafe_memset(indeg.bitcast[UInt8](), 0, n * 4)
+            unsafe_memset(indeg.unsafe_bitcast[UInt8](), 0, n * 4)
             for i in range(n):
                 if self.is_deleted(i): continue
-                var c = self.nodes[i].get_neighbor_count(0)
+                var c = self.nodes[unsafe_offset=i].get_neighbor_count(0)
                 for k in range(c):
-                    var nb = self.nodes[i].get_neighbor(0, k)
-                    if nb >= 0 and nb < n: indeg[nb] += 1
+                    var nb = self.nodes[unsafe_offset=i].get_neighbor(0, k)
+                    if nb >= 0 and nb < n: indeg[unsafe_offset=nb] += 1
             self._mark_reachable_l0(self.entry_point_id, reach, queue)
             var linked_pass = 0
             for u in range(n):
-                if reach[u] != 0 or self.is_deleted(u): continue
-                self._search_layer(self.nodes[u].vector, self.entry_point_id, self.ef_construction, 0)
+                if reach[unsafe_offset=u] != 0 or self.is_deleted(u): continue
+                self._search_layer(self.nodes[unsafe_offset=u].vector, self.entry_point_id, self.ef_construction, 0)
                 var found = List[HeapNode]()
                 while len(self.results.data) > 0:
                     found.append(self.results.pop())   # farthest first
@@ -2466,8 +2466,8 @@ struct HNSWGraph(Movable):
                 var fi = len(found) - 1
                 while fi >= 0:
                     var r = found[fi].id
-                    if r != u and reach[r] != 0 and Int(self.nodes[r].neighbor_counts[0]) < cap:
-                        self.nodes[r].add_neighbor(0, u)
+                    if r != u and reach[unsafe_offset=r] != 0 and Int(self.nodes[unsafe_offset=r].neighbor_counts[unsafe_offset=0]) < cap:
+                        self.nodes[unsafe_offset=r].add_neighbor(0, u)
                         r_pick = r
                         break
                     fi -= 1
@@ -2477,44 +2477,44 @@ struct HNSWGraph(Movable):
                 while r_pick < 0 and fi >= 0:
                     var r = found[fi].id
                     fi -= 1
-                    if r == u or reach[r] == 0: continue
-                    var r_ptr = self.nodes + r
+                    if r == u or reach[unsafe_offset=r] == 0: continue
+                    var r_ptr = self.nodes.unsafe_offset(r)
                     var off = r_ptr[]._get_offset(0)
-                    var nc = Int(r_ptr[].neighbor_counts[0])
+                    var nc = Int(r_ptr[].neighbor_counts[unsafe_offset=0])
                     var worst_pos = -1
                     var worst_d = Float32(-1.0)
                     for ni in range(nc):
-                        var w = Int(r_ptr[].neighbors[off + ni])
+                        var w = Int(r_ptr[].neighbors[unsafe_offset=off + ni])
                         if w < 0 or w >= n: continue
-                        var d = self._dist_int8_int8(r_ptr[].vector, self.nodes[w].vector)
+                        var d = self._dist_int8_int8(r_ptr[].vector, self.nodes[unsafe_offset=w].vector)
                         if d > worst_d:
                             worst_d = d; worst_pos = ni
                     if worst_pos < 0: continue
-                    var w_idx = Int(r_ptr[].neighbors[off + worst_pos])
-                    if indeg[w_idx] < 2: continue
-                    r_ptr[].neighbors[off + worst_pos] = UInt32(u)
-                    indeg[w_idx] -= 1
+                    var w_idx = Int(r_ptr[].neighbors[unsafe_offset=off + worst_pos])
+                    if indeg[unsafe_offset=w_idx] < 2: continue
+                    r_ptr[].neighbors[unsafe_offset=off + worst_pos] = UInt32(u)
+                    indeg[unsafe_offset=w_idx] -= 1
                     r_pick = r
                 if r_pick < 0: continue
-                indeg[u] += 1
-                if Int(self.nodes[u].neighbor_counts[0]) < cap:
+                indeg[unsafe_offset=u] += 1
+                if Int(self.nodes[unsafe_offset=u].neighbor_counts[unsafe_offset=0]) < cap:
                     var has = False
-                    var uoff = self.nodes[u]._get_offset(0)
-                    for k in range(Int(self.nodes[u].neighbor_counts[0])):
-                        if Int(self.nodes[u].neighbors[uoff + k]) == r_pick:
+                    var uoff = self.nodes[unsafe_offset=u]._get_offset(0)
+                    for k in range(Int(self.nodes[unsafe_offset=u].neighbor_counts[unsafe_offset=0])):
+                        if Int(self.nodes[unsafe_offset=u].neighbors[unsafe_offset=uoff + k]) == r_pick:
                             has = True; break
                     if not has:
-                        self.nodes[u].add_neighbor(0, r_pick)
-                        indeg[r_pick] += 1
+                        self.nodes[unsafe_offset=u].add_neighbor(0, r_pick)
+                        indeg[unsafe_offset=r_pick] += 1
                 linked_pass += 1
                 self._mark_reachable_l0(u, reach, queue)
             linked_total += linked_pass
             if linked_pass == 0: break
-        reach.free()
-        indeg.free()
+        reach.unsafe_free()
+        indeg.unsafe_free()
         return linked_total
 
-    def build_index_from_shared(mut self, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], shard_id: Int = -1, num_shards: Int = 1,
+    def build_index_from_shared(mut self, shared: Pointer[SharedHNSWView, MutUntrackedOrigin], shard_id: Int = -1, num_shards: Int = 1,
                                 snapshot: Int = -1) raises:
         """V3.1: build graph from the shared ingest buffer (any worker can call this after distributed HSET).
         V8.1 path: build graph in 1536-dim INT8, BFS-compact, search with INT8-INT8 batch-8.
@@ -2532,7 +2532,7 @@ struct HNSWGraph(Movable):
         self.cur_num = 1
         # gh #118: epoch-stamped visited set needs no reset here (monotonic counter).
         for i in range(self.max_elements):
-            self.node_map[i] = -1
+            self.node_map[unsafe_offset=i] = -1
         self.vector_allocator.reset()
 
         var n = Int(Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared[].ingest_count, UInt64(0)))
@@ -2574,13 +2574,13 @@ struct HNSWGraph(Movable):
             if lvl > bp_max_lvl:
                 bp_max_lvl = lvl
                 bp_max_idx = buf_idx
-            var q = self.quantize(shared[].ingest_fp32 + buf_idx * self.dim)
-            var nb = self.neighbor_pool + buf_idx * self.neighbor_pool_per_node
-            (self.nodes + buf_idx).unsafe_write(
-                HNSWNode(Int(shared[].ingest_ids[buf_idx]), q, lvl, self.M, nb))
-            var vid = Int(shared[].ingest_ids[buf_idx])
+            var q = self.quantize(shared[].ingest_fp32.unsafe_offset(buf_idx * self.dim))
+            var nb = self.neighbor_pool.unsafe_offset(buf_idx * self.neighbor_pool_per_node)
+            (self.nodes.unsafe_offset(buf_idx)).unsafe_write(
+                HNSWNode(Int(shared[].ingest_ids[unsafe_offset=buf_idx]), q, lvl, self.M, nb))
+            var vid = Int(shared[].ingest_ids[unsafe_offset=buf_idx])
             if vid >= 0 and vid < self.max_elements:
-                self.node_map[vid] = buf_idx
+                self.node_map[unsafe_offset=vid] = buf_idx
         self.num_nodes = n
         self.entry_point_id = bp_max_idx
         self.max_level = bp_max_lvl
@@ -2591,13 +2591,13 @@ struct HNSWGraph(Movable):
             # unchanged (0.960 / 0.960, Mac, 50K); the repair passes below
             # absorb the extra contended drops.
             var n_threads = Int(external_call["pion_build_lanes", Int64]()) if n >= 4096 else 1
-            self.link_drops[0] = 0  # gh #212: per-build accounting
-            var bctx = alloc[Int64](5)
-            bctx[0] = Int64(Int(UnsafePointer(to=self)))
-            bctx[1] = Int64(Int(shared[].ingest_fp32))
-            bctx[2] = Int64(n)
-            bctx[3] = Int64(bp_max_idx)
-            bctx[4] = Int64(n_threads)
+            self.link_drops[unsafe_offset=0] = 0  # gh #212: per-build accounting
+            var bctx = unsafe_alloc[Int64](5)
+            bctx[unsafe_offset=0] = Int64(Int(Pointer(to=self)))
+            bctx[unsafe_offset=1] = Int64(Int(shared[].ingest_fp32))
+            bctx[unsafe_offset=2] = Int64(n)
+            bctx[unsafe_offset=3] = Int64(bp_max_idx)
+            bctx[unsafe_offset=4] = Int64(n_threads)
             var bp_sym = String("pion_gh199_build_lane") + "\0"
             var bp_rc = external_call["pion_build_pool_run_sym", Int32](
                 bp_sym.unsafe_ptr(), bctx, Int64(n_threads))
@@ -2605,7 +2605,7 @@ struct HNSWGraph(Movable):
                 # -1: some lanes ran serially on the caller (still complete);
                 # -2: dlsym miss — build produced an UNLINKED graph, fail loud.
                 print("[HNSW] parallel build rc=", bp_rc)
-            bctx.free()
+            bctx.unsafe_free()
             # gh #212: post-join repair — single-threaded and deterministic
             # (pthread_join above orders every lane's stores). Nodes that left
             # the concurrent link phase with a degenerate level-0 list are
@@ -2616,10 +2616,10 @@ struct HNSWGraph(Movable):
             var _repaired = 0
             if n_threads > 1:
                 for ni in range(n):
-                    if Int(self.nodes[ni].neighbor_counts[0]) < self.M // 2:
+                    if Int(self.nodes[unsafe_offset=ni].neighbor_counts[unsafe_offset=0]) < self.M // 2:
                         self._relink_node_l0(ni)
                         _repaired += 1
-            var _drops = self.link_drops[0]  # plain read — lanes joined
+            var _drops = self.link_drops[unsafe_offset=0]  # plain read — lanes joined
             if _drops > 0 or _repaired > 0:
                 print("[HNSW] parallel link: " + String(_drops)
                       + " contended link drops, " + String(_repaired)
@@ -2653,10 +2653,10 @@ struct HNSWGraph(Movable):
             if not self.streaming_calibrated and self.fp32_count > 0 and is_not_null(self.fp32_buffer):
                 _ = self._calibrate(self.fp32_buffer, self.fp32_count)
                 for bi in range(self.fp32_count):
-                    self._insert_to_graph(Int(self.fp32_ids[bi]), self.fp32_buffer + bi * self.dim)
-                self.fp32_buffer.free()
+                    self._insert_to_graph(Int(self.fp32_ids[unsafe_offset=bi]), self.fp32_buffer.unsafe_offset(bi * self.dim))
+                self.fp32_buffer.unsafe_free()
                 self.fp32_buffer = null_ptr[Float32, MutUntrackedOrigin]()
-                self.fp32_ids.free()
+                self.fp32_ids.unsafe_free()
                 self.fp32_ids = null_ptr[Int32, MutUntrackedOrigin]()
                 self.fp32_count = 0
                 self.streaming_calibrated = True
@@ -2683,8 +2683,8 @@ struct HNSWGraph(Movable):
 
         # Build graph from all buffered FP32 vectors
         for buf_idx in range(n):
-            var id = Int(self.fp32_ids[buf_idx])
-            var fp32_ptr = self.fp32_buffer + buf_idx * self.dim
+            var id = Int(self.fp32_ids[unsafe_offset=buf_idx])
+            var fp32_ptr = self.fp32_buffer.unsafe_offset(buf_idx * self.dim)
             self._insert_to_graph(id, fp32_ptr)
         self._repair_l0()   # gh #405 + every node can get back out
         # V2.3: compaction (fp32_count kept alive so compact_vectors can build rerank buffer)
@@ -2717,9 +2717,9 @@ struct HNSWGraph(Movable):
     @always_inline
     def _try_gpu_rerank(
         mut self,
-        query: UnsafePointer[Float32, MutUntrackedOrigin],
-        ids_i32: UnsafePointer[Int32, MutUntrackedOrigin],
-        out_dists: UnsafePointer[Float32, MutUntrackedOrigin],
+        query: Pointer[Float32, MutUntrackedOrigin],
+        ids_i32: Pointer[Int32, MutUntrackedOrigin],
+        out_dists: Pointer[Float32, MutUntrackedOrigin],
         k: Int,
         worker_id: Int = 0,
     ) -> Bool:
@@ -2748,23 +2748,23 @@ struct HNSWGraph(Movable):
         formats. 0xFFFFFFFF marks entries with no compact slot (deleted or
         pointer outside the compact buffer) — the beam gather falls back to the
         nodes[] dereference for those. Build-time only; never on the query path."""
-        if is_not_null(self.l0_slots): self.l0_slots.free()
-        self.l0_slots = alloc[UInt32](self.num_nodes * 33)
+        if is_not_null(self.l0_slots): self.l0_slots.unsafe_free()
+        self.l0_slots = unsafe_alloc[UInt32](self.num_nodes * 33)
         var base = Int(self.compact_buffer) + self.compact_hdr
         var span = self.num_nodes * self.compact_stride
         for ni in range(self.num_nodes):
-            var cnt = Int(self.l0_compact[ni * 33])
-            self.l0_slots[ni * 33] = UInt32(cnt)
+            var cnt = Int(self.l0_compact[unsafe_offset=ni * 33])
+            self.l0_slots[unsafe_offset=ni * 33] = UInt32(cnt)
             for k in range(cnt):
-                var nid = Int(self.l0_compact[ni * 33 + 1 + k])
+                var nid = Int(self.l0_compact[unsafe_offset=ni * 33 + 1 + k])
                 var slot_v = UInt32(0xFFFFFFFF)
                 if nid >= 0 and nid < self.num_nodes and self.compact_stride > 0:
-                    var vp = self.nodes[nid].vector
+                    var vp = self.nodes[unsafe_offset=nid].vector
                     if is_not_null(vp):
                         var off = Int(vp) - base
                         if off >= 0 and off < span:
                             slot_v = UInt32(off // self.compact_stride)
-                self.l0_slots[ni * 33 + 1 + k] = slot_v
+                self.l0_slots[unsafe_offset=ni * 33 + 1 + k] = slot_v
 
     def compact_vectors(mut self):
         # V2.3: Reorder vectors into a single contiguous buffer in BFS order.
@@ -2802,111 +2802,111 @@ struct HNSWGraph(Movable):
         # Addressing is compact_stride-driven everywhere (K1 slots, save/load
         # header words 20-21), so pre-pad files keep loading with their own stride.
         var bpv_total = (bpv + hdr + 63) // 64 * 64
-        var new_buf = alloc[Int8](self.num_nodes * bpv_total, alignment=64)
+        var new_buf = unsafe_alloc[Int8](self.num_nodes * bpv_total, alignment=64)
         # Zero the pad bytes: they are written to the index file on save (whole
         # stride rows) — keep them deterministic instead of heap garbage.
         unsafe_memset(new_buf, 0, self.num_nodes * bpv_total)
         # §7: GPU slot→external ID mapping (parallel to compact_buffer slots)
-        if is_not_null(self.gpu_slot_ext_ids): self.gpu_slot_ext_ids.free()
-        self.gpu_slot_ext_ids = alloc[Int32](self.num_nodes)
+        if is_not_null(self.gpu_slot_ext_ids): self.gpu_slot_ext_ids.unsafe_free()
+        self.gpu_slot_ext_ids = unsafe_alloc[Int32](self.num_nodes)
 
         # §7v2: Build FP32 re-rank buffer in BFS order for GPU oversample re-ranking.
         # Maps compact_buffer slot i → FP32 vector at gpu_rerank_fp32[i * dim .. (i+1)*dim-1].
         var build_fp32_rerank = self.has_gpu and is_not_null(self.fp32_buffer) and self.fp32_count > 0
         var eid_to_fp32 = null_ptr[Int32, MutUntrackedOrigin]()
         if build_fp32_rerank:
-            if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.free()
-            self.gpu_rerank_fp32 = alloc[Float32](self.num_nodes * self.dim)
-            eid_to_fp32 = alloc[Int32](self.max_elements)
-            for i in range(self.max_elements): eid_to_fp32[i] = Int32(-1)
+            if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.unsafe_free()
+            self.gpu_rerank_fp32 = unsafe_alloc[Float32](self.num_nodes * self.dim)
+            eid_to_fp32 = unsafe_alloc[Int32](self.max_elements)
+            for i in range(self.max_elements): eid_to_fp32[unsafe_offset=i] = Int32(-1)
             for i in range(self.fp32_count):
-                var eid = Int(self.fp32_ids[i])
+                var eid = Int(self.fp32_ids[unsafe_offset=i])
                 if eid >= 0 and eid < self.max_elements:
-                    eid_to_fp32[eid] = Int32(i)
+                    eid_to_fp32[unsafe_offset=eid] = Int32(i)
 
         var queue = List[Int]()
         self._reset_visited()
 
         queue.append(self.entry_point_id)
-        self.visited_epoch[self.entry_point_id] = self.cur_epoch
+        self.visited_epoch[unsafe_offset=self.entry_point_id] = self.cur_epoch
         var head = 0
         var slot = 0
 
         while head < len(queue) and slot < self.num_nodes:
             var idx = queue[head]; head += 1
-            var slot_start = new_buf + slot * bpv_total
-            var src = self.nodes[idx].vector
+            var slot_start = new_buf.unsafe_offset(slot * bpv_total)
+            var src = self.nodes[unsafe_offset=idx].vector
             # 2.5: Write norms into 8-byte header, then copy vector
             if not self.use_int4:
                 var norm_sq: Float32 = 0.0
                 var prefix_norm_sq: Float32 = 0.0
                 for j in range(self.dim):
-                    var vj = Int(src[j])
+                    var vj = Int(src[unsafe_offset=j])
                     var vj2 = Float32(vj * vj)
                     norm_sq += vj2
                     if j < 256: prefix_norm_sq += vj2
-                slot_start.bitcast[Float32]()[0] = norm_sq
-                slot_start.bitcast[Float32]()[1] = prefix_norm_sq
-            unsafe_memcpy(dest=slot_start + hdr, src=src, count=bpv)
+                slot_start.unsafe_bitcast[Float32]()[unsafe_offset=0] = norm_sq
+                slot_start.unsafe_bitcast[Float32]()[unsafe_offset=1] = prefix_norm_sq
+            unsafe_memcpy(dest=slot_start.unsafe_offset(hdr), src=src, count=bpv)
             # V24: Populate inline dimensions for zero-latency early pruning
             for i in range(16):
-                self.nodes[idx].inline_vector[i] = src[i]
-            self.nodes[idx].vector = slot_start + hdr
-            self.gpu_slot_ext_ids[slot] = Int32(self.nodes[idx].id)
+                self.nodes[unsafe_offset=idx].inline_vector[i] = src[unsafe_offset=i]
+            self.nodes[unsafe_offset=idx].vector = slot_start.unsafe_offset(hdr)
+            self.gpu_slot_ext_ids[unsafe_offset=slot] = Int32(self.nodes[unsafe_offset=idx].id)
             # §7v2: Copy FP32 vector to BFS-ordered rerank buffer
             if build_fp32_rerank:
-                var eid = self.nodes[idx].id
+                var eid = self.nodes[unsafe_offset=idx].id
                 if eid >= 0 and eid < self.max_elements:
-                    var fp32_idx = Int(eid_to_fp32[eid])
+                    var fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
                     if fp32_idx >= 0:
-                        unsafe_memcpy(dest=(self.gpu_rerank_fp32 + slot * self.dim).bitcast[UInt8](),
-                               src=(self.fp32_buffer + fp32_idx * self.dim).bitcast[UInt8](),
+                        unsafe_memcpy(dest=(self.gpu_rerank_fp32.unsafe_offset(slot * self.dim)).unsafe_bitcast[UInt8](),
+                               src=(self.fp32_buffer.unsafe_offset(fp32_idx * self.dim)).unsafe_bitcast[UInt8](),
                                count=self.dim * 4)
             slot += 1
-            for l in range(self.nodes[idx].max_level + 1):
-                var nc = self.nodes[idx].get_neighbor_count(l)
+            for l in range(self.nodes[unsafe_offset=idx].max_level + 1):
+                var nc = self.nodes[unsafe_offset=idx].get_neighbor_count(l)
                 for i in range(nc):
                     # Neighbors store INTERNAL indices — use directly, not via node_map.
                     # node_map maps EXTERNAL→INTERNAL; passing internal IDs through it
                     # corrupted vector pointers for sharded builds (internal != external).
-                    var nid = self.nodes[idx].get_neighbor(l, i)
+                    var nid = self.nodes[unsafe_offset=idx].get_neighbor(l, i)
                     if nid < 0 or nid >= self.num_nodes: continue
                     if self.is_deleted(nid): continue
-                    if (self.visited_epoch[nid] == self.cur_epoch): continue
-                    self.visited_epoch[nid] = self.cur_epoch
+                    if (self.visited_epoch[unsafe_offset=nid] == self.cur_epoch): continue
+                    self.visited_epoch[unsafe_offset=nid] = self.cur_epoch
                     queue.append(nid)
 
         # Safety: handle any nodes not reached by BFS (disconnected components)
         for i in range(self.num_nodes):
             if self.is_deleted(i): continue
-            if (self.visited_epoch[i] != self.cur_epoch) and slot < self.num_nodes:
-                var src = self.nodes[i].vector
-                var slot_start = new_buf + slot * bpv_total
+            if (self.visited_epoch[unsafe_offset=i] != self.cur_epoch) and slot < self.num_nodes:
+                var src = self.nodes[unsafe_offset=i].vector
+                var slot_start = new_buf.unsafe_offset(slot * bpv_total)
                 if not self.use_int4:
                     var norm_sq: Float32 = 0.0
                     var prefix_norm_sq: Float32 = 0.0
                     for j in range(self.dim):
-                        var vj = Int(src[j])
+                        var vj = Int(src[unsafe_offset=j])
                         var vj2 = Float32(vj * vj)
                         norm_sq += vj2
                         if j < 256: prefix_norm_sq += vj2
-                    slot_start.bitcast[Float32]()[0] = norm_sq
-                    slot_start.bitcast[Float32]()[1] = prefix_norm_sq
-                unsafe_memcpy(dest=slot_start + hdr, src=src, count=bpv)
-                self.nodes[i].vector = slot_start + hdr
-                self.gpu_slot_ext_ids[slot] = Int32(self.nodes[i].id)
+                    slot_start.unsafe_bitcast[Float32]()[unsafe_offset=0] = norm_sq
+                    slot_start.unsafe_bitcast[Float32]()[unsafe_offset=1] = prefix_norm_sq
+                unsafe_memcpy(dest=slot_start.unsafe_offset(hdr), src=src, count=bpv)
+                self.nodes[unsafe_offset=i].vector = slot_start.unsafe_offset(hdr)
+                self.gpu_slot_ext_ids[unsafe_offset=slot] = Int32(self.nodes[unsafe_offset=i].id)
                 # §7v2: Copy FP32 for disconnected node
                 if build_fp32_rerank:
-                    var eid = self.nodes[i].id
+                    var eid = self.nodes[unsafe_offset=i].id
                     if eid >= 0 and eid < self.max_elements:
-                        var fp32_idx = Int(eid_to_fp32[eid])
+                        var fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
                         if fp32_idx >= 0:
-                            unsafe_memcpy(dest=(self.gpu_rerank_fp32 + slot * self.dim).bitcast[UInt8](),
-                                   src=(self.fp32_buffer + fp32_idx * self.dim).bitcast[UInt8](),
+                            unsafe_memcpy(dest=(self.gpu_rerank_fp32.unsafe_offset(slot * self.dim)).unsafe_bitcast[UInt8](),
+                                   src=(self.fp32_buffer.unsafe_offset(fp32_idx * self.dim)).unsafe_bitcast[UInt8](),
                                    count=self.dim * 4)
                 slot += 1
 
-        if is_not_null(eid_to_fp32): eid_to_fp32.free()
+        if is_not_null(eid_to_fp32): eid_to_fp32.unsafe_free()
         if build_fp32_rerank:
             print("[GPU] Built FP32 re-rank buffer: " + String(self.num_nodes) + " vectors (" + String(self.num_nodes * self.dim * 4 // 1048576) + " MB)")
 
@@ -2917,45 +2917,45 @@ struct HNSWGraph(Movable):
         # (e.g. via stale upper-level links or l0_compact entries).
         for di in range(self.num_nodes):
             if self.is_deleted(di):
-                self.nodes[di].vector = null_ptr[Int8, MutUntrackedOrigin]()
+                self.nodes[unsafe_offset=di].vector = null_ptr[Int8, MutUntrackedOrigin]()
         # Reclaim slab allocator memory — all vectors now live in compact_buffer
         self.vector_allocator.reset()
         self.compact_buffer = new_buf
         self.compact_is_int4 = self.use_int4
-        if is_not_null(self.node_norms): self.node_norms.free()
+        if is_not_null(self.node_norms): self.node_norms.unsafe_free()
         self.node_norms = null_ptr[Float32, MutUntrackedOrigin]()
-        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.free()
+        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.unsafe_free()
         self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
         # V33: build l0_compact — 33 UInt32/node = count + up to 32 level-0 neighbor IDs
         # 6.6MB total vs 61MB neighbor_pool; hot nodes fit in SLC → fewer DRAM misses per beam step
-        if is_not_null(self.l0_compact): self.l0_compact.free()
-        self.l0_compact = alloc[UInt32](self.num_nodes * 33)
+        if is_not_null(self.l0_compact): self.l0_compact.unsafe_free()
+        self.l0_compact = unsafe_alloc[UInt32](self.num_nodes * 33)
         for ni in range(self.num_nodes):
             if self.is_deleted(ni):
-                self.l0_compact[ni * 33] = UInt32(0)
+                self.l0_compact[unsafe_offset=ni * 33] = UInt32(0)
                 continue
-            var count = self.nodes[ni].get_neighbor_count(0)
+            var count = self.nodes[unsafe_offset=ni].get_neighbor_count(0)
             # A1b: Filter out deleted neighbors from l0_compact
             var actual_count = 0
             for i in range(count):
-                var nid = self.nodes[ni].get_neighbor(0, i)
+                var nid = self.nodes[unsafe_offset=ni].get_neighbor(0, i)
                 if nid >= 0 and nid < self.num_nodes and not self.is_deleted(nid):
-                    self.l0_compact[ni * 33 + 1 + actual_count] = UInt32(nid)
+                    self.l0_compact[unsafe_offset=ni * 33 + 1 + actual_count] = UInt32(nid)
                     actual_count += 1
-            self.l0_compact[ni * 33] = UInt32(actual_count)
+            self.l0_compact[unsafe_offset=ni * 33] = UInt32(actual_count)
         # V34: build prefix_buffer — 256-byte prefix of each node, indexed by nidx.
         # 12.8MB vs 77MB compact_buffer → much higher SLC hit rate in prune phase.
-        if is_not_null(self.prefix_buffer): self.prefix_buffer.free()
-        self.prefix_buffer = alloc[Int8](self.num_nodes * 256)
+        if is_not_null(self.prefix_buffer): self.prefix_buffer.unsafe_free()
+        self.prefix_buffer = unsafe_alloc[Int8](self.num_nodes * 256)
         # A vector shorter than 256 bytes (dim < 256: ATTEND's 128-d graphs)
         # copies what it has and zero-fills; copying 256 read past the end of
         # compact_buffer on the last slot.
         var pre = min(bpv, 256)
         for nidx in range(self.num_nodes):
             if self.is_deleted(nidx) or pre < 256:
-                unsafe_memset(self.prefix_buffer + nidx * 256, 0, 256)
+                unsafe_memset(self.prefix_buffer.unsafe_offset(nidx * 256), 0, 256)
                 if self.is_deleted(nidx): continue
-            unsafe_memcpy(dest=self.prefix_buffer + nidx * 256, src=self.nodes[nidx].vector, count=pre)
+            unsafe_memcpy(dest=self.prefix_buffer.unsafe_offset(nidx * 256), src=self.nodes[unsafe_offset=nidx].vector, count=pre)
         # K1: slot-space adjacency mirror for arithmetic vector addressing.
         self.compact_stride = bpv_total
         self.compact_hdr = hdr
@@ -2973,7 +2973,7 @@ struct HNSWGraph(Movable):
                         print("[GPU] Registered " + String(self.num_nodes) + " vectors with Metal")
             # §7v2: Register with native Mojo GPU context (zero ObjC overhead path)
             try:
-                self.gpu_ctx.register_vectors(self.compact_buffer.bitcast[Int8](), self.num_nodes,
+                self.gpu_ctx.register_vectors(self.compact_buffer.unsafe_bitcast[Int8](), self.num_nodes,
                                               self.compact_stride)
                 print("[GPU] Native Mojo GPU context registered " + String(self.num_nodes) + " vectors")
             except:
@@ -2989,115 +2989,115 @@ struct HNSWGraph(Movable):
         Layout: [FP32 norm (4B)] [FP16 scale (2B) + INT4 packed (16B)] × 48 = 868B/vector.
         50K × 868B = 43.4 MB (vs 77MB INT8 = −44%). No prefix/suffix split — uniform block loop."""
         # Build eid → fp32_buffer index mapping
-        var eid_to_fp32 = alloc[Int32](self.max_elements)
-        for i in range(self.max_elements): eid_to_fp32[i] = Int32(-1)
+        var eid_to_fp32 = unsafe_alloc[Int32](self.max_elements)
+        for i in range(self.max_elements): eid_to_fp32[unsafe_offset=i] = Int32(-1)
         for i in range(self.fp32_count):
-            var eid = Int(self.fp32_ids[i])
+            var eid = Int(self.fp32_ids[unsafe_offset=i])
             if eid >= 0 and eid < self.max_elements:
-                eid_to_fp32[eid] = Int32(i)
+                eid_to_fp32[unsafe_offset=eid] = Int32(i)
 
         # Allocate block-INT4 compact buffer
         var bpv = VEC_BYTES_1536  # 868 bytes per vector
-        var new_buf = alloc[Int8](self.num_nodes * bpv)
-        if is_not_null(self.gpu_slot_ext_ids): self.gpu_slot_ext_ids.free()
-        self.gpu_slot_ext_ids = alloc[Int32](self.num_nodes)
+        var new_buf = unsafe_alloc[Int8](self.num_nodes * bpv)
+        if is_not_null(self.gpu_slot_ext_ids): self.gpu_slot_ext_ids.unsafe_free()
+        self.gpu_slot_ext_ids = unsafe_alloc[Int32](self.num_nodes)
 
         # BFS traverse — quantize each node's FP32 → block INT4
         var queue = List[Int]()
         self._reset_visited()
         queue.append(self.entry_point_id)
-        self.visited_epoch[self.entry_point_id] = self.cur_epoch
+        self.visited_epoch[unsafe_offset=self.entry_point_id] = self.cur_epoch
         var head_ = 0
         var slot = 0
 
         while head_ < len(queue) and slot < self.num_nodes:
             var idx = queue[head_]; head_ += 1
-            var eid = self.nodes[idx].id
-            var slot_start = new_buf + slot * bpv
+            var eid = self.nodes[unsafe_offset=idx].id
+            var slot_start = new_buf.unsafe_offset(slot * bpv)
 
             var fp32_idx = Int(-1)
             if eid >= 0 and eid < self.max_elements:
-                fp32_idx = Int(eid_to_fp32[eid])
+                fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
 
             if fp32_idx >= 0:
                 quantize_fp32_to_block_int4(
-                    self.fp32_buffer + fp32_idx * self.dim, slot_start, self.dim)
+                    self.fp32_buffer.unsafe_offset(fp32_idx * self.dim), slot_start, self.dim)
             else:
                 unsafe_memset(slot_start, 0, bpv)
 
-            self.nodes[idx].vector = slot_start
-            self.gpu_slot_ext_ids[slot] = Int32(eid)
+            self.nodes[unsafe_offset=idx].vector = slot_start
+            self.gpu_slot_ext_ids[unsafe_offset=slot] = Int32(eid)
             slot += 1
-            for l in range(self.nodes[idx].max_level + 1):
-                var nc = self.nodes[idx].get_neighbor_count(l)
+            for l in range(self.nodes[unsafe_offset=idx].max_level + 1):
+                var nc = self.nodes[unsafe_offset=idx].get_neighbor_count(l)
                 for i in range(nc):
                     # Neighbors store INTERNAL indices — use directly, not via node_map.
                     # node_map maps EXTERNAL→INTERNAL; passing internal IDs through it
                     # corrupted vector pointers for sharded builds (internal != external).
-                    var nid = self.nodes[idx].get_neighbor(l, i)
+                    var nid = self.nodes[unsafe_offset=idx].get_neighbor(l, i)
                     if nid < 0 or nid >= self.num_nodes: continue
                     if self.is_deleted(nid): continue
-                    if (self.visited_epoch[nid] == self.cur_epoch): continue
-                    self.visited_epoch[nid] = self.cur_epoch
+                    if (self.visited_epoch[unsafe_offset=nid] == self.cur_epoch): continue
+                    self.visited_epoch[unsafe_offset=nid] = self.cur_epoch
                     queue.append(nid)
 
         # Handle disconnected nodes
         for i in range(self.num_nodes):
-            if (self.visited_epoch[i] != self.cur_epoch) and slot < self.num_nodes:
-                var eid = self.nodes[i].id
-                var slot_start = new_buf + slot * bpv
+            if (self.visited_epoch[unsafe_offset=i] != self.cur_epoch) and slot < self.num_nodes:
+                var eid = self.nodes[unsafe_offset=i].id
+                var slot_start = new_buf.unsafe_offset(slot * bpv)
                 var fp32_idx = Int(-1)
                 if eid >= 0 and eid < self.max_elements:
-                    fp32_idx = Int(eid_to_fp32[eid])
+                    fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
                 if fp32_idx >= 0:
                     quantize_fp32_to_block_int4(
-                        self.fp32_buffer + fp32_idx * self.dim, slot_start, self.dim)
+                        self.fp32_buffer.unsafe_offset(fp32_idx * self.dim), slot_start, self.dim)
                 else:
                     unsafe_memset(slot_start, 0, bpv)
-                self.nodes[i].vector = slot_start
-                self.gpu_slot_ext_ids[slot] = Int32(eid)
+                self.nodes[unsafe_offset=i].vector = slot_start
+                self.gpu_slot_ext_ids[unsafe_offset=slot] = Int32(eid)
                 slot += 1
 
         # Build FP32 re-rank buffer (BFS-ordered, for post-beam-search re-ranking)
-        if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.free()
-        self.gpu_rerank_fp32 = alloc[Float32](self.num_nodes * self.dim)
+        if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.unsafe_free()
+        self.gpu_rerank_fp32 = unsafe_alloc[Float32](self.num_nodes * self.dim)
         for nidx in range(self.num_nodes):
-            var eid = self.nodes[nidx].id
+            var eid = self.nodes[unsafe_offset=nidx].id
             var fp32_idx = Int(-1)
             if eid >= 0 and eid < self.max_elements:
-                fp32_idx = Int(eid_to_fp32[eid])
+                fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
             if fp32_idx >= 0:
-                unsafe_memcpy(dest=(self.gpu_rerank_fp32 + nidx * self.dim).bitcast[UInt8](),
-                       src=(self.fp32_buffer + fp32_idx * self.dim).bitcast[UInt8](),
+                unsafe_memcpy(dest=(self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](),
+                       src=(self.fp32_buffer.unsafe_offset(fp32_idx * self.dim)).unsafe_bitcast[UInt8](),
                        count=self.dim * 4)
             else:
-                unsafe_memset((self.gpu_rerank_fp32 + nidx * self.dim).bitcast[UInt8](), 0, self.dim * 4)
+                unsafe_memset((self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](), 0, self.dim * 4)
         var rerank_mb = self.num_nodes * self.dim * 4 // 1048576
         print("[PolarQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB")
 
-        eid_to_fp32.free()
+        eid_to_fp32.unsafe_free()
         for di in range(self.num_nodes):
             if self.is_deleted(di):
-                self.nodes[di].vector = null_ptr[Int8, MutUntrackedOrigin]()
+                self.nodes[unsafe_offset=di].vector = null_ptr[Int8, MutUntrackedOrigin]()
         self.vector_allocator.reset()
         self.compact_buffer = new_buf
         self.compact_is_int4 = True  # signals block-INT4 format
 
         # Build l0_compact (same as standard path)
-        if is_not_null(self.l0_compact): self.l0_compact.free()
-        self.l0_compact = alloc[UInt32](self.num_nodes * 33)
+        if is_not_null(self.l0_compact): self.l0_compact.unsafe_free()
+        self.l0_compact = unsafe_alloc[UInt32](self.num_nodes * 33)
         for ni in range(self.num_nodes):
             if self.is_deleted(ni):
-                self.l0_compact[ni * 33] = UInt32(0)
+                self.l0_compact[unsafe_offset=ni * 33] = UInt32(0)
                 continue
-            var count = self.nodes[ni].get_neighbor_count(0)
+            var count = self.nodes[unsafe_offset=ni].get_neighbor_count(0)
             var actual_count = 0
             for i in range(count):
-                var nid = self.nodes[ni].get_neighbor(0, i)
+                var nid = self.nodes[unsafe_offset=ni].get_neighbor(0, i)
                 if nid >= 0 and nid < self.num_nodes and not self.is_deleted(nid):
-                    self.l0_compact[ni * 33 + 1 + actual_count] = UInt32(nid)
+                    self.l0_compact[unsafe_offset=ni * 33 + 1 + actual_count] = UInt32(nid)
                     actual_count += 1
-            self.l0_compact[ni * 33] = UInt32(actual_count)
+            self.l0_compact[unsafe_offset=ni * 33] = UInt32(actual_count)
 
         # K1: slot-space adjacency mirror (vector ptr = slot start, no header).
         self.compact_stride = bpv
@@ -3105,11 +3105,11 @@ struct HNSWGraph(Movable):
         self._build_l0_slots()
 
         # No separate prefix_buffer — block-wise search uses unified compact_buffer
-        if is_not_null(self.prefix_buffer): self.prefix_buffer.free()
+        if is_not_null(self.prefix_buffer): self.prefix_buffer.unsafe_free()
         self.prefix_buffer = null_ptr[Int8, MutUntrackedOrigin]()
-        if is_not_null(self.node_norms): self.node_norms.free()
+        if is_not_null(self.node_norms): self.node_norms.unsafe_free()
         self.node_norms = null_ptr[Float32, MutUntrackedOrigin]()
-        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.free()
+        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.unsafe_free()
         self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
 
         var compact_mb = self.num_nodes * bpv // 1048576
@@ -3123,29 +3123,29 @@ struct HNSWGraph(Movable):
         QJL: 192B/vector sign bits in separate buffer (WHT(random_signs ⊙ residual) → sign bits).
         50K × 676B = 33.8 MB compact + 9.6 MB QJL = 43.4 MB total (vs 77MB INT8 = −44%)."""
         # Build eid → fp32_buffer index mapping
-        var eid_to_fp32 = alloc[Int32](self.max_elements)
-        for i in range(self.max_elements): eid_to_fp32[i] = Int32(-1)
+        var eid_to_fp32 = unsafe_alloc[Int32](self.max_elements)
+        for i in range(self.max_elements): eid_to_fp32[unsafe_offset=i] = Int32(-1)
         for i in range(self.fp32_count):
-            var eid = Int(self.fp32_ids[i])
+            var eid = Int(self.fp32_ids[unsafe_offset=i])
             if eid >= 0 and eid < self.max_elements:
-                eid_to_fp32[eid] = Int32(i)
+                eid_to_fp32[unsafe_offset=eid] = Int32(i)
 
         # Allocate block-INT3 compact buffer
         var bpv = INT3_VEC_BYTES_1536  # 676 bytes per vector
-        var new_buf = alloc[Int8](self.num_nodes * bpv)
-        if is_not_null(self.gpu_slot_ext_ids): self.gpu_slot_ext_ids.free()
-        self.gpu_slot_ext_ids = alloc[Int32](self.num_nodes)
+        var new_buf = unsafe_alloc[Int8](self.num_nodes * bpv)
+        if is_not_null(self.gpu_slot_ext_ids): self.gpu_slot_ext_ids.unsafe_free()
+        self.gpu_slot_ext_ids = unsafe_alloc[Int32](self.num_nodes)
 
         # Allocate QJL buffers
-        if is_not_null(self.qjl_buffer): self.qjl_buffer.free()
-        self.qjl_buffer = alloc[UInt64](self.num_nodes * QJL_U64S_1536)
-        if is_not_null(self.qjl_res_norms): self.qjl_res_norms.free()
-        self.qjl_res_norms = alloc[Float32](self.num_nodes)
+        if is_not_null(self.qjl_buffer): self.qjl_buffer.unsafe_free()
+        self.qjl_buffer = unsafe_alloc[UInt64](self.num_nodes * QJL_U64S_1536)
+        if is_not_null(self.qjl_res_norms): self.qjl_res_norms.unsafe_free()
+        self.qjl_res_norms = unsafe_alloc[Float32](self.num_nodes)
 
         # Temporary buffers for QJL residual computation and INT8→FP32 reconstruction
-        var residual_buf = alloc[Float32](self.dim)
-        var wht_tmp = alloc[Float32](self.dim)
-        var recon_fp32 = alloc[Float32](self.dim)  # Streaming mode: dequantized INT8→FP32
+        var residual_buf = unsafe_alloc[Float32](self.dim)
+        var wht_tmp = unsafe_alloc[Float32](self.dim)
+        var recon_fp32 = unsafe_alloc[Float32](self.dim)  # Streaming mode: dequantized INT8→FP32
         var range_val = self.global_max - self.global_min
         var inv_scale = range_val / 255.0
 
@@ -3153,28 +3153,28 @@ struct HNSWGraph(Movable):
         var queue = List[Int]()
         self._reset_visited()
         queue.append(self.entry_point_id)
-        self.visited_epoch[self.entry_point_id] = self.cur_epoch
+        self.visited_epoch[unsafe_offset=self.entry_point_id] = self.cur_epoch
         var head_ = 0
         var slot = 0
 
         while head_ < len(queue) and slot < self.num_nodes:
             var idx = queue[head_]; head_ += 1
-            var eid = self.nodes[idx].id
-            var slot_start = new_buf + slot * bpv
+            var eid = self.nodes[unsafe_offset=idx].id
+            var slot_start = new_buf.unsafe_offset(slot * bpv)
 
             # Get FP32 source: from fp32_buffer (buffered mode) or reconstruct from INT8 (streaming mode)
             var src_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
             var fp32_idx = Int(-1)
             if is_not_null(self.fp32_buffer) and not self.streaming_mode:
                 if eid >= 0 and eid < self.max_elements:
-                    fp32_idx = Int(eid_to_fp32[eid])
+                    fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
                 if fp32_idx >= 0:
-                    src_fp32 = self.fp32_buffer + fp32_idx * self.dim
-            elif is_not_null(self.nodes[idx].vector):
+                    src_fp32 = self.fp32_buffer.unsafe_offset(fp32_idx * self.dim)
+            elif is_not_null(self.nodes[unsafe_offset=idx].vector):
                 # Streaming mode: dequantize INT8 → FP32 from vector_allocator
-                var int8_src = self.nodes[idx].vector
+                var int8_src = self.nodes[unsafe_offset=idx].vector
                 for d in range(self.dim):
-                    recon_fp32[d] = Float32(Int(int8_src[d]) + 128) * inv_scale + self.global_min
+                    recon_fp32[unsafe_offset=d] = Float32(Int(int8_src[unsafe_offset=d]) + 128) * inv_scale + self.global_min
                 src_fp32 = recon_fp32
 
             if is_not_null(src_fp32):
@@ -3183,7 +3183,7 @@ struct HNSWGraph(Movable):
                 var q_off = 4
                 for b in range(NUM_BLOCKS_1536):
                     var base = b * BLOCK_DIM
-                    var scale_v = (slot_start + q_off).bitcast[Float16]()[0].cast[DType.float32]()
+                    var scale_v = (slot_start.unsafe_offset(q_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
                     q_off += 2
                     for g in range(4):
                         var byte_off = q_off + g * 3
@@ -3192,54 +3192,54 @@ struct HNSWGraph(Movable):
                             var q_val = Int((u >> UInt64(vi * 3)) & UInt64(7)) - 4
                             var dim_idx = base + g * 8 + vi
                             if g >= 2: dim_idx = base + 16 + (g - 2) * 8 + vi
-                            residual_buf[dim_idx] = src_fp32[dim_idx] - Float32(q_val) * scale_v
+                            residual_buf[unsafe_offset=dim_idx] = src_fp32[unsafe_offset=dim_idx] - Float32(q_val) * scale_v
                     q_off += 12
                 # QJL rows are indexed by NODE, not slot: the beam reads
                 # qjl_buffer[nidx] with nidx a node index (l0_compact ids).
                 # Writing by BFS slot paired every node with another node's
                 # residual signs.
-                var qjl_dst = self.qjl_buffer + idx * QJL_U64S_1536
-                self.qjl_res_norms[idx] = qjl_compute_signs(
+                var qjl_dst = self.qjl_buffer.unsafe_offset(idx * QJL_U64S_1536)
+                self.qjl_res_norms[unsafe_offset=idx] = qjl_compute_signs(
                     residual_buf, self.qjl_random_signs, wht_tmp, qjl_dst, self.dim)
             else:
                 unsafe_memset(slot_start, 0, bpv)
-                unsafe_memset((self.qjl_buffer + idx * QJL_U64S_1536).bitcast[UInt8](), 0, QJL_BYTES_1536)
-                self.qjl_res_norms[idx] = Float32(0.0)
+                unsafe_memset((self.qjl_buffer.unsafe_offset(idx * QJL_U64S_1536)).unsafe_bitcast[UInt8](), 0, QJL_BYTES_1536)
+                self.qjl_res_norms[unsafe_offset=idx] = Float32(0.0)
 
-            self.nodes[idx].vector = slot_start
-            self.gpu_slot_ext_ids[slot] = Int32(eid)
+            self.nodes[unsafe_offset=idx].vector = slot_start
+            self.gpu_slot_ext_ids[unsafe_offset=slot] = Int32(eid)
             slot += 1
-            for l in range(self.nodes[idx].max_level + 1):
-                var nc = self.nodes[idx].get_neighbor_count(l)
+            for l in range(self.nodes[unsafe_offset=idx].max_level + 1):
+                var nc = self.nodes[unsafe_offset=idx].get_neighbor_count(l)
                 for i in range(nc):
                     # Neighbors store INTERNAL indices — use directly, not via node_map.
                     # node_map maps EXTERNAL→INTERNAL; passing internal IDs through it
                     # corrupted vector pointers for sharded builds (internal != external).
-                    var nid = self.nodes[idx].get_neighbor(l, i)
+                    var nid = self.nodes[unsafe_offset=idx].get_neighbor(l, i)
                     if nid < 0 or nid >= self.num_nodes: continue
                     if self.is_deleted(nid): continue
-                    if (self.visited_epoch[nid] == self.cur_epoch): continue
-                    self.visited_epoch[nid] = self.cur_epoch
+                    if (self.visited_epoch[unsafe_offset=nid] == self.cur_epoch): continue
+                    self.visited_epoch[unsafe_offset=nid] = self.cur_epoch
                     queue.append(nid)
 
         # Handle disconnected nodes
         for i in range(self.num_nodes):
-            if (self.visited_epoch[i] != self.cur_epoch) and slot < self.num_nodes:
-                var eid = self.nodes[i].id
-                var slot_start = new_buf + slot * bpv
+            if (self.visited_epoch[unsafe_offset=i] != self.cur_epoch) and slot < self.num_nodes:
+                var eid = self.nodes[unsafe_offset=i].id
+                var slot_start = new_buf.unsafe_offset(slot * bpv)
 
                 # Get FP32 source for disconnected node
                 var dc_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
                 if is_not_null(self.fp32_buffer) and not self.streaming_mode:
                     var fp32_idx = Int(-1)
                     if eid >= 0 and eid < self.max_elements:
-                        fp32_idx = Int(eid_to_fp32[eid])
+                        fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
                     if fp32_idx >= 0:
-                        dc_fp32 = self.fp32_buffer + fp32_idx * self.dim
-                elif is_not_null(self.nodes[i].vector):
-                    var int8_src = self.nodes[i].vector
+                        dc_fp32 = self.fp32_buffer.unsafe_offset(fp32_idx * self.dim)
+                elif is_not_null(self.nodes[unsafe_offset=i].vector):
+                    var int8_src = self.nodes[unsafe_offset=i].vector
                     for d in range(self.dim):
-                        recon_fp32[d] = Float32(Int(int8_src[d]) + 128) * inv_scale + self.global_min
+                        recon_fp32[unsafe_offset=d] = Float32(Int(int8_src[unsafe_offset=d]) + 128) * inv_scale + self.global_min
                     dc_fp32 = recon_fp32
 
                 if is_not_null(dc_fp32):
@@ -3247,7 +3247,7 @@ struct HNSWGraph(Movable):
                     var q_off = 4
                     for b in range(NUM_BLOCKS_1536):
                         var base = b * BLOCK_DIM
-                        var scale_v = (slot_start + q_off).bitcast[Float16]()[0].cast[DType.float32]()
+                        var scale_v = (slot_start.unsafe_offset(q_off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
                         q_off += 2
                         for g in range(4):
                             var byte_off = q_off + g * 3
@@ -3256,65 +3256,65 @@ struct HNSWGraph(Movable):
                                 var q_val = Int((u >> UInt64(vi * 3)) & UInt64(7)) - 4
                                 var dim_idx = base + g * 8 + vi
                                 if g >= 2: dim_idx = base + 16 + (g - 2) * 8 + vi
-                                residual_buf[dim_idx] = dc_fp32[dim_idx] - Float32(q_val) * scale_v
+                                residual_buf[unsafe_offset=dim_idx] = dc_fp32[unsafe_offset=dim_idx] - Float32(q_val) * scale_v
                         q_off += 12
-                    var qjl_dst = self.qjl_buffer + i * QJL_U64S_1536
-                    self.qjl_res_norms[i] = qjl_compute_signs(
+                    var qjl_dst = self.qjl_buffer.unsafe_offset(i * QJL_U64S_1536)
+                    self.qjl_res_norms[unsafe_offset=i] = qjl_compute_signs(
                         residual_buf, self.qjl_random_signs, wht_tmp, qjl_dst, self.dim)
                 else:
                     unsafe_memset(slot_start, 0, bpv)
-                    unsafe_memset((self.qjl_buffer + i * QJL_U64S_1536).bitcast[UInt8](), 0, QJL_BYTES_1536)
-                    self.qjl_res_norms[i] = Float32(0.0)
-                self.nodes[i].vector = slot_start
-                self.gpu_slot_ext_ids[slot] = Int32(eid)
+                    unsafe_memset((self.qjl_buffer.unsafe_offset(i * QJL_U64S_1536)).unsafe_bitcast[UInt8](), 0, QJL_BYTES_1536)
+                    self.qjl_res_norms[unsafe_offset=i] = Float32(0.0)
+                self.nodes[unsafe_offset=i].vector = slot_start
+                self.gpu_slot_ext_ids[unsafe_offset=slot] = Int32(eid)
                 slot += 1
 
-        residual_buf.free()
-        wht_tmp.free()
-        recon_fp32.free()
+        residual_buf.unsafe_free()
+        wht_tmp.unsafe_free()
+        recon_fp32.unsafe_free()
 
         # Build FP32 re-rank buffer — skip in streaming mode (too expensive for large datasets)
         if not self.streaming_mode:
-            if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.free()
-            self.gpu_rerank_fp32 = alloc[Float32](self.num_nodes * self.dim)
+            if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.unsafe_free()
+            self.gpu_rerank_fp32 = unsafe_alloc[Float32](self.num_nodes * self.dim)
             for nidx in range(self.num_nodes):
-                var eid = self.nodes[nidx].id
+                var eid = self.nodes[unsafe_offset=nidx].id
                 var fp32_idx = Int(-1)
                 if eid >= 0 and eid < self.max_elements:
-                    fp32_idx = Int(eid_to_fp32[eid])
+                    fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
                 if fp32_idx >= 0:
-                    unsafe_memcpy(dest=(self.gpu_rerank_fp32 + nidx * self.dim).bitcast[UInt8](),
-                           src=(self.fp32_buffer + fp32_idx * self.dim).bitcast[UInt8](),
+                    unsafe_memcpy(dest=(self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](),
+                           src=(self.fp32_buffer.unsafe_offset(fp32_idx * self.dim)).unsafe_bitcast[UInt8](),
                            count=self.dim * 4)
                 else:
-                    unsafe_memset((self.gpu_rerank_fp32 + nidx * self.dim).bitcast[UInt8](), 0, self.dim * 4)
+                    unsafe_memset((self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](), 0, self.dim * 4)
             var rerank_mb = self.num_nodes * self.dim * 4 // 1048576
             print("[TurboQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB")
 
-        eid_to_fp32.free()
+        eid_to_fp32.unsafe_free()
         for di in range(self.num_nodes):
             if self.is_deleted(di):
-                self.nodes[di].vector = null_ptr[Int8, MutUntrackedOrigin]()
+                self.nodes[unsafe_offset=di].vector = null_ptr[Int8, MutUntrackedOrigin]()
         self.vector_allocator.reset()
         self.compact_buffer = new_buf
         self.compact_is_3bit = True
         self.compact_is_int4 = False
 
         # Build l0_compact (same as standard path)
-        if is_not_null(self.l0_compact): self.l0_compact.free()
-        self.l0_compact = alloc[UInt32](self.num_nodes * 33)
+        if is_not_null(self.l0_compact): self.l0_compact.unsafe_free()
+        self.l0_compact = unsafe_alloc[UInt32](self.num_nodes * 33)
         for ni in range(self.num_nodes):
             if self.is_deleted(ni):
-                self.l0_compact[ni * 33] = UInt32(0)
+                self.l0_compact[unsafe_offset=ni * 33] = UInt32(0)
                 continue
-            var count = self.nodes[ni].get_neighbor_count(0)
+            var count = self.nodes[unsafe_offset=ni].get_neighbor_count(0)
             var actual_count = 0
             for i in range(count):
-                var nid = self.nodes[ni].get_neighbor(0, i)
+                var nid = self.nodes[unsafe_offset=ni].get_neighbor(0, i)
                 if nid >= 0 and nid < self.num_nodes and not self.is_deleted(nid):
-                    self.l0_compact[ni * 33 + 1 + actual_count] = UInt32(nid)
+                    self.l0_compact[unsafe_offset=ni * 33 + 1 + actual_count] = UInt32(nid)
                     actual_count += 1
-            self.l0_compact[ni * 33] = UInt32(actual_count)
+            self.l0_compact[unsafe_offset=ni * 33] = UInt32(actual_count)
 
         # K1: slot-space adjacency mirror (vector ptr = slot start, no header).
         self.compact_stride = bpv
@@ -3322,11 +3322,11 @@ struct HNSWGraph(Movable):
         self._build_l0_slots()
 
         # Clear unused buffers
-        if is_not_null(self.prefix_buffer): self.prefix_buffer.free()
+        if is_not_null(self.prefix_buffer): self.prefix_buffer.unsafe_free()
         self.prefix_buffer = null_ptr[Int8, MutUntrackedOrigin]()
-        if is_not_null(self.node_norms): self.node_norms.free()
+        if is_not_null(self.node_norms): self.node_norms.unsafe_free()
         self.node_norms = null_ptr[Float32, MutUntrackedOrigin]()
-        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.free()
+        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.unsafe_free()
         self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
 
         var compact_mb = self.num_nodes * bpv // 1048576
@@ -3345,21 +3345,21 @@ struct HNSWGraph(Movable):
         Layout: [FP32 norm (4B)] [FP16 scale (2B) + 2-bit packed (8B)] × 48 = 484B/vector.
         50K × 484B = 24.2 MB compact (vs 33.8 MB INT3, 43.4 MB INT4)."""
         # Build eid → fp32_buffer index mapping
-        var eid_to_fp32 = alloc[Int32](self.max_elements)
-        for i in range(self.max_elements): eid_to_fp32[i] = Int32(-1)
+        var eid_to_fp32 = unsafe_alloc[Int32](self.max_elements)
+        for i in range(self.max_elements): eid_to_fp32[unsafe_offset=i] = Int32(-1)
         for i in range(self.fp32_count):
-            var eid = Int(self.fp32_ids[i])
+            var eid = Int(self.fp32_ids[unsafe_offset=i])
             if eid >= 0 and eid < self.max_elements:
-                eid_to_fp32[eid] = Int32(i)
+                eid_to_fp32[unsafe_offset=eid] = Int32(i)
 
         # Allocate block-INT2 compact buffer
         var bpv = INT2_VEC_BYTES_1536  # 484 bytes per vector
-        var new_buf = alloc[Int8](self.num_nodes * bpv)
-        if is_not_null(self.gpu_slot_ext_ids): self.gpu_slot_ext_ids.free()
-        self.gpu_slot_ext_ids = alloc[Int32](self.num_nodes)
+        var new_buf = unsafe_alloc[Int8](self.num_nodes * bpv)
+        if is_not_null(self.gpu_slot_ext_ids): self.gpu_slot_ext_ids.unsafe_free()
+        self.gpu_slot_ext_ids = unsafe_alloc[Int32](self.num_nodes)
 
         # Temporary buffer for INT8→FP32 reconstruction (streaming mode)
-        var recon_fp32 = alloc[Float32](self.dim)
+        var recon_fp32 = unsafe_alloc[Float32](self.dim)
         var range_val = self.global_max - self.global_min
         var inv_scale = range_val / 255.0
 
@@ -3367,27 +3367,27 @@ struct HNSWGraph(Movable):
         var queue = List[Int]()
         self._reset_visited()
         queue.append(self.entry_point_id)
-        self.visited_epoch[self.entry_point_id] = self.cur_epoch
+        self.visited_epoch[unsafe_offset=self.entry_point_id] = self.cur_epoch
         var head_ = 0
         var slot = 0
 
         while head_ < len(queue) and slot < self.num_nodes:
             var idx = queue[head_]; head_ += 1
-            var eid = self.nodes[idx].id
-            var slot_start = new_buf + slot * bpv
+            var eid = self.nodes[unsafe_offset=idx].id
+            var slot_start = new_buf.unsafe_offset(slot * bpv)
 
             # Get FP32 source: from fp32_buffer (buffered mode) or reconstruct from INT8 (streaming mode)
             var src_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
             var fp32_idx = Int(-1)
             if is_not_null(self.fp32_buffer) and not self.streaming_mode:
                 if eid >= 0 and eid < self.max_elements:
-                    fp32_idx = Int(eid_to_fp32[eid])
+                    fp32_idx = Int(eid_to_fp32[unsafe_offset=eid])
                 if fp32_idx >= 0:
-                    src_fp32 = self.fp32_buffer + fp32_idx * self.dim
-            elif is_not_null(self.nodes[idx].vector):
-                var int8_src = self.nodes[idx].vector
+                    src_fp32 = self.fp32_buffer.unsafe_offset(fp32_idx * self.dim)
+            elif is_not_null(self.nodes[unsafe_offset=idx].vector):
+                var int8_src = self.nodes[unsafe_offset=idx].vector
                 for d in range(self.dim):
-                    recon_fp32[d] = Float32(Int(int8_src[d]) + 128) * inv_scale + self.global_min
+                    recon_fp32[unsafe_offset=d] = Float32(Int(int8_src[unsafe_offset=d]) + 128) * inv_scale + self.global_min
                 src_fp32 = recon_fp32
 
             if is_not_null(src_fp32):
@@ -3395,73 +3395,73 @@ struct HNSWGraph(Movable):
             else:
                 unsafe_memset(slot_start, 0, bpv)
 
-            self.nodes[idx].vector = slot_start
-            self.gpu_slot_ext_ids[slot] = Int32(eid)
+            self.nodes[unsafe_offset=idx].vector = slot_start
+            self.gpu_slot_ext_ids[unsafe_offset=slot] = Int32(eid)
             slot += 1
-            for l in range(self.nodes[idx].max_level + 1):
-                var nc = self.nodes[idx].get_neighbor_count(l)
+            for l in range(self.nodes[unsafe_offset=idx].max_level + 1):
+                var nc = self.nodes[unsafe_offset=idx].get_neighbor_count(l)
                 for i in range(nc):
                     # Neighbors store INTERNAL indices — use directly, not via node_map.
                     # node_map maps EXTERNAL→INTERNAL; passing internal IDs through it
                     # corrupted vector pointers for sharded builds (internal != external).
-                    var nid = self.nodes[idx].get_neighbor(l, i)
+                    var nid = self.nodes[unsafe_offset=idx].get_neighbor(l, i)
                     if nid < 0 or nid >= self.num_nodes: continue
                     if self.is_deleted(nid): continue
-                    if (self.visited_epoch[nid] == self.cur_epoch): continue
-                    self.visited_epoch[nid] = self.cur_epoch
+                    if (self.visited_epoch[unsafe_offset=nid] == self.cur_epoch): continue
+                    self.visited_epoch[unsafe_offset=nid] = self.cur_epoch
                     queue.append(nid)
 
         # Handle disconnected nodes
         for i in range(self.num_nodes):
-            if (self.visited_epoch[i] != self.cur_epoch) and slot < self.num_nodes:
-                var eid = self.nodes[i].id
-                var slot_start = new_buf + slot * bpv
+            if (self.visited_epoch[unsafe_offset=i] != self.cur_epoch) and slot < self.num_nodes:
+                var eid = self.nodes[unsafe_offset=i].id
+                var slot_start = new_buf.unsafe_offset(slot * bpv)
 
                 var dc_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
                 if is_not_null(self.fp32_buffer) and not self.streaming_mode:
                     var fp32_idx2 = Int(-1)
                     if eid >= 0 and eid < self.max_elements:
-                        fp32_idx2 = Int(eid_to_fp32[eid])
+                        fp32_idx2 = Int(eid_to_fp32[unsafe_offset=eid])
                     if fp32_idx2 >= 0:
-                        dc_fp32 = self.fp32_buffer + fp32_idx2 * self.dim
-                elif is_not_null(self.nodes[i].vector):
-                    var int8_src = self.nodes[i].vector
+                        dc_fp32 = self.fp32_buffer.unsafe_offset(fp32_idx2 * self.dim)
+                elif is_not_null(self.nodes[unsafe_offset=i].vector):
+                    var int8_src = self.nodes[unsafe_offset=i].vector
                     for d in range(self.dim):
-                        recon_fp32[d] = Float32(Int(int8_src[d]) + 128) * inv_scale + self.global_min
+                        recon_fp32[unsafe_offset=d] = Float32(Int(int8_src[unsafe_offset=d]) + 128) * inv_scale + self.global_min
                     dc_fp32 = recon_fp32
 
                 if is_not_null(dc_fp32):
                     quantize_fp32_to_block_int2(dc_fp32, slot_start, self.dim)
                 else:
                     unsafe_memset(slot_start, 0, bpv)
-                self.nodes[i].vector = slot_start
-                self.gpu_slot_ext_ids[slot] = Int32(eid)
+                self.nodes[unsafe_offset=i].vector = slot_start
+                self.gpu_slot_ext_ids[unsafe_offset=slot] = Int32(eid)
                 slot += 1
 
-        recon_fp32.free()
+        recon_fp32.unsafe_free()
 
         # Build FP32 re-rank buffer
         if not self.streaming_mode:
-            if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.free()
-            self.gpu_rerank_fp32 = alloc[Float32](self.num_nodes * self.dim)
+            if is_not_null(self.gpu_rerank_fp32): self.gpu_rerank_fp32.unsafe_free()
+            self.gpu_rerank_fp32 = unsafe_alloc[Float32](self.num_nodes * self.dim)
             for nidx in range(self.num_nodes):
-                var eid = self.nodes[nidx].id
+                var eid = self.nodes[unsafe_offset=nidx].id
                 var fp32_idx3 = Int(-1)
                 if eid >= 0 and eid < self.max_elements:
-                    fp32_idx3 = Int(eid_to_fp32[eid])
+                    fp32_idx3 = Int(eid_to_fp32[unsafe_offset=eid])
                 if fp32_idx3 >= 0:
-                    unsafe_memcpy(dest=(self.gpu_rerank_fp32 + nidx * self.dim).bitcast[UInt8](),
-                           src=(self.fp32_buffer + fp32_idx3 * self.dim).bitcast[UInt8](),
+                    unsafe_memcpy(dest=(self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](),
+                           src=(self.fp32_buffer.unsafe_offset(fp32_idx3 * self.dim)).unsafe_bitcast[UInt8](),
                            count=self.dim * 4)
                 else:
-                    unsafe_memset((self.gpu_rerank_fp32 + nidx * self.dim).bitcast[UInt8](), 0, self.dim * 4)
+                    unsafe_memset((self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](), 0, self.dim * 4)
             var rerank_mb = self.num_nodes * self.dim * 4 // 1048576
             print("[NanoQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB")
 
-        eid_to_fp32.free()
+        eid_to_fp32.unsafe_free()
         for di in range(self.num_nodes):
             if self.is_deleted(di):
-                self.nodes[di].vector = null_ptr[Int8, MutUntrackedOrigin]()
+                self.nodes[unsafe_offset=di].vector = null_ptr[Int8, MutUntrackedOrigin]()
         self.vector_allocator.reset()
         self.compact_buffer = new_buf
         self.compact_is_2bit = True
@@ -3469,20 +3469,20 @@ struct HNSWGraph(Movable):
         self.compact_is_int4 = False
 
         # Build l0_compact (same as standard path)
-        if is_not_null(self.l0_compact): self.l0_compact.free()
-        self.l0_compact = alloc[UInt32](self.num_nodes * 33)
+        if is_not_null(self.l0_compact): self.l0_compact.unsafe_free()
+        self.l0_compact = unsafe_alloc[UInt32](self.num_nodes * 33)
         for ni in range(self.num_nodes):
             if self.is_deleted(ni):
-                self.l0_compact[ni * 33] = UInt32(0)
+                self.l0_compact[unsafe_offset=ni * 33] = UInt32(0)
                 continue
-            var count = self.nodes[ni].get_neighbor_count(0)
+            var count = self.nodes[unsafe_offset=ni].get_neighbor_count(0)
             var actual_count = 0
             for i in range(count):
-                var nid = self.nodes[ni].get_neighbor(0, i)
+                var nid = self.nodes[unsafe_offset=ni].get_neighbor(0, i)
                 if nid >= 0 and nid < self.num_nodes and not self.is_deleted(nid):
-                    self.l0_compact[ni * 33 + 1 + actual_count] = UInt32(nid)
+                    self.l0_compact[unsafe_offset=ni * 33 + 1 + actual_count] = UInt32(nid)
                     actual_count += 1
-            self.l0_compact[ni * 33] = UInt32(actual_count)
+            self.l0_compact[unsafe_offset=ni * 33] = UInt32(actual_count)
 
         # K1: slot-space adjacency mirror (vector ptr = slot start, no header).
         self.compact_stride = bpv
@@ -3490,11 +3490,11 @@ struct HNSWGraph(Movable):
         self._build_l0_slots()
 
         # Clear unused buffers
-        if is_not_null(self.prefix_buffer): self.prefix_buffer.free()
+        if is_not_null(self.prefix_buffer): self.prefix_buffer.unsafe_free()
         self.prefix_buffer = null_ptr[Int8, MutUntrackedOrigin]()
-        if is_not_null(self.node_norms): self.node_norms.free()
+        if is_not_null(self.node_norms): self.node_norms.unsafe_free()
         self.node_norms = null_ptr[Float32, MutUntrackedOrigin]()
-        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.free()
+        if is_not_null(self.node_prefix_norms): self.node_prefix_norms.unsafe_free()
         self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
 
         var compact_mb = self.num_nodes * bpv // 1048576
@@ -3573,7 +3573,7 @@ struct HNSWGraph(Movable):
             for i in range(kept_count):
                 self.l0_compact[ni * 33 + 1 + i] = UInt32(kept_ids[i])
 
-    def _prune_neighbors(self, query: UnsafePointer[Int8, MutUntrackedOrigin], all_neighbors: List[HeapNode], m_limit: Int) -> List[Int]:
+    def _prune_neighbors(self, query: Pointer[Int8, MutUntrackedOrigin], all_neighbors: List[HeapNode], m_limit: Int) -> List[Int]:
         var results = List[Int]()
         var discarded = List[Int]()
 
@@ -3582,12 +3582,12 @@ struct HNSWGraph(Movable):
                 break
             var candidate_id = all_neighbors[i].id
             var candidate_dist = all_neighbors[i].distance
-            var candidate_vec = self.nodes[candidate_id].vector
+            var candidate_vec = self.nodes[unsafe_offset=candidate_id].vector
 
             var good = True
             for j in range(len(results)):
                 var r_id = results[j]
-                var r_vec = self.nodes[r_id].vector
+                var r_vec = self.nodes[unsafe_offset=r_id].vector
                 var dist_to_r = self._dist_int8_int8(candidate_vec, r_vec)
                 if dist_to_r < candidate_dist:
                     good = False
@@ -3612,7 +3612,7 @@ struct HNSWGraph(Movable):
         # when the UInt16 counter wraps (every 65535 queries), amortizing to nothing.
         self.cur_epoch += 1
         if self.cur_epoch == 0:
-            unsafe_memset(self.visited_epoch.bitcast[UInt8](), 0, self.max_elements * 2)
+            unsafe_memset(self.visited_epoch.unsafe_bitcast[UInt8](), 0, self.max_elements * 2)
             self.cur_epoch = 1
 
     def unlink_node(mut self, internal_id: Int):
@@ -3620,48 +3620,48 @@ struct HNSWGraph(Movable):
         mark as deleted, replace entry point if needed, and reconnect orphaned neighbors."""
         if internal_id < 0 or internal_id >= self.num_nodes: return
         if self.is_deleted(internal_id): return
-        var node = self.nodes + internal_id
+        var node = self.nodes.unsafe_offset(internal_id)
 
         # 1. Collect neighbors per level BEFORE clearing (needed for reconnection)
         var max_lvl = node[].max_level
         # Use a flat array: orphan_levels[l][j] stored as orphan_ids[l * 64 + j], orphan_counts[l]
-        var orphan_ids = alloc[Int](7 * 64)  # max 7 levels × max 64 neighbors (2*M=32 at L0)
-        var orphan_counts = alloc[Int](7)
+        var orphan_ids = unsafe_alloc[Int](7 * 64)  # max 7 levels × max 64 neighbors (2*M=32 at L0)
+        var orphan_counts = unsafe_alloc[Int](7)
         for l in range(7):
-            orphan_counts[l] = 0
+            orphan_counts[unsafe_offset=l] = 0
 
         for l in range(max_lvl + 1):
             var nc = node[].get_neighbor_count(l)
             var off = node[]._get_offset(l)
             var oc = 0
             for i in range(nc):
-                var neighbor_idx = Int(node[].neighbors[off + i])
+                var neighbor_idx = Int(node[].neighbors[unsafe_offset=off + i])
                 if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                 if self.is_deleted(neighbor_idx): continue
-                orphan_ids[l * 64 + oc] = neighbor_idx
+                orphan_ids[unsafe_offset=l * 64 + oc] = neighbor_idx
                 oc += 1
-            orphan_counts[l] = oc
+            orphan_counts[unsafe_offset=l] = oc
 
         # 2. Remove backlinks: for each neighbor, remove internal_id from their neighbor list
         for l in range(max_lvl + 1):
             var nc = node[].get_neighbor_count(l)
             var off = node[]._get_offset(l)
             for i in range(nc):
-                var neighbor_idx = Int(node[].neighbors[off + i])
+                var neighbor_idx = Int(node[].neighbors[unsafe_offset=off + i])
                 if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
-                var nb_ptr = self.nodes + neighbor_idx
+                var nb_ptr = self.nodes.unsafe_offset(neighbor_idx)
                 var nb_off = nb_ptr[]._get_offset(l)
-                var nb_nc = Int(nb_ptr[].neighbor_counts[l])
+                var nb_nc = Int(nb_ptr[].neighbor_counts[unsafe_offset=l])
                 for ni in range(nb_nc):
-                    if Int(nb_ptr[].neighbors[nb_off + ni]) == internal_id:
+                    if Int(nb_ptr[].neighbors[unsafe_offset=nb_off + ni]) == internal_id:
                         # Swap with last and decrement
-                        nb_ptr[].neighbors[nb_off + ni] = nb_ptr[].neighbors[nb_off + nb_nc - 1]
-                        nb_ptr[].neighbor_counts[l] = UInt32(nb_nc - 1)
+                        nb_ptr[].neighbors[unsafe_offset=nb_off + ni] = nb_ptr[].neighbors[unsafe_offset=nb_off + nb_nc - 1]
+                        nb_ptr[].neighbor_counts[unsafe_offset=l] = UInt32(nb_nc - 1)
                         break
 
         # 3. Clear deleted node's neighbor counts
         for l in range(max_lvl + 1):
-            node[].neighbor_counts[l] = 0
+            node[].neighbor_counts[unsafe_offset=l] = 0
 
         # 4. Mark as deleted
         self.mark_deleted(internal_id)
@@ -3673,8 +3673,8 @@ struct HNSWGraph(Movable):
             var best_level = -1
             for i in range(self.num_nodes):
                 if not self.is_deleted(i):
-                    if self.nodes[i].max_level > best_level:
-                        best_level = self.nodes[i].max_level
+                    if self.nodes[unsafe_offset=i].max_level > best_level:
+                        best_level = self.nodes[unsafe_offset=i].max_level
                         self.entry_point_id = i
             if self.entry_point_id != -1:
                 self.max_level = best_level
@@ -3682,45 +3682,45 @@ struct HNSWGraph(Movable):
         # 6. Reconnect orphaned neighbors
         self._reconnect_orphans(orphan_ids, orphan_counts, max_lvl)
 
-        orphan_ids.free()
-        orphan_counts.free()
+        orphan_ids.unsafe_free()
+        orphan_counts.unsafe_free()
 
-    def _reconnect_orphans(mut self, orphan_ids: UnsafePointer[Int, MutUntrackedOrigin], orphan_counts: UnsafePointer[Int, MutUntrackedOrigin], max_lvl: Int):
+    def _reconnect_orphans(mut self, orphan_ids: Pointer[Int, MutUntrackedOrigin], orphan_counts: Pointer[Int, MutUntrackedOrigin], max_lvl: Int):
         """A1b: Reconnect neighbors that lost a connection due to node deletion.
         For each level, if a former neighbor's connection count dropped below threshold,
         try to connect it to other former neighbors."""
         for l in range(max_lvl + 1):
-            var oc = orphan_counts[l]
+            var oc = orphan_counts[unsafe_offset=l]
             if oc < 2: continue
             var cap = 2 * self.M if l == 0 else self.M
             var threshold = self.M if l == 0 else self.M // 2
 
             for i in range(oc):
-                var nid = orphan_ids[l * 64 + i]
+                var nid = orphan_ids[unsafe_offset=l * 64 + i]
                 if self.is_deleted(nid): continue
-                var current_count = self.nodes[nid].get_neighbor_count(l)
+                var current_count = self.nodes[unsafe_offset=nid].get_neighbor_count(l)
                 if current_count >= threshold: continue
 
                 # Try connecting to other former neighbors
                 for j in range(oc):
                     if i == j: continue
                     if current_count >= cap: break
-                    var cid = orphan_ids[l * 64 + j]
+                    var cid = orphan_ids[unsafe_offset=l * 64 + j]
                     if self.is_deleted(cid): continue
 
                     # Check not already connected
                     var already = False
-                    var off = self.nodes[nid]._get_offset(l)
-                    var nc = Int(self.nodes[nid].neighbor_counts[l])
+                    var off = self.nodes[unsafe_offset=nid]._get_offset(l)
+                    var nc = Int(self.nodes[unsafe_offset=nid].neighbor_counts[unsafe_offset=l])
                     for k in range(nc):
-                        if Int(self.nodes[nid].neighbors[off + k]) == cid:
+                        if Int(self.nodes[unsafe_offset=nid].neighbors[unsafe_offset=off + k]) == cid:
                             already = True
                             break
                     if already: continue
 
                     # Add bidirectional link
-                    self.nodes[nid].add_neighbor(l, cid)
-                    self.nodes[cid].add_neighbor(l, nid)
+                    self.nodes[unsafe_offset=nid].add_neighbor(l, cid)
+                    self.nodes[unsafe_offset=cid].add_neighbor(l, nid)
                     current_count += 1
 
     @always_inline
@@ -3735,7 +3735,7 @@ struct HNSWGraph(Movable):
         return self.dim == 1536 or self.dim == 768 or self.dim == 384 or self.dim == 256 or self.dim == 128
 
     @always_inline
-    def _code_dist(self, q: UnsafePointer[Int8, MutUntrackedOrigin], v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+    def _code_dist(self, q: Pointer[Int8, MutUntrackedOrigin], v: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
         if self.dim == 1536: return l2_int8_sabd_udot[1536](q, v)
         elif self.dim == 1024: return l2_int8_sabd_udot[1024](q, v)
         elif self.dim == 768: return l2_int8_sabd_udot[768](q, v)
@@ -3746,11 +3746,11 @@ struct HNSWGraph(Movable):
         return l2_distance_int8(q, v, self.dim)
 
     @always_inline
-    def _code_dist8(self, q: UnsafePointer[Int8, MutUntrackedOrigin], ids: Array[Int, 8]) -> SIMD[DType.float32, 8]:
-        var v0 = self.nodes[ids[0]].vector; var v1 = self.nodes[ids[1]].vector
-        var v2 = self.nodes[ids[2]].vector; var v3 = self.nodes[ids[3]].vector
-        var v4 = self.nodes[ids[4]].vector; var v5 = self.nodes[ids[5]].vector
-        var v6 = self.nodes[ids[6]].vector; var v7 = self.nodes[ids[7]].vector
+    def _code_dist8(self, q: Pointer[Int8, MutUntrackedOrigin], ids: Array[Int, 8]) -> SIMD[DType.float32, 8]:
+        var v0 = self.nodes[unsafe_offset=ids[0]].vector; var v1 = self.nodes[unsafe_offset=ids[1]].vector
+        var v2 = self.nodes[unsafe_offset=ids[2]].vector; var v3 = self.nodes[unsafe_offset=ids[3]].vector
+        var v4 = self.nodes[unsafe_offset=ids[4]].vector; var v5 = self.nodes[unsafe_offset=ids[5]].vector
+        var v6 = self.nodes[unsafe_offset=ids[6]].vector; var v7 = self.nodes[unsafe_offset=ids[7]].vector
         if self.dim == 1536: return l2_int8_sabd_udot_batch8[1536](q, v0, v1, v2, v3, v4, v5, v6, v7)
         elif self.dim == 1024: return l2_int8_sabd_udot_batch8[1024](q, v0, v1, v2, v3, v4, v5, v6, v7)
         elif self.dim == 768: return l2_int8_sabd_udot_batch8[768](q, v0, v1, v2, v3, v4, v5, v6, v7)
@@ -3786,29 +3786,29 @@ struct HNSWGraph(Movable):
         check (vector gate)."""
         var q = self.query_int8
         var curr = self.entry_point_id
-        var curr_dist = self._code_dist(q, self.nodes[curr].vector)
+        var curr_dist = self._code_dist(q, self.nodes[unsafe_offset=curr].vector)
         var ids = Array[Int, 8](fill=0)
         for l in range(self.max_level, 0, -1):
             var changed = True
             while changed:
                 changed = False
                 var node = curr
-                var nc = self.nodes[node].get_neighbor_count(l)
+                var nc = self.nodes[unsafe_offset=node].get_neighbor_count(l)
                 var best = curr_dist
                 var best_idx = curr
                 var i = 0
                 while i < nc:
                     var cnt = 0
                     while i < nc and cnt < 8:
-                        var nidx = self.nodes[node].get_neighbor(l, i)
+                        var nidx = self.nodes[unsafe_offset=node].get_neighbor(l, i)
                         i += 1
                         if nidx < 0 or nidx >= self.num_nodes: continue
                         if self.is_deleted(nidx): continue
                         ids[cnt] = nidx
                         cnt += 1
                     for j in range(cnt):
-                        var vp = self.nodes[ids[j]].vector
-                        prefetch(vp); prefetch(vp + 64); prefetch(vp + 128); prefetch(vp + 192)
+                        var vp = self.nodes[unsafe_offset=ids[j]].vector
+                        prefetch(vp); prefetch(vp.unsafe_offset(64)); prefetch(vp.unsafe_offset(128)); prefetch(vp.unsafe_offset(192))
                     if cnt == 8:
                         var d8 = self._code_dist8(q, ids)
                         for j in range(8):
@@ -3817,7 +3817,7 @@ struct HNSWGraph(Movable):
                                 best_idx = ids[j]
                     else:
                         for j in range(cnt):
-                            var d = self._code_dist(q, self.nodes[ids[j]].vector)
+                            var d = self._code_dist(q, self.nodes[unsafe_offset=ids[j]].vector)
                             if d < best:
                                 best = d
                                 best_idx = ids[j]
@@ -3828,7 +3828,7 @@ struct HNSWGraph(Movable):
         return curr
 
     @always_inline
-    def _upper_level_greedy(mut self, query: UnsafePointer[Float32, MutUntrackedOrigin]) -> Int:
+    def _upper_level_greedy(mut self, query: Pointer[Float32, MutUntrackedOrigin]) -> Int:
         """Run upper-level greedy descent (levels max_level..1); return best entry node for base-level search.
         P3: called once per batch; result shared across all batch queries to save N-1 greedy passes."""
         # The block-quant searches (polar INT4, turbo INT3, nano INT2) run their
@@ -3843,21 +3843,21 @@ struct HNSWGraph(Movable):
             self._quantize_query_to_int8(query)
             return self._upper_greedy_codes()
         var curr_node_idx = self.entry_point_id
-        var curr_dist = self._dist_fp32_int8(query, self.nodes[curr_node_idx].vector)
+        var curr_dist = self._dist_fp32_int8(query, self.nodes[unsafe_offset=curr_node_idx].vector)
         for l in range(self.max_level, 0, -1):
             var changed = True
             while changed:
                 changed = False
-                var neighbor_count = self.nodes[curr_node_idx].get_neighbor_count(l)
+                var neighbor_count = self.nodes[unsafe_offset=curr_node_idx].get_neighbor_count(l)
                 for i in range(neighbor_count):
-                    var neighbor_idx = self.nodes[curr_node_idx].get_neighbor(l, i)
+                    var neighbor_idx = self.nodes[unsafe_offset=curr_node_idx].get_neighbor(l, i)
                     if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                     if self.is_deleted(neighbor_idx): continue
                     if i + 1 < neighbor_count:
-                        var nxt_idx = self.nodes[curr_node_idx].get_neighbor(l, i + 1)
+                        var nxt_idx = self.nodes[unsafe_offset=curr_node_idx].get_neighbor(l, i + 1)
                         if nxt_idx >= 0 and nxt_idx < self.num_nodes:
-                            prefetch(self.nodes[nxt_idx].vector)
-                    var d = self._dist_fp32_int8(query, self.nodes[neighbor_idx].vector)
+                            prefetch(self.nodes[unsafe_offset=nxt_idx].vector)
+                    var d = self._dist_fp32_int8(query, self.nodes[unsafe_offset=neighbor_idx].vector)
                     if d < curr_dist:
                         curr_dist = d
                         curr_node_idx = neighbor_idx
@@ -3870,7 +3870,7 @@ struct HNSWGraph(Movable):
         libpion_vector under -D PION_HELD_VECTOR, the open reference otherwise."""
         var vp = self.beam_view
         vp.unsafe_write(BeamView1536(
-            rebind[UnsafePointer[LinearPool, MutUntrackedOrigin]](UnsafePointer(to=self.pool)),
+            rebind[Pointer[LinearPool, MutUntrackedOrigin]](Pointer(to=self.pool)),
             ef, query_norm_sq, query_prefix_norm_sq, self.query_int8,
             self.l0_compact, self.l0_slots, self.num_nodes, self.deleted_bitset,
             self.visited_epoch, self.cur_epoch,
@@ -3884,8 +3884,8 @@ struct HNSWGraph(Movable):
         var vp = self.quant_beam_view
         vp.unsafe_write(QuantBeamView1536(
             kind, ef,
-            rebind[UnsafePointer[MinHeap, MutUntrackedOrigin]](UnsafePointer(to=self.candidates)),
-            rebind[UnsafePointer[MaxHeap, MutUntrackedOrigin]](UnsafePointer(to=self.results)),
+            rebind[Pointer[MinHeap, MutUntrackedOrigin]](Pointer(to=self.candidates)),
+            rebind[Pointer[MaxHeap, MutUntrackedOrigin]](Pointer(to=self.results)),
             self.query_block_int8, self.query_block_scales, self.query_block_norm,
             self.l0_compact, self.l0_slots, self.num_nodes, self.deleted_bitset,
             self.visited_epoch, self.cur_epoch,
@@ -3895,7 +3895,7 @@ struct HNSWGraph(Movable):
         quant_beam_search_1536(vp)
 
     @no_inline
-    def search_gpu_brute_force(mut self, query: UnsafePointer[Float32, MutUntrackedOrigin], k: Int,
+    def search_gpu_brute_force(mut self, query: Pointer[Float32, MutUntrackedOrigin], k: Int,
                               mut scores: List[Float32], worker_id: Int = 0) raises -> List[Int]:
         """§7v2 GPU Vector Engine: Metal brute-force search with FP32 re-ranking.
         GPU INT8 oversample (top-K×3) → CPU FP32 re-rank → top-K.
@@ -3917,8 +3917,8 @@ struct HNSWGraph(Movable):
         if is_null(self.gpu_topk_ids):
             # Sized for GPU_RERANK_K_MAX so the same scratch serves both §7v2
             # full-scan oversample (capped at 256) and the quantized rerank paths.
-            self.gpu_topk_ids = alloc[Int32](GPU_RERANK_K_MAX)
-            self.gpu_topk_dists = alloc[Float32](GPU_RERANK_K_MAX)
+            self.gpu_topk_ids = unsafe_alloc[Int32](GPU_RERANK_K_MAX)
+            self.gpu_topk_dists = unsafe_alloc[Float32](GPU_RERANK_K_MAX)
 
         # Fused GPU search + top-K (per-worker buffers, zero mutex contention)
         var found: Int = 0
@@ -3938,23 +3938,23 @@ struct HNSWGraph(Movable):
             if not gpu_done:
                 var dim8 = self.dim >> 3  # dim / 8
                 for i in range(found):
-                    var slot_idx = Int(self.gpu_topk_ids[i])
+                    var slot_idx = Int(self.gpu_topk_ids[unsafe_offset=i])
                     if slot_idx >= 0 and slot_idx < self.num_nodes:
-                        var fp32_vec = self.gpu_rerank_fp32 + slot_idx * self.dim
+                        var fp32_vec = self.gpu_rerank_fp32.unsafe_offset(slot_idx * self.dim)
                         var acc = SIMD[DType.float32, 8](0)
                         for d in range(dim8):
-                            var q = (query + d * 8).load[width=8]()
-                            var v = (fp32_vec + d * 8).load[width=8]()
+                            var q = (query.unsafe_offset(d * 8)).unsafe_load[width=8]()
+                            var v = (fp32_vec.unsafe_offset(d * 8)).unsafe_load[width=8]()
                             var diff = q - v
                             acc = acc + diff * diff
-                        self.gpu_topk_dists[i] = acc.reduce_add()
+                        self.gpu_topk_dists[unsafe_offset=i] = acc.reduce_add()
 
         # Sort by distance (insertion sort — K is small)
         for i in range(1, found):
             var j = i
-            while j > 0 and self.gpu_topk_dists[j] < self.gpu_topk_dists[j - 1]:
-                var tmp_d = self.gpu_topk_dists[j]; self.gpu_topk_dists[j] = self.gpu_topk_dists[j-1]; self.gpu_topk_dists[j-1] = tmp_d
-                var tmp_i = self.gpu_topk_ids[j]; self.gpu_topk_ids[j] = self.gpu_topk_ids[j-1]; self.gpu_topk_ids[j-1] = tmp_i
+            while j > 0 and self.gpu_topk_dists[unsafe_offset=j] < self.gpu_topk_dists[unsafe_offset=j - 1]:
+                var tmp_d = self.gpu_topk_dists[unsafe_offset=j]; self.gpu_topk_dists[unsafe_offset=j] = self.gpu_topk_dists[unsafe_offset=j-1]; self.gpu_topk_dists[unsafe_offset=j-1] = tmp_d
+                var tmp_i = self.gpu_topk_ids[unsafe_offset=j]; self.gpu_topk_ids[unsafe_offset=j] = self.gpu_topk_ids[unsafe_offset=j-1]; self.gpu_topk_ids[unsafe_offset=j-1] = tmp_i
                 j -= 1
 
         # Truncate to final_k after re-ranking
@@ -3964,15 +3964,15 @@ struct HNSWGraph(Movable):
         self.final_results.clear()
         scores.clear()
         for i in range(found):
-            var slot_idx = Int(self.gpu_topk_ids[i])
+            var slot_idx = Int(self.gpu_topk_ids[unsafe_offset=i])
             if slot_idx >= 0 and slot_idx < self.num_nodes:
-                self.final_results.append(Int(self.gpu_slot_ext_ids[slot_idx]))
-                scores.append(self.gpu_topk_dists[i])
+                self.final_results.append(Int(self.gpu_slot_ext_ids[unsafe_offset=slot_idx]))
+                scores.append(self.gpu_topk_dists[unsafe_offset=i])
 
         return self.final_results.copy()
 
     @no_inline
-    def search_gpu_native(mut self, query: UnsafePointer[Float32, MutUntrackedOrigin], k: Int,
+    def search_gpu_native(mut self, query: Pointer[Float32, MutUntrackedOrigin], k: Int,
                          mut scores: List[Float32], worker_id: Int = 0) raises -> List[Int]:
         """§7v2 Native Mojo GPU search — zero ObjC overhead, direct DeviceContext dispatch.
         Falls back to Metal FFI path if native context not ready."""
@@ -4023,14 +4023,14 @@ struct HNSWGraph(Movable):
         if ri >= n: return
         var nidx = self.scratch_ids[ri]
         if nidx < 0 or nidx >= self.num_nodes: return
-        var p = (self.gpu_rerank_fp32 + nidx * self.dim).bitcast[Int8]()
+        var p = (self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[Int8]()
         var off = 0
         var row_bytes = self.dim * 4
         while off < row_bytes:
-            prefetch(p + off)
+            prefetch(p.unsafe_offset(off))
             off += 64
 
-    def _rerank_fp32_sorted(mut self, query: UnsafePointer[Float32, MutUntrackedOrigin],
+    def _rerank_fp32_sorted(mut self, query: Pointer[Float32, MutUntrackedOrigin],
                             k: Int, mut scores: List[Float32]) -> List[Int]:
         """gh #396: the tail shared by the three block-quant searches (nano,
         turbo, polar): drain the beam, re-rank against the FP32 copy when there
@@ -4067,10 +4067,10 @@ struct HNSWGraph(Movable):
             var gpu_done = False
             if n >= GPU_RERANK_THRESHOLD and n <= GPU_RERANK_K_MAX and is_not_null(self.gpu_topk_ids):
                 for ri in range(n):
-                    self.gpu_topk_ids[ri] = Int32(self.scratch_ids[ri])
+                    self.gpu_topk_ids[unsafe_offset=ri] = Int32(self.scratch_ids[ri])
                 if self._try_gpu_rerank(query, self.gpu_topk_ids, self.gpu_topk_dists, n, 0):
                     for ri in range(n):
-                        self.scratch_dists[ri] = self.gpu_topk_dists[ri]
+                        self.scratch_dists[ri] = self.gpu_topk_dists[unsafe_offset=ri]
                     gpu_done = True
             if not gpu_done:
                 self._prefetch_rerank_row(0, n)
@@ -4079,21 +4079,21 @@ struct HNSWGraph(Movable):
                     self._prefetch_rerank_row(ri + 2, n)
                     var nidx = self.scratch_ids[ri]
                     if nidx < 0 or nidx >= self.num_nodes: continue
-                    var fp32_vec = self.gpu_rerank_fp32 + nidx * self.dim
+                    var fp32_vec = self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)
                     var acc_a = SIMD[DType.float32, 8](0)
                     var acc_b = SIMD[DType.float32, 8](0)
                     var di = 0
                     while di + 16 <= self.dim:
-                        var qa = (query + di).load[width=8]()
-                        var va = (fp32_vec + di).load[width=8]()
+                        var qa = (query.unsafe_offset(di)).unsafe_load[width=8]()
+                        var va = (fp32_vec.unsafe_offset(di)).unsafe_load[width=8]()
                         var da = qa - va; acc_a = acc_a + da * da
-                        var qb = (query + di + 8).load[width=8]()
-                        var vb = (fp32_vec + di + 8).load[width=8]()
+                        var qb = (query.unsafe_offset(di).unsafe_offset(8)).unsafe_load[width=8]()
+                        var vb = (fp32_vec.unsafe_offset(di).unsafe_offset(8)).unsafe_load[width=8]()
                         var db = qb - vb; acc_b = acc_b + db * db
                         di += 16
                     while di + 8 <= self.dim:
-                        var qa = (query + di).load[width=8]()
-                        var va = (fp32_vec + di).load[width=8]()
+                        var qa = (query.unsafe_offset(di)).unsafe_load[width=8]()
+                        var va = (fp32_vec.unsafe_offset(di)).unsafe_load[width=8]()
                         var da = qa - va; acc_a = acc_a + da * da
                         di += 8
                     self.scratch_dists[ri] = (acc_a + acc_b).reduce_add()
@@ -4109,12 +4109,12 @@ struct HNSWGraph(Movable):
         for ri in range(min(k, n)):
             var nidx = self.scratch_ids[ri]
             if nidx >= 0 and nidx < self.num_nodes:
-                self.final_results.append(self.nodes[nidx].id)
+                self.final_results.append(self.nodes[unsafe_offset=nidx].id)
                 scores.append(self.scratch_dists[ri])
         return self.final_results.copy()
 
     @no_inline
-    def search_fp32_scored(mut self, query_in: UnsafePointer[Float32, MutUntrackedOrigin], k: Int,
+    def search_fp32_scored(mut self, query_in: Pointer[Float32, MutUntrackedOrigin], k: Int,
                           mut scores: List[Float32], ef: Int = 100, start_node: Int = -1) raises -> List[Int]:
         """Like search_fp32 but also fills `scores` with L2 distance for each returned ID.
         P3: when start_node >= 0, skips upper-level greedy (shared across batch queries)."""
@@ -4145,21 +4145,21 @@ struct HNSWGraph(Movable):
 
             # Upper levels: greedy with block-INT2 distance
             var nq_node = self.entry_point_id
-            var nq_norm_v = self.nodes[nq_node].vector.bitcast[Float32]()[0]
+            var nq_norm_v = self.nodes[unsafe_offset=nq_node].vector.unsafe_bitcast[Float32]()[unsafe_offset=0]
             var nq_dot = int2_dot_single_simd(
-                self.query_block_int8, self.query_block_scales, self.nodes[nq_node].vector)
+                self.query_block_int8, self.query_block_scales, self.nodes[unsafe_offset=nq_node].vector)
             var nq_dist = self.query_block_norm + nq_norm_v - 2.0 * nq_dot
             for l in range(self.max_level, 0, -1):
                 var changed = True
                 while changed:
                     changed = False
-                    var nc = self.nodes[nq_node].get_neighbor_count(l)
+                    var nc = self.nodes[unsafe_offset=nq_node].get_neighbor_count(l)
                     for i in range(nc):
-                        var nidx = self.nodes[nq_node].get_neighbor(l, i)
+                        var nidx = self.nodes[unsafe_offset=nq_node].get_neighbor(l, i)
                         if nidx < 0 or nidx >= self.num_nodes: continue
                         if self.is_deleted(nidx): continue
-                        var nv = self.nodes[nidx].vector
-                        var n_norm = nv.bitcast[Float32]()[0]
+                        var nv = self.nodes[unsafe_offset=nidx].vector
+                        var n_norm = nv.unsafe_bitcast[Float32]()[unsafe_offset=0]
                         var n_dot = int2_dot_single_simd(
                             self.query_block_int8, self.query_block_scales, nv)
                         var d = self.query_block_norm + n_norm - 2.0 * n_dot
@@ -4176,7 +4176,7 @@ struct HNSWGraph(Movable):
             self.results.reserve(ef + 32)
             self.candidates.push(HeapNode(nq_dist, nq_node))
             self.results.push(HeapNode(nq_dist, nq_node))
-            self.visited_epoch[nq_node] = self.cur_epoch
+            self.visited_epoch[unsafe_offset=nq_node] = self.cur_epoch
             self._quant_beam_1536(QUANT_KIND_NANO, ef)
 
             # FP32 re-rank, sort, first k (gh #396: shared tail).
@@ -4195,30 +4195,30 @@ struct HNSWGraph(Movable):
                 var residual_tmp = self._residual_scratch()
                 # Compute dequantized query from INT8 blocks
                 for b in range(NUM_BLOCKS_1536):
-                    var scale = self.query_block_scales[b]
+                    var scale = self.query_block_scales[unsafe_offset=b]
                     for i in range(BLOCK_DIM):
-                        var q_val = Float32(Int(self.query_block_int8[b * BLOCK_DIM + i]))
-                        residual_tmp[b * BLOCK_DIM + i] = query[b * BLOCK_DIM + i] - q_val * scale
+                        var q_val = Float32(Int(self.query_block_int8[unsafe_offset=b * BLOCK_DIM + i]))
+                        residual_tmp[unsafe_offset=b * BLOCK_DIM + i] = query[unsafe_offset=b * BLOCK_DIM + i] - q_val * scale
                 self.qjl_query_res_norm = qjl_compute_signs(
                     residual_tmp, self.qjl_random_signs, self.wht_scratch,
                     self.qjl_query_signs, self.dim)
 
             # Upper levels: greedy with block-INT3 distance
             var tq_node = self.entry_point_id
-            var tq_norm_v = self.nodes[tq_node].vector.bitcast[Float32]()[0]
+            var tq_norm_v = self.nodes[unsafe_offset=tq_node].vector.unsafe_bitcast[Float32]()[unsafe_offset=0]
             var tq_dot = int3_dot_single_simd(
-                self.query_block_int8, self.query_block_scales, self.nodes[tq_node].vector)
+                self.query_block_int8, self.query_block_scales, self.nodes[unsafe_offset=tq_node].vector)
             var tq_dist = self.query_block_norm + tq_norm_v - 2.0 * tq_dot
             for l in range(self.max_level, 0, -1):
                 var changed = True
                 while changed:
                     changed = False
-                    var nc = self.nodes[tq_node].get_neighbor_count(l)
+                    var nc = self.nodes[unsafe_offset=tq_node].get_neighbor_count(l)
                     for i in range(nc):
-                        var nidx = self.nodes[tq_node].get_neighbor(l, i)
+                        var nidx = self.nodes[unsafe_offset=tq_node].get_neighbor(l, i)
                         if nidx < 0 or nidx >= self.num_nodes: continue
-                        var nv = self.nodes[nidx].vector
-                        var n_norm = nv.bitcast[Float32]()[0]
+                        var nv = self.nodes[unsafe_offset=nidx].vector
+                        var n_norm = nv.unsafe_bitcast[Float32]()[unsafe_offset=0]
                         var n_dot = int3_dot_single_simd(
                             self.query_block_int8, self.query_block_scales, nv)
                         var d = self.query_block_norm + n_norm - 2.0 * n_dot
@@ -4235,7 +4235,7 @@ struct HNSWGraph(Movable):
             self.results.reserve(ef + 32)
             self.candidates.push(HeapNode(tq_dist, tq_node))
             self.results.push(HeapNode(tq_dist, tq_node))
-            self.visited_epoch[tq_node] = self.cur_epoch
+            self.visited_epoch[unsafe_offset=tq_node] = self.cur_epoch
             self._quant_beam_1536(QUANT_KIND_TURBO, ef)
 
             # FP32 re-rank, sort, first k (gh #396: shared tail).
@@ -4250,20 +4250,20 @@ struct HNSWGraph(Movable):
 
             # Upper levels: greedy with block-INT4 distance
             var pq_node = self.entry_point_id
-            var pq_norm_v = self.nodes[pq_node].vector.bitcast[Float32]()[0]
+            var pq_norm_v = self.nodes[unsafe_offset=pq_node].vector.unsafe_bitcast[Float32]()[unsafe_offset=0]
             var pq_dot = block_int4_dot_single_simd(
-                self.query_block_int8, self.query_block_scales, self.nodes[pq_node].vector)
+                self.query_block_int8, self.query_block_scales, self.nodes[unsafe_offset=pq_node].vector)
             var pq_dist = self.query_block_norm + pq_norm_v - 2.0 * pq_dot
             for l in range(self.max_level, 0, -1):
                 var changed = True
                 while changed:
                     changed = False
-                    var nc = self.nodes[pq_node].get_neighbor_count(l)
+                    var nc = self.nodes[unsafe_offset=pq_node].get_neighbor_count(l)
                     for i in range(nc):
-                        var nidx = self.nodes[pq_node].get_neighbor(l, i)
+                        var nidx = self.nodes[unsafe_offset=pq_node].get_neighbor(l, i)
                         if nidx < 0 or nidx >= self.num_nodes: continue
-                        var nv = self.nodes[nidx].vector
-                        var n_norm = nv.bitcast[Float32]()[0]
+                        var nv = self.nodes[unsafe_offset=nidx].vector
+                        var n_norm = nv.unsafe_bitcast[Float32]()[unsafe_offset=0]
                         var n_dot = block_int4_dot_single_simd(
                             self.query_block_int8, self.query_block_scales, nv)
                         var d = self.query_block_norm + n_norm - 2.0 * n_dot
@@ -4280,7 +4280,7 @@ struct HNSWGraph(Movable):
             self.results.reserve(ef + 32)
             self.candidates.push(HeapNode(pq_dist, pq_node))
             self.results.push(HeapNode(pq_dist, pq_node))
-            self.visited_epoch[pq_node] = self.cur_epoch
+            self.visited_epoch[unsafe_offset=pq_node] = self.cur_epoch
             self._quant_beam_1536(QUANT_KIND_POLAR, ef)
 
             # FP32 re-rank, sort, first k (gh #396: shared tail).
@@ -4300,23 +4300,23 @@ struct HNSWGraph(Movable):
         else:
             var curr_dist: Float32
             curr_node_idx = self.entry_point_id
-            curr_dist = self._dist_fp32_int8(query, self.nodes[curr_node_idx].vector)
+            curr_dist = self._dist_fp32_int8(query, self.nodes[unsafe_offset=curr_node_idx].vector)
 
             # Upper levels: greedy search
             for l in range(self.max_level, 0, -1):
                 var changed = True
                 while changed:
                     changed = False
-                    var neighbor_count = self.nodes[curr_node_idx].get_neighbor_count(l)
+                    var neighbor_count = self.nodes[unsafe_offset=curr_node_idx].get_neighbor_count(l)
                     for i in range(neighbor_count):
-                        var neighbor_idx = self.nodes[curr_node_idx].get_neighbor(l, i) # 3.1: internal index
+                        var neighbor_idx = self.nodes[unsafe_offset=curr_node_idx].get_neighbor(l, i) # 3.1: internal index
                         if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                         if self.is_deleted(neighbor_idx): continue
                         if i + 1 < neighbor_count:
-                            var nxt_idx = self.nodes[curr_node_idx].get_neighbor(l, i + 1)
+                            var nxt_idx = self.nodes[unsafe_offset=curr_node_idx].get_neighbor(l, i + 1)
                             if nxt_idx >= 0 and nxt_idx < self.num_nodes:
-                                prefetch(self.nodes[nxt_idx].vector)
-                        var d = self._dist_fp32_int8(query, self.nodes[neighbor_idx].vector)
+                                prefetch(self.nodes[unsafe_offset=nxt_idx].vector)
+                        var d = self._dist_fp32_int8(query, self.nodes[unsafe_offset=neighbor_idx].vector)
                         if d < curr_dist:
                             curr_dist = d
                             curr_node_idx = neighbor_idx
@@ -4324,7 +4324,7 @@ struct HNSWGraph(Movable):
 
         # Base level: beam search
         self._reset_visited()
-        self.visited_epoch[curr_node_idx] = self.cur_epoch
+        self.visited_epoch[unsafe_offset=curr_node_idx] = self.cur_epoch
 
         # V10: quantize query to INT8 once — per-group Q8_K if calibrated
         if not query_quantized:
@@ -4339,7 +4339,7 @@ struct HNSWGraph(Movable):
         # Distances in INT32 space (not FP32); ordering is monotone → recall unchanged.
         # Seed with the INT8-INT8 distance directly (consistent metric; the old
         # fp32-push-then-repop dance ended in this exact state).
-        var curr_dist_i8 = self._dist_int8_int8(self.query_int8, self.nodes[curr_node_idx].vector)
+        var curr_dist_i8 = self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=curr_node_idx].vector)
         if self.dim == 1536:
             # gh #197: LinearPool replaces the candidates/results heap pair on
             # this path only. 1.10's fill/prune split is preserved inside.
@@ -4362,20 +4362,20 @@ struct HNSWGraph(Movable):
                 var c = self.candidates.pop()
                 var worst = self.results.peek_distance()
                 if c.distance > worst and len(self.results.data) >= ef: break
-                var neighbor_count = self.nodes[c.id].get_neighbor_count(0)
+                var neighbor_count = self.nodes[unsafe_offset=c.id].get_neighbor_count(0)
                 var valid_count = 0
                 for i in range(neighbor_count):
-                    var neighbor_idx = self.nodes[c.id].get_neighbor(0, i)
+                    var neighbor_idx = self.nodes[unsafe_offset=c.id].get_neighbor(0, i)
                     if neighbor_idx < 0 or neighbor_idx >= self.num_nodes: continue
                     if self.is_deleted(neighbor_idx): continue
-                    if self.visited_epoch[neighbor_idx] == self.cur_epoch: continue
-                    self.visited_epoch[neighbor_idx] = self.cur_epoch
+                    if self.visited_epoch[unsafe_offset=neighbor_idx] == self.cur_epoch: continue
+                    self.visited_epoch[unsafe_offset=neighbor_idx] = self.cur_epoch
                     valid_idxs[valid_count] = neighbor_idx
                     valid_count += 1
                 _evals_this_query += valid_count
                 for i in range(valid_count):
-                    var vptr = self.nodes[valid_idxs[i]].vector
-                    prefetch(vptr); prefetch(vptr + 64); prefetch(vptr + 128); prefetch(vptr + 192)
+                    var vptr = self.nodes[unsafe_offset=valid_idxs[i]].vector
+                    prefetch(vptr); prefetch(vptr.unsafe_offset(64)); prefetch(vptr.unsafe_offset(128)); prefetch(vptr.unsafe_offset(192))
                 if batch_codes:
                     # gh #397: plain INT8 codes at a covered dim — eight at a
                     # time through SABD+UDOT (512 and 1024 used to go one
@@ -4391,7 +4391,7 @@ struct HNSWGraph(Movable):
                         bi += 8
                     while bi < valid_count:
                         var nb = valid_idxs[bi]
-                        var db = self._code_dist(self.query_int8, self.nodes[nb].vector)
+                        var db = self._code_dist(self.query_int8, self.nodes[unsafe_offset=nb].vector)
                         if self.results.push_bounded(db, nb, ef):
                             self.candidates.push(HeapNode(db, nb))
                         bi += 1
@@ -4405,29 +4405,29 @@ struct HNSWGraph(Movable):
                     var dists8: SIMD[DType.float32, 8]
                     if self.dim == 256:
                         dists8 = l2_distance_int8_int8_batch8_jit[256](
-                            self.query_int8, self.nodes[i0].vector, self.nodes[i1].vector,
-                            self.nodes[i2].vector, self.nodes[i3].vector, self.nodes[i4].vector,
-                            self.nodes[i5].vector, self.nodes[i6].vector, self.nodes[i7].vector)
+                            self.query_int8, self.nodes[unsafe_offset=i0].vector, self.nodes[unsafe_offset=i1].vector,
+                            self.nodes[unsafe_offset=i2].vector, self.nodes[unsafe_offset=i3].vector, self.nodes[unsafe_offset=i4].vector,
+                            self.nodes[unsafe_offset=i5].vector, self.nodes[unsafe_offset=i6].vector, self.nodes[unsafe_offset=i7].vector)
                     elif self.dim == 768:
                         dists8 = l2_distance_int8_int8_batch8_jit[768](
-                            self.query_int8, self.nodes[i0].vector, self.nodes[i1].vector,
-                            self.nodes[i2].vector, self.nodes[i3].vector, self.nodes[i4].vector,
-                            self.nodes[i5].vector, self.nodes[i6].vector, self.nodes[i7].vector)
+                            self.query_int8, self.nodes[unsafe_offset=i0].vector, self.nodes[unsafe_offset=i1].vector,
+                            self.nodes[unsafe_offset=i2].vector, self.nodes[unsafe_offset=i3].vector, self.nodes[unsafe_offset=i4].vector,
+                            self.nodes[unsafe_offset=i5].vector, self.nodes[unsafe_offset=i6].vector, self.nodes[unsafe_offset=i7].vector)
                     elif self.dim == 384:
                         dists8 = l2_distance_int8_int8_batch8_jit[384](
-                            self.query_int8, self.nodes[i0].vector, self.nodes[i1].vector,
-                            self.nodes[i2].vector, self.nodes[i3].vector, self.nodes[i4].vector,
-                            self.nodes[i5].vector, self.nodes[i6].vector, self.nodes[i7].vector)
+                            self.query_int8, self.nodes[unsafe_offset=i0].vector, self.nodes[unsafe_offset=i1].vector,
+                            self.nodes[unsafe_offset=i2].vector, self.nodes[unsafe_offset=i3].vector, self.nodes[unsafe_offset=i4].vector,
+                            self.nodes[unsafe_offset=i5].vector, self.nodes[unsafe_offset=i6].vector, self.nodes[unsafe_offset=i7].vector)
                     else:
                         dists8 = SIMD[DType.float32, 8](
-                            self._dist_int8_int8(self.query_int8, self.nodes[i0].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i1].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i2].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i3].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i4].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i5].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i6].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i7].vector))
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i0].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i1].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i2].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i3].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i4].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i5].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i6].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i7].vector))
                     for j in range(8):
                         var d = dists8[j]; var nidx = valid_idxs[vi + j]
                         if self.results.push_bounded(d, nidx, ef):
@@ -4439,22 +4439,22 @@ struct HNSWGraph(Movable):
                     var dists4: SIMD[DType.float32, 4]
                     if self.dim == 256:
                         dists4 = l2_distance_int8_int8_batch4_jit[256](
-                            self.query_int8, self.nodes[i0].vector, self.nodes[i1].vector,
-                            self.nodes[i2].vector, self.nodes[i3].vector)
+                            self.query_int8, self.nodes[unsafe_offset=i0].vector, self.nodes[unsafe_offset=i1].vector,
+                            self.nodes[unsafe_offset=i2].vector, self.nodes[unsafe_offset=i3].vector)
                     elif self.dim == 768:
                         dists4 = l2_distance_int8_int8_batch4_jit[768](
-                            self.query_int8, self.nodes[i0].vector, self.nodes[i1].vector,
-                            self.nodes[i2].vector, self.nodes[i3].vector)
+                            self.query_int8, self.nodes[unsafe_offset=i0].vector, self.nodes[unsafe_offset=i1].vector,
+                            self.nodes[unsafe_offset=i2].vector, self.nodes[unsafe_offset=i3].vector)
                     elif self.dim == 384:
                         dists4 = l2_distance_int8_int8_batch4_jit[384](
-                            self.query_int8, self.nodes[i0].vector, self.nodes[i1].vector,
-                            self.nodes[i2].vector, self.nodes[i3].vector)
+                            self.query_int8, self.nodes[unsafe_offset=i0].vector, self.nodes[unsafe_offset=i1].vector,
+                            self.nodes[unsafe_offset=i2].vector, self.nodes[unsafe_offset=i3].vector)
                     else:
                         dists4 = SIMD[DType.float32, 4](
-                            self._dist_int8_int8(self.query_int8, self.nodes[i0].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i1].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i2].vector),
-                            self._dist_int8_int8(self.query_int8, self.nodes[i3].vector))
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i0].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i1].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i2].vector),
+                            self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=i3].vector))
                     for j in range(4):
                         var d = dists4[j]; var nidx = valid_idxs[vi + j]
                         if self.results.push_bounded(d, nidx, ef):
@@ -4462,7 +4462,7 @@ struct HNSWGraph(Movable):
                     vi += 4
                 while vi < valid_count:
                     var nidx = valid_idxs[vi]
-                    var d = self._dist_int8_int8(self.query_int8, self.nodes[nidx].vector)
+                    var d = self._dist_int8_int8(self.query_int8, self.nodes[unsafe_offset=nidx].vector)
                     if self.results.push_bounded(d, nidx, ef):
                         self.candidates.push(HeapNode(d, nidx))
                     vi += 1
@@ -4481,7 +4481,7 @@ struct HNSWGraph(Movable):
             self.final_results.clear()
             var n_out = min(k, self.pool.size)
             for i in range(n_out):
-                self.final_results.append(self.nodes[self.pool.entry_id(i)].id)
+                self.final_results.append(self.nodes[unsafe_offset=self.pool.entry_id(i)].id)
                 scores.append(self.pool.entry_dist(i))
             return self.final_results.copy()
 
@@ -4490,7 +4490,7 @@ struct HNSWGraph(Movable):
         self.scratch_dists.clear()
         while len(self.results.data) > 0:
             var node = self.results.pop()
-            self.scratch_ids.append(self.nodes[node.id].id)
+            self.scratch_ids.append(self.nodes[unsafe_offset=node.id].id)
             self.scratch_dists.append(node.distance)
 
         self.final_results.clear()
@@ -4501,7 +4501,7 @@ struct HNSWGraph(Movable):
 
         return self.final_results.copy()
 
-    def metric_scores(mut self, query_in: UnsafePointer[Float32, MutUntrackedOrigin],
+    def metric_scores(mut self, query_in: Pointer[Float32, MutUntrackedOrigin],
                       ids: List[Int], mut scores: List[Float32]) -> Bool:
         """gh #365: replace search scores with the index METRIC's distance for
         the k results a reply returns — squared L2 under L2, `1 - cos` under
@@ -4536,9 +4536,9 @@ struct HNSWGraph(Movable):
         var ga = self._residual_scratch()          # [2 * groups]: a then b
         if grouped:
             for g in range(dim // 32):
-                var inv = Float32(1.0) / self.group_scales[g]
-                ga[g] = inv
-                ga[dim // 32 + g] = 127.0 * inv + self.group_qmins[g]
+                var inv = Float32(1.0) / self.group_scales[unsafe_offset=g]
+                ga[unsafe_offset=g] = inv
+                ga[unsafe_offset=dim // 32 + g] = 127.0 * inv + self.group_qmins[unsafe_offset=g]
         # The codes are CLIPPED to the calibrated range: mean ± 8 sigma, which
         # on OpenAI embeddings leaves a few near-constant outlier dimensions
         # (down to -0.69) outside ±0.2 (_calibrate). Search does not care, the
@@ -4553,85 +4553,85 @@ struct HNSWGraph(Movable):
             var qc = self._norm_scratch()
             if Int(query) != Int(qc):
                 for d in range(dim):
-                    qc[d] = query[d]
+                    qc[unsafe_offset=d] = query[unsafe_offset=d]
             if grouped:
                 for g in range(dim // 32):
-                    var lo = self.group_qmins[g]
-                    var hi = lo + Float32(254.0) / self.group_scales[g]
+                    var lo = self.group_qmins[unsafe_offset=g]
+                    var hi = lo + Float32(254.0) / self.group_scales[unsafe_offset=g]
                     for j in range(g * 32, g * 32 + 32):
-                        qc[j] = min(max(qc[j], lo), hi)
+                        qc[unsafe_offset=j] = min(max(qc[unsafe_offset=j], lo), hi)
             else:
                 for d in range(dim):
-                    qc[d] = min(max(qc[d], self.global_min), self.global_max)
+                    qc[unsafe_offset=d] = min(max(qc[unsafe_offset=d], self.global_min), self.global_max)
             query = qc
         var a8 = SIMD[DType.float32, 8](g_inv)
         var b8 = SIMD[DType.float32, 8](127.5 * g_inv + self.global_min)
         for r in range(n):
             var ext = ids[r]
             if ext < 0 or ext >= self.max_elements: continue
-            var nidx = self.node_map[ext]
+            var nidx = self.node_map[unsafe_offset=ext]
             if nidx < 0 or nidx >= self.num_nodes: continue
             var c0 = SIMD[DType.float32, 8](0); var c1 = SIMD[DType.float32, 8](0)
             var c2 = SIMD[DType.float32, 8](0); var c3 = SIMD[DType.float32, 8](0)
             var tail = Float32(0.0)
             if have_fp32:
-                var v = self.gpu_rerank_fp32 + nidx * dim
+                var v = self.gpu_rerank_fp32.unsafe_offset(nidx * dim)
                 var d = 0
                 while d + 32 <= dim:
-                    var t0 = (query + d).load[width=8]() - (v + d).load[width=8]();           c0 = fma_or_muladd(t0, t0, c0)
-                    var t1 = (query + d + 8).load[width=8]() - (v + d + 8).load[width=8]();   c1 = fma_or_muladd(t1, t1, c1)
-                    var t2 = (query + d + 16).load[width=8]() - (v + d + 16).load[width=8](); c2 = fma_or_muladd(t2, t2, c2)
-                    var t3 = (query + d + 24).load[width=8]() - (v + d + 24).load[width=8](); c3 = fma_or_muladd(t3, t3, c3)
+                    var t0 = (query.unsafe_offset(d)).unsafe_load[width=8]() - (v.unsafe_offset(d)).unsafe_load[width=8]();           c0 = fma_or_muladd(t0, t0, c0)
+                    var t1 = (query.unsafe_offset(d).unsafe_offset(8)).unsafe_load[width=8]() - (v.unsafe_offset(d).unsafe_offset(8)).unsafe_load[width=8]();   c1 = fma_or_muladd(t1, t1, c1)
+                    var t2 = (query.unsafe_offset(d).unsafe_offset(16)).unsafe_load[width=8]() - (v.unsafe_offset(d).unsafe_offset(16)).unsafe_load[width=8](); c2 = fma_or_muladd(t2, t2, c2)
+                    var t3 = (query.unsafe_offset(d).unsafe_offset(24)).unsafe_load[width=8]() - (v.unsafe_offset(d).unsafe_offset(24)).unsafe_load[width=8](); c3 = fma_or_muladd(t3, t3, c3)
                     d += 32
                 while d + 8 <= dim:
-                    var t = (query + d).load[width=8]() - (v + d).load[width=8]()
+                    var t = (query.unsafe_offset(d)).unsafe_load[width=8]() - (v.unsafe_offset(d)).unsafe_load[width=8]()
                     c0 = fma_or_muladd(t, t, c0)
                     d += 8
                 while d < dim:
-                    var t = query[d] - v[d]; tail += t * t; d += 1
+                    var t = query[unsafe_offset=d] - v[unsafe_offset=d]; tail += t * t; d += 1
             else:
-                var codes = self.nodes[nidx].vector
+                var codes = self.nodes[unsafe_offset=nidx].vector
                 if is_null(codes): continue
                 if grouped:
                     var ng = dim // 32
                     for g in range(ng):
-                        var ag = SIMD[DType.float32, 8](ga[g])
-                        var bg = SIMD[DType.float32, 8](ga[ng + g])
+                        var ag = SIMD[DType.float32, 8](ga[unsafe_offset=g])
+                        var bg = SIMD[DType.float32, 8](ga[unsafe_offset=ng + g])
                         var off = g * 32
-                        var t0 = (query + off).load[width=8]() - fma_or_muladd((codes + off).load[width=8]().cast[DType.float32](), ag, bg)
+                        var t0 = (query.unsafe_offset(off)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(off)).unsafe_load[width=8]().cast[DType.float32](), ag, bg)
                         c0 = fma_or_muladd(t0, t0, c0)
-                        var t1 = (query + off + 8).load[width=8]() - fma_or_muladd((codes + off + 8).load[width=8]().cast[DType.float32](), ag, bg)
+                        var t1 = (query.unsafe_offset(off).unsafe_offset(8)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(off).unsafe_offset(8)).unsafe_load[width=8]().cast[DType.float32](), ag, bg)
                         c1 = fma_or_muladd(t1, t1, c1)
-                        var t2 = (query + off + 16).load[width=8]() - fma_or_muladd((codes + off + 16).load[width=8]().cast[DType.float32](), ag, bg)
+                        var t2 = (query.unsafe_offset(off).unsafe_offset(16)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(off).unsafe_offset(16)).unsafe_load[width=8]().cast[DType.float32](), ag, bg)
                         c2 = fma_or_muladd(t2, t2, c2)
-                        var t3 = (query + off + 24).load[width=8]() - fma_or_muladd((codes + off + 24).load[width=8]().cast[DType.float32](), ag, bg)
+                        var t3 = (query.unsafe_offset(off).unsafe_offset(24)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(off).unsafe_offset(24)).unsafe_load[width=8]().cast[DType.float32](), ag, bg)
                         c3 = fma_or_muladd(t3, t3, c3)
                 else:
                     var d = 0
                     while d + 32 <= dim:
-                        var t0 = (query + d).load[width=8]() - fma_or_muladd((codes + d).load[width=8]().cast[DType.float32](), a8, b8)
+                        var t0 = (query.unsafe_offset(d)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(d)).unsafe_load[width=8]().cast[DType.float32](), a8, b8)
                         c0 = fma_or_muladd(t0, t0, c0)
-                        var t1 = (query + d + 8).load[width=8]() - fma_or_muladd((codes + d + 8).load[width=8]().cast[DType.float32](), a8, b8)
+                        var t1 = (query.unsafe_offset(d).unsafe_offset(8)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(d).unsafe_offset(8)).unsafe_load[width=8]().cast[DType.float32](), a8, b8)
                         c1 = fma_or_muladd(t1, t1, c1)
-                        var t2 = (query + d + 16).load[width=8]() - fma_or_muladd((codes + d + 16).load[width=8]().cast[DType.float32](), a8, b8)
+                        var t2 = (query.unsafe_offset(d).unsafe_offset(16)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(d).unsafe_offset(16)).unsafe_load[width=8]().cast[DType.float32](), a8, b8)
                         c2 = fma_or_muladd(t2, t2, c2)
-                        var t3 = (query + d + 24).load[width=8]() - fma_or_muladd((codes + d + 24).load[width=8]().cast[DType.float32](), a8, b8)
+                        var t3 = (query.unsafe_offset(d).unsafe_offset(24)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(d).unsafe_offset(24)).unsafe_load[width=8]().cast[DType.float32](), a8, b8)
                         c3 = fma_or_muladd(t3, t3, c3)
                         d += 32
                     while d + 8 <= dim:
-                        var t = (query + d).load[width=8]() - fma_or_muladd((codes + d).load[width=8]().cast[DType.float32](), a8, b8)
+                        var t = (query.unsafe_offset(d)).unsafe_load[width=8]() - fma_or_muladd((codes.unsafe_offset(d)).unsafe_load[width=8]().cast[DType.float32](), a8, b8)
                         c0 = fma_or_muladd(t, t, c0)
                         d += 8
                     while d < dim:
-                        var x1 = fma_or_muladd(Float32(Int(codes[d])), g_inv, 127.5 * g_inv + self.global_min)
-                        var t = query[d] - x1; tail += t * t; d += 1
+                        var x1 = fma_or_muladd(Float32(Int(codes[unsafe_offset=d])), g_inv, 127.5 * g_inv + self.global_min)
+                        var t = query[unsafe_offset=d] - x1; tail += t * t; d += 1
             scores[r] = ((c0 + c1) + (c2 + c3)).reduce_add() + tail
             if self.distance_metric == 1:
                 # unit vectors: |q - v|^2 = 2 - 2cos, so 1 - cos = |q - v|^2 / 2
                 scores[r] = scores[r] * 0.5
         return True
 
-    def _dist_fp32_int8(self, v1: UnsafePointer[Float32, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+    def _dist_fp32_int8(self, v1: Pointer[Float32, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
         if is_null(v1) or is_null(v2): return Float32(1e30)
         var range_val = self.global_max - self.global_min
         if range_val <= 0: range_val = 1.0
@@ -4664,19 +4664,19 @@ struct HNSWGraph(Movable):
 
         return l2_distance_fp32_int8(v1, v2, self.dim, self.global_min, range_val)
 
-    def _dist_int8_int8(self, v1: UnsafePointer[Int8, MutUntrackedOrigin], v2: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+    def _dist_int8_int8(self, v1: Pointer[Int8, MutUntrackedOrigin], v2: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
         if is_null(v1) or is_null(v2): return Float32(1e30)
         if self.use_bq:
             var dim_u64 = (self.dim + 63) // 64
             if dim_u64 == 2:
-                return hamming_distance_jit[2](v1.bitcast[UInt64](), v2.bitcast[UInt64]())
+                return hamming_distance_jit[2](v1.unsafe_bitcast[UInt64](), v2.unsafe_bitcast[UInt64]())
             elif dim_u64 == 6:
-                return hamming_distance_jit[6](v1.bitcast[UInt64](), v2.bitcast[UInt64]())
+                return hamming_distance_jit[6](v1.unsafe_bitcast[UInt64](), v2.unsafe_bitcast[UInt64]())
             elif dim_u64 == 12:
-                return hamming_distance_jit[12](v1.bitcast[UInt64](), v2.bitcast[UInt64]())
+                return hamming_distance_jit[12](v1.unsafe_bitcast[UInt64](), v2.unsafe_bitcast[UInt64]())
             elif dim_u64 == 24:
-                return hamming_distance_jit[24](v1.bitcast[UInt64](), v2.bitcast[UInt64]())
-            return hamming_distance(v1.bitcast[UInt64](), v2.bitcast[UInt64](), dim_u64)
+                return hamming_distance_jit[24](v1.unsafe_bitcast[UInt64](), v2.unsafe_bitcast[UInt64]())
+            return hamming_distance(v1.unsafe_bitcast[UInt64](), v2.unsafe_bitcast[UInt64](), dim_u64)
 
         if self.use_int4 and not self.polarquant:
             # JIT Specialization for common dimensions

@@ -14,12 +14,12 @@ only on a value that no other key aliases. COPY deep-copies containers for
 exactly that reason (key_mgmt.mojo); RENAME moves the pointer and removes the
 source WITHOUT freeing it.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_null, is_not_null
 from std.memory import alloc, stack_allocation
 from std.ffi import external_call
 from src.common.value import GenericValue, ValueType
 from src.common.hash_map import SlabHashMap, StripedHashMap
-from std.memory.unsafe_pointer import Pointer
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
 from src.common.vector_set import VectorSet, free_vset
@@ -33,31 +33,31 @@ def free_container(val: GenericValue):
     left alone (heap string payloads are freed by the map on remove)."""
     var t = val.type.value
     if t == ValueType.ZSET or t == ValueType.GEO:
-        var z = val.as_zset().bitcast[SlabSkipList]()
+        var z = val.as_zset().unsafe_bitcast[SlabSkipList]()
         if is_null(z): return
         z[].release()
         z.unsafe_deinit_pointee()
-        z.free()
+        z.unsafe_free()
     elif t == ValueType.HASH or t == ValueType.SET:
-        var h = val.as_hash().bitcast[SlabHashMap]()
+        var h = val.as_hash().unsafe_bitcast[SlabHashMap]()
         if is_null(h): return
         h.unsafe_deinit_pointee()   # SlabHashMap.__del__ frees slots + payloads
-        h.free()
+        h.unsafe_free()
     elif t == ValueType.VSET:
-        free_vset(val.as_hash().bitcast[VectorSet]())
+        free_vset(val.as_hash().unsafe_bitcast[VectorSet]())
     elif t == ValueType.LIST:
-        var l = val.as_list().bitcast[SlabList]()
+        var l = val.as_list().unsafe_bitcast[SlabList]()
         if is_null(l): return
         l[].release()
-        l.free()              # release() freed every buffer; no destructor to run
+        l.unsafe_free()              # release() freed every buffer; no destructor to run
     # gh #394: the three types below were never freed at all — DEL of an HLL
     # leaked its 16 KB register array, of a stream ~3 KB plus every entry,
     # of a bitmap its bytes.
     elif t == ValueType.STREAM:
-        var sd = val.as_hash().bitcast[StreamData]()
+        var sd = val.as_hash().unsafe_bitcast[StreamData]()
         if is_null(sd): return
         sd[].release()
-        sd.free()
+        sd.unsafe_free()
     elif t == ValueType.HLL or t == ValueType.BITMAP:
         if val._data0 != 0:
             val.as_bitmap().unsafe_free()
@@ -104,8 +104,8 @@ def deep_clone(val: GenericValue) -> GenericValue:
     other's data. Aggregates are rebuilt element by element here."""
     var t = val.type.value
     if t == ValueType.HASH or t == ValueType.SET:
-        var src = val.as_hash().bitcast[SlabHashMap]()
-        var dst = alloc[SlabHashMap](1)
+        var src = val.as_hash().unsafe_bitcast[SlabHashMap]()
+        var dst = unsafe_alloc[SlabHashMap](1)
         dst.unsafe_write(SlabHashMap(16))
         for i in range(src[].capacity):
             if (src[].metadata[unsafe_offset=i] & 0x80) == 0:   # occupied
@@ -120,11 +120,11 @@ def deep_clone(val: GenericValue) -> GenericValue:
                                              ft[].values[unsafe_offset=i].as_int())
         var out = GenericValue()
         out.type = val.type
-        out.set_ptr(dst.bitcast[NoneType]())
+        out.set_ptr(dst.unsafe_bitcast[NoneType]())
         return out
     if t == ValueType.ZSET or t == ValueType.GEO:
-        var zsrc = val.as_zset().bitcast[SlabSkipList]()
-        var zdst = alloc[SlabSkipList](1)
+        var zsrc = val.as_zset().unsafe_bitcast[SlabSkipList]()
+        var zdst = unsafe_alloc[SlabSkipList](1)
         zdst.unsafe_write(SlabSkipList(16))
         var node = zsrc[].head[].forward[0]
         while is_not_null(node):
@@ -132,22 +132,22 @@ def deep_clone(val: GenericValue) -> GenericValue:
             node = node[].forward[0]
         var zout = GenericValue()
         zout.type = val.type
-        zout.set_ptr(zdst.bitcast[NoneType]())
+        zout.set_ptr(zdst.unsafe_bitcast[NoneType]())
         return zout
     if t == ValueType.LIST:
-        var lsrc = val.as_list().bitcast[SlabList]()
-        var ldst = alloc[SlabList](1)
+        var lsrc = val.as_list().unsafe_bitcast[SlabList]()
+        var ldst = unsafe_alloc[SlabList](1)
         ldst.unsafe_write(SlabList())
         ldst[].replace_all(lsrc[].owned_elems())
         var lout = GenericValue()
         lout.type = val.type
-        lout.set_ptr(ldst.bitcast[NoneType]())
+        lout.set_ptr(ldst.unsafe_bitcast[NoneType]())
         return lout
     if t == ValueType.VSET:
-        var vsrc = val.as_hash().bitcast[VectorSet]()
-        var vdst = alloc[VectorSet](1)
+        var vsrc = val.as_hash().unsafe_bitcast[VectorSet]()
+        var vdst = unsafe_alloc[VectorSet](1)
         vdst.unsafe_write(VectorSet(vsrc[].dim))
-        var tmp = alloc[Float32](vsrc[].dim)
+        var tmp = unsafe_alloc[Float32](vsrc[].dim)
         for s in range(vsrc[].n):
             if vsrc[].alive[unsafe_offset=s] == 0:
                 continue
@@ -161,35 +161,35 @@ def deep_clone(val: GenericValue) -> GenericValue:
             var np = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(nm.unsafe_ptr()))
             _ = vdst[].add(np, nm.byte_length(), tmp)
             vdst[].attrs[vdst[].find(np, nm.byte_length())] = vsrc[].attrs[s]
-        tmp.free()
+        tmp.unsafe_free()
         var vout = GenericValue()
         vout.type = val.type
-        vout.set_ptr(vdst.bitcast[NoneType]())
+        vout.set_ptr(vdst.unsafe_bitcast[NoneType]())
         return vout
     # gh #394: these fell through to clone(), a SHALLOW copy of the handle —
     # harmless while nothing ever freed them, a use-after-free the moment DEL
     # does (COPY k k2; DEL k left k2 on freed registers / entries / bytes).
     if t == ValueType.STREAM:
-        var ssrc = val.as_hash().bitcast[StreamData]()
-        var sdst = alloc[StreamData](1)
+        var ssrc = val.as_hash().unsafe_bitcast[StreamData]()
+        var sdst = unsafe_alloc[StreamData](1)
         sdst.unsafe_write(ssrc[].deep_copy())
         var sout = GenericValue()
         sout.type = val.type
-        sout.set_ptr(sdst.bitcast[NoneType]())
+        sout.set_ptr(sdst.unsafe_bitcast[NoneType]())
         return sout
     if t == ValueType.HLL:
-        var hdst = alloc[UInt8](HLL_REGISTERS)
+        var hdst = unsafe_alloc[UInt8](HLL_REGISTERS)
         unsafe_memcpy(dest=hdst, src=val.as_hll(), count=HLL_REGISTERS)
         var hout = val
-        hout.set_ptr(hdst.bitcast[NoneType]())
+        hout.set_ptr(hdst.unsafe_bitcast[NoneType]())
         return hout
     if t == ValueType.BITMAP:
         var n = val.bitmap_len()
-        var bdst = alloc[UInt8](max(n, 1))
+        var bdst = unsafe_alloc[UInt8](max(n, 1))
         if n > 0:
             unsafe_memcpy(dest=bdst, src=val.as_bitmap(), count=n)
         var bout = val
-        bout.set_ptr(bdst.bitcast[NoneType]())
+        bout.set_ptr(bdst.unsafe_bitcast[NoneType]())
         return bout
     return val.clone()
 
@@ -200,7 +200,7 @@ def _now_ns() -> Int64:
     import (fast_path imports it). Same clock, so deadlines compare."""
     var ts = stack_allocation[2, Int64]()
     _ = external_call["clock_gettime", Int32](Int32(0), ts)
-    return ts[0] * Int64(1_000_000_000) + ts[1]
+    return ts[unsafe_offset=0] * Int64(1_000_000_000) + ts[unsafe_offset=1]
 
 
 def hash_get_live(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], key: GenericValue) -> GenericValue:

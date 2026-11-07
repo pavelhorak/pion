@@ -23,7 +23,7 @@ Non-goals (documented in doc/multi_tenant.md): tenants still share the
 worker's WAL, memory, and CPU. One-process-per-tenant remains the
 deployment for hard resource isolation.
 """
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.collections import Array
@@ -43,7 +43,7 @@ def _lit_eq_ci(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
     """Case-insensitive ASCII match of a token against a lowercase literal."""
     if tl != lit.byte_length():
         return False
-    var lp = lit.unsafe_ptr()
+    var lp = lit.ptr()
     for k in range(tl):
         if (tp[unsafe_offset=k] | 0x20) != lp[unsafe_offset=k]:
             return False
@@ -104,10 +104,10 @@ struct TenantTable(Movable):
         tenant_arg_error at arg-parse time. Malformed entries are skipped
         (never partially loaded). Duplicate names: first entry wins."""
         self.count = 0
-        self.name_buf = alloc[UInt8](MAX_TENANTS * MAX_TENANT_NAME)
-        self.name_lens = alloc[Int32](MAX_TENANTS)
-        self.pass_buf = alloc[UInt8](MAX_TENANTS * MAX_TENANT_PASS)
-        self.pass_lens = alloc[Int32](MAX_TENANTS)
+        self.name_buf = unsafe_alloc[UInt8](MAX_TENANTS * MAX_TENANT_NAME)
+        self.name_lens = unsafe_alloc[Int32](MAX_TENANTS)
+        self.pass_buf = unsafe_alloc[UInt8](MAX_TENANTS * MAX_TENANT_PASS)
+        self.pass_lens = unsafe_alloc[Int32](MAX_TENANTS)
         var p = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(spec.unsafe_ptr()))
         var n = spec.byte_length()
         var start = 0

@@ -1,5 +1,5 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
 from src.common.value import GenericValue, ValueType
@@ -38,20 +38,20 @@ struct SlabList(Movable):
     def __init__(out self):
         self.size = 0
         self.zip_cap = Self.ZIPLIST_INITIAL_CAP
-        self.zip_buf = alloc[UInt8](self.zip_cap)
+        self.zip_buf = unsafe_alloc[UInt8](self.zip_cap)
         self.zip_len = 0
 
-        self.active_head_data = alloc[GenericValue](Self.SEG_SIZE)
+        self.active_head_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
         self.head_off = Self.SEG_SIZE  # empty
         self.head_end = Self.SEG_SIZE
-        self.head_segs = alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.head_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
         self.head_seg_count = 0
         self.head_segs_start = 0
         self.head_seg_alloc = 8
 
-        self.active_tail_data = alloc[GenericValue](Self.SEG_SIZE)
+        self.active_tail_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
         self.tail_count = 0
-        self.tail_segs = alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.tail_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
         self.tail_seg_count = 0
         self.tail_seg_alloc = 8
 
@@ -80,20 +80,20 @@ struct SlabList(Movable):
         # Reinitialize
         self.size = 0
         self.zip_cap = Self.ZIPLIST_INITIAL_CAP
-        self.zip_buf = alloc[UInt8](self.zip_cap)
+        self.zip_buf = unsafe_alloc[UInt8](self.zip_cap)
         self.zip_len = 0
 
-        self.active_head_data = alloc[GenericValue](Self.SEG_SIZE)
+        self.active_head_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
         self.head_off = Self.SEG_SIZE
         self.head_end = Self.SEG_SIZE
-        self.head_segs = alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.head_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
         self.head_seg_count = 0
         self.head_segs_start = 0
         self.head_seg_alloc = 8
 
-        self.active_tail_data = alloc[GenericValue](Self.SEG_SIZE)
+        self.active_tail_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
         self.tail_count = 0
-        self.tail_segs = alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.tail_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
         self.tail_seg_count = 0
         self.tail_seg_alloc = 8
 
@@ -155,7 +155,7 @@ struct SlabList(Movable):
     @always_inline
     def _grow_head_segs(mut self):
         var new_alloc = self.head_seg_alloc * 2
-        var new_segs = alloc[Pointer[GenericValue, MutUntrackedOrigin]](new_alloc)
+        var new_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](new_alloc)
         var valid = self.head_seg_count - self.head_segs_start
         for i in range(valid):
             new_segs[unsafe_offset=i] = self.head_segs[unsafe_offset=self.head_segs_start + i]
@@ -168,7 +168,7 @@ struct SlabList(Movable):
     @always_inline
     def _grow_tail_segs(mut self):
         var new_alloc = self.tail_seg_alloc * 2
-        var new_segs = alloc[Pointer[GenericValue, MutUntrackedOrigin]](new_alloc)
+        var new_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](new_alloc)
         for i in range(self.tail_seg_count):
             new_segs[unsafe_offset=i] = self.tail_segs[unsafe_offset=i]
         self.tail_segs.unsafe_free()
@@ -183,8 +183,8 @@ struct SlabList(Movable):
             return
 
         # Collect entry pointers from zip_buf first
-        var ptrs = alloc[Pointer[UInt8, MutUntrackedOrigin]](self.size)
-        var lens = alloc[Int](self.size)
+        var ptrs = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](self.size)
+        var lens = unsafe_alloc[Int](self.size)
         var off = 0
         for i in range(self.size):
             var v_len = Int((self.zip_buf.unsafe_offset(off)).unsafe_bitcast[UInt16]()[])
@@ -202,7 +202,7 @@ struct SlabList(Movable):
                     self._grow_head_segs()
                 self.head_segs[unsafe_offset=self.head_seg_count] = self.active_head_data
                 self.head_seg_count += 1
-                self.active_head_data = alloc[GenericValue](Self.SEG_SIZE)
+                self.active_head_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
                 self.head_off = Self.SEG_SIZE
             self.head_off -= 1
             self.active_head_data[unsafe_offset=self.head_off] = val
@@ -256,7 +256,7 @@ struct SlabList(Movable):
                 self._grow_head_segs()
             self.head_segs[unsafe_offset=self.head_seg_count] = self.active_head_data
             self.head_seg_count += 1
-            self.active_head_data = alloc[GenericValue](Self.SEG_SIZE)
+            self.active_head_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
             self.head_off = Self.SEG_SIZE
             self.head_end = Self.SEG_SIZE  # fresh segment
         self.head_off -= 1
@@ -284,7 +284,7 @@ struct SlabList(Movable):
                 self._grow_tail_segs()
             self.tail_segs[unsafe_offset=self.tail_seg_count] = self.active_tail_data
             self.tail_seg_count += 1
-            self.active_tail_data = alloc[GenericValue](Self.SEG_SIZE)
+            self.active_tail_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
             self.tail_count = 0
         self.active_tail_data[unsafe_offset=self.tail_count] = value.owned()
         self.tail_count += 1
@@ -352,7 +352,7 @@ struct SlabList(Movable):
             self.active_head_data = self.active_tail_data
             self.head_off = 0
             self.head_end = self.tail_count
-            self.active_tail_data = alloc[GenericValue](Self.SEG_SIZE)
+            self.active_tail_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
             self.tail_count = 0
 
     def rpop(mut self) -> GenericValue:
@@ -424,7 +424,7 @@ struct SlabList(Movable):
         var elems = self.get_all()
         var out = List[GenericValue]()
         out.reserve(len(elems))
-        var buf = alloc[UInt8](64)
+        var buf = unsafe_alloc[UInt8](64)
         for j in range(len(elems)):
             var v = elems[j]
             if v.is_string():

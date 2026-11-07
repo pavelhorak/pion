@@ -1,7 +1,7 @@
 """Admin/server commands: XGPU, PING, ECHO, HELLO, QUIT, AUTH, DBSIZE, SELECT, FLUSHALL, FLUSHDB, SAVE, BGSAVE, LASTSAVE, CONFIG, COMMAND, ACL, RESET, SWAPDB, SHUTDOWN, BGREWRITEAOF, DEBUG, SLOWLOG, LATENCY, MEMORY, MODULE, INFO."""
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.commands.command_table import PION_COMMAND_COUNT
-from std.memory.unsafe_pointer import Pointer
 from std.collections import Array, List, Span, Dict
 from std.memory import alloc, unsafe_memcpy
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
@@ -41,12 +41,12 @@ def handle_xgpu_info(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, nu
         var extra = 1  # consume subcommand
 
         if sub_len == 4 and sub0 == 105: # INFO (i=105)
-            var gi_buf = alloc[UInt8](1024)
+            var gi_buf = unsafe_alloc[UInt8](1024)
             var gi_mb = gi_buf
             var gi_off = 0
 
             def _gi_sl(s: StringLiteral, b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):
-                var sl = s.byte_length(); unsafe_memcpy(dest=b.unsafe_offset(o), src=s.unsafe_ptr(), count=sl); o += sl
+                var sl = s.byte_length(); unsafe_memcpy(dest=b.unsafe_offset(o), src=s.ptr(), count=sl); o += sl
             def _gi_in(n: Int, b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):
                 o += format_int_to_buf(b.unsafe_offset(o), 0, Int64(n))
             def _gi_in64(n: Int64, b: Pointer[UInt8, MutUntrackedOrigin], mut o: Int):
@@ -308,7 +308,7 @@ def handle_bgsave(mut snapshot_engine: SnapshotEngine, keyspace: Pointer[Striped
 def handle_time(mut writer: ResponseWriter):
     """TIME -> [unix seconds, microseconds], both bulk strings, as Redis (#30).
     It answered `-ERR unknown command`."""
-    var ts = alloc[Int64](2)
+    var ts = unsafe_alloc[Int64](2)
     _ = external_call["clock_gettime", Int32](Int32(0), ts)   # CLOCK_REALTIME
     var sec = ts[unsafe_offset=0]
     var usec = ts[unsafe_offset=1] // 1000
@@ -330,8 +330,8 @@ def handle_lolwut(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     var argc = num_tokens - i
     var version = 0
     var first = i + 1
-    if argc >= 3 and arg_eq(tokens[i + 1].ptr, tokens[i + 1].length, "version"):
-        var v = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+    if argc >= 3 and arg_eq(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length, "version"):
+        var v = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
         if not v.ok:
             writer.append_error_response("ERR value is not an integer or out of range")
             return
@@ -340,22 +340,22 @@ def handle_lolwut(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         version = u if u == 5 or u == 6 else 0
         first = i + 3
     var want = 3 if version == 5 else (2 if version == 6 else 0)
-    var args = alloc[Int64](3)
+    var args = unsafe_alloc[Int64](3)
     var nargs = 0
     while nargs < want and first + nargs < num_tokens:
-        var t = tokens[first + nargs]
+        var t = tokens[unsafe_offset=first + nargs]
         var a = parse_int64_strict(t.ptr, t.length)
         if not a.ok:
             args.unsafe_free()
             writer.append_error_response("ERR value is not an integer or out of range")
             return
-        args[nargs] = a.value
+        args[unsafe_offset=nargs] = a.value
         nargs += 1
     var label = String("Pion ver. ") + PION_VERSION
-    var out = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+    var out = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
     var n = external_call["pion_lolwut", Int64](Int64(version), Int64(nargs), args,
                                                label.unsafe_ptr(), Int64(label.byte_length()), out)
-    var text = out[0]
+    var text = out[unsafe_offset=0]
     if n >= 0:
         writer.append_verbatim_response(text, Int(n))
     else:
@@ -407,15 +407,15 @@ def _info_sections(body: String, sections: List[String]) -> String:
     var start = 0
     while start < n:
         var end = start
-        while end < n and bp[end] != 10:
+        while end < n and bp[unsafe_offset=end] != 10:
             end += 1
         var line = String(StringSpan[MutUntrackedOrigin](
             unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
                 unsafe_ptr=Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(bp) + start),
                 length=(end + 1 if end < n else end) - start)))
-        if end - start >= 2 and bp[start] == 35 and bp[start + 1] == 32:   # "# Name"
+        if end - start >= 2 and bp[unsafe_offset=start] == 35 and bp[unsafe_offset=start + 1] == 32:   # "# Name"
             var name_end = end
-            if name_end > start and bp[name_end - 1] == 13:
+            if name_end > start and bp[unsafe_offset=name_end - 1] == 13:
                 name_end -= 1
             var name = String(StringSpan[MutUntrackedOrigin](
                 unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
@@ -434,7 +434,7 @@ def _info_sections(body: String, sections: List[String]) -> String:
 
 @always_inline
 def _ps_key(mut writer: ResponseWriter, k: StringLiteral):
-    writer.append_bulk_string_response(k.unsafe_ptr(), k.byte_length())
+    writer.append_bulk_string_response(k.ptr(), k.byte_length())
 
 
 @always_inline
@@ -548,7 +548,7 @@ comptime _CONFIG_COUNT = 17
 def _heap_bytes(s: String) -> Pointer[UInt8, MutUntrackedOrigin]:
     """A heap copy of s's bytes, which the caller frees."""
     var n = s.byte_length()
-    var h = alloc[UInt8](n + 1)
+    var h = unsafe_alloc[UInt8](n + 1)
     unsafe_memcpy(dest=h, src=s.unsafe_ptr(), count=n)
     return h
 
@@ -609,7 +609,7 @@ def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             var nl = _config_name(k).byte_length()
             for j in range(i + 2, num_tokens):
                 var pt = tokens[unsafe_offset=j]
-                var low = alloc[UInt8](max(pt.length, 1))
+                var low = unsafe_alloc[UInt8](max(pt.length, 1))
                 for b in range(pt.length):
                     var c = pt.ptr[unsafe_offset=b]
                     low[unsafe_offset=b] = c | 0x20 if c >= 65 and c <= 90 else c
@@ -720,7 +720,7 @@ def handle_config(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                 else:
                     sml_set = True
                     sml_val = pv.value
-            elif (cmd_eq(nt.ptr, nt.length, "latency-monitor-threshold") and vt.length == 1 and vt.ptr[0] == 48) \
+            elif (cmd_eq(nt.ptr, nt.length, "latency-monitor-threshold") and vt.length == 1 and vt.ptr[unsafe_offset=0] == 48) \
                     or (cmd_eq(nt.ptr, nt.length, "latency-tracking") and arg_eq(vt.ptr, vt.length, "no")):
                 pass     # already so: Pion has neither
             else:
@@ -974,7 +974,7 @@ def handle_debug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     if argc < 2:
         writer.append_error_response("ERR wrong number of arguments for 'debug' command")
         return 0
-    var sub = tokens[i + 1]
+    var sub = tokens[unsafe_offset=i + 1]
     if argc == 2 and arg_eq(sub.ptr, sub.length, "help"):
         var lines = List[String]()
         lines.append("DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:")
@@ -992,12 +992,12 @@ def handle_debug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     elif argc == 3 and arg_eq(sub.ptr, sub.length, "set-active-expire"):
         # atoi, as Redis reads it: anything not starting with a non-zero
         # number turns the sweep off
-        var v = tokens[i + 2].text_value() + "\0"
+        var v = tokens[unsafe_offset=i + 2].text_value() + "\0"
         keyspace[].active_expire = external_call["atoi", Int32](v.unsafe_ptr()) != 0
         _ = v^
         writer.append_ok_response()
     elif argc == 3 and arg_eq(sub.ptr, sub.length, "sleep"):
-        var v = tokens[i + 2].text_value() + "\0"
+        var v = tokens[unsafe_offset=i + 2].text_value() + "\0"
         var secs = external_call["strtod", Float64](v.unsafe_ptr(), null_ptr[UInt8, MutUntrackedOrigin]())
         _ = v^
         if secs > 0:
@@ -1125,18 +1125,18 @@ def handle_memory(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             peak = rss
         var keys: Int64 = 0
         for k in range(8):
-            keys += Int64(keyspace[].shards[k].size)
+            keys += Int64(keyspace[].shards[unsafe_offset=k].size)
         writer.append_map_header(5)
-        writer.append_bulk_string_response("peak.allocated".unsafe_ptr(), 14)
+        writer.append_bulk_string_response("peak.allocated".ptr(), 14)
         writer.append_int_response(Int64(peak))
-        writer.append_bulk_string_response("total.allocated".unsafe_ptr(), 15)
+        writer.append_bulk_string_response("total.allocated".ptr(), 15)
         writer.append_int_response(Int64(rss))
-        writer.append_bulk_string_response("keys.count".unsafe_ptr(), 10)
+        writer.append_bulk_string_response("keys.count".ptr(), 10)
         writer.append_int_response(keys)
-        writer.append_bulk_string_response("peak.percentage".unsafe_ptr(), 15)
+        writer.append_bulk_string_response("peak.percentage".ptr(), 15)
         var pct = String(Float64(rss) * 100.0 / Float64(peak)) if peak > 0 else String("0")
         writer.append_double_response(pct.unsafe_ptr(), pct.byte_length())
-        writer.append_bulk_string_response("allocator.resident".unsafe_ptr(), 18)
+        writer.append_bulk_string_response("allocator.resident".ptr(), 18)
         writer.append_int_response(Int64(rss))
     elif arg_eq(sp, sl, "malloc-stats"):
         if argc != 2:
@@ -1229,13 +1229,13 @@ def handle_module(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             return argc - 1
         writer.append_array_header(1)
         writer.append_map_header(4)
-        writer.append_bulk_string_response("name".unsafe_ptr(), 4)
-        writer.append_bulk_string_response("search".unsafe_ptr(), 6)
-        writer.append_bulk_string_response("ver".unsafe_ptr(), 3)
+        writer.append_bulk_string_response("name".ptr(), 4)
+        writer.append_bulk_string_response("search".ptr(), 6)
+        writer.append_bulk_string_response("ver".ptr(), 3)
         writer.append_int_response(20800)
-        writer.append_bulk_string_response("path".unsafe_ptr(), 4)
-        writer.append_bulk_string_response("".unsafe_ptr(), 0)
-        writer.append_bulk_string_response("args".unsafe_ptr(), 4)
+        writer.append_bulk_string_response("path".ptr(), 4)
+        writer.append_bulk_string_response("".ptr(), 0)
+        writer.append_bulk_string_response("args".ptr(), 4)
         writer.append_empty_array_response()
     elif arg_eq(sub.ptr, sub.length, "help"):
         if argc != 2:

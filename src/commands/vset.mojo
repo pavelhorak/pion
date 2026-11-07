@@ -30,9 +30,9 @@ dispatch site sets `i = cmd_end_tok - 1` and passes `cmd_end_tok` as
 `num_tokens`, so optional-argument scans stay inside their own command.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.vector.fp32_scan import dot_f32_4chain
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, stack_allocation
 from std.memory import unsafe_memcpy
 from std.collections import List, Span
@@ -62,7 +62,7 @@ def _lookup(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], key: GenericV
     if v.type.value != ValueType.VSET:
         wrongtype = True
         return null_ptr[VectorSet, MutUntrackedOrigin]()
-    return v.as_hash().bitcast[VectorSet]()
+    return v.as_hash().unsafe_bitcast[VectorSet]()
 
 
 def _key_p(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
@@ -97,7 +97,7 @@ def _parse_vector(tokens: Pointer[RESP3Token, MutUntrackedOrigin], mut ci: Int, 
         if dim > cap:
             err = "ERR vector dimension too large"
             return
-        unsafe_memcpy(dest=out_buf.bitcast[UInt8](), src=blob.ptr, count=blob.length)
+        unsafe_memcpy(dest=out_buf.unsafe_bitcast[UInt8](), src=blob.ptr, count=blob.length)
         ci += 2
         return
     if arg_eq(fmt.ptr, fmt.length, "values"):
@@ -145,14 +145,14 @@ def handle_vadd(
     if arg_eq(tokens[unsafe_offset=ci].ptr, tokens[unsafe_offset=ci].length, "reduce"):
         writer.append_error_response("ERR VADD REDUCE (random projection) is not supported")
         return 0
-    var vec = alloc[Float32](_VEC_CAP)
+    var vec = unsafe_alloc[Float32](_VEC_CAP)
     var dim = 0
     var err = String("")
     _parse_vector(tokens, ci, num_tokens, vec, _VEC_CAP, dim, err)
     if err.byte_length() == 0 and ci >= num_tokens:
         err = "ERR wrong number of arguments for 'vadd' command"
     if err.byte_length() > 0:
-        vec.free()
+        vec.unsafe_free()
         writer.append_error_response(err)
         return 0
     var elem = tokens[unsafe_offset=ci]
@@ -173,51 +173,51 @@ def handle_vadd(
               or arg_eq(t.ptr, t.length, "q8") or arg_eq(t.ptr, t.length, "bin")):
             ci += 1
         else:
-            vec.free()
+            vec.unsafe_free()
             writer.append_error_response("ERR syntax error in VADD options")
             return 0
     var key = GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
     var wrongtype = False
     var vs = _lookup(keyspace, key, wrongtype)
     if wrongtype:
-        vec.free()
+        vec.unsafe_free()
         writer.append_error_response(WRONGTYPE_MSG)
         return 0
     if is_not_null(vs) and vs[].dim != dim:
-        vec.free()
+        vec.unsafe_free()
         writer.append_error_response("ERR Vector dimension mismatch - got " + String(dim)
                                      + " but set has " + String(vs[].dim))
         return 0
     if is_null(vs):
-        vs = alloc[VectorSet](1)
+        vs = unsafe_alloc[VectorSet](1)
         vs.unsafe_write(VectorSet(dim))
         var nv = GenericValue()
         nv.type = ValueType(ValueType.VSET)
-        nv.set_ptr(vs.bitcast[NoneType]())
+        nv.set_ptr(vs.unsafe_bitcast[NoneType]())
         keyspace[].set(key, nv)
     var added = vs[].add(elem.ptr, elem.length, vec)
     var slot = vs[].find(elem.ptr, elem.length)
     if have_attr:
         vs[].attrs[slot] = attr
-    vec.free()
+    vec.unsafe_free()
     writer.append_int_response(Int64(1) if added else Int64(0))
     # gh #378: effect records — the vector as stored, then the attribute.
     if is_not_null(wal):
-        var payload = alloc[UInt8](vs[].payload_len())
+        var payload = unsafe_alloc[UInt8](vs[].payload_len())
         var pl = vs[].stored_payload(slot, payload)
         _ = wal[].append_field_kv(28, _key_p(tokens, i + 1), tokens[unsafe_offset=i + 1].length,
                                   elem.ptr, elem.length, payload, pl)
-        payload.free()
+        payload.unsafe_free()
         if have_attr:
             # Heap copy: a short String's bytes live INLINE on this frame, and a
             # stack address must not reach the out-of-line append (gh #349 —
             # tests/test_audit_tail_alloca.py caught this one as a tail call).
             var al = attr.byte_length()
-            var ab = alloc[UInt8](max(al, 1))
+            var ab = unsafe_alloc[UInt8](max(al, 1))
             unsafe_memcpy(dest=ab, src=_sp(attr), count=al)
             _ = wal[].append_field_kv(30, _key_p(tokens, i + 1), tokens[unsafe_offset=i + 1].length,
                                       elem.ptr, elem.length, ab, al)
-            ab.free()
+            ab.unsafe_free()
     return 0
 
 
@@ -239,7 +239,7 @@ def handle_vsim(
         writer.append_error_response(WRONGTYPE_MSG)
         return 0
     var ci = i + 2
-    var q = alloc[Float32](_VEC_CAP)
+    var q = unsafe_alloc[Float32](_VEC_CAP)
     var dim = 0
     var err = String("")
     var ele_slot = -1
@@ -287,18 +287,18 @@ def handle_vsim(
         else:
             err = "ERR syntax error in VSIM options"
     if err.byte_length() > 0:
-        q.free()
+        q.unsafe_free()
         writer.append_error_response(err)
         return 0
     if is_null(vs):
-        q.free()
+        q.unsafe_free()
         writer.append_empty_array_response()   # Redis: a missing key is an empty result
         return 0
     if ele_slot >= 0:
-        unsafe_memcpy(dest=q, src=vs[].vecs + ele_slot * vs[].dim, count=vs[].dim)
+        unsafe_memcpy(dest=q, src=vs[].vecs.unsafe_offset(ele_slot * vs[].dim), count=vs[].dim)
     else:
         if dim != vs[].dim:
-            q.free()
+            q.unsafe_free()
             writer.append_error_response("ERR Vector dimension mismatch - got " + String(dim)
                                          + " but set has " + String(vs[].dim))
             return 0
@@ -309,7 +309,7 @@ def handle_vsim(
             var inv = Float32(1.0) / sqrt(ss)
             var d = 0
             while d + 8 <= dim:
-                (q + d).store((q + d).load[width=8]() * inv)
+                (q.unsafe_offset(d)).unsafe_store((q.unsafe_offset(d)).unsafe_load[width=8]() * inv)
                 d += 8
             while d < dim:
                 q[unsafe_offset=d] = q[unsafe_offset=d] * inv
@@ -317,7 +317,7 @@ def handle_vsim(
     var slots = List[Int]()
     var scores = List[Float64]()
     vs[].search(q, count, slots, scores)
-    q.free()
+    q.unsafe_free()
     var n = len(slots)
     if epsilon >= 0.0:
         var m = 0
@@ -450,7 +450,7 @@ def handle_vemb(
         writer.append_null_response()
         return 0
     var norm = Float64(vs[].norms[unsafe_offset=slot])
-    var v = vs[].vecs + slot * vs[].dim
+    var v = vs[].vecs.unsafe_offset(slot * vs[].dim)
     writer.append_array_header(vs[].dim)
     for d in range(vs[].dim):
         _write_float(writer, Float64(v[unsafe_offset=d]) * norm)
@@ -631,8 +631,8 @@ def _in_lo(name: String, bp: Pointer[UInt8, MutUntrackedOrigin], bl: Int) -> Boo
     if bl == 1 and bp[unsafe_offset=0] == 43: return False   # +
     var np = _sp(name); var nl = name.byte_length()
     if bp[unsafe_offset=0] == 91:                             # [
-        return not _bytes_lt(np, nl, bp + 1, bl - 1)
-    return _bytes_lt(bp + 1, bl - 1, np, nl)
+        return not _bytes_lt(np, nl, bp.unsafe_offset(1), bl - 1)
+    return _bytes_lt(bp.unsafe_offset(1), bl - 1, np, nl)
 
 
 def _in_hi(name: String, bp: Pointer[UInt8, MutUntrackedOrigin], bl: Int) -> Bool:
@@ -640,8 +640,8 @@ def _in_hi(name: String, bp: Pointer[UInt8, MutUntrackedOrigin], bl: Int) -> Boo
     if bl == 1 and bp[unsafe_offset=0] == 45: return False   # -
     var np = _sp(name); var nl = name.byte_length()
     if bp[unsafe_offset=0] == 91:
-        return not _bytes_lt(bp + 1, bl - 1, np, nl)
-    return _bytes_lt(np, nl, bp + 1, bl - 1)
+        return not _bytes_lt(bp.unsafe_offset(1), bl - 1, np, nl)
+    return _bytes_lt(np, nl, bp.unsafe_offset(1), bl - 1)
 
 
 def _valid_bound(bp: Pointer[UInt8, MutUntrackedOrigin], bl: Int) -> Bool:

@@ -16,7 +16,6 @@ block starting with an f16 scale):
 Bytes are widened through Int and masked: `UInt64(p[i].cast[DType.uint8]())`
 sign-extends under Mojo 1.0 (the bug #342 fixed in the tuned kernels).
 """
-from std.memory.unsafe_pointer import UnsafePointer
 from std.bit import pop_count
 
 # The register unpackers are the same open primitives the single-vector kernels
@@ -30,74 +29,74 @@ comptime _BLOCK_DIM = 32
 
 
 @always_inline
-def _dot16(q: UnsafePointer[Int8, MutUntrackedOrigin], v: SIMD[DType.int32, 16]) -> Int:
+def _dot16(q: Pointer[Int8, MutUntrackedOrigin], v: SIMD[DType.int32, 16]) -> Int:
     """Portable widening dot of 16 query bytes with 16 decoded codes (exact)."""
-    return Int((q.load[width=16]().cast[DType.int32]() * v).reduce_add())
+    return Int((q.unsafe_load[width=16]().cast[DType.int32]() * v).reduce_add())
 
 
 @always_inline
-def _byte(p: UnsafePointer[Int8, MutUntrackedOrigin], i: Int) -> Int:
+def _byte(p: Pointer[Int8, MutUntrackedOrigin], i: Int) -> Int:
     return Int(p[i]) & 0xFF
 
 
 @always_inline
-def _scale(p: UnsafePointer[Int8, MutUntrackedOrigin], off: Int) -> Float32:
-    return (p + off).bitcast[Float16]()[0].cast[DType.float32]()
+def _scale(p: Pointer[Int8, MutUntrackedOrigin], off: Int) -> Float32:
+    return (p.unsafe_offset(off)).unsafe_bitcast[Float16]()[unsafe_offset=0].cast[DType.float32]()
 
 
 def ref_int4_dot(
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    qs: UnsafePointer[Float32, MutUntrackedOrigin],
-    v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+    q: Pointer[Int8, MutUntrackedOrigin],
+    qs: Pointer[Float32, MutUntrackedOrigin],
+    v: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     var total: Float32 = 0.0
     var off = 4
     for b in range(_BLOCKS):
-        var combined = qs[b] * _scale(v, off)
+        var combined = qs[unsafe_offset=b] * _scale(v, off)
         off += 2
-        var packed = (v + off).load[width=16]().cast[DType.int32]() & SIMD[DType.int32, 16](0xFF)
+        var packed = (v.unsafe_offset(off)).unsafe_load[width=16]().cast[DType.int32]() & SIMD[DType.int32, 16](0xFF)
         var lo = (packed & SIMD[DType.int32, 16](0x0F)) - SIMD[DType.int32, 16](8)
         var hi = (packed >> 4) - SIMD[DType.int32, 16](8)
-        var acc = _dot16(q + b * _BLOCK_DIM, lo) + _dot16(q + b * _BLOCK_DIM + 16, hi)
+        var acc = _dot16(q.unsafe_offset(b * _BLOCK_DIM), lo) + _dot16(q.unsafe_offset(b * _BLOCK_DIM).unsafe_offset(16), hi)
         total += Float32(acc) * combined
         off += 16
     return total
 
 
 def ref_int3_dot(
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    qs: UnsafePointer[Float32, MutUntrackedOrigin],
-    v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+    q: Pointer[Int8, MutUntrackedOrigin],
+    qs: Pointer[Float32, MutUntrackedOrigin],
+    v: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     var total: Float32 = 0.0
     var off = 4
     for b in range(_BLOCKS):
-        var combined = qs[b] * _scale(v, off)
+        var combined = qs[unsafe_offset=b] * _scale(v, off)
         off += 2
-        var acc = _dot16(q + b * _BLOCK_DIM, _unpack16_int3(v, off).cast[DType.int32]()) + _dot16(q + b * _BLOCK_DIM + 16, _unpack16_int3(v, off + 6).cast[DType.int32]())
+        var acc = _dot16(q.unsafe_offset(b * _BLOCK_DIM), _unpack16_int3(v, off).cast[DType.int32]()) + _dot16(q.unsafe_offset(b * _BLOCK_DIM).unsafe_offset(16), _unpack16_int3(v, off + 6).cast[DType.int32]())
         total += Float32(acc) * combined
         off += 12
     return total
 
 
 def ref_int2_dot(
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    qs: UnsafePointer[Float32, MutUntrackedOrigin],
-    v: UnsafePointer[Int8, MutUntrackedOrigin]) -> Float32:
+    q: Pointer[Int8, MutUntrackedOrigin],
+    qs: Pointer[Float32, MutUntrackedOrigin],
+    v: Pointer[Int8, MutUntrackedOrigin]) -> Float32:
     var total: Float32 = 0.0
     var off = 4
     for b in range(_BLOCKS):
-        var combined = qs[b] * _scale(v, off)
+        var combined = qs[unsafe_offset=b] * _scale(v, off)
         off += 2
-        var acc = _dot16(q + b * _BLOCK_DIM, _unpack16_int2(v, off).cast[DType.int32]()) + _dot16(q + b * _BLOCK_DIM + 16, _unpack16_int2(v, off + 4).cast[DType.int32]())
+        var acc = _dot16(q.unsafe_offset(b * _BLOCK_DIM), _unpack16_int2(v, off).cast[DType.int32]()) + _dot16(q.unsafe_offset(b * _BLOCK_DIM).unsafe_offset(16), _unpack16_int2(v, off + 4).cast[DType.int32]())
         total += Float32(acc) * combined
         off += 8
     return total
 
 
 def ref_hamming(
-    a: UnsafePointer[UInt64, MutUntrackedOrigin],
-    b: UnsafePointer[UInt64, MutUntrackedOrigin],
+    a: Pointer[UInt64, MutUntrackedOrigin],
+    b: Pointer[UInt64, MutUntrackedOrigin],
     words: Int) -> Int:
     var total = 0
     for w in range(words):
-        total += Int(pop_count(a[w] ^ b[w]))
+        total += Int(pop_count(a[unsafe_offset=w] ^ b[unsafe_offset=w]))
     return total

@@ -1,5 +1,5 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy, unsafe_memset
 from std.collections import Array
 from src.common.utils import format_int_to_buf
@@ -126,7 +126,7 @@ struct ClusterState(Movable):
         self.peer_slot_starts = Array[Int, 16](fill=Int(0))
         self.peer_slot_ends = Array[Int, 16](fill=Int(0))
         # Init CRC16 table (CCITT, polynomial 0x1021, seed 0)
-        var crc_alloc = alloc[UInt16](256)
+        var crc_alloc = unsafe_alloc[UInt16](256)
         self.crc16_table = crc_alloc
         for i in range(256):
             var c = UInt16(i) << 8
@@ -144,13 +144,13 @@ struct ClusterState(Movable):
         self.repl_id = Array[UInt8, 41](fill=UInt8(48))
         self.repl_id[0] = 63  # '?'
         self.repl_id[1] = 0
-        self.slot_migrating = alloc[Int16](16384)
-        self.slot_importing = alloc[Int16](16384)
+        self.slot_migrating = unsafe_alloc[Int16](16384)
+        self.slot_importing = unsafe_alloc[Int16](16384)
         for si in range(16384):
             self.slot_migrating[unsafe_offset=si] = Int16(-1)
             self.slot_importing[unsafe_offset=si] = Int16(-1)
         # C1: Slot ownership bitset — default: own all 16384 slots (all bits set)
-        self.slot_owned = alloc[UInt8](2048)
+        self.slot_owned = unsafe_alloc[UInt8](2048)
         unsafe_memset(self.slot_owned, 0xFF, 2048)
         self.gossip_handle = null_ptr[NoneType, MutUntrackedOrigin]()
         self.repl_primary_handle = null_ptr[NoneType, MutUntrackedOrigin]()
@@ -214,7 +214,7 @@ struct ClusterState(Movable):
         self.repl_drain_cap = take.repl_drain_cap
         self.server_port = take.server_port
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if is_not_null(self.crc16_table):
             self.crc16_table.unsafe_free()
         if is_not_null(self.slot_migrating):

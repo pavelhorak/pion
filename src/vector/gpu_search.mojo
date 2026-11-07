@@ -11,7 +11,6 @@
 # max-gated build variant, not the default server build).
 
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 
 comptime GPU_BLOCK_SIZE: Int = 256

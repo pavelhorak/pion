@@ -1,7 +1,7 @@
+from std.memory.alloc import unsafe_alloc
 import std.sys as sys
 from std.sys.info import CompilationTarget
 from std.collections import List
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
 from std.atomic import Atomic, Ordering
@@ -31,7 +31,7 @@ from std.memory import unsafe_memset
 def _path_exists(path: String) -> Bool:
     """access(path, F_OK) — probe without opening (gh #176 sidecar path resolve)."""
     var p = path
-    return external_call["access", Int32](p.as_c_string_slice(), Int32(0)) == 0
+    return external_call["access", Int32](p.as_c_string_span(), Int32(0)) == 0
 
 
 def _exe_dir() -> String:
@@ -85,14 +85,14 @@ def _try_auto_detect_ollama(mut config: PionConfig):
     If nomic-embed-text is available, auto-enable semantic cache + AI.COMPLETE.
     Silent no-op if Ollama is not running."""
     var chost = String("127.0.0.1")
-    var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_slice(), Int32(11434))
+    var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_span(), Int32(11434))
     if fd < 0:
         return  # Ollama not running — skip silently
 
     var req = String("GET /api/tags HTTP/1.0\r\nHost: 127.0.0.1:11434\r\nConnection: close\r\n\r\n")
     _ = external_call["pion_write", Int64](fd, req.unsafe_ptr(), req.byte_length())
 
-    var buf = alloc[UInt8](65536)
+    var buf = unsafe_alloc[UInt8](65536)
     var total_n = 0
     var nr: Int64 = 1
     while nr > 0 and total_n < 65535:
@@ -191,7 +191,7 @@ def _parse_peer_nodes(cluster: Pointer[ClusterState, MutUntrackedOrigin], peer_s
                     else:
                         # Add as peer using flat array API
                         if peer_fill < 16:
-                            var tmp_host_buf = alloc[UInt8](h_len + 1)
+                            var tmp_host_buf = unsafe_alloc[UInt8](h_len + 1)
                             for hi in range(h_len):
                                 tmp_host_buf[unsafe_offset=hi] = peer_str.unsafe_ptr()[unsafe_offset=seg_start + hi]
                             tmp_host_buf[unsafe_offset=h_len] = 0
@@ -709,7 +709,7 @@ def main():
             i += 2
         elif args[i] == "--requirepass-file" and i + 1 < len(args):
             # gh #258: read the password from a file instead of argv.
-            var _sbuf = alloc[UInt8](512)
+            var _sbuf = unsafe_alloc[UInt8](512)
             var _pathz = args[i + 1] + "\0"
             var _slen = Int(external_call["pion_read_secret_file", Int32](
                 _pathz.unsafe_ptr(), _sbuf, Int32(512)))
@@ -780,7 +780,7 @@ def main():
             # function as MutUntrackedOrigin is miscompiled at -O3 (gh #349).
             var _mm = String(args[i + 1])
             var _mm_n = _mm.byte_length()
-            var _mm_h = alloc[UInt8](_mm_n + 1)
+            var _mm_h = unsafe_alloc[UInt8](_mm_n + 1)
             for _k in range(_mm_n):
                 _mm_h[unsafe_offset=_k] = _mm.as_bytes()[_k]
             var _mm_v = parse_memory_value(_mm_h, _mm_n,
@@ -840,7 +840,7 @@ def main():
             # copy for the reason --maxmemory's comment gives (gh #349).
             var _lm = String(args[i + 1])
             var _lm_n = _lm.byte_length()
-            var _lm_h = alloc[UInt8](_lm_n + 1)
+            var _lm_h = unsafe_alloc[UInt8](_lm_n + 1)
             for _k in range(_lm_n):
                 _lm_h[unsafe_offset=_k] = _lm.as_bytes()[_k]
             var _lm_v = parse_memory_value(_lm_h, _lm_n,
@@ -1188,11 +1188,11 @@ def main():
             var c_emb = config.inference.default_embedding_model
             var c_llm = config.inference.default_llm_model
             var inference_sidecar_pid = external_call["pion_spawn_inference", Int32](
-                c_python.as_c_string_slice(),
-                c_script.as_c_string_slice(),
-                c_socket.as_c_string_slice(),
-                c_emb.as_c_string_slice(),
-                c_llm.as_c_string_slice(),
+                c_python.as_c_string_span(),
+                c_script.as_c_string_span(),
+                c_socket.as_c_string_span(),
+                c_emb.as_c_string_span(),
+                c_llm.as_c_string_span(),
             )
             if inference_sidecar_pid > 0:
                 print("M1: Inference sidecar PID=" + String(Int(inference_sidecar_pid)))
@@ -1210,13 +1210,13 @@ def main():
     # by the in-process Metal SDPA kernels (--metal-attention / --metal-attention-fp16).
 
     # V2.6: single shared HNSW view — after FT.OPTIMIZE on any worker, all workers can search
-    var shared_hnsw_ptr = alloc[SharedHNSWView](1)
+    var shared_hnsw_ptr = unsafe_alloc[SharedHNSWView](1)
     shared_hnsw_ptr.unsafe_write(SharedHNSWView())
 
     # ingest_count: separately allocated so pointer value is preserved in SharedHNSWView copies.
     # Embedded Atomic[Scalar[DType.uint64]] was snapshotted in __moveinit__, causing workers 1-N to always
     # see count=0 and skip build. Pointer pattern (same as optimize_trigger) fixes this.
-    var ingest_count_buf = alloc[UInt64](1)
+    var ingest_count_buf = unsafe_alloc[UInt64](1)
     ingest_count_buf[unsafe_offset=0] = 0
     shared_hnsw_ptr[].ingest_count = ingest_count_buf
 
@@ -1281,7 +1281,7 @@ def main():
     # all platforms — sacrifices the "8 shards in 32MB L3" perf claim but recovers
     # correctness.
     shared_hnsw_ptr[].num_shards = 1
-    var optimize_trigger_buf = alloc[UInt64](1)
+    var optimize_trigger_buf = unsafe_alloc[UInt64](1)
     optimize_trigger_buf[unsafe_offset=0] = 0
     shared_hnsw_ptr[].optimize_trigger = optimize_trigger_buf
 
@@ -1290,24 +1290,24 @@ def main():
     # ordering before borrowing pointers. Without this, ARM weak memory order
     # can let a borrower observe ready=True before observing the field writes,
     # producing recall≈0 when borrowed pointers are stale.
-    var ready_atomic_buf = alloc[UInt64](1)
+    var ready_atomic_buf = unsafe_alloc[UInt64](1)
     ready_atomic_buf[unsafe_offset=0] = 0
     shared_hnsw_ptr[].ready_atomic = ready_atomic_buf
     # Drop-in (src/network/vector_auto.mojo): the automatic build's state, the
     # workers waiting for it, the publish counter, and the vector INFO counters.
-    var auto_cells = alloc[UInt64](8)
+    var auto_cells = unsafe_alloc[UInt64](8)
     unsafe_memset(auto_cells.unsafe_bitcast[UInt8](), 0, 64)
     shared_hnsw_ptr[].auto_state = auto_cells
-    shared_hnsw_ptr[].auto_waiters = auto_cells + 1
-    shared_hnsw_ptr[].publish_seq = auto_cells + 2
-    shared_hnsw_ptr[].vec_stats = auto_cells + 4      # [0] unindexed writes, [1] auto builds
-    shared_hnsw_ptr[].backfill_gen = auto_cells + 3   # FT.CREATE backfill requests
+    shared_hnsw_ptr[].auto_waiters = auto_cells.unsafe_offset(1)
+    shared_hnsw_ptr[].publish_seq = auto_cells.unsafe_offset(2)
+    shared_hnsw_ptr[].vec_stats = auto_cells.unsafe_offset(4)      # [0] unindexed writes, [1] auto builds
+    shared_hnsw_ptr[].backfill_gen = auto_cells.unsafe_offset(3)   # FT.CREATE backfill requests
     # A warm load of an automatic build: [0] workers still refilling the rows
     # of their hashes, [1] 1 while they do (vector_auto.mojo, restart refill)
     auto_cells[unsafe_offset=6] = UInt64(n_workers)
-    shared_hnsw_ptr[].restart_refill = auto_cells + 6
+    shared_hnsw_ptr[].restart_refill = auto_cells.unsafe_offset(6)
     # FT.CREATE's PREFIX list (0 prefixes = every key)
-    var prefix_cells = alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
+    var prefix_cells = unsafe_alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
     unsafe_memset(prefix_cells, 0, PREFIX_MAX * PREFIX_SLOT)
     shared_hnsw_ptr[].pre_prefixes = prefix_cells
 
@@ -1316,7 +1316,7 @@ def main():
     # wait for it before serving (see Pion.__init__ phase 6).
     # [0] = loaders still loading; [1 + w] = 1 when worker w is one. Decided
     # here, once, so a worker never re-derives it from the filesystem.
-    var warm_pending_buf = alloc[UInt64](1 + n_workers)
+    var warm_pending_buf = unsafe_alloc[UInt64](1 + n_workers)
     warm_pending_buf[unsafe_offset=0] = 0
     for _wl in range(n_workers):
         var _wl_path = "pion.hnsw." + String(_wl) + "\0"
@@ -1330,10 +1330,10 @@ def main():
     # FT.DROPINDEX; `worker_epoch` holds one 64-byte-strided slot per worker so
     # the per-batch relaxed store on the dispatch path never shares a cache
     # line with another core. Sized from n_workers, which is already capped.
-    var reclaim_epoch_buf = alloc[UInt64](1)
+    var reclaim_epoch_buf = unsafe_alloc[UInt64](1)
     reclaim_epoch_buf[unsafe_offset=0] = 1
     shared_hnsw_ptr[].reclaim_epoch = reclaim_epoch_buf
-    var worker_epoch_buf = alloc[UInt64](8 * n_workers)
+    var worker_epoch_buf = unsafe_alloc[UInt64](8 * n_workers)
     unsafe_memset(worker_epoch_buf.unsafe_bitcast[UInt8](), 0, 8 * n_workers * 8)
     shared_hnsw_ptr[].worker_epoch = worker_epoch_buf
     shared_hnsw_ptr[].worker_epoch_slots = n_workers
@@ -1345,33 +1345,33 @@ def main():
     # worker: recall ~0 for the bench's keys, and until 1.0.6 every key over
     # 31 bytes, which this map could not hold.
     var hk_max = config.vector.max_elements
-    var hk_keys_buf = alloc[UInt8](hk_buf_bytes(hk_max))
+    var hk_keys_buf = unsafe_alloc[UInt8](hk_buf_bytes(hk_max))
     unsafe_memset(hk_keys_buf, 0, hk_buf_bytes(hk_max))
     shared_hnsw_ptr[].hk_keys_buf = hk_keys_buf
     shared_hnsw_ptr[].hk_max_elements = hk_max
     # #46: tombstones, a byte per slot, and the build id they belong to
-    var vec_dead = alloc[UInt8](hk_max)
+    var vec_dead = unsafe_alloc[UInt8](hk_max)
     unsafe_memset(vec_dead, 0, hk_max)
     shared_hnsw_ptr[].vec_dead = vec_dead
-    shared_hnsw_ptr[].vec_dead_count = alloc[UInt64](1)
+    shared_hnsw_ptr[].vec_dead_count = unsafe_alloc[UInt64](1)
     shared_hnsw_ptr[].vec_dead_count[] = 0
-    shared_hnsw_ptr[].build_id = alloc[UInt64](1)
+    shared_hnsw_ptr[].build_id = unsafe_alloc[UInt64](1)
     shared_hnsw_ptr[].build_id[] = 0
-    shared_hnsw_ptr[].vec_gen = alloc[UInt64](1)
+    shared_hnsw_ptr[].vec_gen = unsafe_alloc[UInt64](1)
     shared_hnsw_ptr[].vec_gen[] = 1
 
     # 64-byte stride per worker: shard_ready[worker_id * 8] (UInt64 units × 8 bytes each = 64 bytes).
     # Each worker's ready flag occupies its own cache line — eliminates LDXR/STXR livelock on ARM64.
-    var shard_ready_buf = alloc[UInt64](8 * n_workers)
+    var shard_ready_buf = unsafe_alloc[UInt64](8 * n_workers)
     unsafe_memset(shard_ready_buf.unsafe_bitcast[UInt8](), 0, 8 * n_workers * 8)
     shared_hnsw_ptr[].shard_ready = shard_ready_buf
 
-    var shard_bus_ptr = alloc[ShardQueryBus](1)
+    var shard_bus_ptr = unsafe_alloc[ShardQueryBus](1)
     shard_bus_ptr.unsafe_write(ShardQueryBus(n_workers))
     shared_hnsw_ptr[].shard_bus = shard_bus_ptr
 
     # dbg_counters: 8 UInt64 per worker (64-byte stride), slots: [poll, saw_trig, build_done, build_fail, ...]
-    var dbg_counters_buf = alloc[UInt64](8 * n_workers)
+    var dbg_counters_buf = unsafe_alloc[UInt64](8 * n_workers)
     unsafe_memset(dbg_counters_buf.unsafe_bitcast[UInt8](), 0, 8 * n_workers * 8)
     shared_hnsw_ptr[].dbg_counters = dbg_counters_buf
 
@@ -1380,12 +1380,12 @@ def main():
     # when --kvcache is off (single-worker fast path; no overhead). Stored in
     # SharedHNSWView as an opaque pointer to dodge an import cycle.
     if config.server.kvcache_enabled:
-        var _vd = alloc[VStoreDirectory](1)
+        var _vd = unsafe_alloc[VStoreDirectory](1)
         _vd.unsafe_write(VStoreDirectory())
         shared_hnsw_ptr[].vstore_directory = Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(_vd))
 
     # Phase 5: Cluster state — shared across all workers (read-only after init)
-    var cluster_ptr = alloc[ClusterState](1)
+    var cluster_ptr = unsafe_alloc[ClusterState](1)
     cluster_ptr.unsafe_write(ClusterState())
     if config.cluster.enabled:
         cluster_ptr[].enabled = True
@@ -1404,7 +1404,7 @@ def main():
         # For replicas: register primary as peer[0] if not already in peer_nodes
         if config.cluster.is_replica and config.cluster.primary_host != "" and cluster_ptr[].peer_count == 0:
             var ph = config.cluster.primary_host
-            var tmp = alloc[UInt8](ph.byte_length() + 1)
+            var tmp = unsafe_alloc[UInt8](ph.byte_length() + 1)
             for ci in range(ph.byte_length()):
                 tmp[unsafe_offset=ci] = ph.unsafe_ptr()[unsafe_offset=ci]
             tmp[unsafe_offset=ph.byte_length()] = 0
@@ -1438,7 +1438,7 @@ def main():
             if xdp_shared_bpf_fd >= 0:
                 var iface_cstr = config.server.xdp_interface
                 var attach_rc = external_call["pion_xdp_attach_bpf", Int32](
-                    iface_cstr.as_c_string_slice(), xdp_shared_bpf_fd
+                    iface_cstr.as_c_string_span(), xdp_shared_bpf_fd
                 )
                 if attach_rc < 0:
                     print("XDP: BPF attach failed — falling back to io_uring")
@@ -1449,7 +1449,7 @@ def main():
                     # For multi-worker: need per-queue flow rules (RSS doesn't work with AF_XDP)
                     var fs_iface = config.server.xdp_interface
                     _ = external_call["pion_xdp_setup_flow_steering", Int32](
-                        fs_iface.as_c_string_slice(), UInt16(config.server.port), Int32(0)
+                        fs_iface.as_c_string_span(), UInt16(config.server.port), Int32(0)
                     )
                     print("XDP: shared XSKMAP fd=" + String(Int(xdp_shared_xskmap_fd))
                           + " BPF fd=" + String(Int(xdp_shared_bpf_fd))
@@ -1466,13 +1466,13 @@ def main():
     if config.server.use_xdp and CompilationTarget.is_linux():
         var sig_iface = config.server.xdp_interface
         external_call["pion_xdp_register_signal_handlers", NoneType](
-            sig_iface.as_c_string_slice(), UInt16(config.server.port)
+            sig_iface.as_c_string_span(), UInt16(config.server.port)
         )
 
     # Each connection is one fd, and every per-fd table holds 65536 entries. A
     # stock Linux login allows 1024 open files, which capped the server at about
     # a thousand clients; raise the soft limit as Redis does.
-    var _nofile_before = alloc[Int64](1)
+    var _nofile_before = unsafe_alloc[Int64](1)
     _nofile_before[unsafe_offset=0] = 0
     var _nofile = external_call["pion_raise_nofile", Int64](Int64(65536), _nofile_before)
     if _nofile > _nofile_before[unsafe_offset=0] and _nofile_before[unsafe_offset=0] > 0:
@@ -1502,7 +1502,7 @@ def main():
     # P4: per-worker secondary listen sockets for local-affinity connections.
     # Port = config.server.port + 2 + worker_id (e.g. 1976, 1977, 1978, 1979 for -p 1974 -w 4).
     # Clients connecting to these ports bypass cross-worker routing entirely.
-    var secondary_listen_fds = alloc[Int32](n_workers)
+    var secondary_listen_fds = unsafe_alloc[Int32](n_workers)
     for wi in range(n_workers):
         secondary_listen_fds[unsafe_offset=wi] = create_listen_socket(config.server.port + 2 + wi)
 
@@ -1516,7 +1516,7 @@ def main():
         var waited_ds = 0
         for _ in range(300):
             var c_sp2 = config.inference.socket_path
-            var test_fd = external_call["pion_connect_unix", Int32](c_sp2.as_c_string_slice())
+            var test_fd = external_call["pion_connect_unix", Int32](c_sp2.as_c_string_span())
             if test_fd >= 0:
                 _ = external_call["close", Int32](test_fd)
                 connected = True
@@ -1536,7 +1536,7 @@ def main():
             config.inference.enabled = False
 
     # XDP shared state: store fds in allocated memory so workers can access them
-    var xdp_shared_fds = alloc[Int32](2)  # [0] = xskmap_fd, [1] = bpf_prog_fd
+    var xdp_shared_fds = unsafe_alloc[Int32](2)  # [0] = xskmap_fd, [1] = bpf_prog_fd
     xdp_shared_fds[unsafe_offset=0] = xdp_shared_xskmap_fd
     xdp_shared_fds[unsafe_offset=1] = xdp_shared_bpf_fd
 
@@ -1546,7 +1546,7 @@ def main():
     # Mojo 1.0: spawn workers via pthreads (see pion_worker_entry above the
     # heap import below). Blocks forever — workers never exit in normal
     # operation, same contract as the old parallelize[worker_task](n, n).
-    var _boot_ctx = alloc[Int64](9)
+    var _boot_ctx = unsafe_alloc[Int64](9)
     _boot_ctx[unsafe_offset=0] = Int64(Int(shared_hnsw_ptr))
     _boot_ctx[unsafe_offset=1] = Int64(Int(cluster_ptr))
     _boot_ctx[unsafe_offset=2] = Int64(0)    # was the pub/sub ring (#42: per-worker inboxes in C)
@@ -1573,7 +1573,7 @@ def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64
                          argv: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
                          lens: Pointer[Int64, MutUntrackedOrigin], flags: Int64, resp: Int64,
                          reply: Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
-                         wrote: Pointer[Int64, MutUntrackedOrigin]) -> Int64:
+                         wrote: Pointer[Int64, MutUntrackedOrigin]) abi("C") -> Int64:
     var sp = Pointer[SlowPathHandler, MutUntrackedOrigin](unsafe_from_address=Int(ctx))
     return Int64(sp[].script_dispatch(Int(argc), argv, lens, Int(flags), Int(resp), reply, wrote))
 
@@ -1590,7 +1590,7 @@ def pion_script_dispatch(ctx: Pointer[NoneType, MutUntrackedOrigin], argc: Int64
 # (Int32*) [5]=shared_listen_fd [6]=binary_listen_fd [7]=n_workers
 # [8]=io_threads (gh #465: main()'s final value).
 @export
-def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64):
+def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64) abi("C"):
     # gh #465: an I/O thread of `--io-threads`, started by the executor (pion_spawn_detached).
     if worker_idx >= IO_THREAD_BASE:
         io_thread_main(Pointer[IOHub, MutUntrackedOrigin](unsafe_from_address=Int(ctx)),
@@ -1744,7 +1744,7 @@ def pion_worker_entry(ctx: Pointer[Int64, MutUntrackedOrigin], worker_idx: Int64
                 # worker with an empty one — the server announced "a password is
                 # set", bound 0.0.0.0, and then answered AUTH with "no password
                 # is set". Same two-parse-site trap as gh #253's worker cap.
-                var _wbuf = alloc[UInt8](512)
+                var _wbuf = unsafe_alloc[UInt8](512)
                 var _wpathz = args[j + 1] + "\0"
                 var _wlen = Int(external_call["pion_read_secret_file", Int32](
                     _wpathz.unsafe_ptr(), _wbuf, Int32(512)))
@@ -1918,7 +1918,7 @@ from src.common.heap import MinHeap as _GH199MinHeap, MaxHeap as _GH199MaxHeap
 # [3]=entry_idx (pre-pass max-level node; linked via backlinks only),
 # [4]=n_threads (stride).
 @export
-def pion_gh199_build_lane(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: Int64):
+def pion_gh199_build_lane(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: Int64) abi("C"):
     var g = Pointer[HNSWGraph, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=0]))
     var fp32 = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=1]))
     var n = Int(ctx[unsafe_offset=2])
@@ -1926,9 +1926,9 @@ def pion_gh199_build_lane(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: Int
     var n_threads = Int(ctx[unsafe_offset=4])
     var cand = _GH199MinHeap()
     var res = _GH199MaxHeap()
-    var visited = alloc[UInt16](g[].max_elements)
+    var visited = unsafe_alloc[UInt16](g[].max_elements)
     unsafe_memset(visited.unsafe_bitcast[UInt8](), 0, g[].max_elements * 2)
-    var epoch_cell = alloc[UInt16](1)
+    var epoch_cell = unsafe_alloc[UInt16](1)
     epoch_cell[unsafe_offset=0] = 0
     var bi = Int(lane_idx)
     while bi < n:
@@ -1951,7 +1951,7 @@ def pion_gh199_build_lane(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: Int
 # reports BUILT (or FAILED), waits for the worker to publish (SAVING), saves
 # the index file off the event loop, then reports DONE for the worker to join.
 @export
-def pion_vector_auto_build(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: Int64):
+def pion_vector_auto_build(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: Int64) abi("C"):
     _ = lane_idx
     var g = Pointer[HNSWGraph, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=0]))
     var sh = Pointer[SharedHNSWView, MutUntrackedOrigin](unsafe_from_address=Int(ctx[unsafe_offset=1]))

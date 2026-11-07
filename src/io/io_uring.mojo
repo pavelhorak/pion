@@ -1,5 +1,5 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
 from std.memory import unsafe_memset
@@ -201,7 +201,7 @@ struct IOUring(Movable):
         self.cq_off       = CQRingOffsets()
         self.sq_flags_ptr = null_ptr[UInt32, MutUntrackedOrigin]()
         self.sqpoll_active = False
-        var _ts = alloc[Int64](2)
+        var _ts = unsafe_alloc[Int64](2)
         _ts[unsafe_offset=0] = 0; _ts[unsafe_offset=1] = 0
         self.timeout_ts = Pointer[Int64, MutUntrackedOrigin](unsafe_from_address=Int(_ts))
         self.fd_gen = null_ptr[UInt32, MutUntrackedOrigin]()
@@ -233,7 +233,7 @@ struct IOUring(Movable):
     def setup(mut self, entries: UInt32, sqpoll: Bool = False) -> Bool:
         # Allocate a 128-byte buffer for io_uring_params (kernel layout = 120 bytes).
         # Using alloc instead of address_of(embedded field) avoids origin tracking issues.
-        var p = alloc[UInt8](128)
+        var p = unsafe_alloc[UInt8](128)
         unsafe_memset(p, 0, 128)
 
         # SQPOLL: set IORING_SETUP_SQPOLL flag in params.flags (offset 8).
@@ -345,9 +345,9 @@ struct IOUring(Movable):
         self.cq_ring_mask = (cq_base.unsafe_offset(Int(self.cq_off.ring_mask))).unsafe_bitcast[UInt32]()[]
         self.cqes         = (cq_base.unsafe_offset(Int(self.cq_off.cqes))).unsafe_bitcast[CQE]()
 
-        self.fd_gen = alloc[UInt32](URING_MAX_FDS)
+        self.fd_gen = unsafe_alloc[UInt32](URING_MAX_FDS)
         unsafe_memset(self.fd_gen.unsafe_bitcast[UInt8](), 0, URING_MAX_FDS * 4)
-        self.fd_closing = alloc[UInt8](URING_MAX_FDS)
+        self.fd_closing = unsafe_alloc[UInt8](URING_MAX_FDS)
         unsafe_memset(self.fd_closing, 0, URING_MAX_FDS)
 
         if sqpoll:

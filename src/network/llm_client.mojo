@@ -10,7 +10,7 @@ Response: JSON with choices[0].message.content text extracted as a plain string.
 Thread-safety: each worker creates its own LLMClient — no sharing required.
 """
 
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.ffi import external_call
@@ -191,12 +191,12 @@ struct LLMClient(Movable):
         Returns bytes written to out_buf, or 0 on failure."""
         if not self.enabled: return 0
         var chost = self.host
-        var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_slice(), Int32(self.port))
+        var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_span(), Int32(self.port))
         if fd < 0: return 0
 
         # ── Build JSON-escaped content string ────────────────────────────────
         var content_max = context_len * 6 + prompt_len * 6 + 64   # #51: \u00XX is 6 bytes/char
-        var content_buf = alloc[UInt8](content_max)
+        var content_buf = unsafe_alloc[UInt8](content_max)
         var content_mb = content_buf
         var cp = 0
         if context_len > 0:
@@ -218,7 +218,7 @@ struct LLMClient(Movable):
         var suffix1 = "\"}],\"stream\":false}"
         var p1l = prefix1.byte_length(); var m1l = mid1.byte_length(); var s1l = suffix1.byte_length()
         var max_body = p1l + model_len + m1l + content_len + s1l + 4
-        var body_buf = alloc[UInt8](max_body)
+        var body_buf = unsafe_alloc[UInt8](max_body)
         var body_mb = body_buf
         var bp = 0
         unsafe_memcpy(dest=body_mb, src=prefix1.unsafe_ptr().unsafe_bitcast[UInt8](), count=p1l); bp += p1l
@@ -238,7 +238,7 @@ struct LLMClient(Movable):
         req_hdr += "\r\nContent-Type: application/json\r\nContent-Length: "
         req_hdr += body_len_str; req_hdr += "\r\nConnection: close\r\n\r\n"
         var hdr_len = req_hdr.byte_length()
-        var req_buf = alloc[UInt8](hdr_len + body_len + 1)
+        var req_buf = unsafe_alloc[UInt8](hdr_len + body_len + 1)
         var req_mb = req_buf
         unsafe_memcpy(dest=req_mb, src=req_hdr.unsafe_ptr().unsafe_bitcast[UInt8](), count=hdr_len)
         unsafe_memcpy(dest=req_mb.unsafe_offset(hdr_len), src=body_mb, count=body_len)
@@ -253,7 +253,7 @@ struct LLMClient(Movable):
 
         # ── Receive (read until connection close) ─────────────────────────────
         var buf_size = 1024 * 1024  # 1MB
-        var buf = alloc[UInt8](buf_size)
+        var buf = unsafe_alloc[UInt8](buf_size)
         var buf_mb = buf
         var total_read = 0
         var nr: Int64 = 1
@@ -270,7 +270,7 @@ struct LLMClient(Movable):
         # not. The length comes from the literal now, so it cannot drift again.
         comptime TAG = "\"content\":\""
         comptime TAG_LEN = TAG.byte_length()
-        var tag_ptr = TAG.unsafe_ptr()
+        var tag_ptr = TAG.ptr()
         var found = -1
         for si in range(total_read - TAG_LEN):
             var ok = True
@@ -310,7 +310,7 @@ struct LLMClient(Movable):
         out_done[unsafe_offset=0] = 0
 
         var chost = self.host
-        var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_slice(), Int32(self.port))
+        var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_span(), Int32(self.port))
         if fd < 0: return 0
 
         # ── Build JSON body ───────────────────────────────────────────────────
@@ -334,7 +334,7 @@ struct LLMClient(Movable):
         var s1l = suffix1.byte_length(); var s2l = suffix2.byte_length()
 
         var max_body = p1l + model_len + m1l + prompt_len * 6 + s1l + np_len + s2l + 4   # #51: 6 bytes/char
-        var body_buf = alloc[UInt8](max_body)
+        var body_buf = unsafe_alloc[UInt8](max_body)
         var body_mb = body_buf
         var bp = 0
         unsafe_memcpy(dest=body_mb, src=prefix1.unsafe_ptr().unsafe_bitcast[UInt8](), count=p1l); bp += p1l
@@ -355,7 +355,7 @@ struct LLMClient(Movable):
         req_hdr += "\r\nContent-Type: application/json\r\nContent-Length: "
         req_hdr += body_len_str; req_hdr += "\r\nConnection: close\r\n\r\n"
         var hdr_len = req_hdr.byte_length()
-        var req_buf = alloc[UInt8](hdr_len + body_len + 1)
+        var req_buf = unsafe_alloc[UInt8](hdr_len + body_len + 1)
         var req_mb = req_buf
         unsafe_memcpy(dest=req_mb, src=req_hdr.unsafe_ptr().unsafe_bitcast[UInt8](), count=hdr_len)
         unsafe_memcpy(dest=req_mb.unsafe_offset(hdr_len), src=body_mb, count=body_len)
@@ -369,7 +369,7 @@ struct LLMClient(Movable):
 
         # ── Receive ───────────────────────────────────────────────────────────
         var buf_size = 1024 * 1024   # 1MB
-        var buf = alloc[UInt8](buf_size)
+        var buf = unsafe_alloc[UInt8](buf_size)
         var buf_mb = buf
         var total_read = 0
         var nr: Int64 = 1
@@ -382,7 +382,7 @@ struct LLMClient(Movable):
         # ── Parse "response":"..." ────────────────────────────────────────────
         comptime RTAG = "\"response\":\""
         comptime RTAG_LEN = RTAG.byte_length()   # #51: from the literal, not hand-counted
-        var rtag_ptr = RTAG.unsafe_ptr()
+        var rtag_ptr = RTAG.ptr()
         var text_len = 0
         var rfound = -1
         for si in range(total_read - RTAG_LEN):
@@ -398,7 +398,7 @@ struct LLMClient(Movable):
         # ── Parse "logprobs":[...] → find minimum logprob ────────────────────
         comptime LTAG = "\"logprobs\":["
         comptime LTAG_LEN = 12
-        var ltag_ptr = LTAG.unsafe_ptr()
+        var ltag_ptr = LTAG.ptr()
         var lfound = -1
         for si in range(total_read - LTAG_LEN):
             var ok = True
@@ -427,7 +427,7 @@ struct LLMClient(Movable):
         # ── Parse "done":true/false ───────────────────────────────────────────
         comptime DTAG = "\"done\":"
         comptime DTAG_LEN = 7
-        var dtag_ptr = DTAG.unsafe_ptr()
+        var dtag_ptr = DTAG.ptr()
         for si in range(total_read - DTAG_LEN - 4):
             var ok = True
             for ti in range(DTAG_LEN):

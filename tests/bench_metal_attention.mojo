@@ -8,7 +8,7 @@
 # This is a correctness gate, not a perf bench. Perf comparison vs MLX sidecar
 # comes after the kernel is wired into ATTEND.PREFIX.QUERY (out of PoC scope).
 
-from std.memory.unsafe_pointer import UnsafePointer, alloc
+from std.memory.unsafe_pointer import alloc
 from std.math import sqrt
 from std.random import random_float64
 
@@ -16,8 +16,8 @@ from src.vector.metal_attention_kernels import MetalAttentionContext, cpu_attend
 
 
 def cosine_sim(
-    a: UnsafePointer[Float32, MutAnyOrigin],
-    b: UnsafePointer[Float32, MutAnyOrigin],
+    a: Pointer[Float32, MutAnyOrigin],
+    b: Pointer[Float32, MutAnyOrigin],
     n: Int,
 ) -> Float32:
     var dot: Float32 = 0.0
@@ -30,7 +30,7 @@ def cosine_sim(
     return dot / (sqrt(na) * sqrt(nb))
 
 
-def fill_random(p: UnsafePointer[Float32, MutAnyOrigin], n: Int):
+def fill_random(p: Pointer[Float32, MutAnyOrigin], n: Int):
     # Uniform [-1, 1]. Deterministic across runs is not required for a PoC
     # correctness check; cosine threshold is loose enough to absorb seed drift.
     for i in range(n):

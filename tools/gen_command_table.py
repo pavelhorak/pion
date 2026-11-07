@@ -50,8 +50,8 @@ CM = re.compile(r"cmd_matches_(\d+)\s*\(\s*tp\s*,\s*([0-9,\s]+?)\)")
 CEQ = re.compile(r'cmd_eq\s*\(\s*tp\s*,\s*tl\s*,\s*"([^"]+)"\s*\)')
 HANDLER = re.compile(r"\bhandle_([a-z0-9_]+)\s*\(")
 TL = re.compile(r"\btl\s*==\s*(\d+)")
-FOLDED = re.compile(r"\(\s*tp\[\s*(\d+)\s*\]\s*\|\s*0x20\s*\)\s*==\s*(\d+)")
-EXACT = re.compile(r"(?<![|\w])tp\[\s*(\d+)\s*\]\s*==\s*(\d+)")
+FOLDED = re.compile(r"\(\s*tp\[\s*(?:unsafe_offset=\s*)?(\d+)\s*\]\s*\|\s*0x20\s*\)\s*==\s*(\d+)")
+EXACT = re.compile(r"(?<![|\w])tp\[\s*(?:unsafe_offset=\s*)?(\d+)\s*\]\s*==\s*(\d+)")
 FP = re.compile(r"b0_lower\s*==\s*(\d+)\s*and\s*cmd_len\s*==\s*(\d+)")
 
 _DOCS = None
@@ -245,7 +245,7 @@ def _cmd_eq_ci(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
     """Case-insensitive ASCII match, folding only A-Z (see the note above)."""
     if tl != lit.byte_length():
         return False
-    var lp = lit.unsafe_ptr()
+    var lp = lit.ptr()
     for k in range(tl):
         var c = tp[unsafe_offset=k]
         if c >= 65 and c <= 90:

@@ -1,5 +1,4 @@
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.sys import size_of, CompilationTarget
@@ -35,15 +34,15 @@ struct SlabAllocator[T: AnyType](Movable):
         self.slab_sizes.append(total_size)
         self.current_slab = initial_slab
 
-    def __init__(out self, *, deinit take: Self):
-        self.item_size = take.item_size
-        self.items_per_slab = take.items_per_slab
-        self.slabs = take.slabs^
-        self.slab_sizes = take.slab_sizes^
-        self.free_list = take.free_list^
-        self.current_slab = take.current_slab
-        self.current_offset = take.current_offset
-        self.use_huge_pages = take.use_huge_pages
+    def __init__(out self, *, deinit move: Self):
+        self.item_size = move.item_size
+        self.items_per_slab = move.items_per_slab
+        self.slabs = move.slabs^
+        self.slab_sizes = move.slab_sizes^
+        self.free_list = move.free_list^
+        self.current_slab = move.current_slab
+        self.current_offset = move.current_offset
+        self.use_huge_pages = move.use_huge_pages
 
     def _mmap_alloc(self, size: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
         var alloc_size = size

@@ -26,8 +26,8 @@ XADD) are not implemented; XINFO STREAM leaves out their fields and Redis's
 internal radix-tree counts.
 """
 
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc, unsafe_memcpy
-from std.memory.unsafe_pointer import Pointer
 from std.collections import List
 from std.ffi import external_call
 from src.common.ptr import is_not_null, is_null, null_ptr
@@ -67,10 +67,10 @@ def _text(t: RESP3Token) -> String:
 
 
 def write_id(mut writer: ResponseWriter, ms: UInt64, seq: UInt64):
-    var buf = alloc[UInt8](48)
+    var buf = unsafe_alloc[UInt8](48)
     var n = format_stream_id(buf, ms, seq)
     writer.append_bulk_string_response(buf, n)
-    buf.free()
+    buf.unsafe_free()
 
 
 def _write_name(mut writer: ResponseWriter, name: List[UInt8]):
@@ -89,7 +89,7 @@ def _log(wal: Pointer[WAL, MutUntrackedOrigin], cmd: UInt8, kt: RESP3Token, payl
 def _name_bytes(t: RESP3Token) -> List[UInt8]:
     var out = List[UInt8](capacity=t.length)
     for k in range(t.length):
-        out.append(t.ptr[k])
+        out.append(t.ptr[unsafe_offset=k])
     return out^
 
 
@@ -121,8 +121,8 @@ def _decr(mut ms: UInt64, mut seq: UInt64) -> Bool:
 def _parse_interval(t: RESP3Token, missing_seq: UInt64, mut ms: UInt64, mut seq: UInt64, mut exclusive: Bool) -> Bool:
     """streamParseIntervalIDOrReply: `(id` exclusive (a strict id), else an id
     or `-` / `+`."""
-    exclusive = t.length > 1 and t.ptr[0] == 40
-    var r = parse_id(t.ptr + 1 if exclusive else t.ptr, t.length - 1 if exclusive else t.length,
+    exclusive = t.length > 1 and t.ptr[unsafe_offset=0] == 40
+    var r = parse_id(t.ptr.unsafe_offset(1) if exclusive else t.ptr, t.length - 1 if exclusive else t.length,
                      missing_seq, exclusive, False)
     ms = r.ms
     seq = r.seq
@@ -137,7 +137,7 @@ def handle_xgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     if argc < 2:
         writer.append_error_response("ERR wrong number of arguments for 'xgroup' command")
         return
-    var sub = tokens[i + 1]
+    var sub = tokens[unsafe_offset=i + 1]
     var sp = sub.ptr
     var sl = sub.length
     var is_create = arg_eq(sp, sl, "create")
@@ -169,12 +169,12 @@ def handle_xgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     var entries_read = SCG_INVALID_ENTRIES_READ
     var j = i + 5
     while j < end:
-        var o = tokens[j]
+        var o = tokens[unsafe_offset=j]
         if is_create and arg_eq(o.ptr, o.length, "mkstream"):
             mkstream = True
             j += 1
         elif (is_create or is_setid) and arg_eq(o.ptr, o.length, "entriesread") and j + 1 < end:
-            var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not v.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return
@@ -188,8 +188,8 @@ def handle_xgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
                                          + "'. Try XGROUP HELP.")
             return
 
-    var kt = tokens[i + 2]
-    var gt = tokens[i + 3]
+    var kt = tokens[unsafe_offset=i + 2]
+    var gt = tokens[unsafe_offset=i + 3]
     var val = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
     var sd = null_ptr[StreamData, MutUntrackedOrigin]()
     if not val.is_none():
@@ -215,10 +215,10 @@ def handle_xgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
             writer.append_error_response("ERR unknown subcommand or wrong number of arguments for '" + _text(sub)
                                          + "'. Try XGROUP HELP.")
             return
-        var idt = tokens[i + 4]
+        var idt = tokens[unsafe_offset=i + 4]
         var ms = UInt64(0)
         var seq = UInt64(0)
-        if idt.length == 1 and idt.ptr[0] == 36:          # $
+        if idt.length == 1 and idt.ptr[unsafe_offset=0] == 36:          # $
             if is_not_null(sd):
                 ms = sd[].last_id_ms
                 seq = sd[].last_id_seq
@@ -246,10 +246,10 @@ def handle_xgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
             writer.append_error_response("ERR unknown subcommand or wrong number of arguments for '" + _text(sub)
                                          + "'. Try XGROUP HELP.")
             return
-        var idt = tokens[i + 4]
+        var idt = tokens[unsafe_offset=i + 4]
         var ms = sd[].last_id_ms
         var seq = sd[].last_id_seq
-        if not (idt.length == 1 and idt.ptr[0] == 36):
+        if not (idt.length == 1 and idt.ptr[unsafe_offset=0] == 36):
             var r = parse_id(idt.ptr, idt.length, 0, False, False)
             if not r.ok:
                 writer.append_error_response(_E_BAD_ID)
@@ -271,7 +271,7 @@ def handle_xgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
         _log(wal, 40, kt, encode_group_name_rec(gt.ptr, gt.length))
         writer.append_int_response(1)
     elif arg_eq(sp, sl, "createconsumer"):
-        var ct = tokens[i + 4]
+        var ct = tokens[unsafe_offset=i + 4]
         if sd[].groups[g].consumer_index(ct.ptr, ct.length) >= 0:
             writer.append_int_response(0)
             return
@@ -280,7 +280,7 @@ def handle_xgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
         _settle_consumer(sd, g, ci, True, wal, kt)
         writer.append_int_response(1)
     else:   # delconsumer
-        var ct = tokens[i + 4]
+        var ct = tokens[unsafe_offset=i + 4]
         var ci = sd[].groups[g].consumer_index(ct.ptr, ct.length)
         if ci < 0:
             writer.append_int_response(0)
@@ -349,10 +349,10 @@ def parse_xreadgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, en
         return a^
     var j = i + 1
     while j < end:
-        var o = tokens[j]
+        var o = tokens[unsafe_offset=j]
         var more = end - j - 1
         if arg_eq(o.ptr, o.length, "block") and more > 0:
-            var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not v.ok:
                 writer.append_error_response("ERR timeout is not an integer or out of range")
                 return a^
@@ -365,7 +365,7 @@ def parse_xreadgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, en
             a.block_ms = now_ms + v.value if v.value > 0 else 0
             j += 2
         elif arg_eq(o.ptr, o.length, "count") and more > 0:
-            var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not v.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return a^
@@ -413,15 +413,15 @@ def handle_xreadgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, e
     var a = parse_xreadgroup(tokens, i, end, writer, now)
     if not a.ok:
         return XRG_DONE
-    var gtok = tokens[a.group_at]
-    var ctok = tokens[a.group_at + 1]
+    var gtok = tokens[unsafe_offset=a.group_at]
+    var ctok = tokens[unsafe_offset=a.group_at + 1]
     var n = a.nstreams
     var kind = List[Int]()        # 0 new (">"), 1 history
     var ids_ms = List[UInt64]()
     var ids_seq = List[UInt64]()
     for s in range(n):
-        var kt = tokens[a.streams_at + s]
-        var it = tokens[a.streams_at + n + s]
+        var kt = tokens[unsafe_offset=a.streams_at + s]
+        var it = tokens[unsafe_offset=a.streams_at + n + s]
         var val = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
         if not val.is_none() and val.type.value != ValueType.STREAM:
             writer.append_error_response(_E_WRONGTYPE)
@@ -433,17 +433,17 @@ def handle_xreadgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, e
             writer.append_error_response("NOGROUP No such key '" + _text(kt) + "' or consumer group '" + _text(gtok)
                                          + "' in XREADGROUP with GROUP option")
             return XRG_DONE
-        if it.length == 1 and it.ptr[0] == 36:          # $
+        if it.length == 1 and it.ptr[unsafe_offset=0] == 36:          # $
             writer.append_error_response("ERR The $ ID is meaningless in the context of XREADGROUP: you want to read "
                                          + "the history of this consumer by specifying a proper ID, or use the > ID "
                                          + "to get new messages. The $ ID would just return an empty result set.")
             return XRG_DONE
-        if it.length == 1 and it.ptr[0] == 43:          # +
+        if it.length == 1 and it.ptr[unsafe_offset=0] == 43:          # +
             writer.append_error_response("ERR The + ID is meaningless in the context of XREADGROUP: you want to read "
                                          + "the history of this consumer by specifying a proper ID, or use the > ID "
                                          + "to get new messages. The + ID would just return an empty result set.")
             return XRG_DONE
-        if it.length == 1 and it.ptr[0] == 62:          # >
+        if it.length == 1 and it.ptr[unsafe_offset=0] == 62:          # >
             kind.append(0)
             ids_ms.append(0)
             ids_seq.append(0)
@@ -465,7 +465,7 @@ def handle_xreadgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, e
     var included = List[Bool]()
     var nserve = 0
     for s in range(n):
-        var kt = tokens[a.streams_at + s]
+        var kt = tokens[unsafe_offset=a.streams_at + s]
         var sd = get_stream(keyspace, GenericValue.borrow(kt.ptr, kt.length))
         var g = sd[].group_index(gtok.ptr, gtok.length)
         var ci = sd[].groups[g].consumer_index(ctok.ptr, ctok.length)
@@ -508,7 +508,7 @@ def handle_xreadgroup(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, e
     for s in range(n):
         if not included[s]:
             continue
-        var kt = tokens[a.streams_at + s]
+        var kt = tokens[unsafe_offset=a.streams_at + s]
         if writer.proto != 3:
             writer.append_array_header(2)
         writer.append_bulk_string_response(kt.ptr, kt.length)
@@ -626,8 +626,8 @@ def handle_xack(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: In
     if end - i < 4:
         writer.append_error_response("ERR wrong number of arguments for 'xack' command")
         return
-    var kt = tokens[i + 1]
-    var gt = tokens[i + 2]
+    var kt = tokens[unsafe_offset=i + 1]
+    var gt = tokens[unsafe_offset=i + 2]
     var val = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
     if not val.is_none() and val.type.value != ValueType.STREAM:
         writer.append_error_response(_E_WRONGTYPE)
@@ -643,7 +643,7 @@ def handle_xack(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: In
     var ms = List[UInt64]()
     var seq = List[UInt64]()
     for j in range(i + 3, end):
-        var r = parse_id(tokens[j].ptr, tokens[j].length, 0, True, False)
+        var r = parse_id(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, 0, True, False)
         if not r.ok:
             writer.append_error_response(_E_BAD_ID)
             return
@@ -678,7 +678,7 @@ def _parse_ackdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, e
     var a = AckDelArgs(False, DEL_NONE, -1, 0)
     var j = start
     while j < end:
-        var t = tokens[j]
+        var t = tokens[unsafe_offset=j]
         if a.strategy == DEL_NONE and arg_eq(t.ptr, t.length, "keepref"):
             a.strategy = DEL_KEEPREF
             j += 1
@@ -689,7 +689,7 @@ def _parse_ackdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], start: Int, e
             a.strategy = DEL_ACKED
             j += 1
         elif arg_eq(t.ptr, t.length, "ids") and j + 1 < end:
-            var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not v.ok or v.value < 1:
                 writer.append_error_response("ERR Number of IDs must be a positive integer")
                 return a
@@ -715,7 +715,7 @@ def _parse_ids(tokens: Pointer[RESP3Token, MutUntrackedOrigin], at: Int, n: Int,
                mut seq: List[UInt64], mut writer: ResponseWriter) -> Bool:
     """Every id strictly, before anything changes (all or nothing)."""
     for k in range(n):
-        var r = parse_id(tokens[at + k].ptr, tokens[at + k].length, 0, True, False)
+        var r = parse_id(tokens[unsafe_offset=at + k].ptr, tokens[unsafe_offset=at + k].length, 0, True, False)
         if not r.ok:
             writer.append_error_response(_E_BAD_ID)
             return False
@@ -737,7 +737,7 @@ def handle_xdelex(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     if end - i < 5:
         writer.append_error_response("ERR wrong number of arguments for 'xdelex' command")
         return
-    var kt = tokens[i + 1]
+    var kt = tokens[unsafe_offset=i + 1]
     var val = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
     if not val.is_none() and val.type.value != ValueType.STREAM:
         writer.append_error_response(_E_WRONGTYPE)
@@ -782,8 +782,8 @@ def handle_xackdel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end:
     if end - i < 6:
         writer.append_error_response("ERR wrong number of arguments for 'xackdel' command")
         return
-    var kt = tokens[i + 1]
-    var gt = tokens[i + 2]
+    var kt = tokens[unsafe_offset=i + 1]
+    var gt = tokens[unsafe_offset=i + 2]
     var val = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
     if not val.is_none() and val.type.value != ValueType.STREAM:
         writer.append_error_response(_E_WRONGTYPE)
@@ -837,8 +837,8 @@ def handle_xpending(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end
     if argc != 3 and (argc < 6 or argc > 9):
         writer.append_error_response("ERR syntax error")
         return
-    var kt = tokens[i + 1]
-    var gt = tokens[i + 2]
+    var kt = tokens[unsafe_offset=i + 1]
+    var gt = tokens[unsafe_offset=i + 2]
     var minidle = Int64(0)
     var count = Int64(0)
     var s_ms = UInt64(0)
@@ -848,8 +848,8 @@ def handle_xpending(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end
     var consumer_at = -1
     if argc >= 6:
         var at = i + 3
-        if arg_eq(tokens[at].ptr, tokens[at].length, "idle"):
-            var v = parse_int64_strict(tokens[at + 1].ptr, tokens[at + 1].length)
+        if arg_eq(tokens[unsafe_offset=at].ptr, tokens[unsafe_offset=at].length, "idle"):
+            var v = parse_int64_strict(tokens[unsafe_offset=at + 1].ptr, tokens[unsafe_offset=at + 1].length)
             if not v.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return
@@ -858,19 +858,19 @@ def handle_xpending(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end
                 writer.append_error_response("ERR syntax error")
                 return
             at += 2
-        var cv = parse_int64_strict(tokens[at + 2].ptr, tokens[at + 2].length)
+        var cv = parse_int64_strict(tokens[unsafe_offset=at + 2].ptr, tokens[unsafe_offset=at + 2].length)
         if not cv.ok:
             writer.append_error_response("ERR value is not an integer or out of range")
             return
         count = cv.value if cv.value > 0 else 0
         var ex = False
-        if not _parse_interval(tokens[at], 0, s_ms, s_seq, ex):
+        if not _parse_interval(tokens[unsafe_offset=at], 0, s_ms, s_seq, ex):
             writer.append_error_response(_E_BAD_ID)
             return
         if ex and not _incr(s_ms, s_seq):
             writer.append_error_response("ERR invalid start ID for the interval")
             return
-        if not _parse_interval(tokens[at + 1], UInt64.MAX, e_ms, e_seq, ex):
+        if not _parse_interval(tokens[unsafe_offset=at + 1], UInt64.MAX, e_ms, e_seq, ex):
             writer.append_error_response(_E_BAD_ID)
             return
         if ex and not _decr(e_ms, e_seq):
@@ -918,7 +918,7 @@ def handle_xpending(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end
         return
     var only = -1
     if consumer_at >= 0:
-        var cidx = grp.consumer_index(tokens[consumer_at].ptr, tokens[consumer_at].length)
+        var cidx = grp.consumer_index(tokens[unsafe_offset=consumer_at].ptr, tokens[unsafe_offset=consumer_at].length)
         if cidx < 0:
             writer.append_array_header(0)
             return
@@ -946,7 +946,7 @@ def handle_xpending(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end
         if oi >= 0:
             _write_name(writer, grp.consumers[oi].name)
         else:
-            writer.append_bulk_string_response("".unsafe_ptr(), 0)
+            writer.append_bulk_string_response("".ptr(), 0)
         var idle = now - nk.delivery_time
         writer.append_int_response(idle if idle > 0 else 0)
         writer.append_int_response(nk.delivery_count)
@@ -979,9 +979,9 @@ def handle_xclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     if end - i < 6:
         writer.append_error_response("ERR wrong number of arguments for 'xclaim' command")
         return
-    var kt = tokens[i + 1]
-    var gt = tokens[i + 2]
-    var ct = tokens[i + 3]
+    var kt = tokens[unsafe_offset=i + 1]
+    var gt = tokens[unsafe_offset=i + 2]
+    var ct = tokens[unsafe_offset=i + 3]
     var val = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
     if not val.is_none() and val.type.value != ValueType.STREAM:
         writer.append_error_response(_E_WRONGTYPE)
@@ -994,7 +994,7 @@ def handle_xclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     if g < 0:
         writer.append_error_response("NOGROUP No such key '" + _text(kt) + "' or consumer group '" + _text(gt) + "'")
         return
-    var mi = parse_int64_strict(tokens[i + 4].ptr, tokens[i + 4].length)
+    var mi = parse_int64_strict(tokens[unsafe_offset=i + 4].ptr, tokens[unsafe_offset=i + 4].length)
     if not mi.ok:
         writer.append_error_response("ERR Invalid min-idle-time argument for XCLAIM")
         return
@@ -1003,7 +1003,7 @@ def handle_xclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     var ids_seq = List[UInt64]()
     var j = i + 5
     while j < end:
-        var r = parse_id(tokens[j].ptr, tokens[j].length, 0, True, False)
+        var r = parse_id(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, 0, True, False)
         if not r.ok:
             break
         ids_ms.append(r.ms)
@@ -1017,7 +1017,7 @@ def handle_xclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     var last_ms = UInt64(0)
     var last_seq = UInt64(0)
     while j < end:
-        var o = tokens[j]
+        var o = tokens[unsafe_offset=j]
         var more = end - 1 - j
         if arg_eq(o.ptr, o.length, "force"):
             force = True
@@ -1025,28 +1025,28 @@ def handle_xclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
             justid = True
         elif arg_eq(o.ptr, o.length, "idle") and more > 0:
             j += 1
-            var v = parse_int64_strict(tokens[j].ptr, tokens[j].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length)
             if not v.ok:
                 writer.append_error_response("ERR Invalid IDLE option argument for XCLAIM")
                 return
             dtime = now - v.value
         elif arg_eq(o.ptr, o.length, "time") and more > 0:
             j += 1
-            var v = parse_int64_strict(tokens[j].ptr, tokens[j].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length)
             if not v.ok:
                 writer.append_error_response("ERR Invalid TIME option argument for XCLAIM")
                 return
             dtime = v.value
         elif arg_eq(o.ptr, o.length, "retrycount") and more > 0:
             j += 1
-            var v = parse_int64_strict(tokens[j].ptr, tokens[j].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length)
             if not v.ok:
                 writer.append_error_response("ERR Invalid RETRYCOUNT option argument for XCLAIM")
                 return
             retrycount = v.value
         elif arg_eq(o.ptr, o.length, "lastid") and more > 0:
             j += 1
-            var r = parse_id(tokens[j].ptr, tokens[j].length, 0, True, False)
+            var r = parse_id(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, 0, True, False)
             if not r.ok:
                 writer.append_error_response(_E_BAD_ID)
                 return
@@ -1114,10 +1114,10 @@ def handle_xautoclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, e
     if end - i < 6:
         writer.append_error_response("ERR wrong number of arguments for 'xautoclaim' command")
         return
-    var kt = tokens[i + 1]
-    var gt = tokens[i + 2]
-    var ct = tokens[i + 3]
-    var mi = parse_int64_strict(tokens[i + 4].ptr, tokens[i + 4].length)
+    var kt = tokens[unsafe_offset=i + 1]
+    var gt = tokens[unsafe_offset=i + 2]
+    var ct = tokens[unsafe_offset=i + 3]
+    var mi = parse_int64_strict(tokens[unsafe_offset=i + 4].ptr, tokens[unsafe_offset=i + 4].length)
     if not mi.ok:
         writer.append_error_response("ERR Invalid min-idle-time argument for XAUTOCLAIM")
         return
@@ -1125,7 +1125,7 @@ def handle_xautoclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, e
     var s_ms = UInt64(0)
     var s_seq = UInt64(0)
     var ex = False
-    if not _parse_interval(tokens[i + 5], 0, s_ms, s_seq, ex):
+    if not _parse_interval(tokens[unsafe_offset=i + 5], 0, s_ms, s_seq, ex):
         writer.append_error_response(_E_BAD_ID)
         return
     if ex and not _incr(s_ms, s_seq):
@@ -1135,10 +1135,10 @@ def handle_xautoclaim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, e
     var justid = False
     var j = i + 6
     while j < end:
-        var o = tokens[j]
+        var o = tokens[unsafe_offset=j]
         var more = end - 1 - j
         if arg_eq(o.ptr, o.length, "count") and more > 0:
-            var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not v.ok or v.value < 1 or v.value > Int64(9223372036854775807) // 16:
                 writer.append_error_response("ERR COUNT must be > 0")
                 return
@@ -1227,8 +1227,8 @@ def handle_xsetid(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     if end - i < 3:
         writer.append_error_response("ERR wrong number of arguments for 'xsetid' command")
         return
-    var kt = tokens[i + 1]
-    var r = parse_id(tokens[i + 2].ptr, tokens[i + 2].length, 0, True, False)
+    var kt = tokens[unsafe_offset=i + 1]
+    var r = parse_id(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, 0, True, False)
     if not r.ok:
         writer.append_error_response(_E_BAD_ID)
         return
@@ -1237,10 +1237,10 @@ def handle_xsetid(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
     var md_seq = UInt64(0)
     var j = i + 3
     while j < end:
-        var o = tokens[j]
+        var o = tokens[unsafe_offset=j]
         var more = end - 1 - j
         if arg_eq(o.ptr, o.length, "entriesadded") and more > 0:
-            var v = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var v = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not v.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return
@@ -1250,7 +1250,7 @@ def handle_xsetid(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: 
             entries_added = v.value
             j += 2
         elif arg_eq(o.ptr, o.length, "maxdeletedid") and more > 0:
-            var m = parse_id(tokens[j + 1].ptr, tokens[j + 1].length, 0, True, False)
+            var m = parse_id(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length, 0, True, False)
             if not m.ok:
                 writer.append_error_response(_E_BAD_ID)
                 return
@@ -1305,7 +1305,7 @@ def handle_xinfo(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: I
     if argc < 2:
         writer.append_error_response("ERR wrong number of arguments for 'xinfo' command")
         return
-    var sub = tokens[i + 1]
+    var sub = tokens[unsafe_offset=i + 1]
     if arg_eq(sub.ptr, sub.length, "help"):
         if argc != 2:
             writer.append_error_response("ERR wrong number of arguments for 'xinfo|help' command")
@@ -1333,7 +1333,7 @@ def handle_xinfo(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: I
     if (is_stream and argc < 3) or (is_groups and argc != 3) or (is_consumers and argc != 4):
         writer.append_error_response("ERR wrong number of arguments for 'xinfo|" + _lower(sub) + "' command")
         return
-    var kt = tokens[i + 2]
+    var kt = tokens[unsafe_offset=i + 2]
     var val = keyspace[].get(GenericValue.borrow(kt.ptr, kt.length))
     if val.is_none():
         writer.append_error_response("ERR no such key")
@@ -1344,7 +1344,7 @@ def handle_xinfo(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: I
     var sd = val.as_hash().unsafe_bitcast[StreamData]()
     var now = _now_ms()
     if is_consumers:
-        var gt = tokens[i + 3]
+        var gt = tokens[unsafe_offset=i + 3]
         var g = sd[].group_index(gt.ptr, gt.length)
         if g < 0:
             writer.append_error_response("NOGROUP No such consumer group '" + _text(gt) + "' for key name '"
@@ -1392,13 +1392,13 @@ def handle_xinfo(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: I
     var full = False
     var full_count = 10
     if argc > 3:
-        if not arg_eq(tokens[i + 3].ptr, tokens[i + 3].length, "full"):
+        if not arg_eq(tokens[unsafe_offset=i + 3].ptr, tokens[unsafe_offset=i + 3].length, "full"):
             writer.append_error_response("ERR unknown subcommand or wrong number of arguments for '" + _text(sub)
                                          + "'. Try XINFO HELP.")
             return
         full = True
-        if argc == 6 and arg_eq(tokens[i + 4].ptr, tokens[i + 4].length, "count"):
-            var v = parse_int64_strict(tokens[i + 5].ptr, tokens[i + 5].length)
+        if argc == 6 and arg_eq(tokens[unsafe_offset=i + 4].ptr, tokens[unsafe_offset=i + 4].length, "count"):
+            var v = parse_int64_strict(tokens[unsafe_offset=i + 5].ptr, tokens[unsafe_offset=i + 5].length)
             if not v.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return
@@ -1486,7 +1486,7 @@ def handle_xinfo(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: I
             if oi >= 0:
                 _write_name(writer, grp.consumers[oi].name)
             else:
-                writer.append_bulk_string_response("".unsafe_ptr(), 0)
+                writer.append_bulk_string_response("".ptr(), 0)
             writer.append_int_response(nk.delivery_time)
             writer.append_int_response(nk.delivery_count)
         _key_str(writer, "consumers")

@@ -24,6 +24,7 @@ Wire forms:
 Used by `pion-vllm-mlx`'s mlx-lm monkey-patch (see
 `pion-vllm-mlx/pion_vllm_mlx/mlx_lm_patch.py`).
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.utils import strict_atol
 
 from src.common.ptr import is_not_null, null_ptr
@@ -33,7 +34,6 @@ from src.network.metal_attention_engine import MetalAttentionEngine
 from src.network.cuda_attention_engine import CudaAttentionEngine
 from std.sys.info import CompilationTarget
 from std.collections import Array
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 
@@ -85,7 +85,7 @@ def handle_attend_prefix_store(
     var V_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(V_tok.ptr.unsafe_bitcast[Float32]()))
     var sid_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(sid_ptr))
 
-    var ok = False
+    var ok: Bool
     if have_cuda:
         ok = cuda_engine.store_kv(sid_ext, sid_len, Int(layer_id), Int(H), Int(N), Int(D), K_ptr, V_ptr)
     else:
@@ -173,11 +173,11 @@ def handle_attend_prefix_query(
 
     var out_floats = Int(H) * M * Int(D)
     var lse_floats = Int(H) * M
-    var _out = alloc[Float32](out_floats)
+    var _out = unsafe_alloc[Float32](out_floats)
     var out_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_out))
     var lse_ptr = null_ptr[Float32, MutUntrackedOrigin]()
     if M > 1:
-        var _lse = alloc[Float32](lse_floats)
+        var _lse = unsafe_alloc[Float32](lse_floats)
         lse_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_lse))
 
     # gh #9: route M=1 to CUDA when available (Linux + --cuda-attention).
@@ -201,7 +201,7 @@ def handle_attend_prefix_query(
         # M=1 path: just the output. M>1: output ‖ LSE concatenated.
         if M > 1 and is_not_null(lse_ptr):
             var total = (out_floats + lse_floats) * 4
-            var combined = alloc[UInt8](total)
+            var combined = unsafe_alloc[UInt8](total)
             unsafe_memcpy(dest=combined, src=out_ptr.unsafe_bitcast[UInt8](), count=out_floats * 4)
             unsafe_memcpy(dest=combined.unsafe_offset(out_floats * 4), src=lse_ptr.unsafe_bitcast[UInt8](), count=lse_floats * 4)
             var combined_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(combined))
@@ -303,7 +303,7 @@ def handle_attend_prefix_query_fused(
     var sid_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(sid_ptr))
 
     var out_floats = Int(H_q) * M * Int(D)
-    var _out = alloc[Float32](out_floats)
+    var _out = unsafe_alloc[Float32](out_floats)
     var out_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_out))
 
     # gh #60 Step 1: optional positional fa_window override at end.
@@ -406,7 +406,7 @@ def handle_attend_prefix_query_sparse(
     var sid_ext = Pointer[UInt8,   MutUntrackedOrigin](unsafe_from_address=Int(sid_ptr))
 
     var out_floats = Int(H) * Int(D)
-    var _out = alloc[Float32](out_floats)
+    var _out = unsafe_alloc[Float32](out_floats)
     var out_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_out))
 
     # Wire form passes head_map only when GQA is desired. For non-GQA callers
@@ -470,11 +470,11 @@ def handle_attend_prefix_lookup(
     # gh #67: tri-state probe — 1 = WARM, 2 = COLD, 0 = MISSING.
     var state = metal_engine.session_state(sid_ext, Int(sid_tok.length), Int(layer_id))
     if state == 1:
-        writer.append_to_response("+HIT\r\n".unsafe_ptr(), 6)
+        writer.append_to_response("+HIT\r\n".ptr(), 6)
     elif state == 2:
-        writer.append_to_response("+COLD\r\n".unsafe_ptr(), 7)
+        writer.append_to_response("+COLD\r\n".ptr(), 7)
     else:
-        writer.append_to_response("+MISS\r\n".unsafe_ptr(), 7)
+        writer.append_to_response("+MISS\r\n".ptr(), 7)
     return 1
 
 
@@ -570,10 +570,10 @@ def handle_attend_prefix_query_sparse_auto(
         hm_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(HM_tok.ptr))
 
     var out_floats = Int(H_q) * Int(D)
-    var _out = alloc[Float32](out_floats)
+    var _out = unsafe_alloc[Float32](out_floats)
     var out_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_out))
 
-    var ok = False
+    var ok: Bool
     if have_cuda:
         # CUDA path: K_block + K_blocks come straight from B + K_top. The
         # bridge derives h_kv from head_map; if head_map is empty the kernel
@@ -711,7 +711,7 @@ def handle_attend_prefix_query_sparse_auto_fused(
         Vs_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(Vs_tok.ptr.unsafe_bitcast[Float32]()))
 
     var out_floats = Int(H_q) * Int(D)
-    var _out = alloc[Float32](out_floats)
+    var _out = unsafe_alloc[Float32](out_floats)
     var out_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_out))
 
     var ok = metal_engine.query_sparse_auto_fused(

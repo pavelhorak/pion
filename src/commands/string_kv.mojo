@@ -1,8 +1,8 @@
 """String/KV commands (slow path): SET variants, APPEND, STRLEN, GETRANGE, SETRANGE, GETSET, GETDEL, GETEX, UNLINK, MSETNX, INCRBY, DECRBY, INCRBYFLOAT, EXPIRETIME, PEXPIRETIME, multi-DEL."""
+from std.memory.alloc import unsafe_alloc
 from src.common.container_free import free_container
 from std.ffi import external_call
 from src.common.ptr import is_not_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.collections import Array
 from std.memory import alloc, unsafe_memcpy, unsafe_memset
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
@@ -42,7 +42,7 @@ def handle_incrby(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                 new_val = cur + delta
         elif val.is_string():
             var length = val.string_len()
-            var _sbuf = alloc[UInt8](24)
+            var _sbuf = unsafe_alloc[UInt8](24)
             var ptr = val.as_string_safe(_sbuf)
             var parsed_val: Int64 = 0; var is_neg = False; var start_idx = 0
             if length > 0 and ptr[unsafe_offset=0] == 45: is_neg = True; start_idx = 1
@@ -63,7 +63,7 @@ def handle_incrby(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         else: valid = False
         if valid:
             keyspace[].set(key_v, GenericValue.from_int(new_val))
-            var _wb = alloc[UInt8](32)
+            var _wb = unsafe_alloc[UInt8](32)
             var _wl = format_int_to_buf(_wb, 0, new_val)
             _ = wal[].append_kv(1, key_str.unsafe_ptr(), key_str.byte_length(), _wb, _wl)
             _wb.unsafe_free()
@@ -99,7 +99,7 @@ def handle_decrby(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                 new_val = cur - delta
         elif val.is_string():
             var length = val.string_len()
-            var _sbuf = alloc[UInt8](24)
+            var _sbuf = unsafe_alloc[UInt8](24)
             var ptr = val.as_string_safe(_sbuf)
             var parsed_val: Int64 = 0; var is_neg = False; var start_idx = 0
             if length > 0 and ptr[unsafe_offset=0] == 45: is_neg = True; start_idx = 1
@@ -120,7 +120,7 @@ def handle_decrby(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         else: valid = False
         if valid:
             keyspace[].set(key_v, GenericValue.from_int(new_val))
-            var _wb = alloc[UInt8](32)
+            var _wb = unsafe_alloc[UInt8](32)
             var _wl = format_int_to_buf(_wb, 0, new_val)
             _ = wal[].append_kv(1, key_str.unsafe_ptr(), key_str.byte_length(), _wb, _wl)
             _wb.unsafe_free()
@@ -160,7 +160,7 @@ def handle_incrbyfloat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
         var cur_kind = 0
         var cur_d: Float64 = 0.0
         var cur_l = 0
-        var cbuf = alloc[UInt8](32)
+        var cbuf = unsafe_alloc[UInt8](32)
         var cur_p = cbuf
         if val.type.value == ValueType.FLOAT:
             cur_kind = 2
@@ -172,7 +172,7 @@ def handle_incrbyfloat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             cur_kind = 1
             cur_p = val.as_string_safe(cbuf)
             cur_l = val.string_len()
-        var fbuf = alloc[UInt8](5200)    # Redis's MAX_LONG_DOUBLE_CHARS, and some
+        var fbuf = unsafe_alloc[UInt8](5200)    # Redis's MAX_LONG_DOUBLE_CHARS, and some
         var flen = Int(external_call["pion_ld_incr", Int64](
             Int32(cur_kind), cur_p, Int64(cur_l), cur_d,
             tokens[unsafe_offset=i+2].ptr, Int64(tokens[unsafe_offset=i+2].length),
@@ -200,17 +200,17 @@ def handle_append(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var old_gv = keyspace[].get(key_v)
-        var old_len = 0
+        var old_len: Int
         # gh #232: BITMAP is string-like; this branch copies via `copy_to`
         # into a fresh buffer and never frees the original, so it is safe
         # for an arena-backed payload (gh #163).
         if not old_gv.is_none() and (old_gv.is_string_like() or old_gv.type.value == ValueType.INT):
             if old_gv.type.value == ValueType.INT:
-                var ibuf = alloc[UInt8](32)
+                var ibuf = unsafe_alloc[UInt8](32)
                 var ibuf_p = ibuf
                 var ilen = format_int_to_buf(ibuf_p, 0, old_gv.as_int())
                 var new_app_len = ilen + tokens[unsafe_offset=i+2].length
-                var app_buf = alloc[UInt8](new_app_len)
+                var app_buf = unsafe_alloc[UInt8](new_app_len)
                 unsafe_memcpy(dest=app_buf, src=ibuf, count=ilen)
                 unsafe_memcpy(dest=app_buf.unsafe_offset(ilen), src=tokens[unsafe_offset=i+2].ptr, count=tokens[unsafe_offset=i+2].length)
                 var app_gv = GenericValue.from_ptr(app_buf, new_app_len)
@@ -222,7 +222,7 @@ def handle_append(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                 old_len = old_gv.string_len()
                 var append_len = tokens[unsafe_offset=i+2].length
                 var new_len = old_len + append_len
-                var new_buf = alloc[UInt8](new_len)
+                var new_buf = unsafe_alloc[UInt8](new_len)
                 var new_buf_p = new_buf
                 old_gv.copy_to(new_buf_p)
                 unsafe_memcpy(dest=new_buf.unsafe_offset(old_len), src=tokens[unsafe_offset=i+2].ptr, count=append_len)
@@ -258,7 +258,6 @@ def handle_append(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
 def handle_strlen(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """STRLEN key → integer length of string value."""
     if i + 1 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
         if val.is_none(): writer.append_int_response(Int64(0))
@@ -268,7 +267,7 @@ def handle_strlen(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         # exactly a BITMAP's byte length; only the type check excluded it.
         elif val.is_string_like(): writer.append_int_response(Int64(val.string_len()))
         elif val.type.value == ValueType.INT:
-            var ibuf2 = alloc[UInt8](32)
+            var ibuf2 = unsafe_alloc[UInt8](32)
             var ilen2 = format_int_to_buf(ibuf2, 0, val.as_int())
             writer.append_int_response(Int64(ilen2))
             ibuf2.unsafe_free()
@@ -436,7 +435,6 @@ def handle_setex(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
     """SETEX key seconds value → +OK."""
     if i + 3 < num_tokens:
         var key_str = tokens[unsafe_offset=i+1].value()
-        var secs_str = tokens[unsafe_offset=i+2].value()
         var val_str = tokens[unsafe_offset=i+3].raw_value()
         # Strict (gh #229's rule reaching SETEX): the loop this replaces SKIPPED
         # non-digits, so `SETEX k -5 v` set a 5 s TTL and `SETEX k abc v` a 0 s
@@ -463,7 +461,6 @@ def handle_psetex(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     """PSETEX key milliseconds value → +OK."""
     if i + 3 < num_tokens:
         var key_str = tokens[unsafe_offset=i+1].value()
-        var ms_str2 = tokens[unsafe_offset=i+2].value()
         var val_str2 = tokens[unsafe_offset=i+3].raw_value()
         var _px = parse_int64_strict(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
         if not _px.ok:
@@ -488,7 +485,6 @@ def handle_msetex(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     # Need at least: MSETEX seconds key val = 4 tokens (i is at MSETEX)
     if i + 3 < num_tokens:
         # Parse seconds
-        var secs_str = tokens[unsafe_offset=i+1].value()
         var _mx = parse_int64_strict(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         if not _mx.ok or _mx.value <= 0 or _mx.value > 9223372036854:
             writer.append_error_response("ERR invalid expire time in 'msetex' command")
@@ -521,7 +517,6 @@ def handle_msetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         var all_new = True
         var j_ms = i + 1
         while j_ms < num_tokens:
-            var chk_key = tokens[unsafe_offset=j_ms].value()
             var chk_v = GenericValue.borrow(tokens[unsafe_offset=j_ms].ptr, tokens[unsafe_offset=j_ms].length)
             if not keyspace[].get(chk_v).is_none(): all_new = False; break
             j_ms += 2
@@ -543,7 +538,6 @@ def handle_msetnx(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
 def handle_getrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """GETRANGE key start end → bulk string substring."""
     if i + 3 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
         var start_i = strict_atol(tokens[unsafe_offset=i+2].value())
@@ -576,15 +570,15 @@ def handle_getrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
                 writer.append_bulk_string_response(String("").unsafe_ptr(), 0)
             else:
                 var range_len = end_i - start_i + 1
-                var range_buf = alloc[UInt8](range_len)
+                var range_buf = unsafe_alloc[UInt8](range_len)
                 var range_buf_p = range_buf
                 if val.type.value == ValueType.INT:
-                    var ibuf3 = alloc[UInt8](32)
+                    var ibuf3 = unsafe_alloc[UInt8](32)
                     _ = format_int_to_buf(ibuf3, 0, val.as_int())
                     unsafe_memcpy(dest=range_buf, src=ibuf3.unsafe_offset(start_i), count=range_len)
                     ibuf3.unsafe_free()
                 else:
-                    var _sbuf = alloc[UInt8](24)
+                    var _sbuf = unsafe_alloc[UInt8](24)
                     var src_p = val.as_string_safe(_sbuf)
                     unsafe_memcpy(dest=range_buf, src=src_p.unsafe_offset(start_i), count=range_len)
                     _sbuf.unsafe_free()
@@ -600,7 +594,6 @@ def handle_getrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
 def handle_substr(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """SUBSTR key start end → bulk string substring (comptime for GETRANGE)."""
     if i + 3 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
         var start_s = strict_atol(tokens[unsafe_offset=i+2].value())
@@ -626,7 +619,7 @@ def handle_substr(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
                 writer.append_bulk_string_response(String("").unsafe_ptr(), 0)
             else:
                 var rlen2 = end_s - start_s + 1
-                var rbuf2 = alloc[UInt8](rlen2 + slen2)
+                var rbuf2 = unsafe_alloc[UInt8](rlen2 + slen2)
                 var rbuf2_p = rbuf2
                 val.copy_to(rbuf2_p)
                 writer.append_bulk_string_response(rbuf2_p.unsafe_offset(start_s), rlen2)
@@ -685,7 +678,7 @@ def handle_setrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
             if not old_gv2.is_none() and old_gv2.is_string_like(): old_len2 = old_gv2.string_len()
             var new_len2 = offset_i + val_len2
             if old_len2 > new_len2: new_len2 = old_len2
-            var new_buf2 = alloc[UInt8](new_len2)
+            var new_buf2 = unsafe_alloc[UInt8](new_len2)
             var new_buf2_p = new_buf2
             unsafe_memset(new_buf2_p, 0, new_len2)
             if old_len2 > 0: old_gv2.copy_to(new_buf2_p)
@@ -705,7 +698,6 @@ def handle_setrange(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
 def handle_expiretime(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
     """EXPIRETIME key → unix timestamp in seconds when key expires (-1=no TTL, -2=not found)."""
     if i + 1 < num_tokens and is_not_null(ttl_map):
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var existing = keyspace[].get(key_v)
         if existing.is_none(): writer.append_int_response(Int64(-2))
@@ -723,7 +715,6 @@ def handle_expiretime(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
 def handle_pexpiretime(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
     """PEXPIRETIME key → unix timestamp in milliseconds when key expires (-1=no TTL, -2=not found)."""
     if i + 1 < num_tokens and is_not_null(ttl_map):
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var existing = keyspace[].get(key_v)
         if existing.is_none(): writer.append_int_response(Int64(-2))
@@ -814,8 +805,8 @@ def handle_lcs(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_toke
     if getidx and getlen:
         writer.append_error_response("ERR If you want both the length and indexes, please just use IDX.")
         return 0
-    var sa = alloc[UInt8](32)
-    var sb = alloc[UInt8](32)
+    var sa = unsafe_alloc[UInt8](32)
+    var sb = unsafe_alloc[UInt8](32)
     var alen = 0
     var blen = 0
     var pa = sa
@@ -824,7 +815,7 @@ def handle_lcs(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_toke
         pa = _string_bytes(va, sa, alen)
     if not vb.is_none():
         pb = _string_bytes(vb, sb, blen)
-    var out = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+    var out = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
     var mode = Int64(2) if getidx else (Int64(1) if getlen else Int64(0))
     var n = external_call["pion_lcs", Int64](pa, Int64(alen), pb, Int64(blen), mode, minmatchlen,
                                              Int64(1) if withmatchlen else Int64(0), Int64(Int(writer.proto)), out)

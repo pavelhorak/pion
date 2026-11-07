@@ -7,8 +7,8 @@
 #
 # It also prints a single-thread timing next to the FP32-dequant distance the
 # greedy used before (cache-hot, like the upper levels), for the record.
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
-from std.memory.unsafe_pointer import UnsafePointer
 from std.random import random_si64, random_float64, seed
 from std.time import perf_counter_ns
 
@@ -18,19 +18,19 @@ from src.vector.kernels import (
 )
 
 
-def fill(v: UnsafePointer[Int8, MutUntrackedOrigin], n: Int, mode: Int):
+def fill(v: Pointer[Int8, MutUntrackedOrigin], n: Int, mode: Int):
     for i in range(n):
         if mode == 0:
-            v[i] = Int8(random_si64(-127, 127))
+            v[unsafe_offset=i] = Int8(random_si64(-127, 127))
         elif mode == 1:
-            v[i] = Int8(-128) if (i % 2) == 0 else Int8(127)
+            v[unsafe_offset=i] = Int8(-128) if (i % 2) == 0 else Int8(127)
         else:
-            v[i] = Int8(127) if (i % 2) == 0 else Int8(-128)
+            v[unsafe_offset=i] = Int8(127) if (i % 2) == 0 else Int8(-128)
 
 
 def check[dim: Int](trials: Int) -> Int:
-    var q = alloc[Int8](dim)
-    var vs = alloc[Int8](dim * 8)
+    var q = unsafe_alloc[Int8](dim)
+    var vs = unsafe_alloc[Int8](dim * 8)
     var bad = 0
     for t in range(trials):
         # every 7th trial is an extreme pair: q and v at opposite ends
@@ -38,41 +38,41 @@ def check[dim: Int](trials: Int) -> Int:
         var mode_v = 2 if t % 7 == 0 else 0
         fill(q, dim, mode_q)
         for j in range(8):
-            fill(vs + j * dim, dim, mode_v if j % 2 == 0 else 0)
+            fill(vs.unsafe_offset(j * dim), dim, mode_v if j % 2 == 0 else 0)
         var d8 = l2_int8_sabd_udot_batch8[dim](
-            q, vs, vs + dim, vs + 2 * dim, vs + 3 * dim,
-            vs + 4 * dim, vs + 5 * dim, vs + 6 * dim, vs + 7 * dim)
+            q, vs, vs.unsafe_offset(dim), vs.unsafe_offset(2 * dim), vs.unsafe_offset(3 * dim),
+            vs.unsafe_offset(4 * dim), vs.unsafe_offset(5 * dim), vs.unsafe_offset(6 * dim), vs.unsafe_offset(7 * dim))
         for j in range(8):
-            var want = l2_distance_int8_jit[dim](q, vs + j * dim)
-            var got = l2_int8_sabd_udot[dim](q, vs + j * dim)
+            var want = l2_distance_int8_jit[dim](q, vs.unsafe_offset(j * dim))
+            var got = l2_int8_sabd_udot[dim](q, vs.unsafe_offset(j * dim))
             if got.to_bits() != want.to_bits(): bad += 1
             if d8[j].to_bits() != want.to_bits(): bad += 1
-    q.free(); vs.free()
+    q.unsafe_free(); vs.unsafe_free()
     return bad
 
 
 def bench() -> Tuple[Float64, Float64, Float64]:
     comptime dim = 1536
-    var q = alloc[Int8](dim)
-    var qf = alloc[Float32](dim)
-    var vs = alloc[Int8](dim * 16)
+    var q = unsafe_alloc[Int8](dim)
+    var qf = unsafe_alloc[Float32](dim)
+    var vs = unsafe_alloc[Int8](dim * 16)
     fill(q, dim, 0)
     fill(vs, dim * 16, 0)
-    for i in range(dim): qf[i] = Float32(random_float64(-0.2, 0.2))
+    for i in range(dim): qf[unsafe_offset=i] = Float32(random_float64(-0.2, 0.2))
     comptime N = 200000
     var acc = Float32(0)
     var t0 = perf_counter_ns()
     for i in range(N):
-        acc += l2_distance_fp32_int8_fused_jit[dim](qf, vs + (i & 15) * dim, Float32(-0.2), Float32(0.4))
+        acc += l2_distance_fp32_int8_fused_jit[dim](qf, vs.unsafe_offset((i & 15) * dim), Float32(-0.2), Float32(0.4))
     var t1 = perf_counter_ns()
     for i in range(N):
-        acc += l2_distance_int8_jit[dim](q, vs + (i & 15) * dim)
+        acc += l2_distance_int8_jit[dim](q, vs.unsafe_offset((i & 15) * dim))
     var t2 = perf_counter_ns()
     for i in range(N):
-        acc += l2_int8_sabd_udot[dim](q, vs + (i & 15) * dim)
+        acc += l2_int8_sabd_udot[dim](q, vs.unsafe_offset((i & 15) * dim))
     var t3 = perf_counter_ns()
     if acc == 1.0: print(acc)   # keep the loops
-    q.free(); qf.free(); vs.free()
+    q.unsafe_free(); qf.unsafe_free(); vs.unsafe_free()
     return (Float64(t1 - t0) / N, Float64(t2 - t1) / N, Float64(t3 - t2) / N)
 
 

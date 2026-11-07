@@ -8,12 +8,13 @@
 # the INCRBYFLOAT sites happened to be right. Every FILTER @price:[10 20] was
 # refused as "invalid numeric filter range". The validator no longer uses
 # `break`; this file calls it the way the failing contexts did.
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.testing import assert_equal
 from src.common.utils import is_valid_float_arg, parse_float64
 
 
-def check_bound(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int, mut out_v: Float32) -> Bool:
+def check_bound(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, mut out_v: Float32) -> Bool:
     """The shape of vector.mojo's _parse_bound — the context that failed."""
     if not is_valid_float_arg(p, n):
         return False
@@ -22,7 +23,7 @@ def check_bound(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int, mut out_v: 
 
 
 def main() raises:
-    var buf = alloc[UInt8](32)
+    var buf = unsafe_alloc[UInt8](32)
     var good: List[String] = ["10", "0", "0.2", "-3", "+4.5", "1e5", "1E-3", "2.5e+10", "007", ".5", "5."]
     var bad: List[String] = ["", "abc", "1.2.3", "e5", ".", "-", "1e", "1e+", "10x", "--1", "1 0", "0x10"]
     for t in range(len(good)):

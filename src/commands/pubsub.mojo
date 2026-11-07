@@ -21,8 +21,8 @@ message to every other worker's inbox (src/ffi/fcntl_wrap.c), and each worker
 takes its inbox on its tick and delivers to its own subscribers. PUBLISH counts
 the subscribers of its own worker, as a Redis Cluster node counts its own.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy, unsafe_memset
 from std.ffi import external_call
 from src.network.resp3 import RESP3Token
@@ -51,7 +51,7 @@ struct Subscription(Copyable, Movable):
 def _bytes(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> List[UInt8]:
     var out = List[UInt8](capacity=n)
     for k in range(n):
-        out.append(p[k])
+        out.append(p[unsafe_offset=k])
     return out^
 
 
@@ -59,7 +59,7 @@ def _same(a: List[UInt8], p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool
     if len(a) != n:
         return False
     for k in range(n):
-        if a[k] != p[k]:
+        if a[k] != p[unsafe_offset=k]:
             return False
     return True
 
@@ -76,19 +76,19 @@ struct PubSubRegistry(Movable):
         self.channels = List[Subscription]()
         self.patterns = List[Subscription]()
         self.shards = List[Subscription]()
-        self.counts = alloc[Int32](MAX_FDS)
-        self.shard_counts = alloc[Int32](MAX_FDS)
+        self.counts = unsafe_alloc[Int32](MAX_FDS)
+        self.shard_counts = unsafe_alloc[Int32](MAX_FDS)
         unsafe_memset(self.counts.unsafe_bitcast[UInt8](), 0, MAX_FDS * 4)
         unsafe_memset(self.shard_counts.unsafe_bitcast[UInt8](), 0, MAX_FDS * 4)
         self.subscribed_fds = 0
 
-    def __init__(out self, *, deinit take: Self):
-        self.channels = take.channels^
-        self.patterns = take.patterns^
-        self.shards = take.shards^
-        self.counts = take.counts
-        self.shard_counts = take.shard_counts
-        self.subscribed_fds = take.subscribed_fds
+    def __init__(out self, *, deinit move: Self):
+        self.channels = move.channels^
+        self.patterns = move.patterns^
+        self.shards = move.shards^
+        self.counts = move.counts
+        self.shard_counts = move.shard_counts
+        self.subscribed_fds = move.subscribed_fds
 
     def _list(mut self, kind: Int) -> Pointer[List[Subscription], MutUntrackedOrigin]:
         if kind == KIND_PATTERN:
@@ -118,9 +118,9 @@ struct PubSubRegistry(Movable):
         if not self.subscribed(fd):
             self.subscribed_fds += 1
         if kind == KIND_SHARD:
-            self.shard_counts[Int(fd)] += 1
+            self.shard_counts[unsafe_offset=Int(fd)] += 1
         else:
-            self.counts[Int(fd)] += 1
+            self.counts[unsafe_offset=Int(fd)] += 1
 
     def unsubscribe(mut self, kind: Int, fd: Int32, p: Pointer[UInt8, MutUntrackedOrigin], n: Int):
         var k = self.find(kind, p, n)
@@ -133,9 +133,9 @@ struct PubSubRegistry(Movable):
             if l[][k].fds[j] == fd:
                 _ = l[][k].fds.pop(j)
                 if kind == KIND_SHARD:
-                    self.shard_counts[Int(fd)] -= 1
+                    self.shard_counts[unsafe_offset=Int(fd)] -= 1
                 else:
-                    self.counts[Int(fd)] -= 1
+                    self.counts[unsafe_offset=Int(fd)] -= 1
                 if not self.subscribed(fd):
                     self.subscribed_fds -= 1
                 if len(l[][k].fds) == 0:
@@ -163,21 +163,21 @@ struct PubSubRegistry(Movable):
                 self._drop(kind, k, fd)
                 if len(l[]) == before:
                     k += 1
-        self.counts[Int(fd)] = 0
-        self.shard_counts[Int(fd)] = 0
+        self.counts[unsafe_offset=Int(fd)] = 0
+        self.shard_counts[unsafe_offset=Int(fd)] = 0
 
     @always_inline
     def get_sub_count(self, fd: Int32) -> Int:
         """Channels + patterns: the count a (P)SUBSCRIBE reply carries, and
         nonzero while a RESP2 connection is in subscribed mode."""
-        return Int(self.counts[Int(fd)])
+        return Int(self.counts[unsafe_offset=Int(fd)])
 
     @always_inline
     def get_shard_count(self, fd: Int32) -> Int:
-        return Int(self.shard_counts[Int(fd)])
+        return Int(self.shard_counts[unsafe_offset=Int(fd)])
 
     def subscribed(self, fd: Int32) -> Bool:
-        return self.counts[Int(fd)] > 0 or self.shard_counts[Int(fd)] > 0
+        return self.counts[unsafe_offset=Int(fd)] > 0 or self.shard_counts[unsafe_offset=Int(fd)] > 0
 
 
 # ── Delivery ──
@@ -186,7 +186,7 @@ def _put_len(mut out: List[UInt8], prefix: UInt8, n: Int, tmp: Pointer[UInt8, Mu
     out.append(prefix)
     var e = format_int_to_buf(tmp, 0, Int64(n))
     for k in range(e):
-        out.append(tmp[k])
+        out.append(tmp[unsafe_offset=k])
     out.append(13)
     out.append(10)
 
@@ -195,7 +195,7 @@ def _put_bulk(mut out: List[UInt8], p: Pointer[UInt8, MutUntrackedOrigin], n: In
               tmp: Pointer[UInt8, MutUntrackedOrigin]):
     _put_len(out, 36, n, tmp)
     for k in range(n):
-        out.append(p[k])
+        out.append(p[unsafe_offset=k])
     out.append(13)
     out.append(10)
 
@@ -205,7 +205,7 @@ def _frame(kind: Int, pattern: List[UInt8], ch: Pointer[UInt8, MutUntrackedOrigi
     """`message`, `pmessage` or `smessage`, RESP2 framed: byte 0 is restamped
     `>` for a RESP3 recipient (the rest of the frame is the same)."""
     var out = List[UInt8](capacity=ml + cl + len(pattern) + 64)
-    var tmp = alloc[UInt8](24)
+    var tmp = unsafe_alloc[UInt8](24)
     var word = List[UInt8]()
     var ws = "pmessage" if kind == KIND_PATTERN else ("smessage" if kind == KIND_SHARD else "message")
     for b in ws.as_bytes():
@@ -223,7 +223,7 @@ def _frame(kind: Int, pattern: List[UInt8], ch: Pointer[UInt8, MutUntrackedOrigi
 
 def _send_frame(mut frame: List[UInt8], to: Int32, self_fd: Int32, mut writer: ResponseWriter,
                 server: TCPServer, kq: Int32, resp_proto: Pointer[UInt8, MutUntrackedOrigin]):
-    frame[0] = 62 if (is_not_null(resp_proto) and resp_proto[Int(to)] == 3) else 42
+    frame[0] = 62 if (is_not_null(resp_proto) and resp_proto[unsafe_offset=Int(to)] == 3) else 42
     var fp = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(frame.unsafe_ptr()))
     if to == self_fd:
         writer.append_to_response(fp, len(frame))      # in its own reply stream
@@ -276,21 +276,21 @@ def pubsub_post(worker_id: Int, num_workers: Int, shard: Bool,
 @always_inline
 def _u32_at(p: Pointer[UInt8, MutUntrackedOrigin], at: Int) -> Int:
     """A little-endian u32 at any alignment (the records are packed)."""
-    return Int(p[at]) | (Int(p[at + 1]) << 8) | (Int(p[at + 2]) << 16) | (Int(p[at + 3]) << 24)
+    return Int(p[unsafe_offset=at]) | (Int(p[unsafe_offset=at + 1]) << 8) | (Int(p[unsafe_offset=at + 2]) << 16) | (Int(p[unsafe_offset=at + 3]) << 24)
 
 
 def pubsub_drain(mut registry: PubSubRegistry, worker_id: Int, mut writer: ResponseWriter,
                  server: TCPServer, kq: Int32, resp_proto: Pointer[UInt8, MutUntrackedOrigin]):
     """Deliver what other workers published since the last tick."""
-    var out = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+    var out = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
     var n = Int(external_call["pion_pubsub_take", Int64](Int32(worker_id), out))
-    var buf = out[0]
+    var buf = out[unsafe_offset=0]
     out.unsafe_free()
     if n <= 0:
         return
     var off = 0
     while off + 9 <= n:
-        var kind = Int(buf[off])
+        var kind = Int(buf[unsafe_offset=off])
         var cl = _u32_at(buf, off + 1)
         var ml = _u32_at(buf, off + 5)
         var ch = buf.unsafe_offset(off + 9)
@@ -323,7 +323,7 @@ def handle_subscribe_kind(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: In
         writer.append_error_response("ERR wrong number of arguments for '" + word + "' command")
         return 0
     for k in range(i + 1, num_tokens):
-        var t = tokens[k]
+        var t = tokens[unsafe_offset=k]
         registry.subscribe(kind, fd, t.ptr, t.length)
         var count = registry.get_shard_count(fd) if kind == KIND_SHARD else registry.get_sub_count(fd)
         _confirm(writer, word, t.ptr, t.length, False, count)
@@ -349,7 +349,7 @@ def handle_unsubscribe_kind(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: 
         _ = names^
         return 0
     for k in range(i + 1, num_tokens):
-        var t = tokens[k]
+        var t = tokens[unsafe_offset=k]
         registry.unsubscribe(kind, fd, t.ptr, t.length)
         var count = registry.get_shard_count(fd) if kind == KIND_SHARD else registry.get_sub_count(fd)
         _confirm(writer, word, t.ptr, t.length, False, count)
@@ -370,8 +370,8 @@ def handle_publish_kind(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int,
         writer.append_error_response("ERR wrong number of arguments for '" + String("spublish" if shard else "publish")
                                      + "' command")
         return 0
-    var ch = tokens[i + 1]
-    var msg = tokens[i + 2]
+    var ch = tokens[unsafe_offset=i + 1]
+    var msg = tokens[unsafe_offset=i + 2]
     var n: Int
     if is_null(dw):
         n = publish_local(registry, shard, ch.ptr, ch.length, msg.ptr, msg.length, fd, writer, server, kq, resp_proto)
@@ -389,7 +389,7 @@ def handle_pubsub(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     if num_tokens - i < 2:
         writer.append_error_response("ERR wrong number of arguments for 'pubsub' command")
         return 0
-    var sub = tokens[i + 1]
+    var sub = tokens[unsafe_offset=i + 1]
     var argc = num_tokens - i
     if arg_eq(sub.ptr, sub.length, "channels") or arg_eq(sub.ptr, sub.length, "shardchannels"):
         if argc > 3:
@@ -401,7 +401,7 @@ def handle_pubsub(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         for k in range(len(l[])):
             if argc == 3:
                 var nm = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(l[][k].name.unsafe_ptr()))
-                if not _glob_match(tokens[i + 2].ptr, tokens[i + 2].length, 0, nm, len(l[][k].name), 0):
+                if not _glob_match(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, 0, nm, len(l[][k].name), 0):
                     continue
             picked.append(k)
         writer.append_array_header(len(picked))
@@ -414,7 +414,7 @@ def handle_pubsub(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         # a flat [name, count, ...] array in both protocols, as Redis
         writer.append_array_header(n * 2)
         for k in range(i + 2, num_tokens):
-            var t = tokens[k]
+            var t = tokens[unsafe_offset=k]
             writer.append_bulk_string_response(t.ptr, t.length)
             var at = registry.find(kind, t.ptr, t.length)
             var l = registry._list(kind)

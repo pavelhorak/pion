@@ -1,5 +1,4 @@
 from src.memory.slab_allocator import SlabAllocator
-from std.memory.unsafe_pointer import UnsafePointer
 from std.testing import assert_true, assert_equal
 
 def test_slab_allocator() raises:
