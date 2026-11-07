@@ -54,7 +54,7 @@ pixi run build                          # ~290 s on Mac M4
 pixi run build-dev                      # NEVER use for benchmarks
 ```
 
-The Mojo version is pinned at **`==1.1.0`** (Mojo 1.1, 2026-09-17). Don't bump it in a PR: the gate thresholds are perf baselines, so a floating toolchain makes every number incomparable. See [`pixi.toml`](pixi.toml) for the rationale. A bump is its own session, with the gates re-run on both sides.
+The Mojo version is pinned at **`==1.2.0`** (Mojo 1.2). Don't bump it in a PR: the gate thresholds are perf baselines, so a floating toolchain makes every number incomparable. See [`pixi.toml`](pixi.toml) for the rationale. A bump is its own session, with the gates re-run on both sides.
 
 ## Adding a new command
 

@@ -39,7 +39,7 @@ mojo run -I build/mojo-packages your_program.mojo
 from pion_resp import RESP3Parser, RESP3Token
 ```
 
-A precompiled package is tied to the compiler that built it (Mojo 1.1.0 here).
+A precompiled package is tied to the compiler that built it (Mojo 1.2.0 here).
 
 ## Packaging for the modular-community channel
 
