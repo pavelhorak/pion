@@ -843,6 +843,8 @@ struct FastPathHandler(Movable):
             for i in range(k):
                 if vals[i].type.value == ValueType.NONE:
                     continue
+                if keyspace[].track_access:
+                    keyspace[].touch(GenericValue.borrow(buffer + Int(key_off[i]), Int(key_len_a[i])), h_a[i])
                 var dv = ttl_map[].get_with_hash(
                     GenericValue.borrow(buffer + Int(key_off[i]), Int(key_len_a[i])), h_a[i])
                 if dv.type.value != ValueType.NONE:

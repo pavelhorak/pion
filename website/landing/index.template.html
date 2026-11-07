@@ -311,7 +311,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
           <h3>One binary, durable by default</h3>
           <p>Zero-allocation hot path, mmap WAL with segment rotation, snapshots, blob arenas for large values, crash breadcrumbs and a 1 Hz status file that survives an OOM kill.</p>
           <p class="fig">{{tile_dur_fig}}</p>
-          <p class="caveat">Loopback by default. No TLS, and <code>--maxmemory</code> refuses writes rather than evicting — read the security model first.</p>
+          <p class="caveat">Loopback by default. No TLS, and <code>--maxmemory</code> holds RSS, not allocator bytes — read the security model first.</p>
         </div>
       </div>
     </div>

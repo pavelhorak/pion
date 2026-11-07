@@ -1,5 +1,6 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import free_graveyard
+from src.commands.evict import evict_configure, evict_tick
 from src.network.vector_ingest import log_dead_slots, sync_vector_records
 from src.network.vector_auto import vector_auto_tick
 from std.sys.info import CompilationTarget
@@ -23,7 +24,7 @@ from src.vector.hnsw import HNSWGraph, SharedHNSWView
 from src.vector.hnsw_types import HNSW_SHARDED_INGEST_ENABLED
 from src.io.wal import WAL
 from src.io.snapshot import SNAP_HDR_LEN
-from src.io.blob_store import BlobStore
+from src.io.blob_store import BlobStore, BLOB_TIER_OFF
 from src.network.raft import RaftNode
 from src.common.lock_free import LockFreeRingBuffer, ShardQueryBus
 from std.atomic import Atomic, Ordering
@@ -117,6 +118,9 @@ struct NetworkEngine:
     # cold state lives behind `writer.ctx` (see WriterCtx for the measured
     # reason), and the release-equivalence MSET A/B was taken with it here.
     var writer: ResponseWriter
+    # A maxmemory policy is set (commands/evict.mojo). Read once per tick. Last,
+    # so that no other field moves.
+    var evict_on: Bool
 
 
     def __init__(
@@ -174,6 +178,7 @@ struct NetworkEngine:
         self.cluster = cluster
         self.failover_ticks = 0
         self.ttl_sweep_counter = 0
+        self.evict_on = False
         self.writer = ResponseWriter()
         self.fast_path = FastPathHandler(keyspace, hash_map_pool, skip_list_pool, list_pool, ai_queue, wal, raft, shared_hnsw,
                                          worker_id=worker_id, num_workers=num_workers,
@@ -263,12 +268,22 @@ struct NetworkEngine:
         self.writer.ctx[].pending_offsets[unsafe_offset=ci] = 0
         self.writer.out_free(ci)                     # #49
 
+    @no_inline
+    def _evict_tick(mut self):
+        """A policy is set: every tick, as the sweep below runs every 100."""
+        var cl = self.slow_path.cluster
+        evict_tick(self.fast_path.keyspace, self.fast_path.ttl_map, self.fast_path.wal,
+                   self.worker_id, self.num_workers,
+                   self.slow_path.clients.pause_until_ms != 0
+                   or (is_not_null(cl) and cl[].enabled and cl[].is_replica),
+                   self.slow_path.tx_state.key_versions)
+
     @always_inline
     def _set_expiry_clock(mut self):
         """#45: set the keyspace's lazy-expiry clock for the coming batch."""
         var ks = self.fast_path.keyspace
         var tm = self.fast_path.ttl_map
-        if is_not_null(tm) and tm[].size > 0:
+        if (is_not_null(tm) and tm[].size > 0) or ks[].track_access:
             ks[].clock_ns = _get_now_ns()
             var cl = self.slow_path.cluster
             # #47: and while CLIENT PAUSE holds writes, as Redis pauses expiry
@@ -783,6 +798,15 @@ struct NetworkEngine:
         # gh #261: --maxmemory. One load and a return when no limit is set; with
         # one, at most one worker per 100 ms samples RSS. The flag only routes
         # dispatch to the slow path, which re-confirms before refusing anything.
+        # Under an eviction policy it means nothing is left to evict.
+        var _policy = Int(external_call["pion_get_maxmemory_policy", Int32]())
+        if _policy != 0 or is_not_null(self.fast_path.keyspace[].evict):
+            self.evict_on = evict_configure(self.fast_path.keyspace, self.fast_path.ttl_map, _policy, self.worker_id)
+            if self.evict_on:
+                # An arena's bytes come back only at a restart (gh #167), so
+                # evicting a value there would free nothing.
+                self.fast_path.blob_threshold = BLOB_TIER_OFF
+                self.slow_path.dispatcher.blob_threshold = BLOB_TIER_OFF
         var _oom = external_call["pion_maxmemory_check", Int32]() != 0
         self.over_maxmemory = _oom
         self.slow_path.over_maxmemory = _oom
@@ -1216,6 +1240,8 @@ struct NetworkEngine:
                 self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # TTL sweep
+            if self.evict_on:
+                self._evict_tick()
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
@@ -1490,6 +1516,8 @@ struct NetworkEngine:
                 self.slow_path.drain_pubsub(self.writer, self.server, kq)   # #42
 
             # Active TTL sweep + housekeeping counter.
+            if self.evict_on:
+                self._evict_tick()
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
@@ -1674,6 +1702,8 @@ struct NetworkEngine:
             var nevents = external_call["epoll_wait", Int32](epfd, events, Int32(1024), timeout_ms)
 
             # Housekeeping (same gating as kqueue/io_uring)
+            if self.evict_on:
+                self._evict_tick()
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0
@@ -1955,6 +1985,8 @@ struct NetworkEngine:
             var now = _get_now_ns()
             if did == 0 or now - last_tick >= 100_000:
                 last_tick = now
+                if self.evict_on:
+                    self._evict_tick()
                 self.ttl_sweep_counter += 1
                 if self.ttl_sweep_counter >= 100:
                     self.ttl_sweep_counter = 0
@@ -2078,6 +2110,8 @@ struct NetworkEngine:
                 continue
 
             # Active TTL sweep + housekeeping counter.
+            if self.evict_on:
+                self._evict_tick()
             self.ttl_sweep_counter += 1
             if self.ttl_sweep_counter >= 100:
                 self.ttl_sweep_counter = 0

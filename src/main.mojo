@@ -9,6 +9,8 @@ from src.network.io_threads import IOHub, io_thread_main
 from src.network.io_ring import IO_THREAD_BASE
 from src.common.ptr import is_not_null
 
+from src.common.hash_map import evict_policy_name
+from src.commands.evict import evict_policy_from_string
 from src.common.config import PionConfig
 from src.common.version import PION_VERSION, PION_BUILD_SHA, PION_BUILD_DATE
 from src.vector.vector_abi import vector_backend_line, vector_abi_ok, vector_lib_abi, VECTOR_ABI_VERSION
@@ -222,7 +224,7 @@ def _known_flags() -> List[String]:
         "--wal-max-segments", "--wal-full-policy", "--blob-threshold", "--no-blob-tier",
         "--iouring", "--epoll", "--io-threads", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
         "--tenant", "--dim", "--max-elements", "--crash-log",
-        "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory",
+        "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory", "--maxmemory-policy", "--maxmemory-samples",
         "--lua-time-limit", "--lua-memory-limit", "--enable-debug-command",
         "--help", "-h", "--version", "-v",
     ]
@@ -238,7 +240,7 @@ def _value_flags() -> List[String]:
         "--wal-size", "--wal-max-segments", "--wal-full-policy", "--blob-threshold", "--ns-prefix",
         "--requirepass", "--requirepass-file", "--bind", "--tenant",
         "--dim", "--max-elements", "--crash-log", "--status-file",
-        "--rss-warn-pct", "--maxmemory", "--lua-time-limit", "--lua-memory-limit",
+        "--rss-warn-pct", "--maxmemory", "--maxmemory-policy", "--maxmemory-samples", "--lua-time-limit", "--lua-memory-limit",
         "--enable-debug-command", "--io-threads",
     ]
 
@@ -341,8 +343,11 @@ def _print_help():
     print("      --status-file PATH    1 Hz liveness record: pid/uptime/RSS/ticks (default pion-<port>.status)")
     print("      --no-crash-log        disable both breadcrumb files")
     print("      --rss-warn-pct N      warn once when RSS crosses N% of physical RAM (default 70; >100 off)")
-    print("      --maxmemory SIZE      refuse memory-growing writes (-OOM) above this RSS; bytes,")
-    print("                            k/kb/m/mb/g/gb or N% of RAM (default 0 = off; no eviction)")
+    print("      --maxmemory SIZE      hold RSS to this: bytes, k/kb/m/mb/g/gb or N% of RAM (default 0 = off).")
+    print("      --maxmemory-policy P  what happens over it: noeviction (default; memory-growing writes get")
+    print("                            -OOM), allkeys-lru, allkeys-lfu, allkeys-random, volatile-lru,")
+    print("                            volatile-lfu, volatile-random, volatile-ttl")
+    print("      --maxmemory-samples N keys sampled per eviction, 1-64 (default 5)")
     print("      --lua-time-limit MS   stop a script that runs longer without writing (default 5000;")
     print("                            0 = never). A worker cannot answer SCRIPT KILL mid-script.")
     print("      --lua-memory-limit SIZE  Lua heap cap per worker state (default 1gb; 0 = none)")
@@ -785,6 +790,22 @@ def main():
                 _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i])
                             + " (bytes, or with k/kb/m/mb/g/gb, or 1-100%):")
             config.server.maxmemory = Int(_mm_v.value)
+            i += 2
+        elif args[i] == "--maxmemory-policy" and i + 1 < len(args):
+            var _pol = evict_policy_from_string(String(args[i + 1]))
+            if _pol < 0:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]) + ":")
+            config.server.maxmemory_policy = _pol
+            i += 2
+        elif args[i] == "--maxmemory-samples" and i + 1 < len(args):
+            var _ms = 0
+            try:
+                _ms = atol(args[i + 1])
+            except:
+                _ms = 0
+            if _ms < 1 or _ms > 64:
+                _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]) + " (1-64):")
+            config.server.maxmemory_samples = _ms
             i += 2
         elif args[i] == "--rss-warn-pct" and i + 1 < len(args):
             try:
@@ -1233,10 +1254,17 @@ def main():
     # gh #261: the limit is process-wide and lives in C, where every worker's
     # housekeeping tick reads it. The C side logs each crossing (with the RSS it
     # measured), so this line states only what was configured.
+    external_call["pion_set_maxmemory_policy", NoneType](Int32(config.server.maxmemory_policy))
+    external_call["pion_set_maxmemory_samples", NoneType](Int32(config.server.maxmemory_samples))
     if config.server.maxmemory > 0:
         external_call["pion_set_maxmemory", NoneType](UInt64(config.server.maxmemory))
-        print("Maxmemory: " + String(config.server.maxmemory >> 20)
-              + " MB (noeviction: above it, memory-growing writes get -OOM)")
+        if config.server.maxmemory_policy == 0:
+            print("Maxmemory: " + String(config.server.maxmemory >> 20)
+                  + " MB (noeviction: above it, memory-growing writes get -OOM)")
+        else:
+            print("Maxmemory: " + String(config.server.maxmemory >> 20) + " MB ("
+                  + String(evict_policy_name(config.server.maxmemory_policy))
+                  + ": above it, keys are evicted)")
     # #36: every worker's Lua states take these when they are created.
     external_call["pion_lua_set_defaults", NoneType](Int64(lua_memory_limit), Int64(lua_time_limit_ms))
 

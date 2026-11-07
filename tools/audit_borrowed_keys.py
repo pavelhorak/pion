@@ -65,6 +65,9 @@ READ_METHODS = {
 # its bytes, and none keeps it. Name -> the argument positions that may be a
 # borrowed key. Adding one here is a claim about its body — read it first.
 SAFE_FUNCS = {
+    # StripedHashMap: eviction's access record. They read the key to find its slot.
+    "touch": {0},
+    "access_entry": {0},
     "remove_and_free": {1},          # container_free.mojo: get + remove_generic
     "get_stream": {1},               # stream.mojo: get
     "stream_key_is_wrongtype": {1},  # stream.mojo: get
