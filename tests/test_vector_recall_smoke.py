@@ -114,16 +114,21 @@ def main() -> int:
     r = Resp(args.port)
     r.call("FT.CREATE", INDEX, "ON", "HASH", "PREFIX", "1", "rs:", "SCHEMA", "vec",
            "VECTOR", "HNSW", "6", "TYPE", "FLOAT32", "DIM", DIM, "DISTANCE_METRIC", "L2")
+    # Every vector is made before the first is sent, in the same order as
+    # before, so the data is unchanged. Made between pipelines, each batch of
+    # 250 took a CI runner about the 200 ms that starts a background build, so
+    # whether and where builds ran mid-ingest depended on the runner's speed.
+    # The graph FT.OPTIMIZE builds then depends on it too: levels come from
+    # the process's one random stream, and earlier builds advance it. On these
+    # tight clusters that alone moved recall between 0.80 and 1.00 on x86, on
+    # any build.
     cmds = []
     for c in range(CLUSTERS):
         for p in range(PER):
             v = [x + rng.gauss(0, 0.05 / math.sqrt(DIM)) for x in centres[c]]
             cmds.append(("HSET", f"rs:{c}:{p}", "vec", pack(v)))
-            if len(cmds) == 250:
-                r.pipeline(cmds)
-                cmds = []
-    if cmds:
-        r.pipeline(cmds)
+    for i in range(0, len(cmds), 250):
+        r.pipeline(cmds[i:i + 250])
     t0 = time.time()
     r.call("FT.OPTIMIZE", INDEX)
     built = time.time() - t0
