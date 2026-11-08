@@ -90,8 +90,10 @@ def build(r, name, D, metric, docs, drop_first=True):
     """FLUSHALL, create, ingest, optimize. `metric=None` omits the keyword."""
     if drop_first:
         r.execute_command("FLUSHALL")
-    args = ["FT.CREATE", name, "SCHEMA", "vec", "VECTOR", "HNSW", "6",
-            "TYPE", "FLOAT32", "DIM", str(D)]
+    # The count must match the words sent: FT.CREATE refuses `HNSW 6` with
+    # four words since 1.0.4, which this section did until 2026-11-08.
+    args = ["FT.CREATE", name, "SCHEMA", "vec", "VECTOR", "HNSW",
+            "4" if metric is None else "6", "TYPE", "FLOAT32", "DIM", str(D)]
     if metric is not None:
         args += ["DISTANCE_METRIC", metric]
     r.execute_command(*args)
