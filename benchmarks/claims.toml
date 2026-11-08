@@ -372,11 +372,11 @@ expect = ["comptime HLL_P = 14"]
 
 [[claim]]
 file = "doc/data_types.md"
-where = "Triggers at 70% fill"
-numbers = ["70%"]
+where = "Arrays of 256 KiB or more"
+numbers = ["256 KiB"]
 kind = "code"
 evidence = ["src/common/hash_map.mojo"]
-expect = ["* 100 > self.capacity * 70"]
+expect = ["comptime TABLE_MAP_MIN = 262144"]
 
 [[claim]]
 file = "doc/distributed_systems.md"

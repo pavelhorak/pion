@@ -6,6 +6,7 @@ from std.memory import unsafe_memset, unsafe_memcpy, stack_allocation
 from std.sys.intrinsics import prefetch
 from std.bit import count_trailing_zeros
 from std.math import iota
+from std.sys import size_of, CompilationTarget
 from std.collections import List
 from src.common.value import GenericValue, ValueType, BLOB_TAG
 from src.common.prng import Xoshiro256PlusPlus
@@ -22,6 +23,60 @@ def _movemask16(m: SIMD[DType.bool, 16]) -> Int:
     Canonical Swiss-table movemask: iterate only matching lanes via count_trailing_zeros
     instead of walking all 16 slots scalar."""
     return Int((m.cast[DType.uint16]() * _LANE_BITS).reduce_add())
+
+
+# ── Table memory ──────────────────────────────────────────────────────────────
+#
+# A table array of at least TABLE_MAP_MIN bytes is mapped from the OS and
+# unmapped when its table is rebuilt or dropped. Freed to the allocator, old
+# tables stayed resident: growing the keyspace to 8 x 65,536 slots frees 30 MB
+# of smaller tables, and RSS kept ~8 MB of it. Eviction needs RSS to fall when
+# it shrinks a table, too. Mapped memory starts zero, which is what an empty
+# slot holds (GenericValue() is all zero bytes), so a mapped key or value array
+# is not written until a slot is used, and its untouched pages cost nothing.
+#
+# Whether an array is mapped follows from its element count, which every free
+# site knows (the capacity it was allocated for), so nothing records it.
+comptime TABLE_MAP_MIN = 262144
+
+
+@always_inline
+def _table_mapped[T: AnyType](n: Int) -> Bool:
+    return n * size_of[T]() >= TABLE_MAP_MIN
+
+
+@always_inline
+def _table_alloc[T: AnyType](n: Int) -> Pointer[T, MutUntrackedOrigin]:
+    if not _table_mapped[T](n):
+        return unsafe_alloc[T](n)
+    return _table_map(n * size_of[T]()).unsafe_bitcast[T]()
+
+
+@always_inline
+def _table_free[T: AnyType](p: Pointer[T, MutUntrackedOrigin], n: Int):
+    if not _table_mapped[T](n):
+        p.unsafe_free()
+    else:
+        _ = external_call["munmap", Int32](p.unsafe_bitcast[UInt8](), n * size_of[T]())
+
+
+@no_inline
+def _table_map(nbytes: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+    # The same call, argument for argument, as SlabAllocator's: Mojo 1.2
+    # refuses two signatures for one C function.
+    var flags: Int
+    comptime if CompilationTarget.is_linux():
+        flags = 0x22                     # MAP_PRIVATE | MAP_ANONYMOUS
+    else:
+        flags = 0x1002                   # MAP_PRIVATE | MAP_ANON
+    var p = external_call["mmap", Pointer[UInt8, MutUntrackedOrigin]](
+        null_ptr[UInt8, MutUntrackedOrigin](), nbytes, 0x3, flags, -1, 0)
+    if Int(p) == -1:
+        # The allocator would have failed too: it maps its memory the same way.
+        print("FATAL: out of memory mapping a", nbytes, "byte hash table")
+        external_call["exit", NoneType](Int32(1))
+    return p
+
 
 struct SlabHashMap(Movable):
     var metadata: Pointer[UInt8, MutUntrackedOrigin]
@@ -80,14 +135,15 @@ struct SlabHashMap(Movable):
         self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         self.vec_gen = 0
         self.rehashes = 0
-        self.metadata = unsafe_alloc[UInt8](real_cap + 16 + 8)
+        self.metadata = _table_alloc[UInt8](real_cap + 16 + 8)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), real_cap + 16)
         unsafe_memset(self.metadata.unsafe_offset(real_cap + 16), UInt8(0), 8)   # no access table
-        self.keys = unsafe_alloc[GenericValue](real_cap)
-        self.values = unsafe_alloc[GenericValue](real_cap)
-        for i in range(real_cap):
-            (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
-            (self.values.unsafe_offset(i)).unsafe_write(GenericValue())
+        self.keys = _table_alloc[GenericValue](real_cap)
+        self.values = _table_alloc[GenericValue](real_cap)
+        if not _table_mapped[GenericValue](real_cap):      # mapped: already zero
+            for i in range(real_cap):
+                (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
+                (self.values.unsafe_offset(i)).unsafe_write(GenericValue())
 
 
     # ── The access table: what an LRU or LFU maxmemory policy knows of a slot ──
@@ -118,8 +174,9 @@ struct SlabHashMap(Movable):
         if Int(self.access_table()) != 0:
             return
         # One word past the slots: may this table grow (set_may_grow).
-        var t = unsafe_alloc[UInt32](self.capacity + 1)
-        unsafe_memset(t.unsafe_bitcast[UInt8](), UInt8(0), self.capacity * 4)
+        var t = _table_alloc[UInt32](self.capacity + 1)
+        if not _table_mapped[UInt32](self.capacity + 1):
+            unsafe_memset(t.unsafe_bitcast[UInt8](), UInt8(0), self.capacity * 4)
         t[unsafe_offset=self.capacity] = 1
         self._set_access_table(t)
 
@@ -134,7 +191,7 @@ struct SlabHashMap(Movable):
     def disable_access_table(mut self):
         var t = self.access_table()
         if Int(t) != 0:
-            t.unsafe_free()
+            _table_free(t, self.capacity + 1)
             self._set_access_table(null_ptr[UInt32, MutUntrackedOrigin]())
 
     def shrink_if_sparse(mut self):
@@ -339,6 +396,17 @@ struct SlabHashMap(Movable):
         grow path there costs the hot loop even though it never runs."""
         self.graveyard[].append(old)
 
+    @always_inline
+    def _past_fill(self) -> Bool:
+        """Rebuild before this insert: more than 7/8 of the slots are taken,
+        tombstones included (gh #210). The usual Swiss-table limit. It was 70%,
+        which held the table 35-70% full, and at 65 bytes a slot that was most
+        of what a key cost over Redis (benchmarks/reproducers/memory_per_key.py).
+        A 16-wide group match with a 7-bit fingerprint keeps a fuller table's
+        probes short. _rehash's ratios and EVICT_TABLE_FILL are set against
+        this one."""
+        return (self.size + self.tombstones) * 8 > self.capacity * 7
+
     def _h2(self, h: UInt64) -> UInt8:
         return UInt8(h & 0x7F)
 
@@ -347,7 +415,7 @@ struct SlabHashMap(Movable):
         self.set(GenericValue.borrow(key_str.unsafe_ptr(), key_str.byte_length()), value^)
 
     def set(mut self, key: GenericValue, var value: GenericValue):
-        if (self.size + self.tombstones) * 100 > self.capacity * 70:
+        if self._past_fill():
             self._rehash()
 
         var h = UInt64(key.__hash__())
@@ -436,7 +504,7 @@ struct SlabHashMap(Movable):
         blob-arena-tagged) of exactly `val_len` bytes, and the new value is
         too long for SSO. Every other shape falls back to free + from_ptr,
         which is byte-for-byte the old behavior."""
-        if (self.size + self.tombstones) * 100 > self.capacity * 70:
+        if self._past_fill():
             self._rehash()
 
         var h1 = self._h1(h)
@@ -601,7 +669,7 @@ struct SlabHashMap(Movable):
         """Like set() but skips hash computation — caller provides precomputed hash.
         Only the keyspace stores through this (MSET's loop among them), so it
         has no #46 vector-field check: a hash's fields go through set()."""
-        if (self.size + self.tombstones) * 100 > self.capacity * 70:
+        if self._past_fill():
             self._rehash()
         var h1 = self._h1(h)
         var h2 = self._h2(h)
@@ -954,22 +1022,24 @@ struct SlabHashMap(Movable):
         # gh #210: doubling is for genuine live-entry pressure. When the table
         # is mostly tombstones (churn workload), rebuild at the same capacity —
         # the rebuild purges them; doubling would grow memory without bound.
+        # The ratios are the 70% trigger's scaled to 7/8 (_past_fill): 7/16 of
+        # the slots live is half the trigger, as 35% was.
         var new_cap = old_cap * 2
-        if self.size * 100 <= old_cap * 35:
+        if self.size * 16 <= old_cap * 7:
             new_cap = old_cap
-        elif Int(old_table) != 0 and self.size * 100 <= old_cap * 66 \
-                and (self.size * 100 <= old_cap * 50 or old_table[unsafe_offset=old_cap] == 0):
+        elif Int(old_table) != 0 and self.size * 40 <= old_cap * 33 \
+                and (self.size * 8 <= old_cap * 5 or old_table[unsafe_offset=old_cap] == 0):
             # Under eviction the live count holds still and churn alone fills
             # the table with tombstones. Doubling for that costs 69 bytes a slot,
             # which the limit takes from the data: a 72 MB table over 48 MB of
-            # values. Past 50% it doubles only if the result fits; eviction holds
-            # the count under EVICT_TABLE_FILL when it does not. The 66 is the
-            # backstop: at the 70% that triggers a rebuild, a table that stayed
-            # this size would rebuild on every insert.
+            # values. Past 5/8 live it doubles only if the result fits; eviction
+            # holds the count under EVICT_TABLE_FILL when it does not. 82.5% is
+            # the backstop: at the 7/8 that triggers a rebuild, a table that
+            # stayed this size would rebuild on every insert.
             new_cap = old_cap
         if Int(old_table) != 0 and self.size * 8 < old_cap:
             # And when eviction has left the table mostly empty, give the slots
-            # back. A large block is the one thing the allocator returns to the
+            # back: a large table is mapped (TABLE_MAP_MIN) and goes back to the
             # OS, and with RSS still over the limit nothing else could end -OOM.
             new_cap = old_cap
             while new_cap > 4096 and self.size * 4 < new_cap:
@@ -977,7 +1047,7 @@ struct SlabHashMap(Movable):
         self.capacity = new_cap
         self.size = 0
         self.tombstones = 0
-        self.metadata = unsafe_alloc[UInt8](self.capacity + 16 + 8)
+        self.metadata = _table_alloc[UInt8](self.capacity + 16 + 8)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), self.capacity + 16)
         unsafe_memset(self.metadata.unsafe_offset(self.capacity + 16), UInt8(0), 8)
         # The stamps move with their entries: a tombstone purge rebuilds the
@@ -988,12 +1058,13 @@ struct SlabHashMap(Movable):
             self.enable_access_table()
             new_table = self.access_table()
             new_table[unsafe_offset=self.capacity] = old_table[unsafe_offset=old_cap]
-        self.keys = unsafe_alloc[GenericValue](self.capacity)
-        self.values = unsafe_alloc[GenericValue](self.capacity)
-        for i in range(self.capacity):
-            (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
-            (self.values.unsafe_offset(i)).unsafe_write(GenericValue())
-            
+        self.keys = _table_alloc[GenericValue](self.capacity)
+        self.values = _table_alloc[GenericValue](self.capacity)
+        if not _table_mapped[GenericValue](self.capacity):   # mapped: already zero
+            for i in range(self.capacity):
+                (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
+                (self.values.unsafe_offset(i)).unsafe_write(GenericValue())
+
         var mask = self.capacity - 1
         
         comptime width = 16
@@ -1029,11 +1100,11 @@ struct SlabHashMap(Movable):
         for i in range(old_cap):
              (old_keys.unsafe_offset(i)).unsafe_deinit_pointee()
              (old_values.unsafe_offset(i)).unsafe_deinit_pointee()
-        old_meta.unsafe_free()
-        old_keys.unsafe_free()
-        old_values.unsafe_free()
+        _table_free(old_meta, old_cap + 16 + 8)
+        _table_free(old_keys, old_cap)
+        _table_free(old_values, old_cap)
         if Int(old_table) != 0:
-            old_table.unsafe_free()
+            _table_free(old_table, old_cap + 1)
 
     def forget_borrowed(mut self):
         """Drop every key and value WITHOUT freeing its heap payload.
@@ -1063,18 +1134,18 @@ struct SlabHashMap(Movable):
         if Int(self.metadata) != 0:
             var t = self.access_table()
             if Int(t) != 0:
-                t.unsafe_free()
-            self.metadata.unsafe_free()
+                _table_free(t, self.capacity + 1)
+            _table_free(self.metadata, self.capacity + 16 + 8)
         if Int(self.keys) != 0:
             for i in range(self.capacity):
                 self.keys[unsafe_offset=i].free_str_payload()  # gh #123: free key heap payloads
                 (self.keys.unsafe_offset(i)).unsafe_deinit_pointee()
-            self.keys.unsafe_free()
+            _table_free(self.keys, self.capacity)
         if Int(self.values) != 0:
             for i in range(self.capacity):
                 self.values[unsafe_offset=i].free_str_payload()  # gh #123: free value heap payloads
                 (self.values.unsafe_offset(i)).unsafe_deinit_pointee()
-            self.values.unsafe_free()
+            _table_free(self.values, self.capacity)
 
 
 comptime VEC_KEY_SHARDS = 8
@@ -1098,8 +1169,9 @@ comptime LRU_MASK = 0xFFFFFF
 comptime LFU_MINUTE_SHIFT = 36
 comptime LFU_INIT = 5
 # Under eviction, live keys per 100 slots that the keyspace's tables may hold
-# when they cannot grow. Rebuilds trigger at 70, tombstones included.
-comptime EVICT_TABLE_FILL = 60
+# when they cannot grow. Rebuilds trigger at 87.5 (7/8), tombstones included;
+# this was 60 under the 70 trigger, and the gap scales with it.
+comptime EVICT_TABLE_FILL = 75
 
 
 def evict_policy_name(p: Int) -> StaticString:

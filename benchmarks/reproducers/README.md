@@ -15,6 +15,7 @@ produces a *wrong number*, not an error. Close everything else first.
 | [`sweep_qwen3_5_warm_ttft.py`](sweep_qwen3_5_warm_ttft.py) | Qwen3.5-4B hybrid warm TTFT: **14.0× / 25.3× / 29.0×** at 2K / 4K / 8K prefix (`--target-tokens 2048` runs one length) | Apple Silicon, MLX, Qwen3.5-4B-MLX-4bit, a Pion server with `--kvcache` |
 | [`stage1_hybrid_recall_bench.py`](stage1_hybrid_recall_bench.py) | hybrid retrieval cache recall | Apple Silicon, MLX, Llama-3.2-1B-Instruct-4bit, a Pion server |
 | [`stage0_hybrid_kv_injection.py`](stage0_hybrid_kv_injection.py) | the chunk-keyed cache's first evidence | Apple Silicon, MLX, Llama-3.2-1B-Instruct-4bit |
+| [`memory_per_key.py`](memory_per_key.py) | what a key costs in RSS against Redis (the CHANGELOG's 7/8 load-factor entry): RSS idle and loaded for N keys of a given value size, both servers | a Pion binary, `redis-server` on the PATH; no model |
 
 ## If a number does not reproduce
 

@@ -102,7 +102,9 @@ Used for the main keyspace (as the 8 shards of a `StripedHashMap`, 65,536 slots 
 
 ### Rehash
 
-Triggers at 70% fill (`size * 100 > capacity * 70`). Doubles capacity, re-inserts all non-EMPTY/non-DELETED entries.
+Triggers past 7/8 fill, tombstones included (`(size + tombstones) * 8 > capacity * 7`). Doubles capacity, re-inserts all non-EMPTY/non-DELETED entries. A table that is mostly tombstones is rebuilt at the same capacity instead (live entries at most 7/16 of the slots).
+
+Arrays of 256 KiB or more (a key or value array from 8,192 slots up) are mapped with `mmap` and unmapped when the table is rebuilt or dropped, so a grown table's old arrays go back to the OS rather than staying resident in the allocator.
 
 ### Capacity Defaults
 
