@@ -234,6 +234,14 @@ jobs:
         # ~1 s; on a simulated #341 build it reports recall 0.000.
         run: python3 tests/test_vector_recall_smoke.py --port 1974
 
+      - name: A vector build does not depend on the builds before it
+        # HNSW levels came from the process's one random stream, so the graph
+        # FT.OPTIMIZE built from the same vectors depended on how many builds
+        # (automatic ones included) had run first. x86 CI read recall 0.87 on
+        # the smoke above for that reason alone. Three builds of one data set
+        # on this server must answer every query identically.
+        run: python3 tests/test_hnsw_build_history.py --port 1974
+
       - name: Dispatch sweep — every command consumes its own frame
         # 289 commands x 5 argument shapes. Each shape added here found real
         # desyncs; an arm that stops consuming at its required arity is

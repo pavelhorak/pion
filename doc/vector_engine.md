@@ -31,7 +31,11 @@ The core index is an HNSW (Hierarchical Navigable Small Worlds) graph.
 - `node_map[id] → internal_idx` allows O(1) lookup by user-supplied integer ID.
 
 ### Insert (`add_vector`)
-1. Assign a random level (`_random_level`).
+1. Assign a level (`_level_of`). It is random across nodes but fixed by the node's
+   position in the build, so the same vectors in the same order get the same
+   levels whatever the server built before. A build of fewer than 4,096 vectors
+   links on one lane and is then the same graph; a larger one links on several,
+   whose interleaving can still differ.
 2. Quantize the `Float32` input vector to `Int8` via calibrated SQ8.
 3. Greedy descent from `max_level` down to `level+1` to find best entry point.
 4. For each level from `min(level, max_level)` down to 0: beam-search (`_search_layer`, ef = `ef_construction`), prune neighbors (heuristic), link bidirectionally.

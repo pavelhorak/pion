@@ -118,10 +118,11 @@ def main() -> int:
     # before, so the data is unchanged. Made between pipelines, each batch of
     # 250 took a CI runner about the 200 ms that starts a background build, so
     # whether and where builds ran mid-ingest depended on the runner's speed.
-    # The graph FT.OPTIMIZE builds then depends on it too: levels come from
-    # the process's one random stream, and earlier builds advance it. On these
-    # tight clusters that alone moved recall between 0.80 and 1.00 on x86, on
-    # any build.
+    # The graph FT.OPTIMIZE built then depended on it too, while levels came
+    # from the process's one random stream and earlier builds advanced it. On
+    # these tight clusters that alone moved recall between 0.80 and 1.00 on
+    # x86, on any build. A level is now fixed by the node's position in the
+    # build (tests/test_hnsw_build_history.py).
     cmds = []
     for c in range(CLUSTERS):
         for p in range(PER):

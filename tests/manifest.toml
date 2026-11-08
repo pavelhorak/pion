@@ -1212,6 +1212,11 @@ server = "-w 1"
 tier = "gate"
 
 [[test]]
+file = "tests/test_hnsw_build_history.py"
+server = "-w 1"
+tier = "gate"
+
+[[test]]
 file = "tests/test_vset_differential.py"
 server = "self"
 tier = "gate"
