@@ -19,6 +19,17 @@ enumerated — there were roughly 1,100 of them.
 
 ### Changed
 
+- **A key costs less memory.** Hash tables (the keyspace, and every hash, set
+  and TTL table) now grow past 7/8 full instead of 70%, the usual Swiss-table
+  limit. A table's arrays of 256 KiB or more are mapped from the OS and unmapped
+  when the table grows or goes, instead of staying with the allocator. Measured
+  on macOS with 200-byte values, RSS for the data (loaded less idle): 200,000
+  keys 78.4 → 57.2 MB (Redis 8.10: 54.2 MB), 400,000 keys 147.5 → 113.8 MB
+  (108.3 MB). Just after a table doubles it is still up to a quarter over
+  Redis: 154.7 MB at 460,000 keys, against 123.5 MB. Idle RSS is 4 MB lower,
+  because an empty table's pages are never touched. At the fullest table, a
+  GET miss costs 2.1% more instructions and SET and MSET 1.3–1.5% more.
+  `benchmarks/reproducers/memory_per_key.py` measures it.
 - **Mojo 1.2.0.** The toolchain moved from 1.1.0, with the closed vector library
   rebuilt on all three platforms. The engine needed one change: Mojo 1.2 refuses
   two signatures for one C function, and a Linux-only `write()` call declared a

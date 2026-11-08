@@ -30,7 +30,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bench_proc import pion_server_pids  # noqa: E402
 
 GATE_PORT = 1974
-MIN_FREE_GB = 2.0
+# 2.0 until 2026-11-07, when ~4 GB free halved durable MSET (0.89-1.67M on two
+# binaries, interleaved; the write rows dipped with it, reads did not) and this
+# check said clean. Freeing 9.7 GB put both back at 1.92-2.08M.
+MIN_FREE_GB = 8.0
 # This box idles near 1.3-2.0 with a Claude session and the desktop app up.
 # Spotlight indexing a fresh venv left it at 6.31 with 0% instantaneous CPU.
 MAX_LOAD1 = 4.0
@@ -271,9 +274,11 @@ def check_disk(path="/"):
     if free_gb >= MIN_FREE_GB:
         return []
     return [Finding(f"disk pressure: {free_gb:.1f} GB free on / (want >= {MIN_FREE_GB:.0f})",
-                    "Near-full, the WAL's mmap/msync stalls both perf gates, and a FULL "
-                    "disk makes `pixi run build` exit 0 with stale machine code. Swapfiles "
-                    "in /System/Volumes/VM can swing free space by gigabytes within minutes.",
+                    "Near-full, the WAL's mmap/msync stalls both perf gates (~4 GB free "
+                    "halved MSET), and a FULL disk makes `pixi run build` exit 0 with stale "
+                    "machine code. Swapfiles in /System/Volumes/VM can swing free space by "
+                    "gigabytes within minutes. Look in $TMPDIR first: a measurement loop "
+                    "that starts servers in mkdtemp() leaves a 256 MB WAL per run.",
                     "ours")]
 
 

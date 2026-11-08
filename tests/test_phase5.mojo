@@ -31,6 +31,53 @@ def test_slab_hash_map() raises:
     assert_equal(v3.type.value, ValueType.NONE)
     print("SlabHashMap tests passed!")
 
+def test_table_growth() raises:
+    """The table grows past 7/8 full, and a big table's arrays are mapped
+    (TABLE_MAP_MIN): they start zero instead of being written, and go back
+    with munmap on a rebuild and when the map is dropped."""
+    print("Testing table growth...")
+    for _ in range(3):              # build and drop: a bad unmap shows on reuse
+        var hm = SlabHashMap(16)
+        # 220,000 keys: under 7/8 of 262,144 (229,376), over 70% of it, so
+        # the old trigger would have doubled to 524,288.
+        var n = 220000
+        for i in range(n):
+            hm.set("k" + String(i), GenericValue.from_int(Int64(i)))
+        assert_equal(hm.capacity, 262144)
+        assert_equal(hm.size, n)
+        for i in range(n):
+            assert_equal(Int(hm.get("k" + String(i)).as_int()), i)
+        assert_equal(hm.get("missing").type.value, ValueType.NONE)
+
+        # Churn: half the keys go and as many new ones come, into tombstones.
+        for i in range(0, n, 2):
+            assert_true(hm.remove("k" + String(i)))
+        for i in range(n, n + n // 2):
+            hm.set("k" + String(i), GenericValue.from_int(Int64(i)))
+        assert_equal(hm.size, n)
+        for i in range(n + n // 2):
+            var v = hm.get("k" + String(i))
+            if i < n and i % 2 == 0:
+                assert_equal(v.type.value, ValueType.NONE)
+            else:
+                assert_equal(Int(v.as_int()), i)
+
+        # An access table on a mapped table: it starts zero, carries its
+        # may-grow word across a doubling, and is unmapped.
+        hm.enable_access_table()
+        var t = hm.access_table()
+        assert_equal(Int(t[unsafe_offset=hm.capacity]), 1)
+        assert_equal(Int(t[unsafe_offset=0]) + Int(t[unsafe_offset=hm.capacity - 1]), 0)
+        # 340,000 live keys: past 7/8 of 262,144, under 7/8 of 524,288.
+        for i in range(n + n // 2, n + n // 2 + 120000):
+            hm.set("k" + String(i), GenericValue.from_int(Int64(i)))
+        assert_equal(hm.capacity, 524288)
+        assert_equal(Int(hm.access_table()[unsafe_offset=hm.capacity]), 1)
+        assert_equal(Int(hm.get("k" + String(n + n // 2 + 119999)).as_int()), n + n // 2 + 119999)
+        hm.disable_access_table()
+        assert_equal(Int(hm.access_table()), 0)
+    print("table growth tests passed!")
+
 def test_slab_skip_list() raises:
     print("Testing SlabSkipList...")
     var sl = SlabSkipList(100)
@@ -55,5 +102,6 @@ def main() raises:
     # exited 0, so this test could not fail even before it stopped compiling.
     test_generic_value()
     test_slab_hash_map()
+    test_table_growth()
     test_slab_skip_list()
     print("--- ALL PHASE 5 TESTS PASSED ---")
