@@ -155,8 +155,13 @@ def ft_search_leak(d):
     try:
         c = Conn(PORT, timeout=60)
         dim = 16
-        c.cmd("FT.CREATE", "lk", "SCHEMA", "vec", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
-              "DIM", str(dim))
+        # Six attribute words, as the count says: FT.CREATE has refused a count
+        # that does not match since 1.0.4, as RediSearch does, and this probe
+        # (full tier only) then searched an index that did not exist.
+        r = c.cmd("FT.CREATE", "lk", "SCHEMA", "vec", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+                  "DIM", str(dim), "DISTANCE_METRIC", "L2")
+        if r != "OK":
+            return f"FT.SEARCH: FT.CREATE failed: {r!r:.120}"
         vec = lambda i: struct.pack(f"{dim}f", *[((i * 7919 + j * 104729) % 1000) / 1000.0
                                                  for j in range(dim)])
         run(c, [("HSET", f"document:longkey:{i:08d}", "vec", vec(i), "id", str(i))
