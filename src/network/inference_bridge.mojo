@@ -8,8 +8,8 @@ Types: EMBED=1, GENERATE=2, LOAD_MODEL=3, HEALTH=4, SHUTDOWN=5
 Status: OK=0, ERROR=1
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.ffi import external_call
@@ -51,8 +51,8 @@ struct InferenceBridge(Movable):
         self.socket_fd = Int32(-1)
         self.sidecar_pid = Int32(-1)
         self.next_req_id = UInt32(1)
-        self.send_buf = alloc[UInt8](INFER_SEND_BUF_SIZE)
-        self.recv_buf = alloc[UInt8](INFER_RECV_BUF_SIZE)
+        self.send_buf = unsafe_alloc[UInt8](INFER_SEND_BUF_SIZE)
+        self.recv_buf = unsafe_alloc[UInt8](INFER_RECV_BUF_SIZE)
         self.recv_offset = 0
         self.connected = False
         self.enabled = enabled
@@ -69,7 +69,7 @@ struct InferenceBridge(Movable):
         self.enabled = take.enabled
         self.socket_path = take.socket_path^
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if is_not_null(self.send_buf):
             self.send_buf.unsafe_free()
         if is_not_null(self.recv_buf):
@@ -83,7 +83,7 @@ struct InferenceBridge(Movable):
         if not self.enabled:
             return False
         var c_path = self.socket_path
-        var fd = external_call["pion_connect_unix", Int32](c_path.as_c_string_slice())
+        var fd = external_call["pion_connect_unix", Int32](c_path.as_c_string_span())
         if fd < 0:
             return False
         self.socket_fd = fd
@@ -238,7 +238,7 @@ struct InferenceBridge(Movable):
         # Drain any remaining bytes if body was larger than out_body_max
         if body_len > out_body_max:
             var skip = body_len - out_body_max
-            var skip_buf = alloc[UInt8](skip)
+            var skip_buf = unsafe_alloc[UInt8](skip)
             _ = self._recv_all(skip_buf, skip)
             skip_buf.unsafe_free()
         return InferenceResponse(msg_type, req_id, status, actual_read)
@@ -254,7 +254,7 @@ struct InferenceBridge(Movable):
         if req_id == 0:
             return 0
         # Response body: [dim:u32][f32 * dim]
-        var body_buf = alloc[UInt8](INFER_RECV_BUF_SIZE)
+        var body_buf = unsafe_alloc[UInt8](INFER_RECV_BUF_SIZE)
         var resp = self.recv_response_blocking(body_buf, INFER_RECV_BUF_SIZE)
         if resp.status != INFER_STATUS_OK or resp.body_len < 4:
             body_buf.unsafe_free()

@@ -1,5 +1,4 @@
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from src.memory.slab_allocator import SlabAllocator
 from src.common.value import GenericValue, ValueType

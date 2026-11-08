@@ -22,11 +22,11 @@ Wire surface:
     SSM.PREFIX.FETCH <session_id> <layer_id>
     SSM.PREFIX.DROP  <session_id> [<layer_id>]    # layer_id omitted = drop all
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.utils import strict_atol
 
 from src.common.ptr import null_ptr
 from std.ffi import external_call
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.sys.info import CompilationTarget
 
@@ -63,11 +63,11 @@ def ssm_durability_startup(worker_id: Int) -> None:
         var snap_path = "pion.ssm." + String(worker_id) + "\0"
         var wal_path  = "pion.ssm.wal." + String(worker_id) + "\0"
         _ = external_call["pion_ssm_load_snapshot", Int32](
-            UInt32(worker_id), snap_path.as_c_string_slice())
+            UInt32(worker_id), snap_path.as_c_string_span())
         _ = external_call["pion_ssm_wal_replay", Int32](
-            UInt32(worker_id), wal_path.as_c_string_slice())
+            UInt32(worker_id), wal_path.as_c_string_span())
         _ = external_call["pion_ssm_wal_open", Int32](
-            UInt32(worker_id), wal_path.as_c_string_slice())
+            UInt32(worker_id), wal_path.as_c_string_span())
 
 
 def ssm_save_snapshot(worker_id: Int) -> Int32:
@@ -81,7 +81,7 @@ def ssm_save_snapshot(worker_id: Int) -> Int32:
     comptime if CompilationTarget.is_macos() or CompilationTarget.is_linux():
         var snap_path = "pion.ssm." + String(worker_id) + "\0"
         var rc = external_call["pion_ssm_save_snapshot", Int32](
-            UInt32(worker_id), snap_path.as_c_string_slice())
+            UInt32(worker_id), snap_path.as_c_string_span())
         if rc >= 0:
             _ = external_call["pion_ssm_wal_truncate", Int32](UInt32(worker_id))
         return rc
@@ -160,7 +160,7 @@ def handle_ssm_prefix_fetch(
         # are allocated on the host heap (no contention) so the second call
         # is guaranteed to see the same size unless an evict happens between
         # — bounded race; if mismatch we return -ERR rather than partial data.
-        var _size_buf = alloc[UInt32](1)
+        var _size_buf = unsafe_alloc[UInt32](1)
         var size_out_ptr = Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=Int(_size_buf))
         var rc_size = external_call["pion_ssm_size", Int32](
             UInt32(worker_id),
@@ -176,9 +176,9 @@ def handle_ssm_prefix_fetch(
         if blob_len == 0:
             writer.append_bulk_string_response(null_ptr[UInt8, MutUntrackedOrigin](), 0)
             return 1
-        var _buf = alloc[UInt8](blob_len)
+        var _buf = unsafe_alloc[UInt8](blob_len)
         var buf_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf))
-        var _len_buf = alloc[UInt32](1)
+        var _len_buf = unsafe_alloc[UInt32](1)
         var out_len_ptr = Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=Int(_len_buf))
         var rc = external_call["pion_ssm_fetch", Int32](
             UInt32(worker_id),

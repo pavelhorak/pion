@@ -27,7 +27,7 @@ def _cmd_eq_ci(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int,
     """Case-insensitive ASCII match, folding only A-Z (see the note above)."""
     if tl != lit.byte_length():
         return False
-    var lp = lit.unsafe_ptr()
+    var lp = lit.ptr()
     for k in range(tl):
         var c = tp[unsafe_offset=k]
         if c >= 65 and c <= 90:

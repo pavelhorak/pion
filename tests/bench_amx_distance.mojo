@@ -16,7 +16,7 @@ Build / run:
     pixi run bench-amx
 """
 
-from std.memory.unsafe_pointer import UnsafePointer, alloc
+from std.memory.unsafe_pointer import alloc
 from std.memory import unsafe_memset
 from std.time import perf_counter_ns
 from std.ffi import external_call
@@ -35,9 +35,9 @@ comptime CBLAS_NO_TRANS: Int32 = 111
 @always_inline
 def cblas_sgemv_k_dim(
     K: Int,
-    A: UnsafePointer[Float32, MutUntrackedOrigin],
-    x: UnsafePointer[Float32, MutUntrackedOrigin],
-    y: UnsafePointer[Float32, MutUntrackedOrigin],
+    A: Pointer[Float32, MutUntrackedOrigin],
+    x: Pointer[Float32, MutUntrackedOrigin],
+    y: Pointer[Float32, MutUntrackedOrigin],
 ):
     """Compute y = A * x where A is K×DIM row-major FP32, x is DIM, y is K."""
     _ = external_call["cblas_sgemv", Int32](
@@ -60,9 +60,9 @@ def cblas_sgemv_k_dim(
 def cblas_sgemm_M_K(
     M: Int,
     K: Int,
-    queries_MxDim: UnsafePointer[Float32, MutUntrackedOrigin],
-    cands_KxDim: UnsafePointer[Float32, MutUntrackedOrigin],
-    out_MxK: UnsafePointer[Float32, MutUntrackedOrigin],
+    queries_MxDim: Pointer[Float32, MutUntrackedOrigin],
+    cands_KxDim: Pointer[Float32, MutUntrackedOrigin],
+    out_MxK: Pointer[Float32, MutUntrackedOrigin],
 ):
     """Batched: C[M×K] = Q[M×DIM] * cands[DIM×K]; cands stored as K rows so transpose_b=True.
 
@@ -91,9 +91,9 @@ def cblas_sgemm_M_K(
 @always_inline
 def cblas_sgemm_q_K(
     K: Int,
-    A_KxDim: UnsafePointer[Float32, MutUntrackedOrigin],
-    x_Dim: UnsafePointer[Float32, MutUntrackedOrigin],
-    y_K: UnsafePointer[Float32, MutUntrackedOrigin],
+    A_KxDim: Pointer[Float32, MutUntrackedOrigin],
+    x_Dim: Pointer[Float32, MutUntrackedOrigin],
+    y_K: Pointer[Float32, MutUntrackedOrigin],
 ):
     """SGEMM variant: C[1xK] = A[1xDIM] * B[DIMxK], where B is candidates transposed.
 
@@ -121,7 +121,7 @@ def cblas_sgemm_q_K(
     )
 
 
-def fill_int8(buf: UnsafePointer[Int8, MutUntrackedOrigin], n: Int, seed: Int):
+def fill_int8(buf: Pointer[Int8, MutUntrackedOrigin], n: Int, seed: Int):
     var s = UInt64(seed)
     for i in range(n):
         s = s * 6364136223846793005 + 1442695040888963407
@@ -131,8 +131,8 @@ def fill_int8(buf: UnsafePointer[Int8, MutUntrackedOrigin], n: Int, seed: Int):
 
 
 def fill_fp32_from_int8(
-    src: UnsafePointer[Int8, MutUntrackedOrigin],
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    src: Pointer[Int8, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     n: Int,
     scale: Float32,
 ):
@@ -141,10 +141,10 @@ def fill_fp32_from_int8(
 
 
 def run_neon_batch8(
-    q: UnsafePointer[Int8, MutUntrackedOrigin],
-    cands: UnsafePointer[Int8, MutUntrackedOrigin],
+    q: Pointer[Int8, MutUntrackedOrigin],
+    cands: Pointer[Int8, MutUntrackedOrigin],
     K: Int,
-    dst: UnsafePointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
 ):
     """K must be a multiple of 8."""
     var k = 0

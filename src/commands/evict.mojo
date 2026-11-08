@@ -38,9 +38,9 @@ goes; the container is freed; a vector document leaves its index. Also what a
 write does for WATCH. A replica does not evict, as Redis's
 `replica-ignore-maxmemory yes` default: it applies its primary's DELs.
 """
+from std.memory.alloc import unsafe_alloc
 from std.ffi import external_call
 from std.memory import alloc
-from std.memory.unsafe_pointer import Pointer
 from src.common.ptr import is_null, is_not_null
 from src.common.value import GenericValue, ValueType
 from src.common.hash_map import (
@@ -90,7 +90,7 @@ def evict_policy_from_string(s: String) -> Int:
     # On the heap: a short String keeps its bytes inline, on the stack, and a
     # stack pointer passed out of line as MutUntrackedOrigin is miscompiled (gh #349).
     var n = s.byte_length()
-    var h = alloc[UInt8](n + 1)
+    var h = unsafe_alloc[UInt8](n + 1)
     for k in range(n):
         h[unsafe_offset=k] = s.as_bytes()[k]
     var p = evict_policy_from_name(h, n)
@@ -314,7 +314,7 @@ def evict_configure(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
     when eviction is on, which sends the event loop to evict_tick every tick."""
     var st = ks[].evict
     if is_null(st):
-        st = alloc[EvictState](1)
+        st = unsafe_alloc[EvictState](1)
         st.unsafe_write(EvictState(UInt64(_get_now_ns()) ^ (UInt64(worker_id) << 32)))
         ks[].evict = st
     if st[].policy != policy:

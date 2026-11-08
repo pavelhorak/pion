@@ -14,8 +14,8 @@ Memory per 128K tokens, 32 layers, dim=1024, turbo4:
   128K × 1024 × 0.5625 B × 32 = 2.25 GB per session
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 from std.ffi import external_call
@@ -72,7 +72,7 @@ comptime DIR_SID_INLINE  = 64
 
 
 def _sort_uint64_inplace(
-    a: UnsafePointer[UInt64, MutUntrackedOrigin],
+    a: Pointer[UInt64, MutUntrackedOrigin],
     lo: Int,
     hi: Int,
 ):
@@ -84,38 +84,38 @@ def _sort_uint64_inplace(
     # Insertion sort for small ranges (avoids deep recursion + faster on short arrays).
     if hi - lo <= 16:
         for i in range(lo + 1, hi + 1):
-            var key = a[i]
+            var key = a[unsafe_offset=i]
             var j = i - 1
-            while j >= lo and a[j] > key:
-                a[j + 1] = a[j]
+            while j >= lo and a[unsafe_offset=j] > key:
+                a[unsafe_offset=j + 1] = a[unsafe_offset=j]
                 j -= 1
-            a[j + 1] = key
+            a[unsafe_offset=j + 1] = key
         return
     # Median-of-three pivot to dodge worst-case quadratic on sorted input.
     var mid = (lo + hi) // 2
-    if a[lo] > a[mid]:
-        var t = a[lo]; a[lo] = a[mid]; a[mid] = t
-    if a[lo] > a[hi]:
-        var t = a[lo]; a[lo] = a[hi]; a[hi] = t
-    if a[mid] > a[hi]:
-        var t = a[mid]; a[mid] = a[hi]; a[hi] = t
+    if a[unsafe_offset=lo] > a[unsafe_offset=mid]:
+        var t = a[unsafe_offset=lo]; a[unsafe_offset=lo] = a[unsafe_offset=mid]; a[unsafe_offset=mid] = t
+    if a[unsafe_offset=lo] > a[unsafe_offset=hi]:
+        var t = a[unsafe_offset=lo]; a[unsafe_offset=lo] = a[unsafe_offset=hi]; a[unsafe_offset=hi] = t
+    if a[unsafe_offset=mid] > a[unsafe_offset=hi]:
+        var t = a[unsafe_offset=mid]; a[unsafe_offset=mid] = a[unsafe_offset=hi]; a[unsafe_offset=hi] = t
     # Move the chosen pivot (mid) to hi-1 and partition.
-    var tmp = a[mid]; a[mid] = a[hi - 1]; a[hi - 1] = tmp
-    var pivot = a[hi - 1]
+    var tmp = a[unsafe_offset=mid]; a[unsafe_offset=mid] = a[unsafe_offset=hi - 1]; a[unsafe_offset=hi - 1] = tmp
+    var pivot = a[unsafe_offset=hi - 1]
     var i = lo
     var j = hi - 1
     while True:
         i += 1
-        while a[i] < pivot:
+        while a[unsafe_offset=i] < pivot:
             i += 1
         j -= 1
-        while a[j] > pivot:
+        while a[unsafe_offset=j] > pivot:
             j -= 1
         if i >= j:
             break
-        var swap = a[i]; a[i] = a[j]; a[j] = swap
+        var swap = a[unsafe_offset=i]; a[unsafe_offset=i] = a[unsafe_offset=j]; a[unsafe_offset=j] = swap
     # Restore pivot.
-    var swap2 = a[i]; a[i] = a[hi - 1]; a[hi - 1] = swap2
+    var swap2 = a[unsafe_offset=i]; a[unsafe_offset=i] = a[unsafe_offset=hi - 1]; a[unsafe_offset=hi - 1] = swap2
     _sort_uint64_inplace(a, lo, i - 1)
     _sort_uint64_inplace(a, i + 1, hi)
 
@@ -190,17 +190,17 @@ struct VStoreDirectory(Movable):
     with RELEASE on registration and read with ACQUIRE on lookup, pairing
     the field writes with the visibility flag the same way SharedHNSWView
     handles its own `ready_atomic`."""
-    var entries: UnsafePointer[VStoreDirEntry, MutUntrackedOrigin]
-    var published: UnsafePointer[UInt64, MutUntrackedOrigin]  # 0 = empty/in-flight, 1 = visible
+    var entries: Pointer[VStoreDirEntry, MutUntrackedOrigin]
+    var published: Pointer[UInt64, MutUntrackedOrigin]  # 0 = empty/in-flight, 1 = visible
 
     def __init__(out self):
-        var _e = alloc[VStoreDirEntry](MAX_DIR_ENTRIES)
-        var ep = UnsafePointer[VStoreDirEntry, MutUntrackedOrigin](unsafe_from_address=Int(_e))
+        var _e = unsafe_alloc[VStoreDirEntry](MAX_DIR_ENTRIES)
+        var ep = Pointer[VStoreDirEntry, MutUntrackedOrigin](unsafe_from_address=Int(_e))
         for i in range(MAX_DIR_ENTRIES):
-            ep[i] = VStoreDirEntry()
-        var _p = alloc[UInt64](MAX_DIR_ENTRIES)
-        unsafe_memset(_p.bitcast[UInt8](), 0, MAX_DIR_ENTRIES * 8)
-        var pp = UnsafePointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_p))
+            ep[unsafe_offset=i] = VStoreDirEntry()
+        var _p = unsafe_alloc[UInt64](MAX_DIR_ENTRIES)
+        unsafe_memset(_p.unsafe_bitcast[UInt8](), 0, MAX_DIR_ENTRIES * 8)
+        var pp = Pointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_p))
         self.entries = ep
         self.published = pp
 
@@ -210,16 +210,16 @@ struct VStoreDirectory(Movable):
 
 
 @always_inline
-def _dir_hash(sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], sid_len: Int) -> UInt64:
+def _dir_hash(sid_ptr: Pointer[UInt8, MutUntrackedOrigin], sid_len: Int) -> UInt64:
     var h: UInt64 = 0
     for i in range(sid_len):
-        h = h * UInt64(0x100000001b3) + UInt64(Int(sid_ptr[i]))
+        h = h * UInt64(0x100000001b3) + UInt64(Int(sid_ptr[unsafe_offset=i]))
     return h
 
 
 def vstore_dir_register(
-    dir_ptr: UnsafePointer[VStoreDirectory, MutUntrackedOrigin],
-    sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+    dir_ptr: Pointer[VStoreDirectory, MutUntrackedOrigin],
+    sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
     sid_len: Int,
     kv_dim: Int,
     v_format: UInt8,
@@ -240,45 +240,45 @@ def vstore_dir_register(
     # First pass: find existing entry to refresh.
     for i in range(MAX_DIR_ENTRIES):
         if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
-                published + i, UInt64(0)) == 0:
+                published.unsafe_offset(i), UInt64(0)) == 0:
             continue
-        if entries[i].sid_hash != h or entries[i].sid_len != sid_len:
+        if entries[unsafe_offset=i].sid_hash != h or entries[unsafe_offset=i].sid_len != sid_len:
             continue
         var same = True
         for j in range(sid_len):
-            if entries[i].sid[j] != sid_ptr[j]:
+            if entries[unsafe_offset=i].sid[j] != sid_ptr[unsafe_offset=j]:
                 same = False
                 break
         if same:
-            entries[i].owner_worker_id = owner_worker_id
-            entries[i].last_ts = ts
-            entries[i].kv_dim = kv_dim
-            entries[i].v_format = v_format
-            entries[i].schema_digest = schema_digest
+            entries[unsafe_offset=i].owner_worker_id = owner_worker_id
+            entries[unsafe_offset=i].last_ts = ts
+            entries[unsafe_offset=i].kv_dim = kv_dim
+            entries[unsafe_offset=i].v_format = v_format
+            entries[unsafe_offset=i].schema_digest = schema_digest
             return i
 
     # Second pass: claim a free slot (published==0).
     for i in range(MAX_DIR_ENTRIES):
         if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
-                published + i, UInt64(0)) != 0:
+                published.unsafe_offset(i), UInt64(0)) != 0:
             continue
         # Write fields under the assumption that published is still 0 — if
         # another worker also picks this slot we'll lose the race; the loser's
         # writes get overwritten by the winner's RELEASE store. With 64 slots
         # and 4 workers this is rare; for a stricter solution use an atomic CAS
         # on `published` before writing.
-        entries[i].active = True
-        entries[i].sid_hash = h
-        entries[i].sid_len = sid_len
+        entries[unsafe_offset=i].active = True
+        entries[unsafe_offset=i].sid_hash = h
+        entries[unsafe_offset=i].sid_len = sid_len
         for j in range(sid_len):
-            entries[i].sid[j] = sid_ptr[j]
-        entries[i].kv_dim = kv_dim
-        entries[i].v_format = v_format
-        entries[i].owner_worker_id = owner_worker_id
-        entries[i].last_ts = ts
-        entries[i].schema_digest = schema_digest
+            entries[unsafe_offset=i].sid[j] = sid_ptr[unsafe_offset=j]
+        entries[unsafe_offset=i].kv_dim = kv_dim
+        entries[unsafe_offset=i].v_format = v_format
+        entries[unsafe_offset=i].owner_worker_id = owner_worker_id
+        entries[unsafe_offset=i].last_ts = ts
+        entries[unsafe_offset=i].schema_digest = schema_digest
         Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
-            published + i, UInt64(1))
+            published.unsafe_offset(i), UInt64(1))
         return i
 
     return -1  # directory full
@@ -286,9 +286,9 @@ def vstore_dir_register(
 
 def vstore_compute_schema_digest(
     num_layers: Int,
-    layer_value_dim: UnsafePointer[Int, MutUntrackedOrigin],
-    v_fmt: UnsafePointer[UInt8, MutUntrackedOrigin],
-    layer_rope_dim: UnsafePointer[Int, MutUntrackedOrigin],
+    layer_value_dim: Pointer[Int, MutUntrackedOrigin],
+    v_fmt: Pointer[UInt8, MutUntrackedOrigin],
+    layer_rope_dim: Pointer[Int, MutUntrackedOrigin],
 ) -> UInt32:
     """FNV-1a hash over the per-layer (dim, fmt, rope_dim) tuple stream.
     Returns 0 only when num_layers == 0 (caller should treat as "unset")."""
@@ -296,9 +296,9 @@ def vstore_compute_schema_digest(
         return UInt32(0)
     var h: UInt32 = UInt32(2166136261)
     for li in range(num_layers):
-        var d = UInt32(layer_value_dim[li])
-        var f = UInt32(v_fmt[li])
-        var r = UInt32(layer_rope_dim[li])
+        var d = UInt32(layer_value_dim[unsafe_offset=li])
+        var f = UInt32(v_fmt[unsafe_offset=li])
+        var r = UInt32(layer_rope_dim[unsafe_offset=li])
         # Mix each field byte-wise.
         for shift in range(4):
             h = (h ^ ((d >> (UInt32(shift) * UInt32(8))) & UInt32(0xFF))) * UInt32(16777619)
@@ -312,8 +312,8 @@ def vstore_compute_schema_digest(
 
 
 def vstore_dir_get_schema_digest(
-    dir_ptr: UnsafePointer[VStoreDirectory, MutUntrackedOrigin],
-    sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+    dir_ptr: Pointer[VStoreDirectory, MutUntrackedOrigin],
+    sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
     sid_len: Int,
 ) -> UInt32:
     """Return the schema_digest for the entry, or 0 if not found / unset."""
@@ -324,23 +324,23 @@ def vstore_dir_get_schema_digest(
     var published = dir_ptr[].published
     for i in range(MAX_DIR_ENTRIES):
         if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
-                published + i, UInt64(0)) == 0:
+                published.unsafe_offset(i), UInt64(0)) == 0:
             continue
-        if entries[i].sid_hash != h or entries[i].sid_len != sid_len:
+        if entries[unsafe_offset=i].sid_hash != h or entries[unsafe_offset=i].sid_len != sid_len:
             continue
         var same = True
         for j in range(sid_len):
-            if entries[i].sid[j] != sid_ptr[j]:
+            if entries[unsafe_offset=i].sid[j] != sid_ptr[unsafe_offset=j]:
                 same = False
                 break
         if same:
-            return entries[i].schema_digest
+            return entries[unsafe_offset=i].schema_digest
     return UInt32(0)
 
 
 def vstore_dir_lookup(
-    dir_ptr: UnsafePointer[VStoreDirectory, MutUntrackedOrigin],
-    sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+    dir_ptr: Pointer[VStoreDirectory, MutUntrackedOrigin],
+    sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
     sid_len: Int,
 ) -> Int:
     """Return the owner worker_id for the namespace, or -1 if not registered."""
@@ -351,23 +351,23 @@ def vstore_dir_lookup(
     var published = dir_ptr[].published
     for i in range(MAX_DIR_ENTRIES):
         if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
-                published + i, UInt64(0)) == 0:
+                published.unsafe_offset(i), UInt64(0)) == 0:
             continue
-        if entries[i].sid_hash != h or entries[i].sid_len != sid_len:
+        if entries[unsafe_offset=i].sid_hash != h or entries[unsafe_offset=i].sid_len != sid_len:
             continue
         var same = True
         for j in range(sid_len):
-            if entries[i].sid[j] != sid_ptr[j]:
+            if entries[unsafe_offset=i].sid[j] != sid_ptr[unsafe_offset=j]:
                 same = False
                 break
         if same:
-            return entries[i].owner_worker_id
+            return entries[unsafe_offset=i].owner_worker_id
     return -1
 
 
 def vstore_dir_drop(
-    dir_ptr: UnsafePointer[VStoreDirectory, MutUntrackedOrigin],
-    sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+    dir_ptr: Pointer[VStoreDirectory, MutUntrackedOrigin],
+    sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
     sid_len: Int,
 ) -> Bool:
     """Remove the entry for this namespace. Returns True if something was removed."""
@@ -378,21 +378,21 @@ def vstore_dir_drop(
     var published = dir_ptr[].published
     for i in range(MAX_DIR_ENTRIES):
         if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
-                published + i, UInt64(0)) == 0:
+                published.unsafe_offset(i), UInt64(0)) == 0:
             continue
-        if entries[i].sid_hash != h or entries[i].sid_len != sid_len:
+        if entries[unsafe_offset=i].sid_hash != h or entries[unsafe_offset=i].sid_len != sid_len:
             continue
         var same = True
         for j in range(sid_len):
-            if entries[i].sid[j] != sid_ptr[j]:
+            if entries[unsafe_offset=i].sid[j] != sid_ptr[unsafe_offset=j]:
                 same = False
                 break
         if same:
             # Clear publish flag first so concurrent lookups don't read mid-clear.
             Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
-                published + i, UInt64(0))
-            entries[i].active = False
-            entries[i].sid_len = 0
+                published.unsafe_offset(i), UInt64(0))
+            entries[unsafe_offset=i].active = False
+            entries[unsafe_offset=i].sid_len = 0
             return True
     return False
 
@@ -401,7 +401,7 @@ struct VSSessionMeta(TrivialRegisterPassable):
     """Per-session metadata."""
     var active: Bool
     var session_hash: UInt64
-    var session_id_ptr: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var session_id_ptr: Pointer[UInt8, MutUntrackedOrigin]
     var session_id_len: Int
     var value_dim: Int
     var v_format: UInt8
@@ -418,8 +418,8 @@ struct VSSessionMeta(TrivialRegisterPassable):
     # (issue target ≤ 100 µs). Both arrays have `block_count` entries.
     var block_size: UInt32
     var block_count: UInt32
-    var block_hashes: UnsafePointer[UInt64, MutUntrackedOrigin]
-    var block_hashes_sorted: UnsafePointer[UInt64, MutUntrackedOrigin]
+    var block_hashes: Pointer[UInt64, MutUntrackedOrigin]
+    var block_hashes_sorted: Pointer[UInt64, MutUntrackedOrigin]
     # gh #468: VStoreIndex.gen_clock at this session's last change. An export
     # file is named by its sessions' gens, so a changed session never serves
     # an old file.
@@ -447,39 +447,39 @@ struct VStoreIndex(Movable):
     No HNSW. No keys. Just flat quantized V arrays indexed by token ID.
     GPU keeps K for routing; Pion stores V for memory savings.
     """
-    var sessions: UnsafePointer[VSSessionMeta, MutUntrackedOrigin]
+    var sessions: Pointer[VSSessionMeta, MutUntrackedOrigin]
 
     # Per-session per-layer token count. tokens_per_layer[session * MAX_VS_LAYERS + layer]
-    var tokens_per_layer: UnsafePointer[Int, MutUntrackedOrigin]
+    var tokens_per_layer: Pointer[Int, MutUntrackedOrigin]
 
     # Per-layer V storage. Slot = session_idx * MAX_VS_LAYERS + layer_id.
     # INT8 path:
-    var v_int8: UnsafePointer[UnsafePointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin]
-    var v_scale: UnsafePointer[Float32, MutUntrackedOrigin]
-    var v_min: UnsafePointer[Float32, MutUntrackedOrigin]
+    var v_int8: Pointer[Pointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin]
+    var v_scale: Pointer[Float32, MutUntrackedOrigin]
+    var v_min: Pointer[Float32, MutUntrackedOrigin]
     # Turbo/FP16 path (reuse same pointer for turbo4/turbo3/turbo2/fp16):
-    var v_turbo: UnsafePointer[UnsafePointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin]
+    var v_turbo: Pointer[Pointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin]
     # Per-slot format (resolved at store time):
-    var v_fmt: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var v_fmt: Pointer[UInt8, MutUntrackedOrigin]
     # A1 (gh #29): per-layer value_dim. Populated either by broadcasting the
     # session-level value_dim (legacy `V.CREATE sid dim [VQUANT fmt]`) or by
     # parsing per-layer specs (heterogeneous `V.CREATE sid [default_dim]
     # SCHEMA N spec_0 ... spec_{N-1}`). store_batch / fetch_tokens / save /
     # load / wal_replay all read THIS array, never `meta.value_dim`, so
     # heterogeneous and uniform sessions follow the same code path.
-    var layer_value_dim: UnsafePointer[Int, MutUntrackedOrigin]
+    var layer_value_dim: Pointer[Int, MutUntrackedOrigin]
     # A2 (gh #30): per-layer rope_dim — meaningful ONLY for VFMT_BF16_ROPE_FP8.
     # 0 for every other format. Layout impact: the first rope_dim values of
     # each token are stored as BF16 (2 bytes), the remaining (val_dim - rope_dim)
     # values as block-FP8.
-    var layer_rope_dim: UnsafePointer[Int, MutUntrackedOrigin]
+    var layer_rope_dim: Pointer[Int, MutUntrackedOrigin]
     # gh #41 fix: per-slot buffer capacity in TOKENS. store_batch reads this
     # to decide whether to realloc-grow before writing past first-batch end_id.
     # Pre-#41, multi-batch STOREs past the initial capacity silently corrupted
     # the heap (buffer was sized at first-STORE end_id × bpt, never resized).
     # Snapshot/restore tests are the first workload that exercises multi-batch
     # routinely; without this fix they trigger tcmalloc heap corruption.
-    var buf_capacity: UnsafePointer[Int, MutUntrackedOrigin]
+    var buf_capacity: Pointer[Int, MutUntrackedOrigin]
     # A10 (gh #37 / #41): per-session snapshot pool.
     #
     # Slot indexed by `session_idx * MAX_VS_SNAPSHOTS_PER_SESSION + snap_slot`.
@@ -497,10 +497,10 @@ struct VStoreIndex(Movable):
     # surfaced only in cross-test setups. Bisecting under #41 found the pool
     # itself was clean; the corruption traced to other state I couldn't pin
     # down but that no longer manifests on this revision.
-    var snap_id: UnsafePointer[UInt64, MutUntrackedOrigin]
-    var snap_lens: UnsafePointer[Int, MutUntrackedOrigin]
-    var snap_scales: UnsafePointer[Float32, MutUntrackedOrigin]
-    var snap_mins: UnsafePointer[Float32, MutUntrackedOrigin]
+    var snap_id: Pointer[UInt64, MutUntrackedOrigin]
+    var snap_lens: Pointer[Int, MutUntrackedOrigin]
+    var snap_scales: Pointer[Float32, MutUntrackedOrigin]
+    var snap_mins: Pointer[Float32, MutUntrackedOrigin]
     var snap_id_counter: UInt64
 
     var session_count: Int
@@ -514,7 +514,7 @@ struct VStoreIndex(Movable):
     # snapshots. Truncated by KV.PREFIX.SAVE once a fresh snapshot is durable.
     # When wal_fd < 0, WAL is disabled (cold path / replay in progress).
     var wal_fd: Int32
-    var wal_path_buf: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var wal_path_buf: Pointer[UInt8, MutUntrackedOrigin]
     var wal_path_len: Int
     var wal_appended: Int           # diagnostic: ops appended since open
     var wal_replayed: Int           # diagnostic: ops replayed at startup
@@ -523,7 +523,7 @@ struct VStoreIndex(Movable):
     # — without this, a fresh connection that race-accepts onto a non-owner
     # worker reports MISS even though the prefix is cached. NULL = no directory
     # (single-worker deployments).
-    var directory: UnsafePointer[VStoreDirectory, MutUntrackedOrigin]
+    var directory: Pointer[VStoreDirectory, MutUntrackedOrigin]
     var my_worker_id: Int
     # Multi-tenant: when non-empty, every KV.PREFIX.* namespace must start
     # with this exact byte sequence. Set from config.server.ns_prefix.
@@ -533,7 +533,7 @@ struct VStoreIndex(Movable):
     # Indexed by session slot like `sessions`. Deliberately NOT persisted in
     # the V-store WAL/snapshot: a restart forgets the measurement and the
     # ledger falls back to its per-token estimate, which it labels as such.
-    var prefix_prefill_us: UnsafePointer[UInt64, MutUntrackedOrigin]
+    var prefix_prefill_us: Pointer[UInt64, MutUntrackedOrigin]
     # gh #468: export lane state. gen_clock only ever grows within a process;
     # export_nonce (pid ^ start time) separates this process's export files
     # from a previous one's, which the first export of a process deletes.
@@ -556,86 +556,86 @@ struct VStoreIndex(Movable):
         self.directory = null_ptr[VStoreDirectory, MutUntrackedOrigin]()
         self.my_worker_id = -1
         self.ns_prefix = String("")
-        var _ppu = alloc[UInt64](MAX_VS_SESSIONS)
-        self.prefix_prefill_us = UnsafePointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_ppu))
+        var _ppu = unsafe_alloc[UInt64](MAX_VS_SESSIONS)
+        self.prefix_prefill_us = Pointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_ppu))
         self.gen_clock = 0
         self.export_nonce = 0
         self.export_pruned = False
         for i in range(MAX_VS_SESSIONS):
-            self.prefix_prefill_us[i] = UInt64(0)
+            self.prefix_prefill_us[unsafe_offset=i] = UInt64(0)
 
         var num_slots = MAX_VS_SESSIONS * MAX_VS_LAYERS
 
-        var _s = alloc[VSSessionMeta](MAX_VS_SESSIONS)
-        self.sessions = UnsafePointer[VSSessionMeta, MutUntrackedOrigin](unsafe_from_address=Int(_s))
+        var _s = unsafe_alloc[VSSessionMeta](MAX_VS_SESSIONS)
+        self.sessions = Pointer[VSSessionMeta, MutUntrackedOrigin](unsafe_from_address=Int(_s))
         for i in range(MAX_VS_SESSIONS):
-            self.sessions[i] = VSSessionMeta()
+            self.sessions[unsafe_offset=i] = VSSessionMeta()
 
-        var _tpl = alloc[Int](num_slots)
-        self.tokens_per_layer = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_tpl))
+        var _tpl = unsafe_alloc[Int](num_slots)
+        self.tokens_per_layer = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_tpl))
         for i in range(num_slots):
-            self.tokens_per_layer[i] = 0
+            self.tokens_per_layer[unsafe_offset=i] = 0
 
-        var _i8 = alloc[UnsafePointer[Int8, MutUntrackedOrigin]](num_slots)
-        self.v_int8 = UnsafePointer[UnsafePointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin](unsafe_from_address=Int(_i8))
+        var _i8 = unsafe_alloc[Pointer[Int8, MutUntrackedOrigin]](num_slots)
+        self.v_int8 = Pointer[Pointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin](unsafe_from_address=Int(_i8))
         for i in range(num_slots):
-            self.v_int8[i] = null_ptr[Int8, MutUntrackedOrigin]()
+            self.v_int8[unsafe_offset=i] = null_ptr[Int8, MutUntrackedOrigin]()
 
-        var _sc = alloc[Float32](num_slots)
-        self.v_scale = UnsafePointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_sc))
-        var _mn = alloc[Float32](num_slots)
-        self.v_min = UnsafePointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_mn))
+        var _sc = unsafe_alloc[Float32](num_slots)
+        self.v_scale = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_sc))
+        var _mn = unsafe_alloc[Float32](num_slots)
+        self.v_min = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_mn))
         for i in range(num_slots):
-            self.v_scale[i] = Float32(1.0)
-            self.v_min[i] = Float32(0.0)
+            self.v_scale[unsafe_offset=i] = Float32(1.0)
+            self.v_min[unsafe_offset=i] = Float32(0.0)
 
-        var _tb = alloc[UnsafePointer[Int8, MutUntrackedOrigin]](num_slots)
-        self.v_turbo = UnsafePointer[UnsafePointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin](unsafe_from_address=Int(_tb))
+        var _tb = unsafe_alloc[Pointer[Int8, MutUntrackedOrigin]](num_slots)
+        self.v_turbo = Pointer[Pointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin](unsafe_from_address=Int(_tb))
         for i in range(num_slots):
-            self.v_turbo[i] = null_ptr[Int8, MutUntrackedOrigin]()
+            self.v_turbo[unsafe_offset=i] = null_ptr[Int8, MutUntrackedOrigin]()
 
-        var _vf = alloc[UInt8](num_slots)
-        self.v_fmt = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_vf))
+        var _vf = unsafe_alloc[UInt8](num_slots)
+        self.v_fmt = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_vf))
         for i in range(num_slots):
-            self.v_fmt[i] = VFMT_INT8
+            self.v_fmt[unsafe_offset=i] = VFMT_INT8
 
         # A1: per-layer value_dim. Initialised to 0 (= unset). create_session
         # populates with the session value_dim (broadcast); the SCHEMA path
         # writes per-layer.
-        var _ld = alloc[Int](num_slots)
-        self.layer_value_dim = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_ld))
+        var _ld = unsafe_alloc[Int](num_slots)
+        self.layer_value_dim = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_ld))
         for i in range(num_slots):
-            self.layer_value_dim[i] = 0
+            self.layer_value_dim[unsafe_offset=i] = 0
 
         # A2: per-layer rope_dim. 0 unless VFMT_BF16_ROPE_FP8.
-        var _rd = alloc[Int](num_slots)
-        self.layer_rope_dim = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_rd))
+        var _rd = unsafe_alloc[Int](num_slots)
+        self.layer_rope_dim = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_rd))
         for i in range(num_slots):
-            self.layer_rope_dim[i] = 0
+            self.layer_rope_dim[unsafe_offset=i] = 0
 
         # #41 fix: per-slot buffer capacity (in tokens). 0 = no buffer yet.
-        var _bc = alloc[Int](num_slots)
-        self.buf_capacity = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_bc))
+        var _bc = unsafe_alloc[Int](num_slots)
+        self.buf_capacity = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_bc))
         for i in range(num_slots):
-            self.buf_capacity[i] = 0
+            self.buf_capacity[unsafe_offset=i] = 0
 
         # A10 BISECT: snap_id (4 KB) + snap_lens (320 KB).
         var snap_count = MAX_VS_SESSIONS * MAX_VS_SNAPSHOTS_PER_SESSION
-        var _si = alloc[UInt64](snap_count)
-        unsafe_memset(_si.bitcast[UInt8](), 0, snap_count * 8)
-        self.snap_id = UnsafePointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_si))
+        var _si = unsafe_alloc[UInt64](snap_count)
+        unsafe_memset(_si.unsafe_bitcast[UInt8](), 0, snap_count * 8)
+        self.snap_id = Pointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_si))
         var snap_lens_count = snap_count * MAX_VS_LAYERS
-        var _sl = alloc[Int](snap_lens_count)
-        unsafe_memset(_sl.bitcast[UInt8](), 0, snap_lens_count * 8)
-        self.snap_lens = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_sl))
+        var _sl = unsafe_alloc[Int](snap_lens_count)
+        unsafe_memset(_sl.unsafe_bitcast[UInt8](), 0, snap_lens_count * 8)
+        self.snap_lens = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_sl))
         # BISECT: snap_scales + snap_mins (4-byte Float32 each — half the size
         # of snap_lens).
-        var _ss = alloc[Float32](snap_lens_count)
-        unsafe_memset(_ss.bitcast[UInt8](), 0, snap_lens_count * 4)
-        self.snap_scales = UnsafePointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_ss))
-        var _sm = alloc[Float32](snap_lens_count)
-        unsafe_memset(_sm.bitcast[UInt8](), 0, snap_lens_count * 4)
-        self.snap_mins = UnsafePointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_sm))
+        var _ss = unsafe_alloc[Float32](snap_lens_count)
+        unsafe_memset(_ss.unsafe_bitcast[UInt8](), 0, snap_lens_count * 4)
+        self.snap_scales = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_ss))
+        var _sm = unsafe_alloc[Float32](snap_lens_count)
+        unsafe_memset(_sm.unsafe_bitcast[UInt8](), 0, snap_lens_count * 4)
+        self.snap_mins = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_sm))
         self.snap_id_counter = 0
 
 
@@ -681,20 +681,20 @@ struct VStoreIndex(Movable):
         """gh #468: mark session `idx` changed (see VSSessionMeta.gen)."""
         if idx >= 0 and idx < MAX_VS_SESSIONS:
             self.gen_clock += 1
-            self.sessions[idx].gen = self.gen_clock
+            self.sessions[unsafe_offset=idx].gen = self.gen_clock
 
-    def _find_session(self, sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], sid_len: Int) -> Int:
+    def _find_session(self, sid_ptr: Pointer[UInt8, MutUntrackedOrigin], sid_len: Int) -> Int:
         """Find session by ID. Returns index or -1."""
         # Simple wyhash on session ID
         var h: UInt64 = 0
         for i in range(sid_len):
-            h = h * UInt64(0x100000001b3) + UInt64(Int(sid_ptr[i]))
+            h = h * UInt64(0x100000001b3) + UInt64(Int(sid_ptr[unsafe_offset=i]))
         for i in range(MAX_VS_SESSIONS):
-            if self.sessions[i].active and self.sessions[i].session_hash == h:
-                if self.sessions[i].session_id_len == sid_len:
+            if self.sessions[unsafe_offset=i].active and self.sessions[unsafe_offset=i].session_hash == h:
+                if self.sessions[unsafe_offset=i].session_id_len == sid_len:
                     var found = True
                     for j in range(sid_len):
-                        if self.sessions[i].session_id_ptr[j] != sid_ptr[j]:
+                        if self.sessions[unsafe_offset=i].session_id_ptr[unsafe_offset=j] != sid_ptr[unsafe_offset=j]:
                             found = False
                             break
                     if found:
@@ -705,9 +705,9 @@ struct VStoreIndex(Movable):
     def _touch(mut self, slot: Int):
         """Bump LRU timestamp on the given slot. Caller must have validated slot."""
         self.access_counter += 1
-        self.sessions[slot].last_access_ts = self.access_counter
+        self.sessions[unsafe_offset=slot].last_access_ts = self.access_counter
 
-    def find_and_touch(mut self, sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin], sid_len: Int) -> Int:
+    def find_and_touch(mut self, sid_ptr: Pointer[UInt8, MutUntrackedOrigin], sid_len: Int) -> Int:
         """Find session and bump LRU timestamp. Use on cache-access calls
         (LOOKUP / STOREBATCH / FETCH). Read-only stats paths use _find_session."""
         var idx = self._find_session(sid_ptr, sid_len)
@@ -723,51 +723,51 @@ struct VStoreIndex(Movable):
         """
         if slot < 0 or slot >= MAX_VS_SESSIONS:
             return False
-        if not self.sessions[slot].active:
+        if not self.sessions[unsafe_offset=slot].active:
             return False
 
         # Account for tokens being freed
         var freed_tokens = 0
         for li in range(MAX_VS_LAYERS):
             var li_slot = slot * MAX_VS_LAYERS + li
-            freed_tokens += self.tokens_per_layer[li_slot]
-            if is_not_null(self.v_int8[li_slot]):
-                self.v_int8[li_slot].free()
-                self.v_int8[li_slot] = null_ptr[Int8, MutUntrackedOrigin]()
-            if is_not_null(self.v_turbo[li_slot]):
-                self.v_turbo[li_slot].free()
-                self.v_turbo[li_slot] = null_ptr[Int8, MutUntrackedOrigin]()
-            self.tokens_per_layer[li_slot] = 0
-            self.v_scale[li_slot] = Float32(1.0)
-            self.v_min[li_slot] = Float32(0.0)
-            self.v_fmt[li_slot] = VFMT_INT8
-            self.layer_value_dim[li_slot] = 0
-            self.layer_rope_dim[li_slot] = 0
-            self.buf_capacity[li_slot] = 0
+            freed_tokens += self.tokens_per_layer[unsafe_offset=li_slot]
+            if is_not_null(self.v_int8[unsafe_offset=li_slot]):
+                self.v_int8[unsafe_offset=li_slot].unsafe_free()
+                self.v_int8[unsafe_offset=li_slot] = null_ptr[Int8, MutUntrackedOrigin]()
+            if is_not_null(self.v_turbo[unsafe_offset=li_slot]):
+                self.v_turbo[unsafe_offset=li_slot].unsafe_free()
+                self.v_turbo[unsafe_offset=li_slot] = null_ptr[Int8, MutUntrackedOrigin]()
+            self.tokens_per_layer[unsafe_offset=li_slot] = 0
+            self.v_scale[unsafe_offset=li_slot] = Float32(1.0)
+            self.v_min[unsafe_offset=li_slot] = Float32(0.0)
+            self.v_fmt[unsafe_offset=li_slot] = VFMT_INT8
+            self.layer_value_dim[unsafe_offset=li_slot] = 0
+            self.layer_rope_dim[unsafe_offset=li_slot] = 0
+            self.buf_capacity[unsafe_offset=li_slot] = 0
         # A10: invalidate any snapshots taken against this slot.
         for sn in range(MAX_VS_SNAPSHOTS_PER_SESSION):
-            self.snap_id[slot * MAX_VS_SNAPSHOTS_PER_SESSION + sn] = UInt64(0)
+            self.snap_id[unsafe_offset=slot * MAX_VS_SNAPSHOTS_PER_SESSION + sn] = UInt64(0)
 
         # Unpublish from the cross-worker directory BEFORE freeing the id.
         # Every drop path must do this — LRU eviction (create_session under
         # slot pressure) reached here without it, leaving a stale entry that
         # kept KV.PREFIX.LOOKUP answering +HIT for a session whose V buffers
         # were gone (Gate 2c / test_kv_prefix_lru, 2026-08-01).
-        if is_not_null(self.directory) and is_not_null(self.sessions[slot].session_id_ptr):
+        if is_not_null(self.directory) and is_not_null(self.sessions[unsafe_offset=slot].session_id_ptr):
             _ = vstore_dir_drop(self.directory,
-                                self.sessions[slot].session_id_ptr,
-                                self.sessions[slot].session_id_len)
+                                self.sessions[unsafe_offset=slot].session_id_ptr,
+                                self.sessions[unsafe_offset=slot].session_id_len)
 
-        if is_not_null(self.sessions[slot].session_id_ptr):
-            self.sessions[slot].session_id_ptr.free()
+        if is_not_null(self.sessions[unsafe_offset=slot].session_id_ptr):
+            self.sessions[unsafe_offset=slot].session_id_ptr.unsafe_free()
 
         # gh #71: free optional block-hash table before clearing the meta slot.
-        if is_not_null(self.sessions[slot].block_hashes):
-            self.sessions[slot].block_hashes.free()
-        if is_not_null(self.sessions[slot].block_hashes_sorted):
-            self.sessions[slot].block_hashes_sorted.free()
+        if is_not_null(self.sessions[unsafe_offset=slot].block_hashes):
+            self.sessions[unsafe_offset=slot].block_hashes.unsafe_free()
+        if is_not_null(self.sessions[unsafe_offset=slot].block_hashes_sorted):
+            self.sessions[unsafe_offset=slot].block_hashes_sorted.unsafe_free()
 
-        self.sessions[slot] = VSSessionMeta()
+        self.sessions[unsafe_offset=slot] = VSSessionMeta()
         self.session_count -= 1
         self.total_tokens -= freed_tokens
         self.total_evictions += 1
@@ -791,35 +791,35 @@ struct VStoreIndex(Movable):
         slot: Int,
         block_size: UInt32,
         block_count: UInt32,
-        src: UnsafePointer[UInt8, MutUntrackedOrigin],
+        src: Pointer[UInt8, MutUntrackedOrigin],
     ) -> Bool:
         if slot < 0 or slot >= MAX_VS_SESSIONS:
             return False
-        if not self.sessions[slot].active:
+        if not self.sessions[unsafe_offset=slot].active:
             return False
         # Free any previously registered tables.
-        if is_not_null(self.sessions[slot].block_hashes):
-            self.sessions[slot].block_hashes.free()
-            self.sessions[slot].block_hashes = null_ptr[UInt64, MutUntrackedOrigin]()
-        if is_not_null(self.sessions[slot].block_hashes_sorted):
-            self.sessions[slot].block_hashes_sorted.free()
-            self.sessions[slot].block_hashes_sorted = null_ptr[UInt64, MutUntrackedOrigin]()
-        self.sessions[slot].block_size = block_size
-        self.sessions[slot].block_count = block_count
+        if is_not_null(self.sessions[unsafe_offset=slot].block_hashes):
+            self.sessions[unsafe_offset=slot].block_hashes.unsafe_free()
+            self.sessions[unsafe_offset=slot].block_hashes = null_ptr[UInt64, MutUntrackedOrigin]()
+        if is_not_null(self.sessions[unsafe_offset=slot].block_hashes_sorted):
+            self.sessions[unsafe_offset=slot].block_hashes_sorted.unsafe_free()
+            self.sessions[unsafe_offset=slot].block_hashes_sorted = null_ptr[UInt64, MutUntrackedOrigin]()
+        self.sessions[unsafe_offset=slot].block_size = block_size
+        self.sessions[unsafe_offset=slot].block_count = block_count
         if Int(block_count) == 0:
             return True
         var nbytes = Int(block_count) * 8
         # Token-order copy (returned by KV.PREFIX.BLOCKS).
-        var _h = alloc[UInt64](Int(block_count))
-        var hp = UnsafePointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_h))
-        unsafe_memcpy(dest=hp.bitcast[UInt8](), src=src, count=nbytes)
-        self.sessions[slot].block_hashes = hp
+        var _h = unsafe_alloc[UInt64](Int(block_count))
+        var hp = Pointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_h))
+        unsafe_memcpy(dest=hp.unsafe_bitcast[UInt8](), src=src, count=nbytes)
+        self.sessions[unsafe_offset=slot].block_hashes = hp
         # Sorted copy (binary-searched by KV.PREFIX.MEMBERSHIP).
-        var _hs = alloc[UInt64](Int(block_count))
-        var hsp = UnsafePointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_hs))
-        unsafe_memcpy(dest=hsp.bitcast[UInt8](), src=src, count=nbytes)
+        var _hs = unsafe_alloc[UInt64](Int(block_count))
+        var hsp = Pointer[UInt64, MutUntrackedOrigin](unsafe_from_address=Int(_hs))
+        unsafe_memcpy(dest=hsp.unsafe_bitcast[UInt8](), src=src, count=nbytes)
         _sort_uint64_inplace(hsp, 0, Int(block_count) - 1)
-        self.sessions[slot].block_hashes_sorted = hsp
+        self.sessions[unsafe_offset=slot].block_hashes_sorted = hsp
         return True
 
     # ── A10 (gh #37): snapshot / restore / commit ──────────────────────────
@@ -839,49 +839,49 @@ struct VStoreIndex(Movable):
     def snapshot_session(mut self, session_idx: Int) -> UInt64:
         if session_idx < 0 or session_idx >= MAX_VS_SESSIONS:
             return UInt64(0)
-        if not self.sessions[session_idx].active:
+        if not self.sessions[unsafe_offset=session_idx].active:
             return UInt64(0)
         var snap_base = session_idx * MAX_VS_SNAPSHOTS_PER_SESSION
         var free_slot = -1
         for sn in range(MAX_VS_SNAPSHOTS_PER_SESSION):
-            if self.snap_id[snap_base + sn] == UInt64(0):
+            if self.snap_id[unsafe_offset=snap_base + sn] == UInt64(0):
                 free_slot = sn
                 break
         if free_slot < 0:
             return UInt64(0)
         self.snap_id_counter += 1
         var sid_value = self.snap_id_counter
-        self.snap_id[snap_base + free_slot] = sid_value
+        self.snap_id[unsafe_offset=snap_base + free_slot] = sid_value
         var lens_base = (snap_base + free_slot) * MAX_VS_LAYERS
         var tpl_base = session_idx * MAX_VS_LAYERS
         for li in range(MAX_VS_LAYERS):
-            self.snap_lens[lens_base + li] = self.tokens_per_layer[tpl_base + li]
+            self.snap_lens[unsafe_offset=lens_base + li] = self.tokens_per_layer[unsafe_offset=tpl_base + li]
             # BISECT step: write to snap_scales / snap_mins.
-            self.snap_scales[lens_base + li] = self.v_scale[tpl_base + li]
-            self.snap_mins[lens_base + li] = self.v_min[tpl_base + li]
+            self.snap_scales[unsafe_offset=lens_base + li] = self.v_scale[unsafe_offset=tpl_base + li]
+            self.snap_mins[unsafe_offset=lens_base + li] = self.v_min[unsafe_offset=tpl_base + li]
         return sid_value
 
     def restore_session(mut self, session_idx: Int, snap_id_v: UInt64) -> Bool:
         if session_idx < 0 or session_idx >= MAX_VS_SESSIONS:
             return False
-        if not self.sessions[session_idx].active or snap_id_v == UInt64(0):
+        if not self.sessions[unsafe_offset=session_idx].active or snap_id_v == UInt64(0):
             return False
         var snap_base = session_idx * MAX_VS_SNAPSHOTS_PER_SESSION
         for sn in range(MAX_VS_SNAPSHOTS_PER_SESSION):
-            if self.snap_id[snap_base + sn] == snap_id_v:
+            if self.snap_id[unsafe_offset=snap_base + sn] == snap_id_v:
                 var lens_base = (snap_base + sn) * MAX_VS_LAYERS
                 var tpl_base = session_idx * MAX_VS_LAYERS
                 var diff = 0
                 for li in range(MAX_VS_LAYERS):
-                    var cur = self.tokens_per_layer[tpl_base + li]
-                    var snap_len = self.snap_lens[lens_base + li]
+                    var cur = self.tokens_per_layer[unsafe_offset=tpl_base + li]
+                    var snap_len = self.snap_lens[unsafe_offset=lens_base + li]
                     if cur > snap_len:
                         diff += (cur - snap_len)
-                        self.tokens_per_layer[tpl_base + li] = snap_len
+                        self.tokens_per_layer[unsafe_offset=tpl_base + li] = snap_len
                         # BISECT step: restore scale + min for INT8 dequant
                         # correctness across multi-batch sessions.
-                        self.v_scale[tpl_base + li] = self.snap_scales[lens_base + li]
-                        self.v_min[tpl_base + li] = self.snap_mins[lens_base + li]
+                        self.v_scale[unsafe_offset=tpl_base + li] = self.snap_scales[unsafe_offset=lens_base + li]
+                        self.v_min[unsafe_offset=tpl_base + li] = self.snap_mins[unsafe_offset=lens_base + li]
                 self.total_tokens -= diff
                 self._bump_gen(session_idx)
                 return True
@@ -890,12 +890,12 @@ struct VStoreIndex(Movable):
     def commit_session_snapshot(mut self, session_idx: Int, snap_id_v: UInt64) -> Bool:
         if session_idx < 0 or session_idx >= MAX_VS_SESSIONS:
             return False
-        if not self.sessions[session_idx].active or snap_id_v == UInt64(0):
+        if not self.sessions[unsafe_offset=session_idx].active or snap_id_v == UInt64(0):
             return False
         var snap_base = session_idx * MAX_VS_SNAPSHOTS_PER_SESSION
         for sn in range(MAX_VS_SNAPSHOTS_PER_SESSION):
-            if self.snap_id[snap_base + sn] == snap_id_v:
-                self.snap_id[snap_base + sn] = UInt64(0)
+            if self.snap_id[unsafe_offset=snap_base + sn] == snap_id_v:
+                self.snap_id[unsafe_offset=snap_base + sn] = UInt64(0)
                 return True
         return False
 
@@ -905,8 +905,8 @@ struct VStoreIndex(Movable):
         var best_ts: UInt64 = UInt64(0)
         var first = True
         for i in range(MAX_VS_SESSIONS):
-            if self.sessions[i].active:
-                var ts = self.sessions[i].last_access_ts
+            if self.sessions[unsafe_offset=i].active:
+                var ts = self.sessions[unsafe_offset=i].last_access_ts
                 if first or ts < best_ts:
                     best_ts = ts
                     best_slot = i
@@ -915,7 +915,7 @@ struct VStoreIndex(Movable):
 
     def create_session(
         mut self,
-        sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+        sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
         sid_len: Int,
         value_dim: Int,
         v_format: UInt8 = VFMT_INT8,
@@ -933,7 +933,7 @@ struct VStoreIndex(Movable):
         # Find free slot
         var slot = -1
         for i in range(MAX_VS_SESSIONS):
-            if not self.sessions[i].active:
+            if not self.sessions[unsafe_offset=i].active:
                 slot = i
                 break
         if slot < 0:
@@ -944,8 +944,8 @@ struct VStoreIndex(Movable):
             # Log the eviction: without a DROP record the WAL still holds the
             # victim's CREATE and rows, and a restart replays them back. (No-op
             # during replay itself, where wal_fd < 0.)
-            self.wal_append_drop(self.sessions[victim].session_id_ptr,
-                                 self.sessions[victim].session_id_len)
+            self.wal_append_drop(self.sessions[unsafe_offset=victim].session_id_ptr,
+                                 self.sessions[unsafe_offset=victim].session_id_len)
             _ = self.drop_session(victim)
             slot = victim
 
@@ -957,28 +957,28 @@ struct VStoreIndex(Movable):
             actual_fmt = VFMT_INT8  # fallback
 
         # Copy session ID
-        var _sid = alloc[UInt8](sid_len)
-        var sid_copy = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_sid))
+        var _sid = unsafe_alloc[UInt8](sid_len)
+        var sid_copy = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_sid))
         unsafe_memcpy(dest=sid_copy, src=sid_ptr, count=sid_len)
 
         var h: UInt64 = 0
         for i in range(sid_len):
-            h = h * UInt64(0x100000001b3) + UInt64(Int(sid_ptr[i]))
+            h = h * UInt64(0x100000001b3) + UInt64(Int(sid_ptr[unsafe_offset=i]))
 
-        self.sessions[slot].active = True
-        self.sessions[slot].session_hash = h
-        self.sessions[slot].session_id_ptr = sid_copy
-        self.sessions[slot].session_id_len = sid_len
-        self.sessions[slot].value_dim = value_dim
-        self.sessions[slot].v_format = actual_fmt
-        self.sessions[slot].num_layers = 0
+        self.sessions[unsafe_offset=slot].active = True
+        self.sessions[unsafe_offset=slot].session_hash = h
+        self.sessions[unsafe_offset=slot].session_id_ptr = sid_copy
+        self.sessions[unsafe_offset=slot].session_id_len = sid_len
+        self.sessions[unsafe_offset=slot].value_dim = value_dim
+        self.sessions[unsafe_offset=slot].v_format = actual_fmt
+        self.sessions[unsafe_offset=slot].num_layers = 0
         for i in range(MAX_VS_LAYERS):
             var li_slot = slot * MAX_VS_LAYERS + i
-            self.tokens_per_layer[li_slot] = 0
+            self.tokens_per_layer[unsafe_offset=li_slot] = 0
             # A1: broadcast the uniform session value_dim across all layer
             # slots so store_batch / fetch_tokens can read layer_value_dim
             # unconditionally.
-            self.layer_value_dim[li_slot] = value_dim
+            self.layer_value_dim[unsafe_offset=li_slot] = value_dim
             # gh #148: broadcast the session's format too. This used to be left
             # at the VFMT_INT8 that __init__ wrote, on the assumption that
             # "store_batch will overwrite per layer at first STORE" — but
@@ -990,7 +990,7 @@ struct VStoreIndex(Movable):
             # Verified before the fix: V.INFO reported layer_0_fmt:int8 for
             # turbo4, fp16 and mlx4g32 alike. The SCHEMA path was unaffected,
             # since it writes v_fmt per layer itself.
-            self.v_fmt[li_slot] = actual_fmt
+            self.v_fmt[unsafe_offset=li_slot] = actual_fmt
         self.session_count += 1
         self._touch(slot)
         self._bump_gen(slot)
@@ -999,13 +999,13 @@ struct VStoreIndex(Movable):
 
     def create_session_schema(
         mut self,
-        sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+        sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
         sid_len: Int,
         default_value_dim: Int,
         num_layers: Int,
-        per_layer_dim: UnsafePointer[Int, MutUntrackedOrigin],
-        per_layer_fmt: UnsafePointer[UInt8, MutUntrackedOrigin],
-        per_layer_rope: UnsafePointer[Int, MutUntrackedOrigin] = null_ptr[Int, MutUntrackedOrigin](),
+        per_layer_dim: Pointer[Int, MutUntrackedOrigin],
+        per_layer_fmt: Pointer[UInt8, MutUntrackedOrigin],
+        per_layer_rope: Pointer[Int, MutUntrackedOrigin] = null_ptr[Int, MutUntrackedOrigin](),
     ) -> Int:
         """A1 (gh #29): Create a session with a per-layer schema.
 
@@ -1026,35 +1026,35 @@ struct VStoreIndex(Movable):
             return slot
         for li in range(num_layers):
             var li_slot = slot * MAX_VS_LAYERS + li
-            var ld = per_layer_dim[li]
+            var ld = per_layer_dim[unsafe_offset=li]
             if ld <= 0:
                 ld = default_value_dim
-            var lf = per_layer_fmt[li]
+            var lf = per_layer_fmt[unsafe_offset=li]
             # Re-apply turbo / FP8 dim divisibility constraint per layer.
             if (lf == VFMT_TURBO4 or lf == VFMT_TURBO3 or lf == VFMT_TURBO2 or lf == VFMT_FP8) and (ld % 32 != 0):
                 lf = VFMT_INT8
-            self.layer_value_dim[li_slot] = ld
-            self.v_fmt[li_slot] = lf
+            self.layer_value_dim[unsafe_offset=li_slot] = ld
+            self.v_fmt[unsafe_offset=li_slot] = lf
             # A2: hybrid format stores per-layer rope_dim. For all other
             # formats the rope_dim slot stays 0.
             if lf == VFMT_BF16_ROPE_FP8 and is_not_null(per_layer_rope):
-                var rd = per_layer_rope[li]
+                var rd = per_layer_rope[unsafe_offset=li]
                 if rd <= 0 or rd >= ld or (ld - rd) % 32 != 0:
                     # Bad rope_dim → fall back to plain INT8 to avoid silent
                     # mis-quantization. Caller gets a working session but
                     # not the format they asked for.
-                    self.v_fmt[li_slot] = VFMT_INT8
+                    self.v_fmt[unsafe_offset=li_slot] = VFMT_INT8
                 else:
-                    self.layer_rope_dim[li_slot] = rd
+                    self.layer_rope_dim[unsafe_offset=li_slot] = rd
         # Set num_layers to the declared schema length so V.INFO reports it
         # immediately (legacy path leaves this at 0 until first STORE bumps it).
-        self.sessions[slot].num_layers = num_layers
+        self.sessions[unsafe_offset=slot].num_layers = num_layers
         # A2: set session-level v_format to layer 0's fmt — gives V.INFO a
         # sensible "representative" format string for single-layer SCHEMA
         # sessions (which would otherwise look uniform-INT8 because
         # create_session() was called with VFMT_INT8 internally).
         if num_layers > 0:
-            self.sessions[slot].v_format = self.v_fmt[slot * MAX_VS_LAYERS]
+            self.sessions[unsafe_offset=slot].v_format = self.v_fmt[unsafe_offset=slot * MAX_VS_LAYERS]
         return slot
 
     # ── Store ───────────────────────────────────────────────────────────
@@ -1090,10 +1090,10 @@ struct VStoreIndex(Movable):
     def _bytes_per_token_for_slot(self, slot: Int) -> Int:
         """Resolve bytes-per-token for a per-slot fmt+dim+rope_dim. Used by
         store/fetch/save/load to keep the hybrid-vs-uniform branch in one place."""
-        var vf = self.v_fmt[slot]
-        var ld = self.layer_value_dim[slot]
+        var vf = self.v_fmt[unsafe_offset=slot]
+        var ld = self.layer_value_dim[unsafe_offset=slot]
         if vf == VFMT_BF16_ROPE_FP8:
-            return self._bytes_per_token_hybrid(ld, self.layer_rope_dim[slot])
+            return self._bytes_per_token_hybrid(ld, self.layer_rope_dim[unsafe_offset=slot])
         return self._bytes_per_token(vf, ld)
 
     def store_batch(
@@ -1102,7 +1102,7 @@ struct VStoreIndex(Movable):
         layer_id: Int,
         start_id: Int,
         num_tokens: Int,
-        values_fp32: UnsafePointer[Float32, MutUntrackedOrigin],
+        values_fp32: Pointer[Float32, MutUntrackedOrigin],
     ) -> Bool:
         """Store a batch of tokens' V, quantizing according to session format.
 
@@ -1111,7 +1111,7 @@ struct VStoreIndex(Movable):
         """
         if session_idx < 0 or session_idx >= MAX_VS_SESSIONS:
             return False
-        if not self.sessions[session_idx].active:
+        if not self.sessions[unsafe_offset=session_idx].active:
             return False
         if layer_id < 0 or layer_id >= MAX_VS_LAYERS:
             return False
@@ -1120,13 +1120,13 @@ struct VStoreIndex(Movable):
         # A1: per-layer dim/fmt are the source of truth. Legacy uniform
         # sessions populate every layer slot with the session default, so this
         # branch reads identically for both paths.
-        var val_dim = self.layer_value_dim[slot]
-        var vf = self.v_fmt[slot]
+        var val_dim = self.layer_value_dim[unsafe_offset=slot]
+        var vf = self.v_fmt[unsafe_offset=slot]
         if val_dim <= 0:
             # Defensive: should not happen — create_session and create_session_schema
             # both populate every layer slot. Fall back to the session-level value.
-            val_dim = self.sessions[session_idx].value_dim
-            vf = self.sessions[session_idx].v_format
+            val_dim = self.sessions[unsafe_offset=session_idx].value_dim
+            vf = self.sessions[unsafe_offset=session_idx].v_format
         var end_id = start_id + num_tokens
 
         if end_id > MAX_VS_TOKENS:
@@ -1141,7 +1141,7 @@ struct VStoreIndex(Movable):
         # bytes-per-token: hybrid format also depends on per-layer rope_dim.
         var bpt: Int
         if vf == VFMT_BF16_ROPE_FP8:
-            bpt = self._bytes_per_token_hybrid(val_dim, self.layer_rope_dim[slot])
+            bpt = self._bytes_per_token_hybrid(val_dim, self.layer_rope_dim[unsafe_offset=slot])
         else:
             bpt = self._bytes_per_token(vf, val_dim)
 
@@ -1150,39 +1150,39 @@ struct VStoreIndex(Movable):
         # convention as the other non-INT8 paths).
         if vf == VFMT_TURBO4 or vf == VFMT_TURBO3 or vf == VFMT_TURBO2 or vf == VFMT_FP16 or vf == VFMT_FP8 or vf == VFMT_BF16_ROPE_FP8 or vf == VFMT_MLX4G32:
             # Turbo/FP16 path. #41 fix: realloc-grow when end_id exceeds capacity.
-            if is_null(self.v_turbo[slot]):
+            if is_null(self.v_turbo[unsafe_offset=slot]):
                 # First batch — round capacity up to a power-of-2 multiple of
                 # end_id to amortize the next few extends. Min cap = end_id.
                 var cap = end_id
                 if cap < 32:
                     cap = 32
                 var buf_size = cap * bpt
-                var _buf = alloc[Int8](buf_size)
-                self.v_turbo[slot] = UnsafePointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_buf))
-                unsafe_memset(self.v_turbo[slot], 0, buf_size)
-                self.buf_capacity[slot] = cap
-            elif end_id > self.buf_capacity[slot]:
+                var _buf = unsafe_alloc[Int8](buf_size)
+                self.v_turbo[unsafe_offset=slot] = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_buf))
+                unsafe_memset(self.v_turbo[unsafe_offset=slot], 0, buf_size)
+                self.buf_capacity[unsafe_offset=slot] = cap
+            elif end_id > self.buf_capacity[unsafe_offset=slot]:
                 # Grow: 2× current or end_id, whichever is larger.
-                var new_cap = self.buf_capacity[slot] * 2
+                var new_cap = self.buf_capacity[unsafe_offset=slot] * 2
                 if end_id > new_cap:
                     new_cap = end_id
                 var new_buf_size = new_cap * bpt
-                var _nb = alloc[Int8](new_buf_size)
-                var new_buf = UnsafePointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_nb))
+                var _nb = unsafe_alloc[Int8](new_buf_size)
+                var new_buf = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_nb))
                 unsafe_memset(new_buf, 0, new_buf_size)
                 # Copy live tokens from old buffer.
-                var live_bytes = self.tokens_per_layer[slot] * bpt
+                var live_bytes = self.tokens_per_layer[unsafe_offset=slot] * bpt
                 if live_bytes > 0:
-                    unsafe_memcpy(dest=new_buf, src=self.v_turbo[slot], count=live_bytes)
-                self.v_turbo[slot].free()
-                self.v_turbo[slot] = new_buf
-                self.buf_capacity[slot] = new_cap
+                    unsafe_memcpy(dest=new_buf, src=self.v_turbo[unsafe_offset=slot], count=live_bytes)
+                self.v_turbo[unsafe_offset=slot].unsafe_free()
+                self.v_turbo[unsafe_offset=slot] = new_buf
+                self.buf_capacity[unsafe_offset=slot] = new_cap
 
-            var buf = self.v_turbo[slot]
-            var rope_dim = self.layer_rope_dim[slot]  # 0 unless hybrid
+            var buf = self.v_turbo[unsafe_offset=slot]
+            var rope_dim = self.layer_rope_dim[unsafe_offset=slot]  # 0 unless hybrid
             for ti in range(num_tokens):
-                var src = values_fp32 + ti * val_dim
-                var dst = buf + (start_id + ti) * bpt
+                var src = values_fp32.unsafe_offset(ti * val_dim)
+                var dst = buf.unsafe_offset((start_id + ti) * bpt)
                 if vf == VFMT_TURBO4:
                     quantize_fp32_to_block_int4(src, dst, val_dim)
                 elif vf == VFMT_TURBO3:
@@ -1196,44 +1196,44 @@ struct VStoreIndex(Movable):
                 elif vf == VFMT_MLX4G32:
                     quantize_fp32_to_mlx4_g32(src, dst, val_dim)
                 else:  # FP16
-                    var f16 = dst.bitcast[Float16]()
+                    var f16 = dst.unsafe_bitcast[Float16]()
                     for vi in range(val_dim):
-                        f16[vi] = src[vi].cast[DType.float16]()
+                        f16[unsafe_offset=vi] = src[unsafe_offset=vi].cast[DType.float16]()
 
-            self.v_fmt[slot] = vf
+            self.v_fmt[unsafe_offset=slot] = vf
         else:
             # INT8 path: per-batch min/max (append semantics).
             # #41 fix: same realloc-grow as the turbo path. INT8 bpt = val_dim.
-            if is_null(self.v_int8[slot]):
+            if is_null(self.v_int8[unsafe_offset=slot]):
                 var cap = end_id
                 if cap < 32:
                     cap = 32
                 var buf_size = cap * val_dim
-                var _buf = alloc[Int8](buf_size)
-                self.v_int8[slot] = UnsafePointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_buf))
-                unsafe_memset(self.v_int8[slot], 0, buf_size)
-                self.buf_capacity[slot] = cap
-            elif end_id > self.buf_capacity[slot]:
-                var new_cap = self.buf_capacity[slot] * 2
+                var _buf = unsafe_alloc[Int8](buf_size)
+                self.v_int8[unsafe_offset=slot] = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_buf))
+                unsafe_memset(self.v_int8[unsafe_offset=slot], 0, buf_size)
+                self.buf_capacity[unsafe_offset=slot] = cap
+            elif end_id > self.buf_capacity[unsafe_offset=slot]:
+                var new_cap = self.buf_capacity[unsafe_offset=slot] * 2
                 if end_id > new_cap:
                     new_cap = end_id
                 var new_buf_size = new_cap * val_dim
-                var _nb = alloc[Int8](new_buf_size)
-                var new_buf = UnsafePointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_nb))
+                var _nb = unsafe_alloc[Int8](new_buf_size)
+                var new_buf = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_nb))
                 unsafe_memset(new_buf, 0, new_buf_size)
-                var live_bytes = self.tokens_per_layer[slot] * val_dim
+                var live_bytes = self.tokens_per_layer[unsafe_offset=slot] * val_dim
                 if live_bytes > 0:
-                    unsafe_memcpy(dest=new_buf, src=self.v_int8[slot], count=live_bytes)
-                self.v_int8[slot].free()
-                self.v_int8[slot] = new_buf
-                self.buf_capacity[slot] = new_cap
+                    unsafe_memcpy(dest=new_buf, src=self.v_int8[unsafe_offset=slot], count=live_bytes)
+                self.v_int8[unsafe_offset=slot].unsafe_free()
+                self.v_int8[unsafe_offset=slot] = new_buf
+                self.buf_capacity[unsafe_offset=slot] = new_cap
 
             # Compute min/max for this batch
             var total_vals = num_tokens * val_dim
-            var vmin = values_fp32[0]
-            var vmax = values_fp32[0]
+            var vmin = values_fp32[unsafe_offset=0]
+            var vmax = values_fp32[unsafe_offset=0]
             for vi in range(total_vals):
-                var v = values_fp32[vi]
+                var v = values_fp32[unsafe_offset=vi]
                 if v < vmin: vmin = v
                 if v > vmax: vmax = v
 
@@ -1242,25 +1242,25 @@ struct VStoreIndex(Movable):
                 vrange = Float32(1.0)
             var scale = Float32(254.0) / vrange
 
-            var buf = self.v_int8[slot]
+            var buf = self.v_int8[unsafe_offset=slot]
             for ti in range(num_tokens):
                 var base_src = ti * val_dim
                 var base_dst = (start_id + ti) * val_dim
                 for vi in range(val_dim):
-                    var normalized = (values_fp32[base_src + vi] - vmin) * scale
+                    var normalized = (values_fp32[unsafe_offset=base_src + vi] - vmin) * scale
                     var clamped = min(max(normalized, Float32(0.0)), Float32(254.0))
-                    buf[base_dst + vi] = Int8(Int(clamped) - 127)
+                    buf[unsafe_offset=base_dst + vi] = Int8(Int(clamped) - 127)
 
-            self.v_scale[slot] = scale
-            self.v_min[slot] = vmin
-            self.v_fmt[slot] = VFMT_INT8
+            self.v_scale[unsafe_offset=slot] = scale
+            self.v_min[unsafe_offset=slot] = vmin
+            self.v_fmt[unsafe_offset=slot] = VFMT_INT8
 
         # Update token count
         var tpl_slot = session_idx * MAX_VS_LAYERS + layer_id
-        if end_id > self.tokens_per_layer[tpl_slot]:
-            self.tokens_per_layer[tpl_slot] = end_id
-        if layer_id >= self.sessions[session_idx].num_layers:
-            self.sessions[session_idx].num_layers = layer_id + 1
+        if end_id > self.tokens_per_layer[unsafe_offset=tpl_slot]:
+            self.tokens_per_layer[unsafe_offset=tpl_slot] = end_id
+        if layer_id >= self.sessions[unsafe_offset=session_idx].num_layers:
+            self.sessions[unsafe_offset=session_idx].num_layers = layer_id + 1
         self.total_tokens += num_tokens
         self._touch(session_idx)
         self._bump_gen(session_idx)
@@ -1273,9 +1273,9 @@ struct VStoreIndex(Movable):
         mut self,
         session_idx: Int,
         layer_id: Int,
-        token_ids: UnsafePointer[Int32, MutUntrackedOrigin],
+        token_ids: Pointer[Int32, MutUntrackedOrigin],
         num_ids: Int,
-        output_fp32: UnsafePointer[Float32, MutUntrackedOrigin],
+        output_fp32: Pointer[Float32, MutUntrackedOrigin],
     ) -> Int:
         """Fetch and dequantize V for requested token IDs.
 
@@ -1284,7 +1284,7 @@ struct VStoreIndex(Movable):
         """
         if session_idx < 0 or session_idx >= MAX_VS_SESSIONS:
             return 0
-        if not self.sessions[session_idx].active:
+        if not self.sessions[unsafe_offset=session_idx].active:
             return 0
         if layer_id < 0 or layer_id >= MAX_VS_LAYERS:
             return 0
@@ -1292,35 +1292,35 @@ struct VStoreIndex(Movable):
         var slot = session_idx * MAX_VS_LAYERS + layer_id
         # A1: read per-layer dim. If unset (= 0), fall back to session-level
         # for backward-compat with snapshots that pre-date the per-layer array.
-        var val_dim = self.layer_value_dim[slot]
+        var val_dim = self.layer_value_dim[unsafe_offset=slot]
         if val_dim <= 0:
-            val_dim = self.sessions[session_idx].value_dim
-        var vf = self.v_fmt[slot]
-        var rope_dim = self.layer_rope_dim[slot]  # 0 unless hybrid
+            val_dim = self.sessions[unsafe_offset=session_idx].value_dim
+        var vf = self.v_fmt[unsafe_offset=slot]
+        var rope_dim = self.layer_rope_dim[unsafe_offset=slot]  # 0 unless hybrid
         # bytes-per-token: hybrid format depends on rope_dim.
         var bpt: Int
         if vf == VFMT_BF16_ROPE_FP8:
             bpt = self._bytes_per_token_hybrid(val_dim, rope_dim)
         else:
             bpt = self._bytes_per_token(vf, val_dim)
-        var max_tok = self.tokens_per_layer[session_idx * MAX_VS_LAYERS + layer_id]
+        var max_tok = self.tokens_per_layer[unsafe_offset=session_idx * MAX_VS_LAYERS + layer_id]
         var fetched = 0
 
         self.total_fetches += num_ids
         self._touch(session_idx)
 
         if vf == VFMT_TURBO4 or vf == VFMT_TURBO3 or vf == VFMT_TURBO2 or vf == VFMT_FP8 or vf == VFMT_BF16_ROPE_FP8 or vf == VFMT_MLX4G32:
-            var buf = self.v_turbo[slot]
+            var buf = self.v_turbo[unsafe_offset=slot]
             if is_null(buf):
                 return 0
             for i in range(num_ids):
-                var tid = Int(token_ids[i])
+                var tid = Int(token_ids[unsafe_offset=i])
                 if tid < 0 or tid >= max_tok:
                     # Zero-fill for out-of-range
-                    unsafe_memset(output_fp32 + i * val_dim, 0, val_dim * 4)
+                    unsafe_memset(output_fp32.unsafe_offset(i * val_dim), 0, val_dim * 4)
                     continue
-                var src = buf + tid * bpt
-                var dst = output_fp32 + i * val_dim
+                var src = buf.unsafe_offset(tid * bpt)
+                var dst = output_fp32.unsafe_offset(i * val_dim)
                 if vf == VFMT_TURBO4:
                     dequantize_block_int4_to_fp32(src, dst, val_dim)
                 elif vf == VFMT_TURBO3:
@@ -1336,37 +1336,37 @@ struct VStoreIndex(Movable):
                 fetched += 1
 
         elif vf == VFMT_FP16:
-            var buf = self.v_turbo[slot]  # FP16 reuses turbo pointer
+            var buf = self.v_turbo[unsafe_offset=slot]  # FP16 reuses turbo pointer
             if is_null(buf):
                 return 0
             for i in range(num_ids):
-                var tid = Int(token_ids[i])
+                var tid = Int(token_ids[unsafe_offset=i])
                 if tid < 0 or tid >= max_tok:
-                    unsafe_memset(output_fp32 + i * val_dim, 0, val_dim * 4)
+                    unsafe_memset(output_fp32.unsafe_offset(i * val_dim), 0, val_dim * 4)
                     continue
-                var src = buf + tid * bpt
-                var f16 = src.bitcast[Float16]()
-                var dst = output_fp32 + i * val_dim
+                var src = buf.unsafe_offset(tid * bpt)
+                var f16 = src.unsafe_bitcast[Float16]()
+                var dst = output_fp32.unsafe_offset(i * val_dim)
                 for vi in range(val_dim):
-                    dst[vi] = f16[vi].cast[DType.float32]()
+                    dst[unsafe_offset=vi] = f16[unsafe_offset=vi].cast[DType.float32]()
                 fetched += 1
 
         else:
             # INT8
-            var buf = self.v_int8[slot]
+            var buf = self.v_int8[unsafe_offset=slot]
             if is_null(buf):
                 return 0
-            var scale = self.v_scale[slot]
-            var vmin = self.v_min[slot]
+            var scale = self.v_scale[unsafe_offset=slot]
+            var vmin = self.v_min[unsafe_offset=slot]
             for i in range(num_ids):
-                var tid = Int(token_ids[i])
+                var tid = Int(token_ids[unsafe_offset=i])
                 if tid < 0 or tid >= max_tok:
-                    unsafe_memset(output_fp32 + i * val_dim, 0, val_dim * 4)
+                    unsafe_memset(output_fp32.unsafe_offset(i * val_dim), 0, val_dim * 4)
                     continue
-                var src = buf + tid * val_dim
-                var dst = output_fp32 + i * val_dim
+                var src = buf.unsafe_offset(tid * val_dim)
+                var dst = output_fp32.unsafe_offset(i * val_dim)
                 for vi in range(val_dim):
-                    dst[vi] = (Float32(Int(src[vi]) + 127) / scale) + vmin
+                    dst[unsafe_offset=vi] = (Float32(Int(src[unsafe_offset=vi]) + 127) / scale) + vmin
                 fetched += 1
 
         return fetched
@@ -1377,7 +1377,7 @@ struct VStoreIndex(Movable):
         layer_id: Int,
         start_id: Int,
         num_ids: Int,
-        out_u8: UnsafePointer[UInt8, MutUntrackedOrigin],
+        out_u8: Pointer[UInt8, MutUntrackedOrigin],
     ) -> Int:
         """gh #193 FMT NATIVE: copy stored fp16 bytes straight out for a
         contiguous token range — no fp16→fp32 expansion, half the wire bytes.
@@ -1388,24 +1388,24 @@ struct VStoreIndex(Movable):
         tokens with stored data (0 → caller should reply nil)."""
         if session_idx < 0 or session_idx >= MAX_VS_SESSIONS:
             return 0
-        if not self.sessions[session_idx].active:
+        if not self.sessions[unsafe_offset=session_idx].active:
             return 0
         if layer_id < 0 or layer_id >= MAX_VS_LAYERS:
             return 0
         if start_id < 0 or num_ids <= 0:
             return 0
         var slot = session_idx * MAX_VS_LAYERS + layer_id
-        if self.v_fmt[slot] != VFMT_FP16:
+        if self.v_fmt[unsafe_offset=slot] != VFMT_FP16:
             return 0
-        var val_dim = self.layer_value_dim[slot]
+        var val_dim = self.layer_value_dim[unsafe_offset=slot]
         if val_dim <= 0:
-            val_dim = self.sessions[session_idx].value_dim
+            val_dim = self.sessions[unsafe_offset=session_idx].value_dim
         var bpt = val_dim * 2
-        var buf = self.v_turbo[slot]  # FP16 lives in the turbo slot
+        var buf = self.v_turbo[unsafe_offset=slot]  # FP16 lives in the turbo slot
         if is_null(buf):
             unsafe_memset(out_u8, 0, num_ids * bpt)
             return 0
-        var max_tok = self.tokens_per_layer[slot]
+        var max_tok = self.tokens_per_layer[unsafe_offset=slot]
         var live_end = start_id + num_ids
         if live_end > max_tok:
             live_end = max_tok
@@ -1413,16 +1413,16 @@ struct VStoreIndex(Movable):
         if live < 0:
             live = 0
         if live > 0:
-            unsafe_memcpy(dest=out_u8, src=(buf + start_id * bpt).bitcast[UInt8](), count=live * bpt)
+            unsafe_memcpy(dest=out_u8, src=(buf.unsafe_offset(start_id * bpt)).unsafe_bitcast[UInt8](), count=live * bpt)
         if live < num_ids:
-            unsafe_memset(out_u8 + live * bpt, 0, (num_ids - live) * bpt)
+            unsafe_memset(out_u8.unsafe_offset(live * bpt), 0, (num_ids - live) * bpt)
         self.total_fetches += num_ids
         self._touch(session_idx)
         return live
 
     # ── Disk persistence (snapshot, mirrors HNSW save/load convention) ─────
 
-    def _vs_write_all(self, fd: Int32, ptr: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    def _vs_write_all(self, fd: Int32, ptr: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
         """Write exactly n bytes, retrying on short writes. False on any error
         (a full disk): the caller must not treat a short file as a snapshot."""
         var remaining = n
@@ -1431,11 +1431,11 @@ struct VStoreIndex(Movable):
             var written = external_call["pion_write", Int](fd, p, remaining)
             if written <= 0:
                 return False
-            p = p + written
+            p = p.unsafe_offset(written)
             remaining -= written
         return True
 
-    def _vs_read_all(self, fd: Int32, ptr: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    def _vs_read_all(self, fd: Int32, ptr: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
         """Read exactly n bytes. Returns False on short read or error."""
         var remaining = n
         var p = ptr
@@ -1443,7 +1443,7 @@ struct VStoreIndex(Movable):
             var got = external_call["pion_read", Int](fd, p, remaining)
             if got <= 0:
                 return False
-            p = p + got
+            p = p.unsafe_offset(got)
             remaining -= got
         return True
 
@@ -1478,103 +1478,103 @@ struct VStoreIndex(Movable):
         # held. Writing in place also destroyed the previous snapshot before
         # the new one was complete.
         var tmp_path = path + ".tmp"
-        var fd = external_call["pion_creat", Int32](tmp_path.as_c_string_slice())
+        var fd = external_call["pion_creat", Int32](tmp_path.as_c_string_span())
         if fd < 0:
             print("V-store save: cannot open " + tmp_path)
             return False
         var wok = True
 
         # Header (40 bytes)
-        var hdr = alloc[UInt8](40)
+        var hdr = unsafe_alloc[UInt8](40)
         unsafe_memset(hdr, 0, 40)
         # magic "PIONVS01" little-endian
-        hdr.bitcast[UInt64]()[0] = UInt64(0x3130535649504E4F)  # ASCII "ONPIVS01" reversed for LE
+        hdr.unsafe_bitcast[UInt64]()[unsafe_offset=0] = UInt64(0x3130535649504E4F)  # ASCII "ONPIVS01" reversed for LE
         # ^ "PIONVS01" as 8 bytes in memory order: P=0x50,I=0x49,O=0x4F,N=0x4E,V=0x56,S=0x53,0=0x30,1=0x31
         # LE UInt64 = 0x31_30_53_56_4E_4F_49_50
-        hdr.bitcast[UInt64]()[0] = UInt64(0x3130535645)  # placeholder; we'll write magic byte-by-byte for clarity
+        hdr.unsafe_bitcast[UInt64]()[unsafe_offset=0] = UInt64(0x3130535645)  # placeholder; we'll write magic byte-by-byte for clarity
         # Write magic byte-by-byte to be unambiguous
-        hdr[0]=UInt8(80); hdr[1]=UInt8(73); hdr[2]=UInt8(79); hdr[3]=UInt8(78)
-        hdr[4]=UInt8(86); hdr[5]=UInt8(83); hdr[6]=UInt8(48); hdr[7]=UInt8(49)
-        (hdr + 8).bitcast[UInt32]()[0]  = UInt32(4)                       # version (A1 1→2, A2 2→3, gh #71 3→4)
-        (hdr + 12).bitcast[UInt32]()[0] = UInt32(self.session_count)
-        (hdr + 16).bitcast[Int]()[0]    = self.total_tokens
-        (hdr + 24).bitcast[UInt64]()[0] = self.access_counter
-        (hdr + 32).bitcast[Int]()[0]    = self.total_evictions
+        hdr[unsafe_offset=0]=UInt8(80); hdr[unsafe_offset=1]=UInt8(73); hdr[unsafe_offset=2]=UInt8(79); hdr[unsafe_offset=3]=UInt8(78)
+        hdr[unsafe_offset=4]=UInt8(86); hdr[unsafe_offset=5]=UInt8(83); hdr[unsafe_offset=6]=UInt8(48); hdr[unsafe_offset=7]=UInt8(49)
+        hdr.unsafe_offset(8).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(4)                       # version (A1 1→2, A2 2→3, gh #71 3→4)
+        (hdr.unsafe_offset(12)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(self.session_count)
+        (hdr.unsafe_offset(16)).unsafe_bitcast[Int]()[unsafe_offset=0]    = self.total_tokens
+        (hdr.unsafe_offset(24)).unsafe_bitcast[UInt64]()[unsafe_offset=0] = self.access_counter
+        (hdr.unsafe_offset(32)).unsafe_bitcast[Int]()[unsafe_offset=0]    = self.total_evictions
         wok = self._vs_write_all(fd, hdr, 40) and wok
-        hdr.free()
+        hdr.unsafe_free()
 
         var saved_sessions = 0
         var saved_layers   = 0
         var saved_bytes    = 0
 
         for slot in range(MAX_VS_SESSIONS):
-            if not self.sessions[slot].active:
+            if not self.sessions[unsafe_offset=slot].active:
                 continue
 
-            var meta = self.sessions[slot]
+            var meta = self.sessions[unsafe_offset=slot]
             # Per-session header (variable)
-            var sh = alloc[UInt8](32)
+            var sh = unsafe_alloc[UInt8](32)
             unsafe_memset(sh, 0, 32)
-            sh.bitcast[UInt32]()[0]      = UInt32(meta.session_id_len)
+            sh.unsafe_bitcast[UInt32]()[unsafe_offset=0]      = UInt32(meta.session_id_len)
             wok = self._vs_write_all(fd, sh, 4) and wok
             wok = self._vs_write_all(fd, meta.session_id_ptr, meta.session_id_len) and wok
 
-            (sh + 0).bitcast[UInt32]()[0] = UInt32(meta.value_dim)
-            sh[4] = meta.v_format
-            (sh + 5).bitcast[UInt32]()[0] = UInt32(meta.num_layers)
-            (sh + 9).bitcast[UInt64]()[0] = meta.last_access_ts
+            (sh.unsafe_offset(0)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(meta.value_dim)
+            sh[unsafe_offset=4] = meta.v_format
+            (sh.unsafe_offset(5)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(meta.num_layers)
+            (sh.unsafe_offset(9)).unsafe_bitcast[UInt64]()[unsafe_offset=0] = meta.last_access_ts
             wok = self._vs_write_all(fd, sh, 17) and wok
-            sh.free()
+            sh.unsafe_free()
 
             # A2 v=3: per-layer descriptor extended to 7 bytes per layer
             # (adds [layer_rope_dim 2B] for VFMT_BF16_ROPE_FP8). Other formats
             # write rope_dim=0; load reads it but ignores when fmt != hybrid.
             if meta.num_layers > 0:
                 var desc_bytes = meta.num_layers * 7
-                var desc = alloc[UInt8](desc_bytes)
+                var desc = unsafe_alloc[UInt8](desc_bytes)
                 unsafe_memset(desc, 0, desc_bytes)
                 for li in range(meta.num_layers):
                     var li_slot = slot * MAX_VS_LAYERS + li
-                    (desc + li * 7).bitcast[UInt32]()[0] = UInt32(self.layer_value_dim[li_slot])
-                    desc[li * 7 + 4] = self.v_fmt[li_slot]
-                    (desc + li * 7 + 5).bitcast[UInt16]()[0] = UInt16(self.layer_rope_dim[li_slot])
+                    (desc.unsafe_offset(li * 7)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(self.layer_value_dim[unsafe_offset=li_slot])
+                    desc[unsafe_offset=li * 7 + 4] = self.v_fmt[unsafe_offset=li_slot]
+                    (desc.unsafe_offset(li * 7).unsafe_offset(5)).unsafe_bitcast[UInt16]()[unsafe_offset=0] = UInt16(self.layer_rope_dim[unsafe_offset=li_slot])
                 wok = self._vs_write_all(fd, desc, desc_bytes) and wok
-                desc.free()
+                desc.unsafe_free()
 
             for li in range(meta.num_layers):
                 var li_slot = slot * MAX_VS_LAYERS + li
-                var tokens  = self.tokens_per_layer[li_slot]
-                var vf      = self.v_fmt[li_slot]
-                var ldim    = self.layer_value_dim[li_slot]
+                var tokens  = self.tokens_per_layer[unsafe_offset=li_slot]
+                var vf      = self.v_fmt[unsafe_offset=li_slot]
+                var ldim    = self.layer_value_dim[unsafe_offset=li_slot]
                 if ldim <= 0:
                     ldim = meta.value_dim
 
-                var lh = alloc[UInt8](16)
+                var lh = unsafe_alloc[UInt8](16)
                 unsafe_memset(lh, 0, 16)
-                lh.bitcast[UInt32]()[0] = UInt32(tokens)
-                lh[4] = vf
+                lh.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(tokens)
+                lh[unsafe_offset=4] = vf
                 wok = self._vs_write_all(fd, lh, 5) and wok
-                lh.free()
+                lh.unsafe_free()
 
                 if tokens == 0:
                     continue
 
                 if vf == VFMT_INT8:
-                    var sm = alloc[UInt8](8)
-                    sm.bitcast[Float32]()[0]       = self.v_scale[li_slot]
-                    (sm + 4).bitcast[Float32]()[0] = self.v_min[li_slot]
+                    var sm = unsafe_alloc[UInt8](8)
+                    sm.unsafe_bitcast[Float32]()[unsafe_offset=0]       = self.v_scale[unsafe_offset=li_slot]
+                    (sm.unsafe_offset(4)).unsafe_bitcast[Float32]()[unsafe_offset=0] = self.v_min[unsafe_offset=li_slot]
                     wok = self._vs_write_all(fd, sm, 8) and wok
-                    sm.free()
+                    sm.unsafe_free()
                     var nbytes = tokens * ldim
-                    if is_not_null(self.v_int8[li_slot]):
-                        wok = self._vs_write_all(fd, self.v_int8[li_slot].bitcast[UInt8](), nbytes) and wok
+                    if is_not_null(self.v_int8[unsafe_offset=li_slot]):
+                        wok = self._vs_write_all(fd, self.v_int8[unsafe_offset=li_slot].unsafe_bitcast[UInt8](), nbytes) and wok
                         saved_bytes += nbytes
                 else:
                     # turbo4 / turbo3 / turbo2 / fp16 / fp8 / hybrid
                     var bpt = self._bytes_per_token_for_slot(li_slot)
                     var nbytes = tokens * bpt
-                    if is_not_null(self.v_turbo[li_slot]):
-                        wok = self._vs_write_all(fd, self.v_turbo[li_slot].bitcast[UInt8](), nbytes) and wok
+                    if is_not_null(self.v_turbo[unsafe_offset=li_slot]):
+                        wok = self._vs_write_all(fd, self.v_turbo[unsafe_offset=li_slot].unsafe_bitcast[UInt8](), nbytes) and wok
                         saved_bytes += nbytes
 
                 saved_layers += 1
@@ -1582,15 +1582,15 @@ struct VStoreIndex(Movable):
             # gh #71 v=4: per-session block-hash trailer. Always emitted (zero
             # block_count is the explicit "no table registered" signal that
             # KV.PREFIX.BLOCKS / MEMBERSHIP translate to +UNKNOWN).
-            var bsz  = self.sessions[slot].block_size
-            var bcnt = self.sessions[slot].block_count
-            var bt = alloc[UInt8](8)
-            bt.bitcast[UInt32]()[0]       = bsz
-            (bt + 4).bitcast[UInt32]()[0] = bcnt
+            var bsz  = self.sessions[unsafe_offset=slot].block_size
+            var bcnt = self.sessions[unsafe_offset=slot].block_count
+            var bt = unsafe_alloc[UInt8](8)
+            bt.unsafe_bitcast[UInt32]()[unsafe_offset=0]       = bsz
+            (bt.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = bcnt
             wok = self._vs_write_all(fd, bt, 8) and wok
-            bt.free()
-            if Int(bcnt) > 0 and is_not_null(self.sessions[slot].block_hashes):
-                wok = self._vs_write_all(fd, self.sessions[slot].block_hashes.bitcast[UInt8](), Int(bcnt) * 8) and wok
+            bt.unsafe_free()
+            if Int(bcnt) > 0 and is_not_null(self.sessions[unsafe_offset=slot].block_hashes):
+                wok = self._vs_write_all(fd, self.sessions[unsafe_offset=slot].block_hashes.unsafe_bitcast[UInt8](), Int(bcnt) * 8) and wok
                 saved_bytes += Int(bcnt) * 8
 
             saved_sessions += 1
@@ -1600,12 +1600,12 @@ struct VStoreIndex(Movable):
         wok = (external_call["pion_fdatasync", Int32](fd) == 0) and wok
         _ = external_call["close", Int32](fd)
         if not wok:
-            _ = external_call["unlink", Int32](tmp_path.as_c_string_slice())
+            _ = external_call["unlink", Int32](tmp_path.as_c_string_span())
             print("V-store save FAILED (write or flush error, disk full?) — previous snapshot and WAL kept")
             return False
         var dst_path = path
-        if external_call["rename", Int32](tmp_path.as_c_string_slice(), dst_path.as_c_string_slice()) != 0:
-            _ = external_call["unlink", Int32](tmp_path.as_c_string_slice())
+        if external_call["rename", Int32](tmp_path.as_c_string_span(), dst_path.as_c_string_span()) != 0:
+            _ = external_call["unlink", Int32](tmp_path.as_c_string_span())
             print("V-store save FAILED: cannot rename " + tmp_path + " → " + path)
             return False
         print("V-store saved: " + String(saved_sessions) + " sessions, " + String(saved_layers) +
@@ -1619,37 +1619,37 @@ struct VStoreIndex(Movable):
             return False
 
         var cpath = path
-        var fd = external_call["pion_open_rdonly", Int32](cpath.as_c_string_slice())
+        var fd = external_call["pion_open_rdonly", Int32](cpath.as_c_string_span())
         if fd < 0:
             return False  # No snapshot — cold start
 
-        var hdr = alloc[UInt8](40)
+        var hdr = unsafe_alloc[UInt8](40)
         if not self._vs_read_all(fd, hdr, 40):
-            hdr.free()
+            hdr.unsafe_free()
             _ = external_call["close", Int32](fd)
             print("V-store load: short header read")
             return False
 
         # Magic
-        if hdr[0] != UInt8(80) or hdr[1] != UInt8(73) or hdr[2] != UInt8(79) or hdr[3] != UInt8(78) \
-           or hdr[4] != UInt8(86) or hdr[5] != UInt8(83) or hdr[6] != UInt8(48) or hdr[7] != UInt8(49):
-            hdr.free()
+        if hdr[unsafe_offset=0] != UInt8(80) or hdr[unsafe_offset=1] != UInt8(73) or hdr[unsafe_offset=2] != UInt8(79) or hdr[unsafe_offset=3] != UInt8(78) \
+           or hdr[unsafe_offset=4] != UInt8(86) or hdr[unsafe_offset=5] != UInt8(83) or hdr[unsafe_offset=6] != UInt8(48) or hdr[unsafe_offset=7] != UInt8(49):
+            hdr.unsafe_free()
             _ = external_call["close", Int32](fd)
             print("V-store load: bad magic")
             return False
 
-        var version = (hdr + 8).bitcast[UInt32]()[0]
+        var version = (hdr.unsafe_offset(8)).unsafe_bitcast[UInt32]()[unsafe_offset=0]
         if version != UInt32(1) and version != UInt32(2) and version != UInt32(3) and version != UInt32(4):
-            hdr.free()
+            hdr.unsafe_free()
             _ = external_call["close", Int32](fd)
             print("V-store load: unsupported version " + String(Int(version)))
             return False
 
-        var saved_active   = Int((hdr + 12).bitcast[UInt32]()[0])
-        var saved_total    = (hdr + 16).bitcast[Int]()[0]
-        var saved_counter  = (hdr + 24).bitcast[UInt64]()[0]
-        var saved_evict    = (hdr + 32).bitcast[Int]()[0]
-        hdr.free()
+        var saved_active   = Int((hdr.unsafe_offset(12)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
+        var saved_total    = (hdr.unsafe_offset(16)).unsafe_bitcast[Int]()[unsafe_offset=0]
+        var saved_counter  = (hdr.unsafe_offset(24)).unsafe_bitcast[UInt64]()[unsafe_offset=0]
+        var saved_evict    = (hdr.unsafe_offset(32)).unsafe_bitcast[Int]()[unsafe_offset=0]
+        hdr.unsafe_free()
 
         if saved_active <= 0 or saved_active > MAX_VS_SESSIONS:
             _ = external_call["close", Int32](fd)
@@ -1661,46 +1661,46 @@ struct VStoreIndex(Movable):
 
         for _ in range(saved_active):
             # Read session id
-            var sid_len_buf = alloc[UInt8](4)
+            var sid_len_buf = unsafe_alloc[UInt8](4)
             if not self._vs_read_all(fd, sid_len_buf, 4):
-                sid_len_buf.free()
+                sid_len_buf.unsafe_free()
                 _ = external_call["close", Int32](fd)
                 return False
-            var sid_len = Int(sid_len_buf.bitcast[UInt32]()[0])
-            sid_len_buf.free()
+            var sid_len = Int(sid_len_buf.unsafe_bitcast[UInt32]()[unsafe_offset=0])
+            sid_len_buf.unsafe_free()
             if sid_len <= 0 or sid_len > 4096:
                 _ = external_call["close", Int32](fd)
                 print("V-store load: bad sid_len " + String(sid_len))
                 return False
 
-            var sid_ptr_raw = alloc[UInt8](sid_len)
-            var sid_ptr = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(sid_ptr_raw))
+            var sid_ptr_raw = unsafe_alloc[UInt8](sid_len)
+            var sid_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(sid_ptr_raw))
             if not self._vs_read_all(fd, sid_ptr, sid_len):
                 _ = external_call["close", Int32](fd)
                 return False
 
-            var meta_buf = alloc[UInt8](17)
+            var meta_buf = unsafe_alloc[UInt8](17)
             if not self._vs_read_all(fd, meta_buf, 17):
-                meta_buf.free()
+                meta_buf.unsafe_free()
                 _ = external_call["close", Int32](fd)
                 return False
-            var value_dim   = Int(meta_buf.bitcast[UInt32]()[0])
-            var v_format    = meta_buf[4]
-            var num_layers  = Int((meta_buf + 5).bitcast[UInt32]()[0])
-            var last_ts     = (meta_buf + 9).bitcast[UInt64]()[0]
-            meta_buf.free()
+            var value_dim   = Int(meta_buf.unsafe_bitcast[UInt32]()[unsafe_offset=0])
+            var v_format    = meta_buf[unsafe_offset=4]
+            var num_layers  = Int((meta_buf.unsafe_offset(5)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
+            var last_ts     = (meta_buf.unsafe_offset(9)).unsafe_bitcast[UInt64]()[unsafe_offset=0]
+            meta_buf.unsafe_free()
 
             # Re-create session (this allocates session_id_ptr afresh; the
             # version we read is consumed by _vs_read_all into sid_ptr_raw
             # which we'll free below).
             var slot = self.create_session(sid_ptr, sid_len, value_dim, v_format)
             if slot < 0:
-                sid_ptr_raw.free()
+                sid_ptr_raw.unsafe_free()
                 _ = external_call["close", Int32](fd)
                 print("V-store load: create_session failed mid-load")
                 return False
-            self.sessions[slot].last_access_ts = last_ts
-            self.sessions[slot].num_layers = num_layers
+            self.sessions[unsafe_offset=slot].last_access_ts = last_ts
+            self.sessions[unsafe_offset=slot].num_layers = num_layers
             # Re-publish to the cross-worker directory after snapshot load
             # so multi-worker LOOKUP works on warm restart. Note: the schema
             # digest is set to 0 here (per-layer arrays not yet read);
@@ -1711,7 +1711,7 @@ struct VStoreIndex(Movable):
                 _ = vstore_dir_register(
                     self.directory, sid_ptr, sid_len, value_dim, v_format,
                     self.my_worker_id, last_ts, UInt32(0))
-            sid_ptr_raw.free()
+            sid_ptr_raw.unsafe_free()
 
             # A1 v=2: read per-layer descriptor block.
             # v=1: broadcast the session-level value_dim/v_format below as
@@ -1722,69 +1722,69 @@ struct VStoreIndex(Movable):
                 # Per-layer descriptor — 5 bytes in v=2, 7 bytes in v=3+.
                 var desc_stride = 5 if version == UInt32(2) else 7
                 var desc_bytes = num_layers * desc_stride
-                var desc = alloc[UInt8](desc_bytes)
+                var desc = unsafe_alloc[UInt8](desc_bytes)
                 if not self._vs_read_all(fd, desc, desc_bytes):
-                    desc.free()
+                    desc.unsafe_free()
                     _ = external_call["close", Int32](fd)
                     return False
                 for li in range(num_layers):
                     var li_slot = slot * MAX_VS_LAYERS + li
-                    self.layer_value_dim[li_slot] = Int((desc + li * desc_stride).bitcast[UInt32]()[0])
-                    self.v_fmt[li_slot] = desc[li * desc_stride + 4]
+                    self.layer_value_dim[unsafe_offset=li_slot] = Int((desc.unsafe_offset(li * desc_stride)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                    self.v_fmt[unsafe_offset=li_slot] = desc[unsafe_offset=li * desc_stride + 4]
                     if version == UInt32(3) or version == UInt32(4):
-                        self.layer_rope_dim[li_slot] = Int((desc + li * desc_stride + 5).bitcast[UInt16]()[0])
-                desc.free()
+                        self.layer_rope_dim[unsafe_offset=li_slot] = Int((desc.unsafe_offset(li * desc_stride).unsafe_offset(5)).unsafe_bitcast[UInt16]()[unsafe_offset=0])
+                desc.unsafe_free()
 
             for li in range(num_layers):
-                var lh = alloc[UInt8](5)
+                var lh = unsafe_alloc[UInt8](5)
                 if not self._vs_read_all(fd, lh, 5):
-                    lh.free()
+                    lh.unsafe_free()
                     _ = external_call["close", Int32](fd)
                     return False
-                var tokens = Int(lh.bitcast[UInt32]()[0])
-                var vf     = lh[4]
-                lh.free()
+                var tokens = Int(lh.unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                var vf     = lh[unsafe_offset=4]
+                lh.unsafe_free()
 
                 var li_slot = slot * MAX_VS_LAYERS + li
-                self.tokens_per_layer[li_slot] = tokens
+                self.tokens_per_layer[unsafe_offset=li_slot] = tokens
                 # v=2: per-layer fmt was already populated from the descriptor.
                 # v=1: lh[4] is the only source — broadcast was done by
                 # create_session for value_dim; v_fmt is per-layer here.
-                self.v_fmt[li_slot] = vf
+                self.v_fmt[unsafe_offset=li_slot] = vf
                 # Per-layer dim used for nbytes below.
-                var ldim = self.layer_value_dim[li_slot]
+                var ldim = self.layer_value_dim[unsafe_offset=li_slot]
                 if ldim <= 0:
                     ldim = value_dim  # v=1 fallback
-                    self.layer_value_dim[li_slot] = ldim
+                    self.layer_value_dim[unsafe_offset=li_slot] = ldim
                 if tokens == 0:
                     continue
 
                 if vf == VFMT_INT8:
-                    var sm = alloc[UInt8](8)
+                    var sm = unsafe_alloc[UInt8](8)
                     if not self._vs_read_all(fd, sm, 8):
-                        sm.free()
+                        sm.unsafe_free()
                         _ = external_call["close", Int32](fd)
                         return False
-                    self.v_scale[li_slot] = sm.bitcast[Float32]()[0]
-                    self.v_min[li_slot]   = (sm + 4).bitcast[Float32]()[0]
-                    sm.free()
+                    self.v_scale[unsafe_offset=li_slot] = sm.unsafe_bitcast[Float32]()[unsafe_offset=0]
+                    self.v_min[unsafe_offset=li_slot]   = (sm.unsafe_offset(4)).unsafe_bitcast[Float32]()[unsafe_offset=0]
+                    sm.unsafe_free()
                     var nbytes = tokens * ldim
-                    var _b = alloc[Int8](nbytes)
-                    self.v_int8[li_slot] = UnsafePointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
-                    if not self._vs_read_all(fd, self.v_int8[li_slot].bitcast[UInt8](), nbytes):
+                    var _b = unsafe_alloc[Int8](nbytes)
+                    self.v_int8[unsafe_offset=li_slot] = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
+                    if not self._vs_read_all(fd, self.v_int8[unsafe_offset=li_slot].unsafe_bitcast[UInt8](), nbytes):
                         _ = external_call["close", Int32](fd)
                         return False
                 else:
                     # Hybrid format reads per-slot bpt (depends on rope_dim).
                     var bpt: Int
                     if vf == VFMT_BF16_ROPE_FP8:
-                        bpt = self._bytes_per_token_hybrid(ldim, self.layer_rope_dim[li_slot])
+                        bpt = self._bytes_per_token_hybrid(ldim, self.layer_rope_dim[unsafe_offset=li_slot])
                     else:
                         bpt = self._bytes_per_token(vf, ldim)
                     var nbytes = tokens * bpt
-                    var _b = alloc[Int8](nbytes)
-                    self.v_turbo[li_slot] = UnsafePointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
-                    if not self._vs_read_all(fd, self.v_turbo[li_slot].bitcast[UInt8](), nbytes):
+                    var _b = unsafe_alloc[Int8](nbytes)
+                    self.v_turbo[unsafe_offset=li_slot] = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
+                    if not self._vs_read_all(fd, self.v_turbo[unsafe_offset=li_slot].unsafe_bitcast[UInt8](), nbytes):
                         _ = external_call["close", Int32](fd)
                         return False
 
@@ -1793,30 +1793,30 @@ struct VStoreIndex(Movable):
             # gh #71 v=4: per-session block-hash trailer. v<4 snapshots leave
             # the table empty (block_size = block_count = 0 by __init__).
             if version == UInt32(4):
-                var bt = alloc[UInt8](8)
+                var bt = unsafe_alloc[UInt8](8)
                 if not self._vs_read_all(fd, bt, 8):
-                    bt.free()
+                    bt.unsafe_free()
                     _ = external_call["close", Int32](fd)
                     return False
-                var bsz  = bt.bitcast[UInt32]()[0]
-                var bcnt = (bt + 4).bitcast[UInt32]()[0]
-                bt.free()
+                var bsz  = bt.unsafe_bitcast[UInt32]()[unsafe_offset=0]
+                var bcnt = (bt.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0]
+                bt.unsafe_free()
                 if Int(bcnt) > 0:
                     var nbytes = Int(bcnt) * 8
-                    var _stage = alloc[UInt8](nbytes)
-                    var stage = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_stage))
+                    var _stage = unsafe_alloc[UInt8](nbytes)
+                    var stage = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_stage))
                     if not self._vs_read_all(fd, stage, nbytes):
-                        _stage.free()
+                        _stage.unsafe_free()
                         _ = external_call["close", Int32](fd)
                         return False
                     # Route through set_block_hashes so both the token-order
                     # copy AND the sorted parallel array (for MEMBERSHIP) get
                     # built — same shape as a live REGISTER ... BLOCKS.
                     _ = self.set_block_hashes(slot, bsz, bcnt, stage)
-                    _stage.free()
+                    _stage.unsafe_free()
                 else:
-                    self.sessions[slot].block_size = bsz
-                    self.sessions[slot].block_count = bcnt
+                    self.sessions[unsafe_offset=slot].block_size = bsz
+                    self.sessions[unsafe_offset=slot].block_count = bcnt
 
             loaded_sessions += 1
 
@@ -1846,14 +1846,14 @@ struct VStoreIndex(Movable):
     # crash mid-write; stop replay at first short read.
 
     @always_inline
-    def _wal_path_cstr_alloc(self) -> UnsafePointer[UInt8, MutUntrackedOrigin]:
+    def _wal_path_cstr_alloc(self) -> Pointer[UInt8, MutUntrackedOrigin]:
         """Allocate a NUL-terminated copy of wal_path. Caller must .free() it."""
         var n = self.wal_path_len
-        var _b = alloc[UInt8](n + 1)
-        var p = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
+        var _b = unsafe_alloc[UInt8](n + 1)
+        var p = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
         for i in range(n):
-            p[i] = self.wal_path_buf[i]
-        p[n] = UInt8(0)
+            p[unsafe_offset=i] = self.wal_path_buf[unsafe_offset=i]
+        p[unsafe_offset=n] = UInt8(0)
         return p
 
     def wal_open(mut self, path: String):
@@ -1866,19 +1866,19 @@ struct VStoreIndex(Movable):
             self.wal_fd = Int32(-1)
         # Save path for later truncate
         if is_not_null(self.wal_path_buf):
-            self.wal_path_buf.free()
+            self.wal_path_buf.unsafe_free()
             self.wal_path_buf = null_ptr[UInt8, MutUntrackedOrigin]()
             self.wal_path_len = 0
         self.wal_path_len = path.byte_length()
-        var _b = alloc[UInt8](self.wal_path_len + 1)
-        var pbuf = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
+        var _b = unsafe_alloc[UInt8](self.wal_path_len + 1)
+        var pbuf = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
         var src = path.unsafe_ptr()
         for i in range(self.wal_path_len):
-            pbuf[i] = src[i]
-        pbuf[self.wal_path_len] = UInt8(0)
+            pbuf[unsafe_offset=i] = src[unsafe_offset=i]
+        pbuf[unsafe_offset=self.wal_path_len] = UInt8(0)
         self.wal_path_buf = pbuf
         var cpath = path + "\0"
-        var fd = external_call["pion_open_append", Int32](cpath.as_c_string_slice())
+        var fd = external_call["pion_open_append", Int32](cpath.as_c_string_span())
         self.wal_fd = fd
         if fd < 0:
             print("V-store WAL: cannot open " + path)
@@ -1902,12 +1902,12 @@ struct VStoreIndex(Movable):
             _ = external_call["close", Int32](trunc_fd)
         # Reopen append
         var append_fd = external_call["pion_open_append", Int32](cpath)
-        cpath.free()
+        cpath.unsafe_free()
         self.wal_fd = append_fd
         self.wal_appended = 0
 
     @always_inline
-    def _wal_write_all(self, buf: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    def _wal_write_all(self, buf: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
         if self.wal_fd < 0:
             return False
         var remaining = n
@@ -1916,12 +1916,12 @@ struct VStoreIndex(Movable):
             var w = external_call["pion_write", Int](self.wal_fd, p, remaining)
             if w <= 0:
                 return False
-            p = p + w
+            p = p.unsafe_offset(w)
             remaining -= w
         return True
 
     def wal_append_create(mut self,
-                          sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+                          sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
                           sid_len: Int, value_dim: Int, v_format: UInt8):
         """Log a SESSION_CREATE record. Best-effort: WAL append failures are
         non-fatal (cache will lose this session on next restart, but in-memory
@@ -1929,28 +1929,28 @@ struct VStoreIndex(Movable):
         if self.wal_fd < 0:
             return
         var payload_len = 4 + sid_len + 4 + 1
-        var rec = alloc[UInt8](5 + payload_len)
-        rec.bitcast[UInt32]()[0] = UInt32(payload_len)
-        rec[4] = UInt8(1)
-        var p = rec + 5
-        p.bitcast[UInt32]()[0] = UInt32(sid_len)
-        var sd = p + 4
+        var rec = unsafe_alloc[UInt8](5 + payload_len)
+        rec.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(payload_len)
+        rec[unsafe_offset=4] = UInt8(1)
+        var p = rec.unsafe_offset(5)
+        p.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(sid_len)
+        var sd = p.unsafe_offset(4)
         for i in range(sid_len):
-            sd[i] = sid_ptr[i]
-        (p + 4 + sid_len).bitcast[UInt32]()[0] = UInt32(value_dim)
-        rec[5 + payload_len - 1] = v_format
-        var ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec))
+            sd[unsafe_offset=i] = sid_ptr[unsafe_offset=i]
+        (p.unsafe_offset(4).unsafe_offset(sid_len)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(value_dim)
+        rec[unsafe_offset=5 + payload_len - 1] = v_format
+        var ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec))
         if self._wal_write_all(ext, 5 + payload_len):
             self.wal_appended += 1
-        rec.free()
+        rec.unsafe_free()
 
     def wal_append_create_schema(mut self,
-                                 sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+                                 sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
                                  sid_len: Int, default_value_dim: Int,
                                  num_layers: Int,
-                                 per_layer_dim: UnsafePointer[Int, MutUntrackedOrigin],
-                                 per_layer_fmt: UnsafePointer[UInt8, MutUntrackedOrigin],
-                                 per_layer_rope: UnsafePointer[Int, MutUntrackedOrigin] = null_ptr[Int, MutUntrackedOrigin]()):
+                                 per_layer_dim: Pointer[Int, MutUntrackedOrigin],
+                                 per_layer_fmt: Pointer[UInt8, MutUntrackedOrigin],
+                                 per_layer_rope: Pointer[Int, MutUntrackedOrigin] = null_ptr[Int, MutUntrackedOrigin]()):
         """A1 (gh #29) + bundle (gh #30 / #37): WAL CREATE for a heterogeneous session.
 
         Two sentinel-extended op=1 record formats coexist:
@@ -1988,7 +1988,7 @@ struct VStoreIndex(Movable):
         var has_rope = False
         if is_not_null(per_layer_rope):
             for li in range(num_layers):
-                if per_layer_rope[li] > 0:
+                if per_layer_rope[unsafe_offset=li] > 0:
                     has_rope = True
                     break
 
@@ -1996,59 +1996,59 @@ struct VStoreIndex(Movable):
             # v2 legacy format (no rope) — unchanged from A1.
             var per_layer_bytes_v2 = num_layers * 5
             var payload_len_v2 = 4 + sid_len + 4 + 1 + per_layer_bytes_v2 + 4
-            var rec_v2 = alloc[UInt8](5 + payload_len_v2)
-            rec_v2.bitcast[UInt32]()[0] = UInt32(payload_len_v2)
-            rec_v2[4] = UInt8(1)
-            var p2 = rec_v2 + 5
-            p2.bitcast[UInt32]()[0] = UInt32(sid_len)
-            var sd2 = p2 + 4
+            var rec_v2 = unsafe_alloc[UInt8](5 + payload_len_v2)
+            rec_v2.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(payload_len_v2)
+            rec_v2[unsafe_offset=4] = UInt8(1)
+            var p2 = rec_v2.unsafe_offset(5)
+            p2.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(sid_len)
+            var sd2 = p2.unsafe_offset(4)
             for i in range(sid_len):
-                sd2[i] = sid_ptr[i]
-            var q2 = p2 + 4 + sid_len
-            q2.bitcast[UInt32]()[0] = UInt32(0xFFFFFFFF)              # v2 sentinel
-            (q2 + 4)[0] = UInt8(num_layers)
-            var desc2 = q2 + 5
+                sd2[unsafe_offset=i] = sid_ptr[unsafe_offset=i]
+            var q2 = p2.unsafe_offset(4).unsafe_offset(sid_len)
+            q2.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(0xFFFFFFFF)              # v2 sentinel
+            (q2.unsafe_offset(4))[unsafe_offset=0] = UInt8(num_layers)
+            var desc2 = q2.unsafe_offset(5)
             for li in range(num_layers):
-                (desc2 + li * 5).bitcast[UInt32]()[0] = UInt32(per_layer_dim[li])
-                desc2[li * 5 + 4] = per_layer_fmt[li]
-            (desc2 + per_layer_bytes_v2).bitcast[UInt32]()[0] = UInt32(default_value_dim)
-            var ext_v2 = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec_v2))
+                (desc2.unsafe_offset(li * 5)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(per_layer_dim[unsafe_offset=li])
+                desc2[unsafe_offset=li * 5 + 4] = per_layer_fmt[unsafe_offset=li]
+            (desc2.unsafe_offset(per_layer_bytes_v2)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(default_value_dim)
+            var ext_v2 = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec_v2))
             if self._wal_write_all(ext_v2, 5 + payload_len_v2):
                 self.wal_appended += 1
-            rec_v2.free()
+            rec_v2.unsafe_free()
             return
 
         # v3 format (with per-layer rope_dim) — emitted only for hybrid SCHEMA.
         var per_layer_bytes = num_layers * 7
         var payload_len = 4 + sid_len + 4 + 1 + per_layer_bytes + 4
-        var rec = alloc[UInt8](5 + payload_len)
-        rec.bitcast[UInt32]()[0] = UInt32(payload_len)
-        rec[4] = UInt8(1)
-        var p = rec + 5
-        p.bitcast[UInt32]()[0] = UInt32(sid_len)
-        var sd = p + 4
+        var rec = unsafe_alloc[UInt8](5 + payload_len)
+        rec.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(payload_len)
+        rec[unsafe_offset=4] = UInt8(1)
+        var p = rec.unsafe_offset(5)
+        p.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(sid_len)
+        var sd = p.unsafe_offset(4)
         for i in range(sid_len):
-            sd[i] = sid_ptr[i]
-        var q = p + 4 + sid_len
-        q.bitcast[UInt32]()[0] = UInt32(0xFFFFFFFE)              # v3 sentinel
-        (q + 4)[0] = UInt8(num_layers)
-        var desc = q + 5
+            sd[unsafe_offset=i] = sid_ptr[unsafe_offset=i]
+        var q = p.unsafe_offset(4).unsafe_offset(sid_len)
+        q.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(0xFFFFFFFE)              # v3 sentinel
+        (q.unsafe_offset(4))[unsafe_offset=0] = UInt8(num_layers)
+        var desc = q.unsafe_offset(5)
         for li in range(num_layers):
-            (desc + li * 7).bitcast[UInt32]()[0] = UInt32(per_layer_dim[li])
-            desc[li * 7 + 4] = per_layer_fmt[li]
-            (desc + li * 7 + 5).bitcast[UInt16]()[0] = UInt16(per_layer_rope[li])
-        (desc + per_layer_bytes).bitcast[UInt32]()[0] = UInt32(default_value_dim)
-        var ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec))
+            (desc.unsafe_offset(li * 7)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(per_layer_dim[unsafe_offset=li])
+            desc[unsafe_offset=li * 7 + 4] = per_layer_fmt[unsafe_offset=li]
+            (desc.unsafe_offset(li * 7).unsafe_offset(5)).unsafe_bitcast[UInt16]()[unsafe_offset=0] = UInt16(per_layer_rope[unsafe_offset=li])
+        (desc.unsafe_offset(per_layer_bytes)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(default_value_dim)
+        var ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec))
         if self._wal_write_all(ext, 5 + payload_len):
             self.wal_appended += 1
-        rec.free()
+        rec.unsafe_free()
 
     def wal_append_blocks(mut self,
-                          sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+                          sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
                           sid_len: Int,
                           block_size: UInt32,
                           block_count: UInt32,
-                          hashes: UnsafePointer[UInt8, MutUntrackedOrigin]):
+                          hashes: Pointer[UInt8, MutUntrackedOrigin]):
         """gh #71: Log a BLOCKS record (op=4) carrying the within-prefix block
         hash table for `<sid>`. Replay attaches the hashes to the session
         recreated by the preceding op=1. Best-effort like the other wal_append_*."""
@@ -2056,47 +2056,47 @@ struct VStoreIndex(Movable):
             return
         var blob_bytes = Int(block_count) * 8
         var payload_len = 4 + sid_len + 4 + 4 + blob_bytes
-        var rec = alloc[UInt8](5 + payload_len)
-        rec.bitcast[UInt32]()[0] = UInt32(payload_len)
-        rec[4] = UInt8(4)
-        var p = rec + 5
-        p.bitcast[UInt32]()[0] = UInt32(sid_len)
-        var sd = p + 4
+        var rec = unsafe_alloc[UInt8](5 + payload_len)
+        rec.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(payload_len)
+        rec[unsafe_offset=4] = UInt8(4)
+        var p = rec.unsafe_offset(5)
+        p.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(sid_len)
+        var sd = p.unsafe_offset(4)
         for i in range(sid_len):
-            sd[i] = sid_ptr[i]
-        var q = p + 4 + sid_len
-        q.bitcast[UInt32]()[0]        = block_size
-        (q + 4).bitcast[UInt32]()[0]  = block_count
+            sd[unsafe_offset=i] = sid_ptr[unsafe_offset=i]
+        var q = p.unsafe_offset(4).unsafe_offset(sid_len)
+        q.unsafe_bitcast[UInt32]()[unsafe_offset=0]        = block_size
+        (q.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0]  = block_count
         if blob_bytes > 0:
-            unsafe_memcpy(dest=(q + 8), src=hashes, count=blob_bytes)
-        var ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec))
+            unsafe_memcpy(dest=(q.unsafe_offset(8)), src=hashes, count=blob_bytes)
+        var ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec))
         if self._wal_write_all(ext, 5 + payload_len):
             self.wal_appended += 1
-        rec.free()
+        rec.unsafe_free()
 
     def wal_append_drop(mut self,
-                        sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+                        sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
                         sid_len: Int):
         if self.wal_fd < 0:
             return
         var payload_len = 4 + sid_len
-        var rec = alloc[UInt8](5 + payload_len)
-        rec.bitcast[UInt32]()[0] = UInt32(payload_len)
-        rec[4] = UInt8(3)
-        (rec + 5).bitcast[UInt32]()[0] = UInt32(sid_len)
-        var sd = rec + 9
+        var rec = unsafe_alloc[UInt8](5 + payload_len)
+        rec.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(payload_len)
+        rec[unsafe_offset=4] = UInt8(3)
+        (rec.unsafe_offset(5)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(sid_len)
+        var sd = rec.unsafe_offset(9)
         for i in range(sid_len):
-            sd[i] = sid_ptr[i]
-        var ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec))
+            sd[unsafe_offset=i] = sid_ptr[unsafe_offset=i]
+        var ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(rec))
         if self._wal_write_all(ext, 5 + payload_len):
             self.wal_appended += 1
-        rec.free()
+        rec.unsafe_free()
 
     def wal_append_storebatch(mut self,
-                              sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+                              sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
                               sid_len: Int, layer_id: Int, start_id: Int,
                               num_tokens: Int, value_dim: Int,
-                              fp32: UnsafePointer[Float32, MutUntrackedOrigin]):
+                              fp32: Pointer[Float32, MutUntrackedOrigin]):
         """Log raw FP32 inputs to STOREBATCH. Replay re-quantizes deterministically.
         Costs N×D×4 bytes per call — at 30 tokens × 1024D that's 120 KB; for a
         long prompt × many layers a single bench can write hundreds of MB. Call
@@ -2108,25 +2108,25 @@ struct VStoreIndex(Movable):
         var payload_len = fixed + fp32_bytes
         # Header (5 bytes) + fixed prefix (4+sid_len+16) — write in one buffer,
         # then stream the FP32 blob without copying.
-        var pre = alloc[UInt8](5 + fixed)
-        pre.bitcast[UInt32]()[0] = UInt32(payload_len)
-        pre[4] = UInt8(2)
-        var p = pre + 5
-        p.bitcast[UInt32]()[0] = UInt32(sid_len)
-        var sd = p + 4
+        var pre = unsafe_alloc[UInt8](5 + fixed)
+        pre.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(payload_len)
+        pre[unsafe_offset=4] = UInt8(2)
+        var p = pre.unsafe_offset(5)
+        p.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(sid_len)
+        var sd = p.unsafe_offset(4)
         for i in range(sid_len):
-            sd[i] = sid_ptr[i]
-        var q = p + 4 + sid_len
-        q.bitcast[UInt32]()[0]       = UInt32(layer_id)
-        (q + 4).bitcast[UInt32]()[0] = UInt32(start_id)
-        (q + 8).bitcast[UInt32]()[0] = UInt32(num_tokens)
-        (q + 12).bitcast[UInt32]()[0] = UInt32(value_dim)
-        var pre_ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pre))
+            sd[unsafe_offset=i] = sid_ptr[unsafe_offset=i]
+        var q = p.unsafe_offset(4).unsafe_offset(sid_len)
+        q.unsafe_bitcast[UInt32]()[unsafe_offset=0]       = UInt32(layer_id)
+        (q.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(start_id)
+        (q.unsafe_offset(8)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(num_tokens)
+        (q.unsafe_offset(12)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(value_dim)
+        var pre_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pre))
         var ok1 = self._wal_write_all(pre_ext, 5 + fixed)
-        pre.free()
+        pre.unsafe_free()
         if not ok1:
             return
-        var fp32_u8 = fp32.bitcast[UInt8]()
+        var fp32_u8 = fp32.unsafe_bitcast[UInt8]()
         if self._wal_write_all(fp32_u8, fp32_bytes):
             self.wal_appended += 1
 
@@ -2139,10 +2139,10 @@ struct VStoreIndex(Movable):
         return external_call["pion_fdatasync", Int32](self.wal_fd) == 0
 
     def wal_append_storebatch_f16(mut self,
-                                  sid_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+                                  sid_ptr: Pointer[UInt8, MutUntrackedOrigin],
                                   sid_len: Int, layer_id: Int, start_id: Int,
                                   num_tokens: Int, value_dim: Int,
-                                  fp32: UnsafePointer[Float32, MutUntrackedOrigin]):
+                                  fp32: Pointer[Float32, MutUntrackedOrigin]):
         """op 5: STOREBATCH into an fp16-stored layer, logged as fp16 — the
         values the layer actually holds. Same layout as op 2 with a 2-byte
         payload element, so the log is half the size; replay widens to fp32
@@ -2153,31 +2153,31 @@ struct VStoreIndex(Movable):
         var f16_bytes = n_vals * 2
         var fixed = 4 + sid_len + 4 + 4 + 4 + 4
         var payload_len = fixed + f16_bytes
-        var pre = alloc[UInt8](5 + fixed)
-        pre.bitcast[UInt32]()[0] = UInt32(payload_len)
-        pre[4] = UInt8(5)
-        var p = pre + 5
-        p.bitcast[UInt32]()[0] = UInt32(sid_len)
-        var sd = p + 4
+        var pre = unsafe_alloc[UInt8](5 + fixed)
+        pre.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(payload_len)
+        pre[unsafe_offset=4] = UInt8(5)
+        var p = pre.unsafe_offset(5)
+        p.unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(sid_len)
+        var sd = p.unsafe_offset(4)
         for i in range(sid_len):
-            sd[i] = sid_ptr[i]
-        var q = p + 4 + sid_len
-        q.bitcast[UInt32]()[0]       = UInt32(layer_id)
-        (q + 4).bitcast[UInt32]()[0] = UInt32(start_id)
-        (q + 8).bitcast[UInt32]()[0] = UInt32(num_tokens)
-        (q + 12).bitcast[UInt32]()[0] = UInt32(value_dim)
-        var pre_ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pre))
+            sd[unsafe_offset=i] = sid_ptr[unsafe_offset=i]
+        var q = p.unsafe_offset(4).unsafe_offset(sid_len)
+        q.unsafe_bitcast[UInt32]()[unsafe_offset=0]       = UInt32(layer_id)
+        (q.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(start_id)
+        (q.unsafe_offset(8)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(num_tokens)
+        (q.unsafe_offset(12)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = UInt32(value_dim)
+        var pre_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pre))
         var ok1 = self._wal_write_all(pre_ext, 5 + fixed)
-        pre.free()
+        pre.unsafe_free()
         if not ok1:
             return
-        var h = alloc[Float16](n_vals)
+        var h = unsafe_alloc[Float16](n_vals)
         for vi in range(n_vals):
-            h[vi] = fp32[vi].cast[DType.float16]()
-        var h_ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(h))
+            h[unsafe_offset=vi] = fp32[unsafe_offset=vi].cast[DType.float16]()
+        var h_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(h))
         if self._wal_write_all(h_ext, f16_bytes):
             self.wal_appended += 1
-        h.free()
+        h.unsafe_free()
 
     def wal_replay(mut self, path: String) -> Int:
         """Replay records onto current state. Call AFTER load_from_disk and
@@ -2186,7 +2186,7 @@ struct VStoreIndex(Movable):
         if not self.enabled:
             return 0
         var cpath = path + "\0"
-        var fd = external_call["pion_open_rdonly", Int32](cpath.as_c_string_slice())
+        var fd = external_call["pion_open_rdonly", Int32](cpath.as_c_string_span())
         if fd < 0:
             return 0
         var n_create = 0
@@ -2194,33 +2194,33 @@ struct VStoreIndex(Movable):
         var n_drop = 0
         var n_skip = 0
         # Header buf reused per record.
-        var hdr_buf = alloc[UInt8](5)
-        var hdr_ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(hdr_buf))
+        var hdr_buf = unsafe_alloc[UInt8](5)
+        var hdr_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(hdr_buf))
         while True:
             if not self._vs_read_all(fd, hdr_ext, 5):
                 break  # end of file or truncated record header
-            var payload_len = Int(hdr_ext.bitcast[UInt32]()[0])
-            var op = hdr_ext[4]
+            var payload_len = Int(hdr_ext.unsafe_bitcast[UInt32]()[unsafe_offset=0])
+            var op = hdr_ext[unsafe_offset=4]
             if payload_len <= 0 or payload_len > 1 << 30:
                 # Sanity: refuse to allocate >1GB or zero-len records.
                 print("V-store WAL replay: bad payload_len " + String(payload_len) + " at op " + String(Int(op)))
                 break
-            var pb = alloc[UInt8](payload_len)
-            var p_ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pb))
+            var pb = unsafe_alloc[UInt8](payload_len)
+            var p_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pb))
             if not self._vs_read_all(fd, p_ext, payload_len):
-                pb.free()
+                pb.unsafe_free()
                 break  # truncated tail
             if op == UInt8(1):
                 # CREATE
                 if payload_len < 9:
-                    pb.free(); break
-                var sid_len = Int(p_ext.bitcast[UInt32]()[0])
+                    pb.unsafe_free(); break
+                var sid_len = Int(p_ext.unsafe_bitcast[UInt32]()[unsafe_offset=0])
                 if sid_len < 0 or sid_len > payload_len - 9:
-                    pb.free(); break
-                var sid = p_ext + 4
-                var value_dim_raw = (p_ext + 4 + sid_len).bitcast[UInt32]()[0]
+                    pb.unsafe_free(); break
+                var sid = p_ext.unsafe_offset(4)
+                var value_dim_raw = (p_ext.unsafe_offset(4).unsafe_offset(sid_len)).unsafe_bitcast[UInt32]()[unsafe_offset=0]
                 var value_dim = Int(value_dim_raw)
-                var v_format = p_ext[4 + sid_len + 4]
+                var v_format = p_ext[unsafe_offset=4 + sid_len + 4]
                 # A1 (gh #29) + bundle: two SCHEMA sentinels for op=1 records.
                 #   0xFFFFFFFF → v2 record (5-byte per-layer descriptor, no rope_dim)
                 #   0xFFFFFFFE → v3 record (7-byte per-layer descriptor, with rope_dim)
@@ -2230,29 +2230,29 @@ struct VStoreIndex(Movable):
                 if value_dim_raw == UInt32(0xFFFFFFFF) or value_dim_raw == UInt32(0xFFFFFFFE):
                     var nl = Int(v_format)  # repurposed slot = num_layers
                     if nl <= 0 or nl > 255:
-                        pb.free(); break
+                        pb.unsafe_free(); break
                     var desc_stride = 5 if value_dim_raw == UInt32(0xFFFFFFFF) else 7
                     var per_layer_bytes = nl * desc_stride
                     var fixed_after_sentinel = 1 + per_layer_bytes + 4
                     if payload_len < 4 + sid_len + 4 + fixed_after_sentinel:
-                        pb.free(); break
-                    var desc = p_ext + 4 + sid_len + 5
-                    var ldim_buf = alloc[Int](nl)
-                    var lfmt_buf = alloc[UInt8](nl)
-                    var lrope_buf = alloc[Int](nl)
-                    var ldim_ext = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(ldim_buf))
-                    var lfmt_ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(lfmt_buf))
-                    var lrope_ext = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(lrope_buf))
+                        pb.unsafe_free(); break
+                    var desc = p_ext.unsafe_offset(4).unsafe_offset(sid_len).unsafe_offset(5)
+                    var ldim_buf = unsafe_alloc[Int](nl)
+                    var lfmt_buf = unsafe_alloc[UInt8](nl)
+                    var lrope_buf = unsafe_alloc[Int](nl)
+                    var ldim_ext = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(ldim_buf))
+                    var lfmt_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(lfmt_buf))
+                    var lrope_ext = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(lrope_buf))
                     for li in range(nl):
-                        ldim_ext[li] = Int((desc + li * desc_stride).bitcast[UInt32]()[0])
-                        lfmt_ext[li] = desc[li * desc_stride + 4]
+                        ldim_ext[unsafe_offset=li] = Int((desc.unsafe_offset(li * desc_stride)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                        lfmt_ext[unsafe_offset=li] = desc[unsafe_offset=li * desc_stride + 4]
                         if desc_stride == 7:
-                            lrope_ext[li] = Int((desc + li * desc_stride + 5).bitcast[UInt16]()[0])
+                            lrope_ext[unsafe_offset=li] = Int((desc.unsafe_offset(li * desc_stride).unsafe_offset(5)).unsafe_bitcast[UInt16]()[unsafe_offset=0])
                         else:
-                            lrope_ext[li] = 0
-                    var default_dim = Int((desc + per_layer_bytes).bitcast[UInt32]()[0])
+                            lrope_ext[unsafe_offset=li] = 0
+                    var default_dim = Int((desc.unsafe_offset(per_layer_bytes)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
                     var slot_replayed = self.create_session_schema(sid, sid_len, default_dim, nl, ldim_ext, lfmt_ext, lrope_ext)
-                    var first_fmt = lfmt_ext[0]  # capture before free
+                    var first_fmt = lfmt_ext[unsafe_offset=0]  # capture before free
                     # Bundle gh #29 §8.2: compute schema digest from the
                     # per-layer arrays as they exist NOW in the slot — captures
                     # any fallbacks that create_session_schema applied (e.g.
@@ -2260,20 +2260,20 @@ struct VStoreIndex(Movable):
                     var sch_digest: UInt32 = UInt32(0)
                     if slot_replayed >= 0:
                         sch_digest = vstore_compute_schema_digest(
-                            self.sessions[slot_replayed].num_layers,
-                            self.layer_value_dim + slot_replayed * MAX_VS_LAYERS,
-                            self.v_fmt + slot_replayed * MAX_VS_LAYERS,
-                            self.layer_rope_dim + slot_replayed * MAX_VS_LAYERS,
+                            self.sessions[unsafe_offset=slot_replayed].num_layers,
+                            self.layer_value_dim.unsafe_offset(slot_replayed * MAX_VS_LAYERS),
+                            self.v_fmt.unsafe_offset(slot_replayed * MAX_VS_LAYERS),
+                            self.layer_rope_dim.unsafe_offset(slot_replayed * MAX_VS_LAYERS),
                         )
-                    ldim_buf.free()
-                    lfmt_buf.free()
-                    lrope_buf.free()
+                    ldim_buf.unsafe_free()
+                    lfmt_buf.unsafe_free()
+                    lrope_buf.unsafe_free()
                     n_create += 1
                     if is_not_null(self.directory) and self.my_worker_id >= 0:
                         _ = vstore_dir_register(
                             self.directory, sid, sid_len, default_dim, first_fmt,
                             self.my_worker_id, UInt64(n_create), sch_digest)
-                    pb.free()
+                    pb.unsafe_free()
                     continue
                 _ = self.create_session(sid, sid_len, value_dim, v_format)
                 n_create += 1
@@ -2288,23 +2288,23 @@ struct VStoreIndex(Movable):
             elif op == UInt8(2):
                 # STORE
                 if payload_len < 24:
-                    pb.free(); break
-                var sid_len = Int(p_ext.bitcast[UInt32]()[0])
+                    pb.unsafe_free(); break
+                var sid_len = Int(p_ext.unsafe_bitcast[UInt32]()[unsafe_offset=0])
                 if sid_len < 0 or sid_len > payload_len - 24:
-                    pb.free(); break
-                var sid = p_ext + 4
-                var q = p_ext + 4 + sid_len
-                var layer_id  = Int(q.bitcast[UInt32]()[0])
-                var start_id  = Int((q + 4).bitcast[UInt32]()[0])
-                var num_tok   = Int((q + 8).bitcast[UInt32]()[0])
+                    pb.unsafe_free(); break
+                var sid = p_ext.unsafe_offset(4)
+                var q = p_ext.unsafe_offset(4).unsafe_offset(sid_len)
+                var layer_id  = Int(q.unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                var start_id  = Int((q.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                var num_tok   = Int((q.unsafe_offset(8)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
                 # value_dim from the WAL record — store_batch reads it from
                 # the session meta, but we sanity-check that the record matches
                 # the recreated session before replaying (mismatch = WAL is
                 # for a different model config and replay would corrupt state).
-                var rec_dim   = Int((q + 12).bitcast[UInt32]()[0])
-                var fp32 = (q + 16).bitcast[Float32]()
+                var rec_dim   = Int((q.unsafe_offset(12)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                var fp32 = (q.unsafe_offset(16)).unsafe_bitcast[Float32]()
                 var idx = self._find_session(sid, sid_len)
-                if idx >= 0 and self.sessions[idx].value_dim == rec_dim:
+                if idx >= 0 and self.sessions[unsafe_offset=idx].value_dim == rec_dim:
                     _ = self.store_batch(idx, layer_id, start_id, num_tok, fp32)
                     n_store += 1
                 else:
@@ -2312,39 +2312,39 @@ struct VStoreIndex(Movable):
             elif op == UInt8(5):
                 # STORE, fp16 payload (fp16-stored layer). Same layout as op 2.
                 if payload_len < 24:
-                    pb.free(); break
-                var sid_len = Int(p_ext.bitcast[UInt32]()[0])
+                    pb.unsafe_free(); break
+                var sid_len = Int(p_ext.unsafe_bitcast[UInt32]()[unsafe_offset=0])
                 if sid_len < 0 or sid_len > payload_len - 24:
-                    pb.free(); break
-                var sid = p_ext + 4
-                var q = p_ext + 4 + sid_len
-                var layer_id  = Int(q.bitcast[UInt32]()[0])
-                var start_id  = Int((q + 4).bitcast[UInt32]()[0])
-                var num_tok   = Int((q + 8).bitcast[UInt32]()[0])
-                var rec_dim   = Int((q + 12).bitcast[UInt32]()[0])
+                    pb.unsafe_free(); break
+                var sid = p_ext.unsafe_offset(4)
+                var q = p_ext.unsafe_offset(4).unsafe_offset(sid_len)
+                var layer_id  = Int(q.unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                var start_id  = Int((q.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                var num_tok   = Int((q.unsafe_offset(8)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
+                var rec_dim   = Int((q.unsafe_offset(12)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
                 var n_vals = num_tok * rec_dim
                 if 4 + sid_len + 16 + n_vals * 2 > payload_len:
-                    pb.free(); break
-                var h = (q + 16).bitcast[Float16]()
+                    pb.unsafe_free(); break
+                var h = (q.unsafe_offset(16)).unsafe_bitcast[Float16]()
                 var idx = self._find_session(sid, sid_len)
-                if idx >= 0 and self.sessions[idx].value_dim == rec_dim:
-                    var wide = alloc[Float32](n_vals)
+                if idx >= 0 and self.sessions[unsafe_offset=idx].value_dim == rec_dim:
+                    var wide = unsafe_alloc[Float32](n_vals)
                     for vi in range(n_vals):
-                        wide[vi] = h[vi].cast[DType.float32]()
-                    var wide_ext = UnsafePointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(wide))
+                        wide[unsafe_offset=vi] = h[unsafe_offset=vi].cast[DType.float32]()
+                    var wide_ext = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(wide))
                     _ = self.store_batch(idx, layer_id, start_id, num_tok, wide_ext)
-                    wide.free()
+                    wide.unsafe_free()
                     n_store += 1
                 else:
                     n_skip += 1
             elif op == UInt8(3):
                 # DROP
                 if payload_len < 4:
-                    pb.free(); break
-                var sid_len = Int(p_ext.bitcast[UInt32]()[0])
+                    pb.unsafe_free(); break
+                var sid_len = Int(p_ext.unsafe_bitcast[UInt32]()[unsafe_offset=0])
                 if sid_len < 0 or sid_len > payload_len - 4:
-                    pb.free(); break
-                var sid = p_ext + 4
+                    pb.unsafe_free(); break
+                var sid = p_ext.unsafe_offset(4)
                 var idx = self._find_session(sid, sid_len)
                 if idx >= 0:
                     _ = self.drop_session(idx)
@@ -2358,29 +2358,29 @@ struct VStoreIndex(Movable):
                 # gh #71: BLOCKS — within-prefix block hash table for sid.
                 # Layout: [sid_len 4B][sid][block_size 4B][block_count 4B][hashes count*8B]
                 if payload_len < 12:
-                    pb.free(); break
-                var sid_len = Int(p_ext.bitcast[UInt32]()[0])
+                    pb.unsafe_free(); break
+                var sid_len = Int(p_ext.unsafe_bitcast[UInt32]()[unsafe_offset=0])
                 if sid_len < 0 or sid_len > payload_len - 12:
-                    pb.free(); break
-                var sid = p_ext + 4
-                var q = p_ext + 4 + sid_len
-                var bsz   = q.bitcast[UInt32]()[0]
-                var bcnt  = (q + 4).bitcast[UInt32]()[0]
+                    pb.unsafe_free(); break
+                var sid = p_ext.unsafe_offset(4)
+                var q = p_ext.unsafe_offset(4).unsafe_offset(sid_len)
+                var bsz   = q.unsafe_bitcast[UInt32]()[unsafe_offset=0]
+                var bcnt  = (q.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0]
                 var blob_bytes = Int(bcnt) * 8
                 if 4 + sid_len + 8 + blob_bytes > payload_len:
-                    pb.free(); break
+                    pb.unsafe_free(); break
                 var idx = self._find_session(sid, sid_len)
                 if idx >= 0:
-                    _ = self.set_block_hashes(idx, bsz, bcnt, q + 8)
+                    _ = self.set_block_hashes(idx, bsz, bcnt, q.unsafe_offset(8))
                 else:
                     n_skip += 1
             else:
                 # Unknown op — stop, don't blindly skip.
                 print("V-store WAL replay: unknown op " + String(Int(op)) + ", stopping at offset before this record")
-                pb.free()
+                pb.unsafe_free()
                 break
-            pb.free()
-        hdr_buf.free()
+            pb.unsafe_free()
+        hdr_buf.unsafe_free()
         _ = external_call["close", Int32](fd)
         var total = n_create + n_store + n_drop
         self.wal_replayed = total

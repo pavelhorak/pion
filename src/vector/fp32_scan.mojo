@@ -8,7 +8,6 @@ where one exists (`scan_dot_f32`), and these are the fallback.
 
 Reassociation moves the last bit of a score; nothing stored changes.
 """
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 
 from src.vector.fma_mad import fma_mad
@@ -24,13 +23,13 @@ def dot_f32_4chain(q: Pointer[Float32, MutUntrackedOrigin],
     var a3 = SIMD[DType.float32, 4](0)
     var d = 0
     while d + 16 <= dim:
-        a0 = fma_mad[4]((q + d).load[width=4](), (v + d).load[width=4](), a0)
-        a1 = fma_mad[4]((q + d + 4).load[width=4](), (v + d + 4).load[width=4](), a1)
-        a2 = fma_mad[4]((q + d + 8).load[width=4](), (v + d + 8).load[width=4](), a2)
-        a3 = fma_mad[4]((q + d + 12).load[width=4](), (v + d + 12).load[width=4](), a3)
+        a0 = fma_mad[4]((q.unsafe_offset(d)).unsafe_load[width=4](), (v.unsafe_offset(d)).unsafe_load[width=4](), a0)
+        a1 = fma_mad[4]((q.unsafe_offset(d).unsafe_offset(4)).unsafe_load[width=4](), (v.unsafe_offset(d).unsafe_offset(4)).unsafe_load[width=4](), a1)
+        a2 = fma_mad[4]((q.unsafe_offset(d).unsafe_offset(8)).unsafe_load[width=4](), (v.unsafe_offset(d).unsafe_offset(8)).unsafe_load[width=4](), a2)
+        a3 = fma_mad[4]((q.unsafe_offset(d).unsafe_offset(12)).unsafe_load[width=4](), (v.unsafe_offset(d).unsafe_offset(12)).unsafe_load[width=4](), a3)
         d += 16
     while d + 4 <= dim:
-        a0 = fma_mad[4]((q + d).load[width=4](), (v + d).load[width=4](), a0)
+        a0 = fma_mad[4]((q.unsafe_offset(d)).unsafe_load[width=4](), (v.unsafe_offset(d)).unsafe_load[width=4](), a0)
         d += 4
     var s = ((a0 + a1) + (a2 + a3)).reduce_add()
     while d < dim:
@@ -49,17 +48,17 @@ def l2sq_f32_4chain(a: Pointer[Float32, MutUntrackedOrigin],
     var a3 = SIMD[DType.float32, 4](0)
     var d = 0
     while d + 16 <= dim:
-        var e0 = (a + d).load[width=4]() - (b + d).load[width=4]()
-        var e1 = (a + d + 4).load[width=4]() - (b + d + 4).load[width=4]()
-        var e2 = (a + d + 8).load[width=4]() - (b + d + 8).load[width=4]()
-        var e3 = (a + d + 12).load[width=4]() - (b + d + 12).load[width=4]()
+        var e0 = (a.unsafe_offset(d)).unsafe_load[width=4]() - (b.unsafe_offset(d)).unsafe_load[width=4]()
+        var e1 = (a.unsafe_offset(d).unsafe_offset(4)).unsafe_load[width=4]() - (b.unsafe_offset(d).unsafe_offset(4)).unsafe_load[width=4]()
+        var e2 = (a.unsafe_offset(d).unsafe_offset(8)).unsafe_load[width=4]() - (b.unsafe_offset(d).unsafe_offset(8)).unsafe_load[width=4]()
+        var e3 = (a.unsafe_offset(d).unsafe_offset(12)).unsafe_load[width=4]() - (b.unsafe_offset(d).unsafe_offset(12)).unsafe_load[width=4]()
         a0 = fma_mad[4](e0, e0, a0)
         a1 = fma_mad[4](e1, e1, a1)
         a2 = fma_mad[4](e2, e2, a2)
         a3 = fma_mad[4](e3, e3, a3)
         d += 16
     while d + 4 <= dim:
-        var e = (a + d).load[width=4]() - (b + d).load[width=4]()
+        var e = (a.unsafe_offset(d)).unsafe_load[width=4]() - (b.unsafe_offset(d)).unsafe_load[width=4]()
         a0 = fma_mad[4](e, e, a0)
         d += 4
     var s = ((a0 + a1) + (a2 + a3)).reduce_add()
@@ -84,4 +83,4 @@ def scan_dot_f32(vecs: Pointer[Float32, MutUntrackedOrigin], rows: Int, dim: Int
     if rc == 0:
         return
     for r in range(rows):
-        dst[unsafe_offset=r] = dot_f32_4chain(q, vecs + r * dim, dim)
+        dst[unsafe_offset=r] = dot_f32_4chain(q, vecs.unsafe_offset(r * dim), dim)

@@ -4,7 +4,6 @@ from src.common.value import GenericValue, ValueType
 from src.memory.slab_allocator import SlabAllocator
 from src.common.hash_map import SlabHashMap
 from src.common.list import SlabList
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 
 @fieldwise_init

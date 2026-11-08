@@ -1,6 +1,6 @@
 """Vector search commands: FT.INFO, FT.DROPINDEX, FT.OPTIMIZE, FT.CREATE, FT.ADDTEXT, FT.SEARCHTEXT, FT.SEARCH + BM25."""
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import UnsafePointer
 from std.collections import Array, List
 from std.memory import alloc, unsafe_memcpy, unsafe_memset, stack_allocation
 from std.atomic import Atomic, Ordering
@@ -85,40 +85,40 @@ struct BM25Token(Copyable, Movable, ImplicitlyCopyable):
 
 
 @always_inline
-def _bm25_next_token(buf: UnsafePointer[UInt8, MutUntrackedOrigin], pos: Int, blen: Int) -> BM25Token:
+def _bm25_next_token(buf: Pointer[UInt8, MutUntrackedOrigin], pos: Int, blen: Int) -> BM25Token:
     """Advance one token. Shared by index-time and query-time tokenization —
     the two MUST agree byte-for-byte or terms hash differently and never match,
     so they deliberately go through this one function."""
     var p = pos
-    while p < blen and _is_bm25_hard_delim(buf[p]):
+    while p < blen and _is_bm25_hard_delim(buf[unsafe_offset=p]):
         p += 1
     if p >= blen: return BM25Token(0, 0, blen, False)
     var s = p
-    while p < blen and not _is_bm25_hard_delim(buf[p]):
+    while p < blen and not _is_bm25_hard_delim(buf[unsafe_offset=p]):
         p += 1
     var e = p
-    while s < e and _is_bm25_edge_trim(buf[s]):
+    while s < e and _is_bm25_edge_trim(buf[unsafe_offset=s]):
         s += 1
-    while e > s and _is_bm25_edge_trim(buf[e - 1]):
+    while e > s and _is_bm25_edge_trim(buf[unsafe_offset=e - 1]):
         e -= 1
     return BM25Token(s, e, p, e > s)
 
 
 @always_inline
-def _bm25_hash(buf: UnsafePointer[UInt8, MutUntrackedOrigin], s: Int, e: Int) -> UInt32:
+def _bm25_hash(buf: Pointer[UInt8, MutUntrackedOrigin], s: Int, e: Int) -> UInt32:
     """FNV-1a over the lowercased token. `| 0x20` is a no-op for digits and
     already-lowercase ASCII; 0 is remapped because it is the empty-slot
     sentinel in the vocabulary hash table."""
     var h: UInt32 = 2166136261
     for bi in range(s, e):
-        h = (h ^ UInt32(buf[bi] | 0x20)) * 16777619
+        h = (h ^ UInt32(buf[unsafe_offset=bi] | 0x20)) * 16777619
     if h == 0: h = 1
     return h
 
 
 @always_inline
-def _bm25_sift_down(idx: UnsafePointer[UInt32, MutUntrackedOrigin],
-                    keys: UnsafePointer[UInt32, MutUntrackedOrigin],
+def _bm25_sift_down(idx: Pointer[UInt32, MutUntrackedOrigin],
+                    keys: Pointer[UInt32, MutUntrackedOrigin],
                     root_in: Int, n: Int):
     """Heapsort helper: sift `idx[root_in]` down a max-heap ordered by
     `keys[idx[...]]`."""
@@ -126,14 +126,14 @@ def _bm25_sift_down(idx: UnsafePointer[UInt32, MutUntrackedOrigin],
     while True:
         var child = 2 * root + 1
         if child >= n: break
-        if child + 1 < n and keys[Int(idx[child])] < keys[Int(idx[child + 1])]: child += 1
-        if keys[Int(idx[root])] >= keys[Int(idx[child])]: break
-        var t = idx[root]; idx[root] = idx[child]; idx[child] = t
+        if child + 1 < n and keys[unsafe_offset=Int(idx[unsafe_offset=child])] < keys[unsafe_offset=Int(idx[unsafe_offset=child + 1])]: child += 1
+        if keys[unsafe_offset=Int(idx[unsafe_offset=root])] >= keys[unsafe_offset=Int(idx[unsafe_offset=child])]: break
+        var t = idx[unsafe_offset=root]; idx[unsafe_offset=root] = idx[unsafe_offset=child]; idx[unsafe_offset=child] = t
         root = child
 
 
 @always_inline
-def bm25_owner_mismatch(hnsw: HNSWGraph, idx_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+def bm25_owner_mismatch(hnsw: HNSWGraph, idx_ptr: Pointer[UInt8, MutUntrackedOrigin],
                         idx_len: Int) -> Bool:
     """gh #145: True when the current postings belong to a different index.
 
@@ -146,28 +146,28 @@ def bm25_owner_mismatch(hnsw: HNSWGraph, idx_ptr: UnsafePointer[UInt8, MutUntrac
     if hnsw.bm25_index_name_len == 0: return False  # unnamed — nothing to verify
     if idx_len != hnsw.bm25_index_name_len: return True
     for ni in range(idx_len):
-        if idx_ptr[ni] != hnsw.bm25_index_name[ni]: return True
+        if idx_ptr[unsafe_offset=ni] != hnsw.bm25_index_name[ni]: return True
     return False
 
 
 @always_inline
-def bm25_owner_error(hnsw: HNSWGraph, idx_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+def bm25_owner_error(hnsw: HNSWGraph, idx_ptr: Pointer[UInt8, MutUntrackedOrigin],
                      idx_len: Int) -> String:
     """The error text for a cross-index BM25 query — names both sides so the
     log tells you which FT.OPTIMIZE took the postings away."""
     var msg = String("ERR index '")
     var qlen = idx_len if idx_len < 64 else 64
-    for ni in range(qlen): msg += chr(Int(idx_ptr[ni]))
+    for ni in range(qlen): msg += chr(Int(idx_ptr[unsafe_offset=ni]))
     msg += "' has no BM25 postings - this server holds one index at a time and the current postings belong to '"
     for ni in range(hnsw.bm25_index_name_len): msg += chr(Int(hnsw.bm25_index_name[ni]))
     msg += "' (a later FT.OPTIMIZE replaced them); re-ingest and FT.OPTIMIZE '"
-    for ni in range(qlen): msg += chr(Int(idx_ptr[ni]))
+    for ni in range(qlen): msg += chr(Int(idx_ptr[unsafe_offset=ni]))
     msg += "' to serve it again"
     return msg
 
 
 @always_inline
-def _copy_value_clamped(val: GenericValue, dest: UnsafePointer[UInt8, MutUntrackedOrigin], cap: Int) -> Int:
+def _copy_value_clamped(val: GenericValue, dest: Pointer[UInt8, MutUntrackedOrigin], cap: Int) -> Int:
     """Copy at most `cap` bytes of a string value into `dest`; returns the count.
 
     `GenericValue.copy_to` always writes `string_len()` bytes, so clamping the
@@ -186,7 +186,7 @@ def _copy_value_clamped(val: GenericValue, dest: UnsafePointer[UInt8, MutUntrack
     return cap
 
 
-def drop_dead(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], mut ids: List[Int],
+def drop_dead(shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin], mut ids: List[Int],
               mut scores: List[Float32], keep: Int):
     """#46: the results without documents that left the keyspace (or whose
     vector left them), at most `keep` of them, in order."""
@@ -207,8 +207,8 @@ def drop_dead(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], mu
         _ = scores.pop()
 
 
-def _slot_key(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-              keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], slot: Int,
+def _slot_key(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+              keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], slot: Int,
               mut owned: Bool) -> GenericValue:
     """The key of the document at ingest slot `slot`, for a lookup: the shared
     slot->key map (a copy: `owned`, so the caller frees it with
@@ -228,8 +228,8 @@ def _slot_key(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     return keyspace[].vec_key(slot)
 
 
-def _hash_named(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-                kp: UnsafePointer[UInt8, MutUntrackedOrigin], kl: Int) -> UnsafePointer[SlabHashMap, MutUntrackedOrigin]:
+def _hash_named(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int) -> Pointer[SlabHashMap, MutUntrackedOrigin]:
     """The hash at key `kp[:kl]` on this worker, or null. The key is borrowed,
     not copied: these are the shared slot map's bytes, alive while the slot
     can be read (hk_get), and a copy per candidate or per reply row was a
@@ -237,12 +237,12 @@ def _hash_named(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
     var v = hash_get_live(keyspace, GenericValue.borrow(kp, kl))
     if v.is_none() or v.type.value != ValueType.HASH:
         return null_ptr[SlabHashMap, MutUntrackedOrigin]()
-    return v.as_hash().bitcast[SlabHashMap]()
+    return v.as_hash().unsafe_bitcast[SlabHashMap]()
 
 
-def _slot_hash(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-               keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-               slot: Int) -> UnsafePointer[SlabHashMap, MutUntrackedOrigin]:
+def _slot_hash(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+               keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+               slot: Int) -> Pointer[SlabHashMap, MutUntrackedOrigin]:
     """The hash of the document at `slot` on this worker, or null."""
     if is_null(keyspace):
         return null_ptr[SlabHashMap, MutUntrackedOrigin]()
@@ -256,18 +256,18 @@ def _slot_hash(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     var v = hash_get_live(keyspace, key)
     if v.is_none() or v.type.value != ValueType.HASH:
         return null_ptr[SlabHashMap, MutUntrackedOrigin]()
-    return v.as_hash().bitcast[SlabHashMap]()
+    return v.as_hash().unsafe_bitcast[SlabHashMap]()
 
 
 @always_inline
-def _ttl_any(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin]) -> Bool:
+def _ttl_any(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) -> Bool:
     """Whether a key on this worker has a TTL at all (one load when none does)."""
     return is_not_null(keyspace) and Int(keyspace[].ttl_map) != 0 and keyspace[].ttl_map[].size > 0 \
         and keyspace[].clock_ns != 0
 
 
-def _slot_expired(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-                  keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin], slot: Int) -> Bool:
+def _slot_expired(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+                  keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], slot: Int) -> Bool:
     """The document at `slot` is past its key's deadline: it is gone, as for any
     read. The lookup expires the key (Redis's lazy expiry), which kills the
     slot (#46), so later searches skip it without asking. FT.SEARCH used to
@@ -288,8 +288,8 @@ def _slot_expired(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
     return due
 
 
-def _key_expired(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-                 kp: UnsafePointer[UInt8, MutUntrackedOrigin], kl: Int) -> Bool:
+def _key_expired(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                 kp: Pointer[UInt8, MutUntrackedOrigin], kl: Int) -> Bool:
     """_slot_expired for a key in the shared slot map, borrowed (_hash_named)."""
     var key = GenericValue.borrow(kp, kl)
     var d = keyspace[].deadline(key)
@@ -299,8 +299,8 @@ def _key_expired(keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
     return due
 
 
-def _schema_slot(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-                 p: UnsafePointer[UInt8, MutUntrackedOrigin], l: Int) -> Int:
+def _schema_slot(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+                 p: Pointer[UInt8, MutUntrackedOrigin], l: Int) -> Int:
     """The index schema's entry for field name `p[:l]` (case-sensitive, as in
     RediSearch), or -1."""
     if is_null(shared):
@@ -310,7 +310,7 @@ def _schema_slot(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
             continue
         var same = True
         for b in range(l):
-            if shared[].schema_field_names[si][b] != p[b]:
+            if shared[].schema_field_names[si][b] != p[unsafe_offset=b]:
                 same = False
                 break
         if same:
@@ -320,7 +320,7 @@ def _schema_slot(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
 
 struct FtSort(ImplicitlyCopyable, Movable):
     """FT.SEARCH's SORTBY: a field, or the KNN score, and the direction."""
-    var p: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var p: Pointer[UInt8, MutUntrackedOrigin]
     var l: Int
     var desc: Bool
     var set: Bool
@@ -361,8 +361,8 @@ def _sort_less(a: Int, b: Int, has: List[Bool], num: List[Float64], is_num: Bool
 
 
 def _sort_knn(mut ids: List[Int], mut scores: List[Float32], sort: FtSort, opts: FtReplyOpts,
-              keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-              shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> String:
+              keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+              shared: Pointer[SharedHNSWView, MutUntrackedOrigin]) -> String:
     """SORTBY over the KNN results, before LIMIT pages them (RediSearch's
     order of operations). It used to be read and dropped: the results came
     back by distance whatever was asked. The KNN score sorts ascending already;
@@ -384,7 +384,7 @@ def _sort_knn(mut ids: List[Int], mut scores: List[Float32], sort: FtSort, opts:
     var arena = List[UInt8]()
     var s_at = List[Int](capacity=n)
     var s_len = List[Int](capacity=n)
-    var vbuf = alloc[UInt8](256)
+    var vbuf = unsafe_alloc[UInt8](256)
     for r in range(n):
         var h = _slot_hash(shared, keyspace, ids[r])
         var v = GenericValue()
@@ -401,23 +401,23 @@ def _sort_knn(mut ids: List[Int], mut scores: List[Float32], sort: FtSort, opts:
             s_len.append(0)
         elif ok:
             var vl = v.string_len()
-            var tmp = alloc[UInt8](vl + 1)
+            var tmp = unsafe_alloc[UInt8](vl + 1)
             v.copy_to(tmp)
             for b in range(vl):
-                arena.append(tmp[b])
-            tmp.free()
+                arena.append(tmp[unsafe_offset=b])
+            tmp.unsafe_free()
             s_len.append(vl)
         else:
             s_len.append(0)
         has.append(ok)
         num.append(x)
-    vbuf.free()
+    vbuf.unsafe_free()
     # stable merge sort of positions
     var order = List[Int](capacity=n)
     for r in range(n):
         order.append(r)
     var tmp_o = List[Int](capacity=n)
-    for r in range(n):
+    for _ in range(n):
         tmp_o.append(0)
     var width = 1
     while width < n:
@@ -453,8 +453,8 @@ def _sort_knn(mut ids: List[Int], mut scores: List[Float32], sort: FtSort, opts:
 
 
 def _ft_knn_reply(mut writer: ResponseWriter, mut ids: List[Int], mut scores: List[Float32],
-                  keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-                  shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                  keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                  shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
                   opts: FtReplyOpts, sort: FtSort, offset: Int, count: Int):
     """A KNN query's reply: every hit sorted (SORTBY), then the LIMIT window.
     The total is every hit, as RediSearch reports it. LIMIT used to cap the
@@ -509,12 +509,12 @@ struct FtReplyOpts(ImplicitlyCopyable, Movable):
     HYBRID, FT.HYBRID), which have no RediSearch equivalent."""
     var mode: UInt8
     var with_scores: Bool
-    var tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin]
+    var tokens: Pointer[RESP3Token, MutUntrackedOrigin]
     var ret_at: Int      # RETURN's first field token
     var ret_n: Int       # RETURN's count: field names, plus each `AS <name>`
-    var alias_p: UnsafePointer[UInt8, MutUntrackedOrigin]   # the KNN clause's AS alias
+    var alias_p: Pointer[UInt8, MutUntrackedOrigin]   # the KNN clause's AS alias
     var alias_l: Int
-    var field_p: UnsafePointer[UInt8, MutUntrackedOrigin]   # the KNN @field, for __<field>_score
+    var field_p: Pointer[UInt8, MutUntrackedOrigin]   # the KNN @field, for __<field>_score
     var field_l: Int
 
     def __init__(out self):
@@ -528,24 +528,24 @@ struct FtReplyOpts(ImplicitlyCopyable, Movable):
         self.field_p = null_ptr[UInt8, MutUntrackedOrigin]()
         self.field_l = 0
 
-    def is_score_name(self, p: UnsafePointer[UInt8, MutUntrackedOrigin], l: Int) -> Bool:
+    def is_score_name(self, p: Pointer[UInt8, MutUntrackedOrigin], l: Int) -> Bool:
         """Whether a RETURN name is the KNN score: the clause's AS alias, else
         RediSearch's default name `__<field>_score`."""
         if self.alias_l > 0:
             if l != self.alias_l:
                 return False
             for b in range(l):
-                if p[b] != self.alias_p[b]:
+                if p[unsafe_offset=b] != self.alias_p[unsafe_offset=b]:
                     return False
             return True
         var fl = self.field_l
-        if fl == 0 or l != fl + 8 or p[0] != 95 or p[1] != 95:     # "__"
+        if fl == 0 or l != fl + 8 or p[unsafe_offset=0] != 95 or p[unsafe_offset=1] != 95:     # "__"
             return False
         for b in range(fl):
-            if p[2 + b] != self.field_p[b]:
+            if p[unsafe_offset=2 + b] != self.field_p[unsafe_offset=b]:
                 return False
-        var s = p + 2 + fl                                           # "_score"
-        return s[0] == 95 and s[1] == 115 and s[2] == 99 and s[3] == 111 and s[4] == 114 and s[5] == 101
+        var s = p.unsafe_offset(2).unsafe_offset(fl)                                           # "_score"
+        return s[unsafe_offset=0] == 95 and s[unsafe_offset=1] == 115 and s[unsafe_offset=2] == 99 and s[unsafe_offset=3] == 111 and s[unsafe_offset=4] == 114 and s[unsafe_offset=5] == 101
 
 
 @always_inline
@@ -575,13 +575,13 @@ def _put_score_bulk(mut writer: ResponseWriter, dist: Float32):
     var score_len = (1 if dist < 0 else 0) + int_string_len(Int64(mag)) + 5
     writer.append_bulk_string_response_header(score_len)
     writer.offset = format_float_to_buf(writer.buffer, writer.offset, dist, 4)
-    writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+    writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset+1] = 10; writer.offset += 2
 
 
 @always_inline
 def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], dist_scores: List[Float32],
-                              keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin] = null_ptr[StripedHashMap, MutUntrackedOrigin](),
-                              shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin](),
+                              keyspace: Pointer[StripedHashMap, MutUntrackedOrigin] = null_ptr[StripedHashMap, MutUntrackedOrigin](),
+                              shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin] = null_ptr[SharedHNSWView, MutUntrackedOrigin](),
                               opts: FtReplyOpts = FtReplyOpts(), total: Int = -1):
     """Write a single FT.SEARCH response to writer (does not flush): RESP2's
     flat array, or RediSearch's RESP3 map on a RESP3 connection.
@@ -618,12 +618,12 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
         _put_lit(writer, _FT_R3_HEAD)
         writer.append_array_header(nr)
     else:
-        writer.buffer[writer.offset] = 42; writer.offset += 1
+        writer.buffer[unsafe_offset=writer.offset] = 42; writer.offset += 1
         writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(1 + nr * per_doc))
-        writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
-        writer.buffer[writer.offset] = 58; writer.offset += 1
+        writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset+1] = 10; writer.offset += 2
+        writer.buffer[unsafe_offset=writer.offset] = 58; writer.offset += 1
         writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(n_total))
-        writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+        writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset+1] = 10; writer.offset += 2
 
     # RETURN's entries, resolved once: the token naming the hash field, the
     # token naming it in the reply (its AS alias, or itself), and a value slot
@@ -638,10 +638,10 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
         while t < t_end:
             var out_t = t
             var step = 1
-            if t + 2 < t_end and opts.tokens[t + 1].length == 2 and arg_eq(opts.tokens[t + 1].ptr, 2, "as"):
+            if t + 2 < t_end and opts.tokens[unsafe_offset=t + 1].length == 2 and arg_eq(opts.tokens[unsafe_offset=t + 1].ptr, 2, "as"):
                 out_t = t + 2
                 step = 3
-            if score_entry < 0 and opts.is_score_name(opts.tokens[t].ptr, opts.tokens[t].length):
+            if score_entry < 0 and opts.is_score_name(opts.tokens[unsafe_offset=t].ptr, opts.tokens[unsafe_offset=t].length):
                 score_entry = len(ret_name)
             ret_name.append(t)
             ret_out.append(out_t)
@@ -673,7 +673,7 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
             elif not result_key.is_none():
                 var doc_val = hash_get_live(keyspace, result_key)
                 if not doc_val.is_none() and doc_val.type.value == ValueType.HASH:
-                    doc_hash = doc_val.as_hash().bitcast[SlabHashMap]()
+                    doc_hash = doc_val.as_hash().unsafe_bitcast[SlabHashMap]()
 
         # Doc key
         if resp3:
@@ -687,7 +687,7 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
             var id_len_n = int_string_len(Int64(did))
             writer.append_bulk_string_response_header(id_len_n)
             writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(did))
-            writer.buffer[writer.offset] = 13; writer.buffer[writer.offset+1] = 10; writer.offset += 2
+            writer.buffer[unsafe_offset=writer.offset] = 13; writer.buffer[unsafe_offset=writer.offset+1] = 10; writer.offset += 2
 
         if opts.with_scores:
             if resp3:
@@ -704,7 +704,7 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
                 var v = GenericValue()
                 if is_not_null(doc_hash):
                     v = doc_hash[].get(GenericValue.borrow(
-                        opts.tokens[ret_name[e]].ptr, opts.tokens[ret_name[e]].length))
+                        opts.tokens[unsafe_offset=ret_name[e]].ptr, opts.tokens[unsafe_offset=ret_name[e]].length))
                 ret_vals[e] = v
                 if not v.is_none():
                     m += 1
@@ -715,13 +715,13 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
                 writer.append_array_header(2 * m)
             if score_entry >= 0:
                 writer.append_bulk_string_response(
-                    opts.tokens[ret_out[score_entry]].ptr, opts.tokens[ret_out[score_entry]].length)
+                    opts.tokens[unsafe_offset=ret_out[score_entry]].ptr, opts.tokens[unsafe_offset=ret_out[score_entry]].length)
                 _put_score_bulk(writer, dist)
             for e in range(len(ret_name)):
                 if e == score_entry or ret_vals[e].is_none():
                     continue
                 writer.append_bulk_string_response(
-                    opts.tokens[ret_out[e]].ptr, opts.tokens[ret_out[e]].length)
+                    opts.tokens[unsafe_offset=ret_out[e]].ptr, opts.tokens[unsafe_offset=ret_out[e]].length)
                 writer.append_bulk_value_response(ret_vals[e])
         elif opts.mode == FT_REPLY_ALL:
             # hash_get_live purged expired fields, so size counts the live ones
@@ -745,28 +745,28 @@ def write_ft_search_response(mut writer: ResponseWriter, results2: List[Int], di
             var id_field_val = GenericValue()
             if is_not_null(doc_hash):
                 var id_name_buf = stack_allocation[2, UInt8]()
-                id_name_buf[0] = 105; id_name_buf[1] = 100  # "id"
+                id_name_buf[unsafe_offset=0] = 105; id_name_buf[unsafe_offset=1] = 100  # "id"
                 id_field_val = doc_hash[].get(GenericValue.borrow(id_name_buf, 2))
             var has_id = not id_field_val.is_none()
             if resp3:
                 _put_lit(writer, _FT_R3_FIELDS)
                 writer.append_map_header(2 if has_id else 1)
             else:
-                writer.buffer[writer.offset] = 42
-                writer.buffer[writer.offset+1] = 52 if has_id else 50 # *4 | *2
-                writer.buffer[writer.offset+2] = 13; writer.buffer[writer.offset+3] = 10; writer.offset += 4
+                writer.buffer[unsafe_offset=writer.offset] = 42
+                writer.buffer[unsafe_offset=writer.offset+1] = 52 if has_id else 50 # *4 | *2
+                writer.buffer[unsafe_offset=writer.offset+2] = 13; writer.buffer[unsafe_offset=writer.offset+3] = 10; writer.offset += 4
             if has_id:
-                writer.buffer[writer.offset]=36; writer.buffer[writer.offset+1]=50 # $2
-                writer.buffer[writer.offset+2]=13; writer.buffer[writer.offset+3]=10
-                writer.buffer[writer.offset+4]=105; writer.buffer[writer.offset+5]=100 # id
-                writer.buffer[writer.offset+6]=13; writer.buffer[writer.offset+7]=10; writer.offset += 8
+                writer.buffer[unsafe_offset=writer.offset]=36; writer.buffer[unsafe_offset=writer.offset+1]=50 # $2
+                writer.buffer[unsafe_offset=writer.offset+2]=13; writer.buffer[unsafe_offset=writer.offset+3]=10
+                writer.buffer[unsafe_offset=writer.offset+4]=105; writer.buffer[unsafe_offset=writer.offset+5]=100 # id
+                writer.buffer[unsafe_offset=writer.offset+6]=13; writer.buffer[unsafe_offset=writer.offset+7]=10; writer.offset += 8
                 writer.append_bulk_value_response(id_field_val)
-            writer.buffer[writer.offset]=36; writer.buffer[writer.offset+1]=53 # $5
-            writer.buffer[writer.offset+2]=13; writer.buffer[writer.offset+3]=10
-            writer.buffer[writer.offset+4]=115; writer.buffer[writer.offset+5]=99 # sc
-            writer.buffer[writer.offset+6]=111; writer.buffer[writer.offset+7]=114 # or
-            writer.buffer[writer.offset+8]=101; writer.buffer[writer.offset+9]=13 # e
-            writer.buffer[writer.offset+10]=10; writer.offset += 11
+            writer.buffer[unsafe_offset=writer.offset]=36; writer.buffer[unsafe_offset=writer.offset+1]=53 # $5
+            writer.buffer[unsafe_offset=writer.offset+2]=13; writer.buffer[unsafe_offset=writer.offset+3]=10
+            writer.buffer[unsafe_offset=writer.offset+4]=115; writer.buffer[unsafe_offset=writer.offset+5]=99 # sc
+            writer.buffer[unsafe_offset=writer.offset+6]=111; writer.buffer[unsafe_offset=writer.offset+7]=114 # or
+            writer.buffer[unsafe_offset=writer.offset+8]=101; writer.buffer[unsafe_offset=writer.offset+9]=13 # e
+            writer.buffer[unsafe_offset=writer.offset+10]=10; writer.offset += 11
             _put_score_bulk(writer, dist)
         if resp3:
             _put_lit(writer, _FT_R3_DOC_END)
@@ -788,17 +788,17 @@ comptime FT_MAX_FILTERS = 4
 comptime FT_FILTER_MAX_CANDIDATES = 16384
 
 
-def _bytes_str(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int, cap: Int = 64) -> String:
+def _bytes_str(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, cap: Int = 64) -> String:
     """Printable copy of client bytes for an error message (ASCII, capped)."""
     var s = String("")
     var m = n if n < cap else cap
     for i in range(m):
-        var c = Int(p[i])
+        var c = Int(p[unsafe_offset=i])
         s += chr(c) if c >= 32 and c < 127 else "?"
     return s
 
 
-def _parse_bound(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int, mut out_v: Float64,
+def _parse_bound(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, mut out_v: Float64,
                  mut excl: Bool) -> Bool:
     """One NUMERIC bound, as RediSearch reads it: a number (strtod's, so
     1e400 is infinity), inf / +inf / -inf, and a leading `(` for an exclusive
@@ -808,9 +808,9 @@ def _parse_bound(p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int, mut out_v:
     excl = False
     var q = p
     var m = n
-    if m > 0 and q[0] == 40:                  # '('
+    if m > 0 and q[unsafe_offset=0] == 40:                  # '('
         excl = True
-        q = q + 1
+        q = q.unsafe_offset(1)
         m -= 1
     if m == 0:
         return False
@@ -845,7 +845,7 @@ struct FtFilters(Movable):
     var types: Array[UInt8, 4]
     var field_lens: Array[UInt8, 4]
     var field_names: Array[Array[UInt8, 32], 4]
-    var str_ptrs: Array[UnsafePointer[UInt8, MutUntrackedOrigin], 4]
+    var str_ptrs: Array[Pointer[UInt8, MutUntrackedOrigin], 4]
     var str_lens: Array[UInt8, 4]
     var lo: Array[Float64, 4]
     var hi: Array[Float64, 4]
@@ -862,7 +862,7 @@ struct FtFilters(Movable):
         self.types = Array[UInt8, 4](uninitialized=True)
         self.field_lens = Array[UInt8, 4](uninitialized=True)
         self.field_names = Array[Array[UInt8, 32], 4](uninitialized=True)
-        self.str_ptrs = Array[UnsafePointer[UInt8, MutUntrackedOrigin], 4](uninitialized=True)
+        self.str_ptrs = Array[Pointer[UInt8, MutUntrackedOrigin], 4](uninitialized=True)
         self.str_lens = Array[UInt8, 4](uninitialized=True)
         self.lo = Array[Float64, 4](uninitialized=True)
         self.hi = Array[Float64, 4](uninitialized=True)
@@ -895,8 +895,8 @@ struct FtFilters(Movable):
             self.error = msg
         return False
 
-    def _begin(mut self, name: UnsafePointer[UInt8, MutUntrackedOrigin], name_len: Int,
-               shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], want: UInt8,
+    def _begin(mut self, name: Pointer[UInt8, MutUntrackedOrigin], name_len: Int,
+               shared: Pointer[SharedHNSWView, MutUntrackedOrigin], want: UInt8,
                legacy: Bool) -> Bool:
         """Claim the next slot for field `name`, which must be a `want` field
         of the index schema when the schema is known. `legacy`: the FILTER
@@ -908,7 +908,7 @@ struct FtFilters(Movable):
         var fi = self.count
         self.field_lens[fi] = UInt8(name_len)
         for b in range(name_len):
-            self.field_names[fi][b] = name[b]
+            self.field_names[fi][b] = name[unsafe_offset=b]
         var slot = _schema_slot(shared, name, name_len)
         if is_not_null(shared) and shared[].schema_known:
             if slot < 0:
@@ -930,10 +930,10 @@ struct FtFilters(Movable):
         self.slots[fi] = slot
         return True
 
-    def add_numeric(mut self, name: UnsafePointer[UInt8, MutUntrackedOrigin], name_len: Int,
-                    lo_p: UnsafePointer[UInt8, MutUntrackedOrigin], lo_n: Int,
-                    hi_p: UnsafePointer[UInt8, MutUntrackedOrigin], hi_n: Int,
-                    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    def add_numeric(mut self, name: Pointer[UInt8, MutUntrackedOrigin], name_len: Int,
+                    lo_p: Pointer[UInt8, MutUntrackedOrigin], lo_n: Int,
+                    hi_p: Pointer[UInt8, MutUntrackedOrigin], hi_n: Int,
+                    shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
                     legacy: Bool = False) -> Bool:
         var lo = Float64(0.0)
         var hi = Float64(0.0)
@@ -960,9 +960,9 @@ struct FtFilters(Movable):
         self.count += 1
         return True
 
-    def add_tag(mut self, name: UnsafePointer[UInt8, MutUntrackedOrigin], name_len: Int,
-                val: UnsafePointer[UInt8, MutUntrackedOrigin], val_len: Int,
-                shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> Bool:
+    def add_tag(mut self, name: Pointer[UInt8, MutUntrackedOrigin], name_len: Int,
+                val: Pointer[UInt8, MutUntrackedOrigin], val_len: Int,
+                shared: Pointer[SharedHNSWView, MutUntrackedOrigin]) -> Bool:
         if val_len == 0 or val_len > 254:
             return self.fail("ERR invalid tag filter value for '" + _bytes_str(name, name_len) + "'")
         if not self._begin(name, name_len, shared, FT_FIELD_TAG, False):
@@ -970,22 +970,22 @@ struct FtFilters(Movable):
         var fi = self.count
         var any = False
         for b in range(val_len):
-            if val[b] == 124: any = True; break    # '|'
+            if val[unsafe_offset=b] == 124: any = True; break    # '|'
         self.types[fi] = FT_FILTER_TAG_ANY if any else FT_FILTER_TAG_EQ
         self.str_ptrs[fi] = val
         self.str_lens[fi] = UInt8(val_len)
         self.count += 1
         return True
 
-    def parse_expr(mut self, p: UnsafePointer[UInt8, MutUntrackedOrigin], n: Int,
-                   shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> Bool:
+    def parse_expr(mut self, p: Pointer[UInt8, MutUntrackedOrigin], n: Int,
+                   shared: Pointer[SharedHNSWView, MutUntrackedOrigin]) -> Bool:
         """RediSearch clause syntax: `*`, or space-separated (ANDed) clauses
         `@field:[lo hi]` / `@field:{a|b}`, optionally parenthesised. OR between
         clauses, negation and free text are refused, not ignored."""
         var i = 0
         var saw_star = False
         while i < n:
-            var c = p[i]
+            var c = p[unsafe_offset=i]
             if c == 32 or c == 40 or c == 41:       # ' ' '(' ')'
                 i += 1; continue
             if c == 42:                             # '*' — match all
@@ -995,53 +995,53 @@ struct FtFilters(Movable):
                                  + "' - Pion supports '*' or ANDed @field:[lo hi] / @field:{tag|tag} clauses")
             var name_start = i + 1
             var j = name_start
-            while j < n and p[j] != 58:             # ':'
+            while j < n and p[unsafe_offset=j] != 58:             # ':'
                 j += 1
             if j >= n or j + 1 >= n:
                 return self.fail("ERR unsupported filter expression '" + _bytes_str(p, n) + "'")
             var name_len = j - name_start
-            var open = p[j + 1]
+            var open = p[unsafe_offset=j + 1]
             var close = UInt8(93) if open == 91 else UInt8(125)   # ']' or '}'
             if open != 91 and open != 123:
                 return self.fail("ERR unsupported filter expression '" + _bytes_str(p, n)
                                  + "' - expected [lo hi] or {tag}")
             var body = j + 2
             var k = body
-            while k < n and p[k] != close:
+            while k < n and p[unsafe_offset=k] != close:
                 k += 1
             if k >= n:
                 return self.fail("ERR unterminated filter clause in '" + _bytes_str(p, n) + "'")
             if open == 91:
                 var a = body
-                while a < k and p[a] == 32: a += 1
+                while a < k and p[unsafe_offset=a] == 32: a += 1
                 var a_end = a
-                while a_end < k and p[a_end] != 32: a_end += 1
+                while a_end < k and p[unsafe_offset=a_end] != 32: a_end += 1
                 var b = a_end
-                while b < k and p[b] == 32: b += 1
+                while b < k and p[unsafe_offset=b] == 32: b += 1
                 var b_end = b
-                while b_end < k and p[b_end] != 32: b_end += 1
+                while b_end < k and p[unsafe_offset=b_end] != 32: b_end += 1
                 var rest = b_end
-                while rest < k and p[rest] == 32: rest += 1
+                while rest < k and p[unsafe_offset=rest] == 32: rest += 1
                 if a_end == a or b_end == b or rest != k:
                     return self.fail("ERR numeric filter needs exactly two bounds: '" + _bytes_str(p, n) + "'")
-                if not self.add_numeric(p + name_start, name_len, p + a, a_end - a, p + b, b_end - b, shared):
+                if not self.add_numeric(p.unsafe_offset(name_start), name_len, p.unsafe_offset(a), a_end - a, p.unsafe_offset(b), b_end - b, shared):
                     return False
             else:
                 var t0 = body
                 var t1 = k
-                while t0 < t1 and p[t0] == 32: t0 += 1
-                while t1 > t0 and p[t1 - 1] == 32: t1 -= 1
-                if not self.add_tag(p + name_start, name_len, p + t0, t1 - t0, shared):
+                while t0 < t1 and p[unsafe_offset=t0] == 32: t0 += 1
+                while t1 > t0 and p[unsafe_offset=t1 - 1] == 32: t1 -= 1
+                if not self.add_tag(p.unsafe_offset(name_start), name_len, p.unsafe_offset(t0), t1 - t0, shared):
                     return False
             i = k + 1
-            if i < n and p[i] == 124:               # '|' between clauses = OR
+            if i < n and p[unsafe_offset=i] == 124:               # '|' between clauses = OR
                 return self.fail("ERR OR between filter clauses is not supported: '" + _bytes_str(p, n) + "'")
         _ = saw_star
         return True
 
-    def parse_filter_arg(mut self, tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], j: Int,
+    def parse_filter_arg(mut self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int,
                          num_tokens: Int,
-                         shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> Int:
+                         shared: Pointer[SharedHNSWView, MutUntrackedOrigin]) -> Int:
         """The arguments after a FILTER keyword at token `j`. Returns how many
         tokens were used after FILTER, or -1 with `error` set. Forms:
           FILTER f lo hi                 (RediSearch's numeric filter)
@@ -1051,42 +1051,42 @@ struct FtFilters(Movable):
         if j + 1 >= num_tokens:
             _ = self.fail("ERR FILTER needs an argument")
             return -1
-        var tp = tokens[j + 1].ptr
-        var tl = tokens[j + 1].length
-        if tl > 0 and tp[0] == 64:
+        var tp = tokens[unsafe_offset=j + 1].ptr
+        var tl = tokens[unsafe_offset=j + 1].length
+        if tl > 0 and tp[unsafe_offset=0] == 64:
             return 1 if self.parse_expr(tp, tl, shared) else -1
         var eq = -1
         for b in range(tl):
-            if tp[b] == 61: eq = b; break
+            if tp[unsafe_offset=b] == 61: eq = b; break
         if eq > 0:
-            return 1 if self.add_tag(tp, eq, tp + eq + 1, tl - eq - 1, shared) else -1
-        if j + 2 < num_tokens and tokens[j + 2].length > 1 and tokens[j + 2].ptr[0] == 91:
-            var rp = tokens[j + 2].ptr
-            var rl = tokens[j + 2].length
-            if rp[rl - 1] != 93:
+            return 1 if self.add_tag(tp, eq, tp.unsafe_offset(eq).unsafe_offset(1), tl - eq - 1, shared) else -1
+        if j + 2 < num_tokens and tokens[unsafe_offset=j + 2].length > 1 and tokens[unsafe_offset=j + 2].ptr[unsafe_offset=0] == 91:
+            var rp = tokens[unsafe_offset=j + 2].ptr
+            var rl = tokens[unsafe_offset=j + 2].length
+            if rp[unsafe_offset=rl - 1] != 93:
                 _ = self.fail("ERR unterminated numeric range '" + _bytes_str(rp, rl) + "'")
                 return -1
             var a = 1
-            while a < rl - 1 and rp[a] == 32: a += 1
+            while a < rl - 1 and rp[unsafe_offset=a] == 32: a += 1
             var a_end = a
-            while a_end < rl - 1 and rp[a_end] != 32: a_end += 1
+            while a_end < rl - 1 and rp[unsafe_offset=a_end] != 32: a_end += 1
             var b = a_end
-            while b < rl - 1 and rp[b] == 32: b += 1
+            while b < rl - 1 and rp[unsafe_offset=b] == 32: b += 1
             var b_end = b
-            while b_end < rl - 1 and rp[b_end] != 32: b_end += 1
+            while b_end < rl - 1 and rp[unsafe_offset=b_end] != 32: b_end += 1
             if a_end == a or b_end == b:
                 _ = self.fail("ERR numeric filter needs two bounds: '" + _bytes_str(rp, rl) + "'")
                 return -1
-            return 2 if self.add_numeric(tp, tl, rp + a, a_end - a, rp + b, b_end - b, shared) else -1
+            return 2 if self.add_numeric(tp, tl, rp.unsafe_offset(a), a_end - a, rp.unsafe_offset(b), b_end - b, shared) else -1
         if j + 3 < num_tokens:
-            return 3 if self.add_numeric(tp, tl, tokens[j + 2].ptr, tokens[j + 2].length,
-                                         tokens[j + 3].ptr, tokens[j + 3].length, shared, True) else -1
+            return 3 if self.add_numeric(tp, tl, tokens[unsafe_offset=j + 2].ptr, tokens[unsafe_offset=j + 2].length,
+                                         tokens[unsafe_offset=j + 3].ptr, tokens[unsafe_offset=j + 3].length, shared, True) else -1
         _ = self.fail("ERR unsupported FILTER argument '" + _bytes_str(tp, tl)
                       + "' - use field lo hi, @field:[lo hi], @field:{tag} or field=value")
         return -1
 
 
-def _rescore_knn(mut hnsw: HNSWGraph, query: UnsafePointer[Float32, MutUntrackedOrigin],
+def _rescore_knn(mut hnsw: HNSWGraph, query: Pointer[Float32, MutUntrackedOrigin],
                  mut ids: List[Int], mut scores: List[Float32]):
     """gh #365: metric-unit scores for the rows a KNN reply returns, in
     ascending order of that score (a few rows can swap relative to the
@@ -1103,8 +1103,8 @@ def _rescore_knn(mut hnsw: HNSWGraph, query: UnsafePointer[Float32, MutUntracked
             b -= 1
 
 
-def _tag_matches(fv: UnsafePointer[UInt8, MutUntrackedOrigin], fl: Int, sep: UInt8, fold: Bool,
-                 q: UnsafePointer[UInt8, MutUntrackedOrigin], ql: Int, any: Bool) -> Bool:
+def _tag_matches(fv: Pointer[UInt8, MutUntrackedOrigin], fl: Int, sep: UInt8, fold: Bool,
+                 q: Pointer[UInt8, MutUntrackedOrigin], ql: Int, any: Bool) -> Bool:
     """A TAG field's value against a clause, as RediSearch indexes it: the
     value is a list split at the field's SEPARATOR (',' by default), each tag
     trimmed of spaces, and compared case-insensitively unless the field is
@@ -1115,27 +1115,27 @@ def _tag_matches(fv: UnsafePointer[UInt8, MutUntrackedOrigin], fl: Int, sep: UIn
     var t0 = 0
     while t0 <= fl:
         var t1 = t0
-        while t1 < fl and fv[t1] != sep:
+        while t1 < fl and fv[unsafe_offset=t1] != sep:
             t1 += 1
         var s0 = t0
         var s1 = t1
-        while s0 < s1 and fv[s0] == 32: s0 += 1
-        while s1 > s0 and fv[s1 - 1] == 32: s1 -= 1
+        while s0 < s1 and fv[unsafe_offset=s0] == 32: s0 += 1
+        while s1 > s0 and fv[unsafe_offset=s1 - 1] == 32: s1 -= 1
         var a0 = 0
         while a0 <= ql:
             var a1 = a0
-            while a1 < ql and (not any or q[a1] != 124):
+            while a1 < ql and (not any or q[unsafe_offset=a1] != 124):
                 a1 += 1
             var b0 = a0
             var b1 = a1
             if any:
-                while b0 < b1 and q[b0] == 32: b0 += 1
-                while b1 > b0 and q[b1 - 1] == 32: b1 -= 1
+                while b0 < b1 and q[unsafe_offset=b0] == 32: b0 += 1
+                while b1 > b0 and q[unsafe_offset=b1 - 1] == 32: b1 -= 1
             if s1 - s0 == b1 - b0 and s1 > s0:
                 var same = True
                 for k in range(s1 - s0):
-                    var x = fv[s0 + k]
-                    var y = q[b0 + k]
+                    var x = fv[unsafe_offset=s0 + k]
+                    var y = q[unsafe_offset=b0 + k]
                     if fold:
                         x = _ascii_fold(x)
                         y = _ascii_fold(y)
@@ -1149,8 +1149,8 @@ def _tag_matches(fv: UnsafePointer[UInt8, MutUntrackedOrigin], fl: Int, sep: UIn
     return False
 
 
-def passes_filters(slot: Int, shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-                   keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+def passes_filters(slot: Int, shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+                   keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                    filters: FtFilters) -> Bool:
     """Whether the document at ingest slot `slot` passes every clause, read
     from its hash on this worker (a document another worker holds fails:
@@ -1172,21 +1172,21 @@ def passes_filters(slot: Int, shared: UnsafePointer[SharedHNSWView, MutUntracked
         if flen == 0: continue
         # the field name, as a lookup key: a heap copy (a stack buffer must not
         # reach an out-of-line callee, gh #349)
-        var fk_buf = alloc[UInt8](32)
-        for bi in range(flen): fk_buf[bi] = filters.field_names[fi][bi]
+        var fk_buf = unsafe_alloc[UInt8](32)
+        for bi in range(flen): fk_buf[unsafe_offset=bi] = filters.field_names[fi][bi]
         var field_val = hash_ptr[].get(GenericValue.borrow(fk_buf, flen))
-        fk_buf.free()
+        fk_buf.unsafe_free()
         if field_val.is_none(): return False
         var ftype = filters.types[fi]
         if ftype == FT_FILTER_TAG_EQ or ftype == FT_FILTER_TAG_ANY:
             var vp = filters.str_ptrs[fi]
             if is_null(vp): return False
             var fv_len = field_val.string_len()
-            var fv_buf = alloc[UInt8](fv_len + 1)
+            var fv_buf = unsafe_alloc[UInt8](fv_len + 1)
             field_val.copy_to(fv_buf)
             var ok = _tag_matches(fv_buf, fv_len, filters.seps[fi], filters.fold[fi],
                                   vp, Int(filters.str_lens[fi]), ftype == FT_FILTER_TAG_ANY)
-            fv_buf.free()
+            fv_buf.unsafe_free()
             if not ok: return False
         elif ftype == FT_FILTER_NUMERIC:
             var x: Float64
@@ -1197,10 +1197,10 @@ def passes_filters(slot: Int, shared: UnsafePointer[SharedHNSWView, MutUntracked
             else:
                 var fv_len2 = field_val.string_len()
                 if fv_len2 <= 0 or fv_len2 > 64: return False
-                var vbuf = alloc[UInt8](fv_len2 + 1)
+                var vbuf = unsafe_alloc[UInt8](fv_len2 + 1)
                 field_val.copy_to(vbuf)
                 var pf = parse_redis_double(vbuf, fv_len2, DOUBLE_VALUE)
-                vbuf.free()
+                vbuf.unsafe_free()
                 if not pf.ok: return False
                 x = pf.value
             var lo = filters.lo[fi]
@@ -1224,12 +1224,12 @@ comptime EXACT_BLOCK = 512    # rows per visibility check and per score block
 
 
 def exact_knn(
-    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    query: UnsafePointer[Float32, MutUntrackedOrigin],
+    shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    query: Pointer[Float32, MutUntrackedOrigin],
     k: Int, lo: Int, hi: Int,
     mut ids: List[Int], mut scores: List[Float32],
     filters: FtFilters,
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
 ):
     """The k nearest of ingest slots [lo, hi), exactly, in the metric's units
     (`1 - cos` under COSINE, squared L2 under L2, as _rescore_knn reports),
@@ -1249,18 +1249,18 @@ def exact_knn(
     if is_null(fp) or dim <= 0:
         return
     var cosine = shared[].pre_distance_metric == 1
-    var q = alloc[Float32](dim)
+    var q = unsafe_alloc[Float32](dim)
     var ss = Float32(0.0)
     for d in range(dim):
-        ss += query[d] * query[d]
+        ss += query[unsafe_offset=d] * query[unsafe_offset=d]
     var inv = Float32(1.0) / sqrt(ss) if cosine and ss > 0.0 else Float32(1.0)
     for d in range(dim):
-        q[d] = query[d] * inv
-    var blk = alloc[Float32](EXACT_BLOCK)
-    var live = alloc[UInt8](EXACT_BLOCK)
+        q[unsafe_offset=d] = query[unsafe_offset=d] * inv
+    var blk = unsafe_alloc[Float32](EXACT_BLOCK)
+    var live = unsafe_alloc[UInt8](EXACT_BLOCK)
     var cap = k if k < hi - lo else hi - lo
-    var hs = alloc[Float32](cap)      # max-heap on score: the worst kept row on top
-    var hi_ = alloc[Int](cap)
+    var hs = unsafe_alloc[Float32](cap)      # max-heap on score: the worst kept row on top
+    var hi_ = unsafe_alloc[Int](cap)
     var hn = 0
     var any_dead = shared[].any_dead()
     var ttls = _ttl_any(keyspace)
@@ -1271,27 +1271,27 @@ def exact_knn(
         for r in range(nb):
             var s = b0 + r
             var ok = shared[].row_visible(s) and not (any_dead and shared[].slot_dead(s))
-            live[r] = 1 if ok else 0
+            live[unsafe_offset=r] = 1 if ok else 0
             if ok: nlive += 1
         if nlive == 0:
             b0 += nb
             continue
         # the ids above were read before the rows below (commit_ingest's pair)
         external_call["pion_full_fence", NoneType]()
-        var rows = fp + b0 * dim
+        var rows = fp.unsafe_offset(b0 * dim)
         if cosine:
             scan_dot_f32(rows, nb, dim, q, blk)
             for r in range(nb):
-                blk[r] = Float32(1.0) - blk[r]
+                blk[unsafe_offset=r] = Float32(1.0) - blk[unsafe_offset=r]
         else:
             for r in range(nb):
-                if live[r] != 0:
-                    blk[r] = l2sq_f32_4chain(q, rows + r * dim, dim)
+                if live[unsafe_offset=r] != 0:
+                    blk[unsafe_offset=r] = l2sq_f32_4chain(q, rows.unsafe_offset(r * dim), dim)
         for r in range(nb):
-            if live[r] == 0:
+            if live[unsafe_offset=r] == 0:
                 continue
-            var sc = blk[r]
-            if hn == cap and not (sc < hs[0]):
+            var sc = blk[unsafe_offset=r]
+            if hn == cap and not (sc < hs[unsafe_offset=0]):
                 continue
             var slot = b0 + r
             if ttls and _slot_expired(shared, keyspace, slot):
@@ -1303,13 +1303,13 @@ def exact_knn(
                 hn += 1
                 while c > 0:
                     var par = (c - 1) // 2
-                    if hs[par] >= sc:
+                    if hs[unsafe_offset=par] >= sc:
                         break
-                    hs[c] = hs[par]
-                    hi_[c] = hi_[par]
+                    hs[unsafe_offset=c] = hs[unsafe_offset=par]
+                    hi_[unsafe_offset=c] = hi_[unsafe_offset=par]
                     c = par
-                hs[c] = sc
-                hi_[c] = slot
+                hs[unsafe_offset=c] = sc
+                hi_[unsafe_offset=c] = slot
             else:
                 var c = 0                      # replace the top, sift down
                 while True:
@@ -1317,15 +1317,15 @@ def exact_knn(
                     if l >= hn:
                         break
                     var m = l
-                    if l + 1 < hn and hs[l + 1] > hs[l]:
+                    if l + 1 < hn and hs[unsafe_offset=l + 1] > hs[unsafe_offset=l]:
                         m = l + 1
-                    if hs[m] <= sc:
+                    if hs[unsafe_offset=m] <= sc:
                         break
-                    hs[c] = hs[m]
-                    hi_[c] = hi_[m]
+                    hs[unsafe_offset=c] = hs[unsafe_offset=m]
+                    hi_[unsafe_offset=c] = hi_[unsafe_offset=m]
                     c = m
-                hs[c] = sc
-                hi_[c] = slot
+                hs[unsafe_offset=c] = sc
+                hi_[unsafe_offset=c] = slot
         b0 += nb
     # pop the heap from the back: ascending order
     for _ in range(hn):
@@ -1333,43 +1333,43 @@ def exact_knn(
         scores.append(0.0)
     var n = hn
     while n > 0:
-        var top_s = hs[0]
-        var top_i = hi_[0]
+        var top_s = hs[unsafe_offset=0]
+        var top_i = hi_[unsafe_offset=0]
         n -= 1
         ids[n] = top_i
         scores[n] = top_s
-        var sc = hs[n]
-        var si = hi_[n]
+        var sc = hs[unsafe_offset=n]
+        var si = hi_[unsafe_offset=n]
         var c = 0
         while True:
             var l = 2 * c + 1
             if l >= n:
                 break
             var m = l
-            if l + 1 < n and hs[l + 1] > hs[l]:
+            if l + 1 < n and hs[unsafe_offset=l + 1] > hs[unsafe_offset=l]:
                 m = l + 1
-            if hs[m] <= sc:
+            if hs[unsafe_offset=m] <= sc:
                 break
-            hs[c] = hs[m]
-            hi_[c] = hi_[m]
+            hs[unsafe_offset=c] = hs[unsafe_offset=m]
+            hi_[unsafe_offset=c] = hi_[unsafe_offset=m]
             c = m
         if n > 0:
-            hs[c] = sc
-            hi_[c] = si
-    q.free()
-    blk.free()
-    live.free()
-    hs.free()
-    hi_.free()
+            hs[unsafe_offset=c] = sc
+            hi_[unsafe_offset=c] = si
+    q.unsafe_free()
+    blk.unsafe_free()
+    live.unsafe_free()
+    hs.unsafe_free()
+    hi_.unsafe_free()
 
 
 def merge_delta(
-    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
     built: Int,
-    query: UnsafePointer[Float32, MutUntrackedOrigin],
+    query: Pointer[Float32, MutUntrackedOrigin],
     k: Int,
     filters: FtFilters,
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     mut ids: List[Int], mut scores: List[Float32],
 ):
     """Drop-in: the graph holds slots [0, built); slots written since (kept by
@@ -1409,8 +1409,8 @@ def merge_delta(
 
 
 def _exact_rescore(
-    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    query: UnsafePointer[Float32, MutUntrackedOrigin],
+    shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    query: Pointer[Float32, MutUntrackedOrigin],
     built: Int,
     mut ids: List[Int], mut scores: List[Float32],
 ):
@@ -1429,23 +1429,23 @@ def _exact_rescore(
     if n == 0 or is_null(fp) or dim <= 0:
         return
     var cosine = shared[].pre_distance_metric == 1
-    var q = alloc[Float32](dim)
+    var q = unsafe_alloc[Float32](dim)
     var ss = Float32(0.0)
     for d in range(dim):
-        ss += query[d] * query[d]
+        ss += query[unsafe_offset=d] * query[unsafe_offset=d]
     var inv = Float32(1.0) / sqrt(ss) if cosine and ss > 0.0 else Float32(1.0)
     for d in range(dim):
-        q[d] = query[d] * inv
+        q[unsafe_offset=d] = query[unsafe_offset=d] * inv
     for i in range(n):
         var slot = ids[i]
         if slot < 0 or slot >= built or not shared[].row_visible(slot):
             continue
-        var row = fp + slot * dim
+        var row = fp.unsafe_offset(slot * dim)
         if cosine:
             scores[i] = Float32(1.0) - dot_f32_4chain(q, row, dim)
         else:
             scores[i] = l2sq_f32_4chain(q, row, dim)
-    q.free()
+    q.unsafe_free()
     for a in range(1, n):
         var b = a
         while b > 0 and scores[b] < scores[b - 1]:
@@ -1456,7 +1456,7 @@ def _exact_rescore(
 
 def refresh_index_view(
     mut hnsw: HNSWGraph,
-    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
     worker_id: Int,
     ready: UInt64,
 ) -> Bool:
@@ -1488,8 +1488,8 @@ def refresh_index_view(
 
 def populate_hnsw_metadata(
     mut hnsw: HNSWGraph,
-    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
 ):
     """Post-FT.OPTIMIZE index build: BM25 over the TEXT fields. The per-node
     TAG/NUMERIC copies it also took went stale when a field changed after the
@@ -1499,8 +1499,8 @@ def populate_hnsw_metadata(
 
 def build_bm25(
     mut hnsw: HNSWGraph,
-    shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
 ):
     """Phase 3.2: build the BM25 inverted index from the TEXT schema field.
 
@@ -1539,62 +1539,62 @@ def build_bm25(
     # [0, max_elements) are dropped rather than scribbling out of bounds.
     var n_cand = hnsw.num_nodes + hnsw.bm25_text_count
     if n_cand <= 0: return
-    var seen = alloc[UInt8](max_doc_id)
+    var seen = unsafe_alloc[UInt8](max_doc_id)
     unsafe_memset(seen, 0, max_doc_id)
-    var doc_ids = alloc[Int32](n_cand)
+    var doc_ids = unsafe_alloc[Int32](n_cand)
     var n_docs = 0
     for nidx in range(hnsw.num_nodes):
-        var e = Int(hnsw.nodes[nidx].id)
-        if e < 0 or e >= max_doc_id or seen[e] != 0: continue
-        seen[e] = 1; doc_ids[n_docs] = Int32(e); n_docs += 1
+        var e = Int(hnsw.nodes[unsafe_offset=nidx].id)
+        if e < 0 or e >= max_doc_id or seen[unsafe_offset=e] != 0: continue
+        seen[unsafe_offset=e] = 1; doc_ids[unsafe_offset=n_docs] = Int32(e); n_docs += 1
     for tix in range(hnsw.bm25_text_count):
-        var e = Int(hnsw.bm25_text_ids[tix])
-        if e < 0 or e >= max_doc_id or seen[e] != 0: continue
-        seen[e] = 1; doc_ids[n_docs] = Int32(e); n_docs += 1
-    seen.free()
+        var e = Int(hnsw.bm25_text_ids[unsafe_offset=tix])
+        if e < 0 or e >= max_doc_id or seen[unsafe_offset=e] != 0: continue
+        seen[unsafe_offset=e] = 1; doc_ids[unsafe_offset=n_docs] = Int32(e); n_docs += 1
+    seen.unsafe_free()
     if n_docs == 0:
-        doc_ids.free(); return
+        doc_ids.unsafe_free(); return
 
     # ── Vocabulary: open-addressing hash table + parallel term arrays ─────────
     # Both grow by doubling; ht_cap is kept ≥ 2× vocab_cap so the probe stays short.
     var vocab_cap = 4096
     var ht_cap    = 16384
     var ht_mask   = ht_cap - 1
-    var ht_hashes = alloc[UInt32](ht_cap)
-    var ht_ids    = alloc[UInt32](ht_cap)
-    unsafe_memset(ht_hashes.bitcast[UInt8](), 0, ht_cap * 4)
-    unsafe_memset(ht_ids.bitcast[UInt8](), 0, ht_cap * 4)
-    var term_hashes_tmp = alloc[UInt32](vocab_cap)
-    var term_df         = alloc[UInt32](vocab_cap)
-    var term_last_doc   = alloc[Int32](vocab_cap)   # last doc that saw this term
-    var term_fwd_pos    = alloc[UInt32](vocab_cap)  # its slot in the forward index
+    var ht_hashes = unsafe_alloc[UInt32](ht_cap)
+    var ht_ids    = unsafe_alloc[UInt32](ht_cap)
+    unsafe_memset(ht_hashes.unsafe_bitcast[UInt8](), 0, ht_cap * 4)
+    unsafe_memset(ht_ids.unsafe_bitcast[UInt8](), 0, ht_cap * 4)
+    var term_hashes_tmp = unsafe_alloc[UInt32](vocab_cap)
+    var term_df         = unsafe_alloc[UInt32](vocab_cap)
+    var term_last_doc   = unsafe_alloc[Int32](vocab_cap)   # last doc that saw this term
+    var term_fwd_pos    = unsafe_alloc[UInt32](vocab_cap)  # its slot in the forward index
     var vocab_count = 0
 
     # Forward index: flat [term_id, tf] pairs, sliced per doc by start/len.
     # Flat + per-doc offsets (rather than a fixed stride) is what removes the
     # per-doc term cap without paying max_terms × n_docs of memory.
     var fwd_cap   = 65536
-    var fwd_buf   = alloc[UInt32](fwd_cap * 2)
+    var fwd_buf   = unsafe_alloc[UInt32](fwd_cap * 2)
     var fwd_count = 0
-    var doc_fwd_start = alloc[UInt32](n_docs)
-    var doc_fwd_len   = alloc[UInt32](n_docs)
+    var doc_fwd_start = unsafe_alloc[UInt32](n_docs)
+    var doc_fwd_len   = unsafe_alloc[UInt32](n_docs)
 
-    var doc_lengths_tmp = alloc[UInt16](max_doc_id)
-    unsafe_memset(doc_lengths_tmp.bitcast[UInt8](), 0, max_doc_id * 2)
+    var doc_lengths_tmp = unsafe_alloc[UInt16](max_doc_id)
+    unsafe_memset(doc_lengths_tmp.unsafe_bitcast[UInt8](), 0, max_doc_id * 2)
     var total_tokens = 0
 
-    var key_buf  = alloc[UInt8](32)
-    var fk_buf   = alloc[UInt8](32)
+    var key_buf  = unsafe_alloc[UInt8](32)
+    var fk_buf   = unsafe_alloc[UInt8](32)
     var text_cap = 8192
-    var text_buf = alloc[UInt8](text_cap)
+    var text_buf = unsafe_alloc[UInt8](text_cap)
     for bi in range(text_field_name_len):
-        fk_buf[bi] = shared[].schema_field_names[text_slot][bi]
+        fk_buf[unsafe_offset=bi] = shared[].schema_field_names[text_slot][bi]
 
     # ── Pass 1: tokenize, intern terms, build the forward index ──────────────
     for didx in range(n_docs):
-        var ext_id = Int(doc_ids[didx])
-        doc_fwd_start[didx] = UInt32(fwd_count)
-        doc_fwd_len[didx]   = 0
+        var ext_id = Int(doc_ids[unsafe_offset=didx])
+        doc_fwd_start[unsafe_offset=didx] = UInt32(fwd_count)
+        doc_fwd_len[unsafe_offset=didx]   = 0
         # the slot map: ext_id → original key → HASH, else the literal decimal key
         var hk_val = keyspace[].vec_key(ext_id)
         var doc_val: GenericValue
@@ -1604,16 +1604,16 @@ def build_bm25(
             var kl = format_int_to_buf(key_buf, 0, Int64(ext_id))
             doc_val = keyspace[].get(GenericValue.borrow(key_buf, kl))
         if doc_val.is_none() or doc_val.type.value != ValueType.HASH: continue
-        var hash_ptr = doc_val.as_hash().bitcast[SlabHashMap]()
+        var hash_ptr = doc_val.as_hash().unsafe_bitcast[SlabHashMap]()
         if is_null(hash_ptr): continue
         var field_val = hash_ptr[].get(GenericValue.borrow(fk_buf, text_field_name_len))
         if field_val.is_none(): continue
         var tlen = field_val.string_len()
         if tlen <= 0: continue
         if tlen > text_cap:
-            text_buf.free()
+            text_buf.unsafe_free()
             text_cap = tlen + 1024
-            text_buf = alloc[UInt8](text_cap)
+            text_buf = unsafe_alloc[UInt8](text_cap)
         _ = _copy_value_clamped(field_val, text_buf, text_cap)
 
         var doc_toks = 0
@@ -1629,145 +1629,145 @@ def build_bm25(
             # rehash has to happen while every live term is still reachable.
             if vocab_count + 1 >= vocab_cap or (vocab_count + 1) * 2 >= ht_cap:
                 var new_vcap = vocab_cap * 2
-                var g_hashes = alloc[UInt32](new_vcap)
-                var g_df     = alloc[UInt32](new_vcap)
-                var g_last   = alloc[Int32](new_vcap)
-                var g_fpos   = alloc[UInt32](new_vcap)
+                var g_hashes = unsafe_alloc[UInt32](new_vcap)
+                var g_df     = unsafe_alloc[UInt32](new_vcap)
+                var g_last   = unsafe_alloc[Int32](new_vcap)
+                var g_fpos   = unsafe_alloc[UInt32](new_vcap)
                 unsafe_memcpy(dest=g_hashes, src=term_hashes_tmp, count=vocab_count)
                 unsafe_memcpy(dest=g_df,     src=term_df,         count=vocab_count)
                 unsafe_memcpy(dest=g_last,   src=term_last_doc,   count=vocab_count)
                 unsafe_memcpy(dest=g_fpos,   src=term_fwd_pos,    count=vocab_count)
-                term_hashes_tmp.free(); term_df.free(); term_last_doc.free(); term_fwd_pos.free()
+                term_hashes_tmp.unsafe_free(); term_df.unsafe_free(); term_last_doc.unsafe_free(); term_fwd_pos.unsafe_free()
                 term_hashes_tmp = g_hashes; term_df = g_df
                 term_last_doc = g_last; term_fwd_pos = g_fpos
                 vocab_cap = new_vcap
                 var new_htcap = ht_cap * 2
                 var new_mask  = new_htcap - 1
-                var g_ht_h = alloc[UInt32](new_htcap)
-                var g_ht_i = alloc[UInt32](new_htcap)
-                unsafe_memset(g_ht_h.bitcast[UInt8](), 0, new_htcap * 4)
-                unsafe_memset(g_ht_i.bitcast[UInt8](), 0, new_htcap * 4)
+                var g_ht_h = unsafe_alloc[UInt32](new_htcap)
+                var g_ht_i = unsafe_alloc[UInt32](new_htcap)
+                unsafe_memset(g_ht_h.unsafe_bitcast[UInt8](), 0, new_htcap * 4)
+                unsafe_memset(g_ht_i.unsafe_bitcast[UInt8](), 0, new_htcap * 4)
                 for t in range(vocab_count):
-                    var th = term_hashes_tmp[t]
+                    var th = term_hashes_tmp[unsafe_offset=t]
                     var s2 = Int(th) & new_mask
-                    while g_ht_h[s2] != 0:
+                    while g_ht_h[unsafe_offset=s2] != 0:
                         s2 = (s2 + 1) & new_mask
-                    g_ht_h[s2] = th; g_ht_i[s2] = UInt32(t)
-                ht_hashes.free(); ht_ids.free()
+                    g_ht_h[unsafe_offset=s2] = th; g_ht_i[unsafe_offset=s2] = UInt32(t)
+                ht_hashes.unsafe_free(); ht_ids.unsafe_free()
                 ht_hashes = g_ht_h; ht_ids = g_ht_i
                 ht_cap = new_htcap; ht_mask = new_mask
 
             # Intern the term
             var slot = Int(h) & ht_mask
-            var tid = 0
+            var tid: Int
             while True:
-                if ht_hashes[slot] == 0:
+                if ht_hashes[unsafe_offset=slot] == 0:
                     tid = vocab_count
-                    ht_hashes[slot] = h; ht_ids[slot] = UInt32(tid)
-                    term_hashes_tmp[tid] = h
-                    term_df[tid] = 0
-                    term_last_doc[tid] = -1
-                    term_fwd_pos[tid] = 0
+                    ht_hashes[unsafe_offset=slot] = h; ht_ids[unsafe_offset=slot] = UInt32(tid)
+                    term_hashes_tmp[unsafe_offset=tid] = h
+                    term_df[unsafe_offset=tid] = 0
+                    term_last_doc[unsafe_offset=tid] = -1
+                    term_fwd_pos[unsafe_offset=tid] = 0
                     vocab_count += 1
                     break
-                elif ht_hashes[slot] == h:
-                    tid = Int(ht_ids[slot]); break
+                elif ht_hashes[unsafe_offset=slot] == h:
+                    tid = Int(ht_ids[unsafe_offset=slot]); break
                 slot = (slot + 1) & ht_mask
 
             # First hit in this doc appends a posting; repeats bump its tf.
             # term_last_doc gives O(1) per-doc dedup — the old code linear-scanned
             # the doc's term list, which is why it needed a cap to stay quick.
-            if term_last_doc[tid] != Int32(didx):
-                term_last_doc[tid] = Int32(didx)
-                term_df[tid] += 1
+            if term_last_doc[unsafe_offset=tid] != Int32(didx):
+                term_last_doc[unsafe_offset=tid] = Int32(didx)
+                term_df[unsafe_offset=tid] += 1
                 if fwd_count >= fwd_cap:
                     var new_fcap = fwd_cap * 2
-                    var g_fwd = alloc[UInt32](new_fcap * 2)
+                    var g_fwd = unsafe_alloc[UInt32](new_fcap * 2)
                     unsafe_memcpy(dest=g_fwd, src=fwd_buf, count=fwd_count * 2)
-                    fwd_buf.free(); fwd_buf = g_fwd; fwd_cap = new_fcap
-                term_fwd_pos[tid] = UInt32(fwd_count)
-                fwd_buf[fwd_count * 2]     = UInt32(tid)
-                fwd_buf[fwd_count * 2 + 1] = 1
+                    fwd_buf.unsafe_free(); fwd_buf = g_fwd; fwd_cap = new_fcap
+                term_fwd_pos[unsafe_offset=tid] = UInt32(fwd_count)
+                fwd_buf[unsafe_offset=fwd_count * 2]     = UInt32(tid)
+                fwd_buf[unsafe_offset=fwd_count * 2 + 1] = 1
                 fwd_count += 1
-                doc_fwd_len[didx] += 1
+                doc_fwd_len[unsafe_offset=didx] += 1
             else:
-                fwd_buf[Int(term_fwd_pos[tid]) * 2 + 1] += 1
+                fwd_buf[unsafe_offset=Int(term_fwd_pos[unsafe_offset=tid]) * 2 + 1] += 1
 
         if ext_id >= 0 and ext_id < max_doc_id:
-            doc_lengths_tmp[ext_id] = UInt16(doc_toks) if doc_toks < 65535 else UInt16(65535)
+            doc_lengths_tmp[unsafe_offset=ext_id] = UInt16(doc_toks) if doc_toks < 65535 else UInt16(65535)
         total_tokens += doc_toks
 
-    ht_hashes.free(); ht_ids.free()
-    key_buf.free(); fk_buf.free(); text_buf.free()
+    ht_hashes.unsafe_free(); ht_ids.unsafe_free()
+    key_buf.unsafe_free(); fk_buf.unsafe_free(); text_buf.unsafe_free()
 
     if vocab_count == 0 or fwd_count == 0:
         # Nothing indexable — leave bm25_is_built False so FT.SEARCH … BM25
         # reports "not built" instead of an indistinguishable empty result.
-        term_hashes_tmp.free(); term_df.free(); term_last_doc.free(); term_fwd_pos.free()
-        fwd_buf.free(); doc_fwd_start.free(); doc_fwd_len.free()
-        doc_lengths_tmp.free(); doc_ids.free()
+        term_hashes_tmp.unsafe_free(); term_df.unsafe_free(); term_last_doc.unsafe_free(); term_fwd_pos.unsafe_free()
+        fwd_buf.unsafe_free(); doc_fwd_start.unsafe_free(); doc_fwd_len.unsafe_free()
+        doc_lengths_tmp.unsafe_free(); doc_ids.unsafe_free()
         return
 
     # ── Sort the vocabulary by term hash (heapsort, O(V log V)) ──────────────
     # Was an insertion sort, which only survived because vocab was capped at 32K.
-    var sort_idx = alloc[UInt32](vocab_count)
-    for i in range(vocab_count): sort_idx[i] = UInt32(i)
+    var sort_idx = unsafe_alloc[UInt32](vocab_count)
+    for i in range(vocab_count): sort_idx[unsafe_offset=i] = UInt32(i)
     var hs_start = vocab_count // 2 - 1
     while hs_start >= 0:
         _bm25_sift_down(sort_idx, term_hashes_tmp, hs_start, vocab_count)
         hs_start -= 1
     var hs_end = vocab_count - 1
     while hs_end > 0:
-        var swp = sort_idx[0]; sort_idx[0] = sort_idx[hs_end]; sort_idx[hs_end] = swp
+        var swp = sort_idx[unsafe_offset=0]; sort_idx[unsafe_offset=0] = sort_idx[unsafe_offset=hs_end]; sort_idx[unsafe_offset=hs_end] = swp
         _bm25_sift_down(sort_idx, term_hashes_tmp, 0, hs_end)
         hs_end -= 1
 
-    var final_term_hashes    = alloc[UInt32](vocab_count)
-    var final_term_idf       = alloc[Float32](vocab_count)
-    var final_postings_start = alloc[UInt32](vocab_count)
-    var final_postings_count = alloc[UInt32](vocab_count)
-    unsafe_memset(final_postings_count.bitcast[UInt8](), 0, vocab_count * 4)
-    var tid_to_pos = alloc[UInt32](vocab_count)
+    var final_term_hashes    = unsafe_alloc[UInt32](vocab_count)
+    var final_term_idf       = unsafe_alloc[Float32](vocab_count)
+    var final_postings_start = unsafe_alloc[UInt32](vocab_count)
+    var final_postings_count = unsafe_alloc[UInt32](vocab_count)
+    unsafe_memset(final_postings_count.unsafe_bitcast[UInt8](), 0, vocab_count * 4)
+    var tid_to_pos = unsafe_alloc[UInt32](vocab_count)
 
     var running_start: UInt32 = 0
     for i in range(vocab_count):
-        var tid = Int(sort_idx[i])
-        tid_to_pos[tid] = UInt32(i)
-        final_term_hashes[i] = term_hashes_tmp[tid]
-        var df_val = Int(term_df[tid])
-        final_postings_start[i] = running_start
+        var tid = Int(sort_idx[unsafe_offset=i])
+        tid_to_pos[unsafe_offset=tid] = UInt32(i)
+        final_term_hashes[unsafe_offset=i] = term_hashes_tmp[unsafe_offset=tid]
+        var df_val = Int(term_df[unsafe_offset=tid])
+        final_postings_start[unsafe_offset=i] = running_start
         running_start += UInt32(df_val)
         # Lucene-shape IDF over the BM25 doc count (not num_nodes — those differ
         # the moment a text-only doc is in play). Always positive, no flooring.
         var idf_n = Float32(n_docs) - Float32(df_val) + 0.5
         var idf_d = Float32(df_val) + 0.5
-        final_term_idf[i] = log(1.0 + idf_n / idf_d)
-    sort_idx.free(); term_hashes_tmp.free(); term_df.free()
-    term_last_doc.free(); term_fwd_pos.free()
+        final_term_idf[unsafe_offset=i] = log(1.0 + idf_n / idf_d)
+    sort_idx.unsafe_free(); term_hashes_tmp.unsafe_free(); term_df.unsafe_free()
+    term_last_doc.unsafe_free(); term_fwd_pos.unsafe_free()
 
     # ── Pass 2: invert the forward index into postings ───────────────────────
-    var final_postings_buf = alloc[UInt32](fwd_count * 2)
+    var final_postings_buf = unsafe_alloc[UInt32](fwd_count * 2)
     for didx2 in range(n_docs):
-        var ext_id2 = UInt32(Int(doc_ids[didx2]))
-        var fs = Int(doc_fwd_start[didx2])
-        var fl = Int(doc_fwd_len[didx2])
+        var ext_id2 = UInt32(Int(doc_ids[unsafe_offset=didx2]))
+        var fs = Int(doc_fwd_start[unsafe_offset=didx2])
+        var fl = Int(doc_fwd_len[unsafe_offset=didx2])
         for pi in range(fl):
-            var old_tid = Int(fwd_buf[(fs + pi) * 2])
-            var tf      = fwd_buf[(fs + pi) * 2 + 1]
-            var spos    = Int(tid_to_pos[old_tid])
-            var widx    = Int(final_postings_start[spos]) + Int(final_postings_count[spos])
-            final_postings_buf[widx * 2]     = ext_id2
-            final_postings_buf[widx * 2 + 1] = tf
-            final_postings_count[spos] += 1
-    fwd_buf.free(); doc_fwd_start.free(); doc_fwd_len.free(); tid_to_pos.free()
+            var old_tid = Int(fwd_buf[unsafe_offset=(fs + pi) * 2])
+            var tf      = fwd_buf[unsafe_offset=(fs + pi) * 2 + 1]
+            var spos    = Int(tid_to_pos[unsafe_offset=old_tid])
+            var widx    = Int(final_postings_start[unsafe_offset=spos]) + Int(final_postings_count[unsafe_offset=spos])
+            final_postings_buf[unsafe_offset=widx * 2]     = ext_id2
+            final_postings_buf[unsafe_offset=widx * 2 + 1] = tf
+            final_postings_count[unsafe_offset=spos] += 1
+    fwd_buf.unsafe_free(); doc_fwd_start.unsafe_free(); doc_fwd_len.unsafe_free(); tid_to_pos.unsafe_free()
 
-    if is_not_null(hnsw.bm25_term_hashes):    hnsw.bm25_term_hashes.free()
-    if is_not_null(hnsw.bm25_term_idf):       hnsw.bm25_term_idf.free()
-    if is_not_null(hnsw.bm25_postings_start): hnsw.bm25_postings_start.free()
-    if is_not_null(hnsw.bm25_postings_count): hnsw.bm25_postings_count.free()
-    if is_not_null(hnsw.bm25_postings_buf):   hnsw.bm25_postings_buf.free()
-    if is_not_null(hnsw.bm25_doc_lengths):    hnsw.bm25_doc_lengths.free()
-    if is_not_null(hnsw.bm25_doc_ids):        hnsw.bm25_doc_ids.free()
+    if is_not_null(hnsw.bm25_term_hashes):    hnsw.bm25_term_hashes.unsafe_free()
+    if is_not_null(hnsw.bm25_term_idf):       hnsw.bm25_term_idf.unsafe_free()
+    if is_not_null(hnsw.bm25_postings_start): hnsw.bm25_postings_start.unsafe_free()
+    if is_not_null(hnsw.bm25_postings_count): hnsw.bm25_postings_count.unsafe_free()
+    if is_not_null(hnsw.bm25_postings_buf):   hnsw.bm25_postings_buf.unsafe_free()
+    if is_not_null(hnsw.bm25_doc_lengths):    hnsw.bm25_doc_lengths.unsafe_free()
+    if is_not_null(hnsw.bm25_doc_ids):        hnsw.bm25_doc_ids.unsafe_free()
 
     hnsw.bm25_term_hashes    = final_term_hashes
     hnsw.bm25_term_idf       = final_term_idf
@@ -1804,7 +1804,7 @@ def build_bm25(
 
 def search_bm25(
     mut hnsw: HNSWGraph,
-    query_ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+    query_ptr: Pointer[UInt8, MutUntrackedOrigin],
     query_len: Int,
     k: Int,
     mut out_scores: List[Float32],
@@ -1828,7 +1828,7 @@ def search_bm25(
     # Clear only the doc set, not all max_elements floats — postings can only
     # name ids in the doc set, so everything else is already zero.
     for di in range(nd):
-        hnsw.bm25_scores_scratch[Int(hnsw.bm25_doc_ids[di])] = 0.0
+        hnsw.bm25_scores_scratch[unsafe_offset=Int(hnsw.bm25_doc_ids[unsafe_offset=di])] = 0.0
 
     # Tokenize the query with the same tokenizer the index was built with.
     var q_hashes = Array[UInt32, BM25_MAX_QUERY_TERMS](uninitialized=True)
@@ -1849,29 +1849,29 @@ def search_bm25(
         var lo = 0; var hi = vc - 1; var found_pos = -1
         while lo <= hi:
             var mid = (lo + hi) >> 1
-            var mh = hnsw.bm25_term_hashes[mid]
+            var mh = hnsw.bm25_term_hashes[unsafe_offset=mid]
             if mh == qh: found_pos = mid; break
             elif mh < qh: lo = mid + 1
             else: hi = mid - 1
         if found_pos < 0: continue
-        var idf     = hnsw.bm25_term_idf[found_pos]
-        var p_start = Int(hnsw.bm25_postings_start[found_pos])
-        var p_count = Int(hnsw.bm25_postings_count[found_pos])
+        var idf     = hnsw.bm25_term_idf[unsafe_offset=found_pos]
+        var p_start = Int(hnsw.bm25_postings_start[unsafe_offset=found_pos])
+        var p_count = Int(hnsw.bm25_postings_count[unsafe_offset=found_pos])
         for pi in range(p_count):
-            var ext_id = Int(hnsw.bm25_postings_buf[(p_start + pi) * 2])
+            var ext_id = Int(hnsw.bm25_postings_buf[unsafe_offset=(p_start + pi) * 2])
             if ext_id < 0 or ext_id >= hnsw.max_elements: continue
-            var tf = Float32(hnsw.bm25_postings_buf[(p_start + pi) * 2 + 1])
-            var dl = Float32(hnsw.bm25_doc_lengths[ext_id])
+            var tf = Float32(hnsw.bm25_postings_buf[unsafe_offset=(p_start + pi) * 2 + 1])
+            var dl = Float32(hnsw.bm25_doc_lengths[unsafe_offset=ext_id])
             if dl < 1.0: dl = 1.0
             var tf_norm = tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * dl / avgdl))
-            hnsw.bm25_scores_scratch[ext_id] += idf * tf_norm
+            hnsw.bm25_scores_scratch[unsafe_offset=ext_id] += idf * tf_norm
 
     var scored_ids  = List[Int](capacity=512)
     var scored_vals = List[Float32](capacity=512)
     for di2 in range(nd):
-        var ext3 = Int(hnsw.bm25_doc_ids[di2])
+        var ext3 = Int(hnsw.bm25_doc_ids[unsafe_offset=di2])
         if ext3 < 0 or ext3 >= hnsw.max_elements: continue
-        var sc = hnsw.bm25_scores_scratch[ext3]
+        var sc = hnsw.bm25_scores_scratch[unsafe_offset=ext3]
         if sc > 0.0:
             scored_ids.append(ext3)
             scored_vals.append(sc)
@@ -1895,8 +1895,8 @@ def search_bm25(
 
 @always_inline
 def _shared_index_name_is(
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    ptr: UnsafePointer[UInt8, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    ptr: Pointer[UInt8, MutUntrackedOrigin],
     length: Int,
 ) -> Bool:
     """gh #403: True when `ptr[:length]` names the index registered in the
@@ -1907,25 +1907,25 @@ def _shared_index_name_is(
     var nl = length if length < 64 else 64
     if sl == 0 or sl != nl: return False
     for b in range(nl):
-        if shared_hnsw[].index_name[b] != ptr[b]: return False
+        if shared_hnsw[].index_name[b] != ptr[unsafe_offset=b]: return False
     return True
 
 
 @always_inline
 def _local_index_name_is(
-    hnsw: HNSWGraph, ptr: UnsafePointer[UInt8, MutUntrackedOrigin], length: Int,
+    hnsw: HNSWGraph, ptr: Pointer[UInt8, MutUntrackedOrigin], length: Int,
 ) -> Bool:
     var nl = length if length < 64 else 64
     if hnsw.index_name_len == 0 or hnsw.index_name_len != nl: return False
     for b in range(nl):
-        if hnsw.index_name[b] != ptr[b]: return False
+        if hnsw.index_name[b] != ptr[unsafe_offset=b]: return False
     return True
 
 
 @always_inline
 def _unnamed_live_index(
     hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
     ready: UInt64,
 ) -> Bool:
     """gh #403 review: a SERVED index with no registered name — a pion.hnsw.0
@@ -1942,11 +1942,11 @@ def _unnamed_live_index(
 
 @always_inline
 def handle_ft_info(
-    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
     num_tokens: Int,
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
     mut writer: ResponseWriter,
 ) -> Int:
     """FT.INFO <index_name> — return index metadata.
@@ -1962,8 +1962,8 @@ def handle_ft_info(
     if i + 1 >= num_tokens:
         writer.append_error_response("ERR wrong number of arguments for 'ft.info' command")
         return i
-    var np = tokens[i + 1].ptr
-    var nlen = tokens[i + 1].length
+    var np = tokens[unsafe_offset=i + 1].ptr
+    var nlen = tokens[unsafe_offset=i + 1].length
     var ready: UInt64 = 0
     if is_not_null(shared_hnsw) and is_not_null(shared_hnsw[].ready_atomic):
         ready = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](
@@ -2022,7 +2022,7 @@ def handle_ft_info(
 # ---------------------------------------------------------------------------
 
 def wait_for_readers(
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
     worker_id: Int,
 ):
     """gh #14: return once no other worker can still hold a pointer it read
@@ -2106,7 +2106,7 @@ def wait_for_readers(
 
 def retire_index(
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
     worker_id: Int,
 ):
     """Unpublish the served index, wait out in-flight readers, reset the graph.
@@ -2142,7 +2142,7 @@ def retire_index(
         if is_not_null(shared_hnsw[].shard_ready) and n_sr > 0:
             for sri in range(n_sr):
                 Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
-                    shared_hnsw[].shard_ready + sri * 8, UInt64(0)
+                    shared_hnsw[].shard_ready.unsafe_offset(sri * 8), UInt64(0)
                 )
     wait_for_readers(shared_hnsw, worker_id)
     if is_not_null(shared_hnsw):
@@ -2159,18 +2159,18 @@ def retire_index(
     # index back: FT.INFO knew it again and FT.SEARCH answered from it. Every
     # caller holds AUTO_HOLD, so no automatic build is writing the file.
     var _ip = String("pion.hnsw.0")
-    _ = external_call["unlink", Int32](_ip.as_c_string_slice())
+    _ = external_call["unlink", Int32](_ip.as_c_string_span())
 
 
 def handle_ft_dropindex(
-    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
     num_tokens: Int,
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
     mut writer: ResponseWriter,
     worker_id: Int,
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     num_workers: Int,
     mut dd_keys: List[UInt8],
     mut dd_ends: List[Int],
@@ -2199,13 +2199,13 @@ def handle_ft_dropindex(
         return i
     var dd = False
     if i + 2 < num_tokens:
-        if i + 3 < num_tokens or not arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "dd"):
-            var bad = i + 3 if i + 3 < num_tokens and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "dd") else i + 2
-            writer.append_error_response("Unknown argument `" + _bytes_str(tokens[bad].ptr, tokens[bad].length) + "`")
+        if i + 3 < num_tokens or not arg_eq(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, "dd"):
+            var bad = i + 3 if i + 3 < num_tokens and arg_eq(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, "dd") else i + 2
+            writer.append_error_response("Unknown argument `" + _bytes_str(tokens[unsafe_offset=bad].ptr, tokens[unsafe_offset=bad].length) + "`")
             return num_tokens - 1
         dd = True
-    var np = tokens[i + 1].ptr
-    var nlen = tokens[i + 1].length
+    var np = tokens[unsafe_offset=i + 1].ptr
+    var nlen = tokens[unsafe_offset=i + 1].length
     var known: Bool
     var ready: UInt64 = 0
     if is_not_null(shared_hnsw):
@@ -2230,7 +2230,7 @@ def handle_ft_dropindex(
             rows = shared_hnsw[].num_nodes
         if rows > shared_hnsw[].hk_max_elements:
             rows = shared_hnsw[].hk_max_elements
-        var kbuf = alloc[UInt8](24)
+        var kbuf = unsafe_alloc[UInt8](24)
         for s in range(rows):
             if shared_hnsw[].slot_dead(s):
                 continue
@@ -2241,10 +2241,10 @@ def handle_ft_dropindex(
             var kl = key.string_len()
             var kp = key.as_string_safe(kbuf)
             for b in range(kl):
-                dd_keys.append(kp[b])
+                dd_keys.append(kp[unsafe_offset=b])
             dd_ends.append(len(dd_keys))
             if owned: key.free_str_payload()
-        kbuf.free()
+        kbuf.unsafe_free()
     # Ingest stays closed while the slots start over (retire_index): an HSET on
     # another worker meanwhile is stored, not indexed, as RediSearch has no
     # index then. Reopened after: VectorDBBench writes again without FT.CREATE.
@@ -2276,7 +2276,7 @@ def handle_ft_dropindex(
 @always_inline
 def adopt_index_config(
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
 ):
     """gh #407: take the index config FT.CREATE registered in the shared view.
 
@@ -2312,7 +2312,7 @@ def adopt_index_config(
     hnsw.adopt_schema(shared_hnsw)
 
 
-def _close_ingest(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
+def _close_ingest(shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
     """FT.OPTIMIZE ends ingest: free the FP32 ingest buffer. Null the pointers,
     wait out every batch that may have read them (an HSET writing a row, an
     exact scan reading one), then free, and restart the count, which nothing
@@ -2325,21 +2325,21 @@ def _close_ingest(shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]
     shared_hnsw[].ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
     wait_for_readers(shared_hnsw, worker_id)
     if is_not_null(old_fp32):
-        old_fp32.free()
+        old_fp32.unsafe_free()
     if is_not_null(old_ids):
-        old_ids.free()
+        old_ids.unsafe_free()
     if is_not_null(shared_hnsw[].ingest_count):
         Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared_hnsw[].ingest_count, UInt64(0))
 
 
 @always_inline
 def handle_ft_optimize(
-    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
     num_tokens: Int,
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     worker_id: Int,
     mut writer: ResponseWriter,
 ) -> Int:
@@ -2379,9 +2379,9 @@ def handle_ft_optimize(
         # local name, which a worker that BORROWED the dropped index still
         # carries (reset_index returns early for a borrower), and which
         # publish_to_shared would otherwise register again.
-        var _onl = tokens[ci].length if tokens[ci].length < 64 else 64
+        var _onl = tokens[unsafe_offset=ci].length if tokens[unsafe_offset=ci].length < 64 else 64
         hnsw.index_name_len = _onl
-        for _bi in range(_onl): hnsw.index_name[_bi] = tokens[ci].ptr[_bi]
+        for _bi in range(_onl): hnsw.index_name[_bi] = tokens[unsafe_offset=ci].ptr[unsafe_offset=_bi]
     adopt_index_config(hnsw, shared_hnsw)
     # Nothing ingested since the served index was built (FT.OPTIMIZE again, or
     # after the automatic build consumed nothing new): keep that index. Only
@@ -2435,7 +2435,7 @@ def handle_ft_optimize(
                 populate_hnsw_metadata(hnsw, shared_hnsw, keyspace)
                 hnsw.index_ready = True
                 Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
-                    shared_hnsw[].shard_ready + worker_id * 8, UInt64(1)
+                    shared_hnsw[].shard_ready.unsafe_offset(worker_id * 8), UInt64(1)
                 )
                 print("FT.OPTIMIZE: worker " + String(worker_id) + " shard built (" + String(hnsw.num_nodes) + " nodes). Waiting for other shards...")
                 # Signal all other workers to build their shards.
@@ -2453,7 +2453,7 @@ def handle_ft_optimize(
                 while wait_iter < max_wait_iters:
                     var all_done = True
                     for si in range(n_shards):
-                        if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].shard_ready + si * 8, UInt64(0)) == 0:
+                        if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].shard_ready.unsafe_offset(si * 8), UInt64(0)) == 0:
                             all_done = False
                             break
                     if all_done: break
@@ -2464,13 +2464,13 @@ def handle_ft_optimize(
                         var dc = shared_hnsw[].dbg_counters
                         for wi in range(n_shards):
                             var base = wi * 8
-                            print("  DBG worker=" + String(wi) + " poll=" + String(dc[base]) + " saw_trig=" + String(dc[base+1]) + " build_done=" + String(dc[base+2]) + " build_fail=" + String(dc[base+3]) + " ready=" + String(Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].shard_ready + wi * 8, UInt64(0))))
+                            print("  DBG worker=" + String(wi) + " poll=" + String(dc[unsafe_offset=base]) + " saw_trig=" + String(dc[unsafe_offset=base+1]) + " build_done=" + String(dc[unsafe_offset=base+2]) + " build_fail=" + String(dc[unsafe_offset=base+3]) + " ready=" + String(Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].shard_ready.unsafe_offset(wi * 8), UInt64(0))))
                 print("FT.OPTIMIZE: all " + String(n_shards) + " shards ready after " + String(wait_iter * 5) + "ms. Search live.")
                 # Reset ingest_count and trigger; keep shard_ready=1 so
                 # workers remain in "serve queries" mode.
                 Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                     shared_hnsw[].ingest_count, UInt64(0))
-                shared_hnsw[].optimize_trigger[0] = 0
+                shared_hnsw[].optimize_trigger[unsafe_offset=0] = 0
             else:
                 # Single-worker path: build full index
                 hnsw.build_index_from_shared(shared_hnsw)
@@ -2555,17 +2555,17 @@ struct FtCreateSpec(Movable):
         self.skip_initial_scan = False
 
 
-def _strict_count(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], j: Int, n: Int) -> Int:
+def _strict_count(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, n: Int) -> Int:
     """Token j as a count (an integer >= 0), or -1."""
     if j >= n:
         return -1
-    var v = parse_int64_strict(tokens[j].ptr, tokens[j].length)
+    var v = parse_int64_strict(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length)
     if not v.ok or v.value < 0 or v.value > 1000000000:
         return -1
     return Int(v.value)
 
 
-def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: Int, n: Int,
+def _parse_ft_create(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n: Int,
                      max_dim: Int, mut spec: FtCreateSpec) -> String:
     """FT.CREATE's grammar, RediSearch's, checked whole: "" when the command is
     well formed and Pion applies every part of it, else the error to reply.
@@ -2586,8 +2586,8 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
     var j = i + 2
     var saw_schema = False
     while j < n:
-        var tp = tokens[j].ptr
-        var tl = tokens[j].length
+        var tp = tokens[unsafe_offset=j].ptr
+        var tl = tokens[unsafe_offset=j].length
         if arg_eq(tp, tl, "schema"):
             saw_schema = True
             j += 1
@@ -2595,10 +2595,10 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
         elif arg_eq(tp, tl, "on"):
             if j + 1 >= n:
                 return "Bad arguments for ON: Expected an argument"
-            if arg_eq(tokens[j + 1].ptr, tokens[j + 1].length, "json"):
+            if arg_eq(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length, "json"):
                 return "ERR FT.CREATE ON JSON is not supported: Pion indexes hashes (ON HASH)"
-            if not arg_eq(tokens[j + 1].ptr, tokens[j + 1].length, "hash"):
-                return "Invalid rule type: " + _bytes_str(tokens[j + 1].ptr, tokens[j + 1].length)
+            if not arg_eq(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length, "hash"):
+                return "Invalid rule type: " + _bytes_str(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             j += 2
         elif arg_eq(tp, tl, "prefix"):
             var pn = _strict_count(tokens, j + 1, n)
@@ -2609,7 +2609,7 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
             if j + 1 + pn >= n:
                 return "ERR Bad arguments for PREFIX: fewer prefixes than its count"
             for k in range(pn):
-                var t = tokens[j + 2 + k]
+                var t = tokens[unsafe_offset=j + 2 + k]
                 if arg_eq(t.ptr, t.length, "schema"):
                     return "ERR Bad arguments for PREFIX: fewer prefixes than its count"
                 if t.length >= PREFIX_SLOT:
@@ -2643,29 +2643,29 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
         return "Fields arguments are missing"
     while j < n:
         var name_at = j
-        var name_p = tokens[j].ptr
-        var name_l = tokens[j].length
+        var name_p = tokens[unsafe_offset=j].ptr
+        var name_l = tokens[unsafe_offset=j].length
         j += 1
         if j >= n:
             return "Field `" + _bytes_str(name_p, name_l) + "` has no type"
-        if arg_eq(tokens[j].ptr, tokens[j].length, "as"):
+        if arg_eq(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, "as"):
             return "ERR FT.CREATE: AS aliases are not supported (name the hash field itself)"
-        var ty_p = tokens[j].ptr
-        var ty_l = tokens[j].length
+        var ty_p = tokens[unsafe_offset=j].ptr
+        var ty_l = tokens[unsafe_offset=j].length
         j += 1
         # a field named twice
-        if spec.vec_at >= 0 and tokens[spec.vec_at].length == name_l:
+        if spec.vec_at >= 0 and tokens[unsafe_offset=spec.vec_at].length == name_l:
             var dup = True
             for b in range(name_l):
-                if tokens[spec.vec_at].ptr[b] != name_p[b]: dup = False; break
+                if tokens[unsafe_offset=spec.vec_at].ptr[unsafe_offset=b] != name_p[unsafe_offset=b]: dup = False; break
             if dup:
                 return "Duplicate field in schema - " + _bytes_str(name_p, name_l)
         for f in range(spec.nfields):
-            var ft = tokens[spec.f_name[f]]
+            var ft = tokens[unsafe_offset=spec.f_name[f]]
             if ft.length != name_l: continue
             var dup2 = True
             for b in range(name_l):
-                if ft.ptr[b] != name_p[b]: dup2 = False; break
+                if ft.ptr[unsafe_offset=b] != name_p[unsafe_offset=b]: dup2 = False; break
             if dup2:
                 return "Duplicate field in schema - " + _bytes_str(name_p, name_l)
         if arg_eq(ty_p, ty_l, "vector"):
@@ -2675,8 +2675,8 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
                 return "ERR FT.CREATE: a field name of more than " + String(SCHEMA_NAME_MAX) + " bytes is not supported"
             if j >= n:
                 return "Bad arguments for vector similarity algorithm: Expected an argument"
-            var algo_p = tokens[j].ptr
-            var algo_l = tokens[j].length
+            var algo_p = tokens[unsafe_offset=j].ptr
+            var algo_l = tokens[unsafe_offset=j].length
             if not (arg_eq(algo_p, algo_l, "hnsw") or arg_eq(algo_p, algo_l, "flat")
                     or arg_eq(algo_p, algo_l, "svs-vamana")):
                 return "Bad arguments for vector similarity algorithm: Unknown argument"
@@ -2694,10 +2694,10 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
             var got_dim = False
             var got_metric = False
             while a < a_end:
-                var kp = tokens[a].ptr
-                var kl = tokens[a].length
-                var vp = tokens[a + 1].ptr
-                var vl = tokens[a + 1].length
+                var kp = tokens[unsafe_offset=a].ptr
+                var kl = tokens[unsafe_offset=a].length
+                var vp = tokens[unsafe_offset=a + 1].ptr
+                var vl = tokens[unsafe_offset=a + 1].length
                 if arg_eq(kp, kl, "type"):
                     got_type = True
                     if not arg_eq(vp, vl, "float32"):
@@ -2760,10 +2760,10 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
                     + " index without specifying " + what + " argument"
             spec.vec_at = name_at
             j = a_end
-            while j < n and arg_eq(tokens[j].ptr, tokens[j].length, "indexmissing"):
+            while j < n and arg_eq(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, "indexmissing"):
                 j += 1
             continue
-        var ftype = UInt8(0)
+        var ftype: UInt8
         if arg_eq(ty_p, ty_l, "text"): ftype = FT_FIELD_TEXT
         elif arg_eq(ty_p, ty_l, "tag"): ftype = FT_FIELD_TAG
         elif arg_eq(ty_p, ty_l, "numeric"): ftype = FT_FIELD_NUMERIC
@@ -2779,12 +2779,12 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
         var sep = UInt8(44)
         # the field's options; any other word starts the next field (as in RediSearch)
         while j < n:
-            var op = tokens[j].ptr
-            var ol = tokens[j].length
+            var op = tokens[unsafe_offset=j].ptr
+            var ol = tokens[unsafe_offset=j].length
             if arg_eq(op, ol, "sortable"):
                 flags |= FT_FLAG_SORTABLE
                 j += 1
-                if j < n and arg_eq(tokens[j].ptr, tokens[j].length, "unf"):
+                if j < n and arg_eq(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, "unf"):
                     flags |= FT_FLAG_UNF
                     j += 1
             elif arg_eq(op, ol, "noindex"):
@@ -2794,10 +2794,10 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
                     or arg_eq(op, ol, "withsuffixtrie"):
                 j += 1
             elif ftype == FT_FIELD_TAG and arg_eq(op, ol, "separator"):
-                if j + 1 >= n or tokens[j + 1].length != 1:
+                if j + 1 >= n or tokens[unsafe_offset=j + 1].length != 1:
                     return "Tag separator must be a single character. Got `" \
-                        + (_bytes_str(tokens[j + 1].ptr, tokens[j + 1].length) if j + 1 < n else String("")) + "`"
-                sep = tokens[j + 1].ptr[0]
+                        + (_bytes_str(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length) if j + 1 < n else String("")) + "`"
+                sep = tokens[unsafe_offset=j + 1].ptr[unsafe_offset=0]
                 j += 2
             elif ftype == FT_FIELD_TAG and arg_eq(op, ol, "casesensitive"):
                 flags |= FT_FLAG_CASESENSITIVE
@@ -2823,11 +2823,11 @@ def _parse_ft_create(tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin], i: I
 
 @always_inline
 def handle_ft_create(
-    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
     num_tokens: Int,
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
     config: PionConfig,
     mut writer: ResponseWriter,
     worker_id: Int,
@@ -2875,20 +2875,20 @@ def handle_ft_create(
     # backfill (1.0.1) took them all at once. Resolved here, before any state
     # is written, so a refused list changes nothing. n = 0, or an empty
     # prefix, is every key, as in RediSearch.
-    var new_prefixes = alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
+    var new_prefixes = unsafe_alloc[UInt8](PREFIX_MAX * PREFIX_SLOT)
     unsafe_memset(new_prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
     var new_prefix_count = 0
     var prefix_err = String("")
     var pj = ci + 2
     while pj < num_tokens:
-        if arg_eq(tokens[pj].ptr, tokens[pj].length, "schema"):
+        if arg_eq(tokens[unsafe_offset=pj].ptr, tokens[unsafe_offset=pj].length, "schema"):
             break
-        if arg_eq(tokens[pj].ptr, tokens[pj].length, "prefix"):
+        if arg_eq(tokens[unsafe_offset=pj].ptr, tokens[unsafe_offset=pj].length, "prefix"):
             var pn = -1
-            if pj + 1 < num_tokens and tokens[pj + 1].length > 0 and tokens[pj + 1].length <= 9:
+            if pj + 1 < num_tokens and tokens[unsafe_offset=pj + 1].length > 0 and tokens[unsafe_offset=pj + 1].length <= 9:
                 pn = 0
-                for b in range(tokens[pj + 1].length):
-                    var c = Int(tokens[pj + 1].ptr[b])
+                for b in range(tokens[unsafe_offset=pj + 1].length):
+                    var c = Int(tokens[unsafe_offset=pj + 1].ptr[unsafe_offset=b])
                     if c < 48 or c > 57:
                         pn = -1
                         break
@@ -2902,7 +2902,7 @@ def handle_ft_create(
             else:
                 var every_key = pn == 0
                 for k in range(pn):
-                    var t = tokens[pj + 2 + k]
+                    var t = tokens[unsafe_offset=pj + 2 + k]
                     if arg_eq(t.ptr, t.length, "schema"):
                         # the count ran into the schema (RediSearch fails too)
                         prefix_err = "ERR Bad arguments for PREFIX: fewer prefixes than its count"
@@ -2914,9 +2914,9 @@ def handle_ft_create(
                     if t.length == 0:
                         every_key = True
                         continue
-                    var dst = new_prefixes + new_prefix_count * PREFIX_SLOT
-                    dst[0] = UInt8(t.length)
-                    unsafe_memcpy(dest=dst + 1, src=t.ptr, count=t.length)
+                    var dst = new_prefixes.unsafe_offset(new_prefix_count * PREFIX_SLOT)
+                    dst[unsafe_offset=0] = UInt8(t.length)
+                    unsafe_memcpy(dest=dst.unsafe_offset(1), src=t.ptr, count=t.length)
                     new_prefix_count += 1
                 if every_key:
                     unsafe_memset(new_prefixes, 0, PREFIX_MAX * PREFIX_SLOT)
@@ -2924,7 +2924,7 @@ def handle_ft_create(
             break
         pj += 1
     if prefix_err.byte_length() > 0:
-        new_prefixes.free()
+        new_prefixes.unsafe_free()
         writer.append_error_response(prefix_err)
         return num_tokens - 1
     var prefix_differs = False
@@ -2933,17 +2933,17 @@ def handle_ft_create(
             prefix_differs = True
         else:
             for b in range(new_prefix_count * PREFIX_SLOT):
-                if new_prefixes[b] != shared_hnsw[].pre_prefixes[b]:
+                if new_prefixes[unsafe_offset=b] != shared_hnsw[].pre_prefixes[unsafe_offset=b]:
                     prefix_differs = True
                     break
     var name_differs = False
     if ci + 1 < num_tokens:
-        var tnl = tokens[ci+1].length if tokens[ci+1].length < 64 else 64
+        var tnl = tokens[unsafe_offset=ci+1].length if tokens[unsafe_offset=ci+1].length < 64 else 64
         if tnl != hnsw.index_name_len:
             name_differs = True
         else:
             for tni in range(tnl):
-                if tokens[ci+1].ptr[tni] != hnsw.index_name[tni]:
+                if tokens[unsafe_offset=ci+1].ptr[unsafe_offset=tni] != hnsw.index_name[tni]:
                     name_differs = True
                     break
     var has_state = hnsw.entry_point_id != -1 or hnsw.num_nodes > 0
@@ -2963,10 +2963,10 @@ def handle_ft_create(
         retire_index(hnsw, shared_hnsw, worker_id)
         if is_not_null(shared_hnsw):
             if is_not_null(shared_hnsw[].ingest_fp32):
-                shared_hnsw[].ingest_fp32.free()
+                shared_hnsw[].ingest_fp32.unsafe_free()
                 shared_hnsw[].ingest_fp32 = null_ptr[Float32, MutUntrackedOrigin]()
             if is_not_null(shared_hnsw[].ingest_ids):
-                shared_hnsw[].ingest_ids.free()
+                shared_hnsw[].ingest_ids.unsafe_free()
                 shared_hnsw[].ingest_ids = null_ptr[Int32, MutUntrackedOrigin]()
     if prefix_differs:
         # Every worker's HSET reads the list to route a vector: stop routing
@@ -2979,22 +2979,22 @@ def handle_ft_create(
         unsafe_memcpy(dest=shared_hnsw[].pre_prefixes, src=new_prefixes, count=PREFIX_MAX * PREFIX_SLOT)
         shared_hnsw[].pre_prefix_count = new_prefix_count
         external_call["pion_full_fence", NoneType]()
-    new_prefixes.free()
+    new_prefixes.unsafe_free()
     # Store index name (token immediately after FT.CREATE)
     if ci + 1 < num_tokens:
-        var nm_ptr = tokens[ci+1].ptr
-        var nm_len = tokens[ci+1].length if tokens[ci+1].length < 64 else 64
+        var nm_ptr = tokens[unsafe_offset=ci+1].ptr
+        var nm_len = tokens[unsafe_offset=ci+1].length if tokens[unsafe_offset=ci+1].length < 64 else 64
         hnsw.index_name_len = nm_len
-        for bi in range(nm_len): hnsw.index_name[bi] = nm_ptr[bi]
+        for bi in range(nm_len): hnsw.index_name[bi] = nm_ptr[unsafe_offset=bi]
     # gh #407: an FT.CREATE without EF_CONSTRUCTION gets the configured
     # default, not whatever an earlier FT.CREATE left on this worker — the
     # value is published below, and a stale one would travel with it.
     hnsw.ef_construction = config.vector.ef_construction
     # The vector field, EF_CONSTRUCTION and DIM, and the schema, as parsed.
     if spec.vec_at >= 0:
-        var vt = tokens[spec.vec_at]
+        var vt = tokens[unsafe_offset=spec.vec_at]
         hnsw.vector_field_len = vt.length
-        for bi in range(vt.length): hnsw.vector_field_name[bi] = vt.ptr[bi] | 0x20
+        for bi in range(vt.length): hnsw.vector_field_name[bi] = vt.ptr[unsafe_offset=bi] | 0x20
     if spec.ef_construction > 0:
         hnsw.ef_construction = spec.ef_construction
     if new_dim > 0 and new_dim != hnsw.dim:
@@ -3002,13 +3002,13 @@ def handle_ft_create(
     var schema_count = spec.nfields
     if is_not_null(shared_hnsw):
         for f in range(spec.nfields):
-            var ft = tokens[spec.f_name[f]]
+            var ft = tokens[unsafe_offset=spec.f_name[f]]
             shared_hnsw[].schema_field_types[f] = spec.f_type[f]
             shared_hnsw[].schema_field_flags[f] = spec.f_flags[f]
             shared_hnsw[].schema_field_seps[f] = spec.f_sep[f]
             shared_hnsw[].schema_field_name_lens[f] = UInt8(ft.length)
             # gh #367: verbatim — `| 0x20` made `a_b` unmatchable
-            for bi in range(ft.length): shared_hnsw[].schema_field_names[f][bi] = ft.ptr[bi]
+            for bi in range(ft.length): shared_hnsw[].schema_field_names[f][bi] = ft.ptr[unsafe_offset=bi]
         shared_hnsw[].schema_known = True
     var j = num_tokens
     if is_not_null(shared_hnsw):
@@ -3072,12 +3072,12 @@ def handle_ft_create(
 
 @always_inline
 def handle_ft_addtext(
-    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
     num_tokens: Int,
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     mut dispatcher: CommandDispatcher,
     mut scache: SemanticCache,
     mut writer: ResponseWriter,
@@ -3099,23 +3099,23 @@ def handle_ft_addtext(
     var ci = i
     if ci + 3 < num_tokens:
         # ci+1 = index name (skip), ci+2 = doc_id, ci+3 = text value
-        var doc_tok  = tokens[ci + 2]
-        var text_tok = tokens[ci + 3]
+        var doc_tok  = tokens[unsafe_offset=ci + 2]
+        var text_tok = tokens[unsafe_offset=ci + 3]
         # Find TEXT schema field name from shared schema
         var tf_name_len = 0
-        var tf_name_buf = alloc[UInt8](32)
+        var tf_name_buf = unsafe_alloc[UInt8](32)
         if is_not_null(shared_hnsw):
             var _sc = shared_hnsw[].schema_field_count
             for _si in range(_sc):
                 if shared_hnsw[].schema_field_types[_si] == 1:
                     tf_name_len = Int(shared_hnsw[].schema_field_name_lens[_si])
                     for _bi in range(tf_name_len):
-                        tf_name_buf[_bi] = shared_hnsw[].schema_field_names[_si][_bi]
+                        tf_name_buf[unsafe_offset=_bi] = shared_hnsw[].schema_field_names[_si][_bi]
                     break
         if tf_name_len > 0:
             # HSET doc_id <text_field_name> <text>
             var doc_key  = GenericValue.from_ptr(doc_tok.ptr, doc_tok.length)
-            var hash_ptr2: UnsafePointer[SlabHashMap, MutUntrackedOrigin]
+            var hash_ptr2: Pointer[SlabHashMap, MutUntrackedOrigin]
             var existing2 = keyspace[].get(doc_key)
             if existing2.is_none():
                 # gh #140: ObjectPool.acquire() past capacity returns raw
@@ -3128,14 +3128,14 @@ def handle_ft_addtext(
                     hash_ptr2 = dispatcher.hash_map_pool[].acquire()
                     hash_ptr2[].reset()
                 else:
-                    hash_ptr2 = alloc[SlabHashMap](1)
+                    hash_ptr2 = unsafe_alloc[SlabHashMap](1)
                     hash_ptr2.unsafe_write(SlabHashMap(16))
                 var _new_hval = GenericValue()
                 _new_hval.type = ValueType(ValueType.HASH)
-                _new_hval.set_ptr(hash_ptr2.bitcast[NoneType]())
+                _new_hval.set_ptr(hash_ptr2.unsafe_bitcast[NoneType]())
                 keyspace[].set(GenericValue.borrow(doc_tok.ptr, doc_tok.length), _new_hval)
             else:
-                hash_ptr2 = existing2.as_hash().bitcast[SlabHashMap]()
+                hash_ptr2 = existing2.as_hash().unsafe_bitcast[SlabHashMap]()
             if is_not_null(hash_ptr2):
                 var field_gv = GenericValue.from_ptr(tf_name_buf, tf_name_len)
                 var val_gv   = GenericValue.from_ptr(text_tok.ptr, text_tok.length)
@@ -3146,14 +3146,14 @@ def handle_ft_addtext(
             var _did_val = 0
             if _did_ok:
                 for _di in range(doc_tok.length):
-                    var _dc = Int(doc_tok.ptr[_di])
+                    var _dc = Int(doc_tok.ptr[unsafe_offset=_di])
                     if _dc < 48 or _dc > 57:
                         _did_ok = False
                         break
                     _did_val = _did_val * 10 + (_dc - 48)
             if _did_ok:
                 hnsw.bm25_register_text_doc(_did_val)
-        tf_name_buf.free()
+        tf_name_buf.unsafe_free()
         # Phase 4: also embed text + add to semantic cache HNSW for FT.SEARCHTEXT
         if scache.enabled and scache.count < CACHE_MAX_ENTRIES:
             # gh #140: this is the document side of an asymmetric retriever.
@@ -3165,7 +3165,7 @@ def handle_ft_addtext(
             if _emb_ok:
                 # #29: the entry belongs to THIS index, and its doc id keeps
                 # every byte (non-ASCII bytes used to be dropped).
-                var _idx_tok = tokens[ci + 1]
+                var _idx_tok = tokens[unsafe_offset=ci + 1]
                 var _owner = scache.owner_id(bytes_name("t:", _idx_tok.ptr, _idx_tok.length), True)
                 try:
                     _ = scache.add_entry(_owner, bytes_name("", doc_tok.ptr, doc_tok.length))
@@ -3184,7 +3184,7 @@ def handle_ft_addtext(
 
 @always_inline
 def handle_ft_searchtext(
-    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
     num_tokens: Int,
     mut scache: SemanticCache,
@@ -3199,16 +3199,16 @@ def handle_ft_searchtext(
         writer.append_empty_array_response()
     elif ci + 2 < num_tokens:
         ci += 1
-        var _st_idx_tok = tokens[ci]   # #29: only this index's documents
-        var _st_text_tok = tokens[ci + 1]
+        var _st_idx_tok = tokens[unsafe_offset=ci]   # #29: only this index's documents
+        var _st_text_tok = tokens[unsafe_offset=ci + 1]
         var _st_k = 10
         ci += 1  # consume text token
         # Parse optional K argument
-        if ci + 1 < num_tokens and tokens[ci + 1].length == 1 and (tokens[ci + 1].ptr[0]|0x20)==107:
+        if ci + 1 < num_tokens and tokens[unsafe_offset=ci + 1].length == 1 and (tokens[unsafe_offset=ci + 1].ptr[unsafe_offset=0]|0x20)==107:
             if ci + 2 < num_tokens:
                 var _kv = 0
-                for _ki in range(tokens[ci + 2].length):
-                    var _kc = Int(tokens[ci + 2].ptr[_ki])
+                for _ki in range(tokens[unsafe_offset=ci + 2].length):
+                    var _kc = Int(tokens[unsafe_offset=ci + 2].ptr[unsafe_offset=_ki])
                     if _kc >= 48 and _kc <= 57: _kv = _kv * 10 + (_kc - 48)
                 if _kv > 0: _st_k = _kv
                 ci += 2
@@ -3247,12 +3247,12 @@ def handle_ft_searchtext(
 # ---------------------------------------------------------------------------
 
 def handle_ft_hybrid(
-    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
     num_tokens: Int,
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     mut scache: SemanticCache,
     fd: Int32,
     mut writer: ResponseWriter,
@@ -3279,9 +3279,9 @@ def handle_ft_hybrid(
         return ci
 
     ci += 1  # skip FT.HYBRID token
-    var _idx_tok = tokens[ci]; ci += 1   # index name
-    var _text_tok = tokens[ci]; ci += 1  # text query
-    var _blob_tok = tokens[ci]; ci += 1  # vector blob
+    var _idx_tok = tokens[unsafe_offset=ci]; ci += 1   # index name
+    var _text_tok = tokens[unsafe_offset=ci]; ci += 1  # text query
+    var _blob_tok = tokens[unsafe_offset=ci]; ci += 1  # vector blob
 
     # Parse optional args: K <k>, ALPHA <a>, RERANK <host> <port> <model> [<top_n>]
     var _k = 10
@@ -3294,23 +3294,23 @@ def handle_ft_hybrid(
     var _rerank_model = String("")
     var _rerank_top_n: Int = 50
     while ci < num_tokens:
-        var _otok = tokens[ci]
+        var _otok = tokens[unsafe_offset=ci]
         var _ol = _otok.length; var _op = _otok.ptr
         # K keyword (1 byte)
-        if _ol == 1 and (_op[0]|0x20) == 107 and ci + 1 < num_tokens:
+        if _ol == 1 and (_op[unsafe_offset=0]|0x20) == 107 and ci + 1 < num_tokens:
             ci += 1
             var _kv = 0
-            for _ki in range(tokens[ci].length):
-                var _kc = Int(tokens[ci].ptr[_ki])
+            for _ki in range(tokens[unsafe_offset=ci].length):
+                var _kc = Int(tokens[unsafe_offset=ci].ptr[unsafe_offset=_ki])
                 if _kc >= 48 and _kc <= 57: _kv = _kv * 10 + (_kc - 48)
             if _kv > 0: _k = _kv
         # ALPHA keyword (5 bytes)
-        elif _ol == 5 and (_op[0]|0x20)==97 and (_op[1]|0x20)==108 and (_op[2]|0x20)==112 and (_op[3]|0x20)==104 and (_op[4]|0x20)==97 and ci + 1 < num_tokens:
+        elif _ol == 5 and (_op[unsafe_offset=0]|0x20)==97 and (_op[unsafe_offset=1]|0x20)==108 and (_op[unsafe_offset=2]|0x20)==112 and (_op[unsafe_offset=3]|0x20)==104 and (_op[unsafe_offset=4]|0x20)==97 and ci + 1 < num_tokens:
             ci += 1
             # Parse float: simple digit.digit format
             var _av: Float32 = 0.0; var _adec = False; var _adiv: Float32 = 1.0
-            for _ai in range(tokens[ci].length):
-                var _ac = Int(tokens[ci].ptr[_ai])
+            for _ai in range(tokens[unsafe_offset=ci].length):
+                var _ac = Int(tokens[unsafe_offset=ci].ptr[unsafe_offset=_ai])
                 if _ac == 46: _adec = True  # '.'
                 elif _ac >= 48 and _ac <= 57:
                     if _adec:
@@ -3319,42 +3319,42 @@ def handle_ft_hybrid(
                         _av = _av * 10.0 + Float32(_ac - 48)
             if _av >= 0.0 and _av <= 1.0: _alpha = _av
         # gh #139: K1 (2 bytes) / B (1 byte) — BM25 ranking parameters.
-        elif _ol == 2 and (_op[0]|0x20)==107 and _op[1]==49 and ci + 1 < num_tokens:
+        elif _ol == 2 and (_op[unsafe_offset=0]|0x20)==107 and _op[unsafe_offset=1]==49 and ci + 1 < num_tokens:
             ci += 1
-            var _k1v = parse_filter_float(tokens[ci].ptr, tokens[ci].length)
+            var _k1v = parse_filter_float(tokens[unsafe_offset=ci].ptr, tokens[unsafe_offset=ci].length)
             if _k1v >= 0.0 and _k1v <= 100.0: _bm25_k1 = _k1v
-        elif _ol == 1 and (_op[0]|0x20)==98 and ci + 1 < num_tokens:
+        elif _ol == 1 and (_op[unsafe_offset=0]|0x20)==98 and ci + 1 < num_tokens:
             ci += 1
-            var _bv = parse_filter_float(tokens[ci].ptr, tokens[ci].length)
+            var _bv = parse_filter_float(tokens[unsafe_offset=ci].ptr, tokens[unsafe_offset=ci].length)
             if _bv >= 0.0 and _bv <= 1.0: _bm25_b = _bv
         # gh #70: RERANK keyword (6 bytes) — requires <host> <port> <model>; optional <top_n>.
-        elif _ol == 6 and (_op[0]|0x20)==114 and (_op[1]|0x20)==101 and (_op[2]|0x20)==114 and (_op[3]|0x20)==97 and (_op[4]|0x20)==110 and (_op[5]|0x20)==107 and ci + 3 < num_tokens:
-            var _rh_tok = tokens[ci + 1]
-            var _rp_tok = tokens[ci + 2]
-            var _rm_tok = tokens[ci + 3]
+        elif _ol == 6 and (_op[unsafe_offset=0]|0x20)==114 and (_op[unsafe_offset=1]|0x20)==101 and (_op[unsafe_offset=2]|0x20)==114 and (_op[unsafe_offset=3]|0x20)==97 and (_op[unsafe_offset=4]|0x20)==110 and (_op[unsafe_offset=5]|0x20)==107 and ci + 3 < num_tokens:
+            var _rh_tok = tokens[unsafe_offset=ci + 1]
+            var _rp_tok = tokens[unsafe_offset=ci + 2]
+            var _rm_tok = tokens[unsafe_offset=ci + 3]
             _rerank_host = String()
             for _hi in range(_rh_tok.length):
-                _rerank_host += chr(Int(_rh_tok.ptr[_hi]))
+                _rerank_host += chr(Int(_rh_tok.ptr[unsafe_offset=_hi]))
             var _rport = 0
             for _pi in range(_rp_tok.length):
-                var _pc = Int(_rp_tok.ptr[_pi])
+                var _pc = Int(_rp_tok.ptr[unsafe_offset=_pi])
                 if _pc >= 48 and _pc <= 57: _rport = _rport * 10 + (_pc - 48)
             _rerank_port = _rport
             _rerank_model = String()
             for _mi in range(_rm_tok.length):
-                _rerank_model += chr(Int(_rm_tok.ptr[_mi]))
+                _rerank_model += chr(Int(_rm_tok.ptr[unsafe_offset=_mi]))
             ci += 3  # host, port, model
             # Optional <top_n> immediately after model — must be all-digits.
             if ci + 1 < num_tokens:
-                var _tn_tok = tokens[ci + 1]
+                var _tn_tok = tokens[unsafe_offset=ci + 1]
                 var _all_digits = _tn_tok.length > 0
                 for _di in range(_tn_tok.length):
-                    var _dc = Int(_tn_tok.ptr[_di])
+                    var _dc = Int(_tn_tok.ptr[unsafe_offset=_di])
                     if _dc < 48 or _dc > 57: _all_digits = False; break
                 if _all_digits:
                     var _tn = 0
                     for _di2 in range(_tn_tok.length):
-                        _tn = _tn * 10 + (Int(_tn_tok.ptr[_di2]) - 48)
+                        _tn = _tn * 10 + (Int(_tn_tok.ptr[unsafe_offset=_di2]) - 48)
                     if _tn > 0: _rerank_top_n = _tn
                     ci += 1
             if _rerank_host.byte_length() > 0 and _rerank_port > 0 and _rerank_model.byte_length() > 0:
@@ -3404,7 +3404,7 @@ def handle_ft_hybrid(
             var _hef = Int(150.0 * sqrt(sqrt(_hr)))
             if _hef > _hybrid_ef: _hybrid_ef = _hef
         try:
-            var _fp32 = _blob_ptr.bitcast[Float32]()
+            var _fp32 = _blob_ptr.unsafe_bitcast[Float32]()
             _vec_ids = hnsw.search_fp32_scored(_fp32, _k * 4, _vec_scores, _hybrid_ef)
             # drop-in: rows written after an automatic build, in metric units
             if _h_rows > hnsw.num_nodes and is_not_null(shared_hnsw[].ingest_fp32):
@@ -3413,7 +3413,7 @@ def handle_ft_hybrid(
                             keyspace, _vec_ids, _vec_scores)
         except: pass
     elif _h_rows > 0:
-        exact_knn(shared_hnsw, _blob_ptr.bitcast[Float32](), _k * 4, 0, _h_rows,
+        exact_knn(shared_hnsw, _blob_ptr.unsafe_bitcast[Float32](), _k * 4, 0, _h_rows,
                   _vec_ids, _vec_scores, FtFilters(), keyspace)
 
     # ── Run BM25 search ──
@@ -3493,15 +3493,15 @@ def handle_ft_hybrid(
                 if shared_hnsw[].schema_field_types[_si] == 1:
                     _tf_name_len = Int(shared_hnsw[].schema_field_name_lens[_si])
                     for _bi in range(_tf_name_len):
-                        _tf_name_buf[_bi] = shared_hnsw[].schema_field_names[_si][_bi]
+                        _tf_name_buf[unsafe_offset=_bi] = shared_hnsw[].schema_field_names[_si][_bi]
                     break
 
         # Collect doc text pointers in their RRF-sorted order. Packing into
         # contiguous arrays the C-ish way so RerankClient.score can iterate.
         var _doc_count = 0
-        var _doc_ptrs = alloc[UnsafePointer[UInt8, MutUntrackedOrigin]](_select_n)
-        var _doc_lens = alloc[Int](_select_n)
-        var _doc_bufs = List[UnsafePointer[UInt8, MutUntrackedOrigin]]()  # owns the text buffers
+        var _doc_ptrs = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](_select_n)
+        var _doc_lens = unsafe_alloc[Int](_select_n)
+        var _doc_bufs = List[Pointer[UInt8, MutUntrackedOrigin]]()  # owns the text buffers
         if _tf_name_len > 0 and is_not_null(keyspace):
             for _ri in range(_select_n):
                 var _ext_id = _all_ids[_ri]
@@ -3511,7 +3511,7 @@ def handle_ft_hybrid(
                 if not _hk_val.is_none():
                     var _doc_val = keyspace[].get(_hk_val)
                     if not _doc_val.is_none() and _doc_val.type.value == ValueType.HASH:
-                        _hash_ptr = _doc_val.as_hash().bitcast[SlabHashMap]()
+                        _hash_ptr = _doc_val.as_hash().unsafe_bitcast[SlabHashMap]()
                 if is_null(_hash_ptr):
                     # Fallback: numeric ext_id as the doc key directly.
                     var _key_buf = stack_allocation[24, UInt8]()
@@ -3519,17 +3519,17 @@ def handle_ft_hybrid(
                     var _key_len: Int
                     var _tmp = _ext_id
                     if _tmp == 0:
-                        _key_buf[0] = 48; _key_len = 1
+                        _key_buf[unsafe_offset=0] = 48; _key_len = 1
                     else:
                         var _nd = 0
                         while _tmp > 0:
-                            _rev_buf[_nd] = UInt8(_tmp % 10) + 48; _nd += 1; _tmp //= 10
-                        for _di in range(_nd): _key_buf[_di] = _rev_buf[_nd - 1 - _di]
+                            _rev_buf[unsafe_offset=_nd] = UInt8(_tmp % 10) + 48; _nd += 1; _tmp //= 10
+                        for _di in range(_nd): _key_buf[unsafe_offset=_di] = _rev_buf[unsafe_offset=_nd - 1 - _di]
                         _key_len = _nd
                     var _num_key = GenericValue.from_ptr(_key_buf, _key_len)
                     var _doc_val2 = keyspace[].get(_num_key)
                     if not _doc_val2.is_none() and _doc_val2.type.value == ValueType.HASH:
-                        _hash_ptr = _doc_val2.as_hash().bitcast[SlabHashMap]()
+                        _hash_ptr = _doc_val2.as_hash().unsafe_bitcast[SlabHashMap]()
                 if is_null(_hash_ptr):
                     continue
                 var _fk = GenericValue.from_ptr(_tf_name_buf, _tf_name_len)
@@ -3539,11 +3539,11 @@ def handle_ft_hybrid(
                     continue
                 var _tlen = _fv.string_len()
                 if _tlen > 4096: _tlen = 4096
-                var _tbuf = alloc[UInt8](_tlen) if _tlen > 0 else null_ptr[UInt8, MutUntrackedOrigin]()
+                var _tbuf = unsafe_alloc[UInt8](_tlen) if _tlen > 0 else null_ptr[UInt8, MutUntrackedOrigin]()
                 if _tlen > 0:
                     _fv.copy_to(_tbuf)
-                _doc_ptrs[_doc_count] = _tbuf
-                _doc_lens[_doc_count] = _tlen
+                _doc_ptrs[unsafe_offset=_doc_count] = _tbuf
+                _doc_lens[unsafe_offset=_doc_count] = _tlen
                 _doc_bufs.append(_tbuf)
                 # Move the RRF-sorted entry into the densely-packed prefix so
                 # _all_ids[0.._doc_count] aligns with _doc_ptrs[0.._doc_count].
@@ -3555,12 +3555,12 @@ def handle_ft_hybrid(
         # Call SIE /v1/score. The client and the score array survive the
         # success-branch only; failure ⇒ free + fall through to RRF order.
         if _doc_count > 0:
-            var _sie_scores = alloc[Float32](_doc_count)
+            var _sie_scores = unsafe_alloc[Float32](_doc_count)
             var _client = RerankClient(_rerank_host, _rerank_port, _rerank_model)
-            var _query_ptr_ext = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_text_tok.ptr))
-            var _doc_ptrs_ext = UnsafePointer[UnsafePointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin](unsafe_from_address=Int(_doc_ptrs))
-            var _doc_lens_ext = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_doc_lens))
-            var _scores_ext = UnsafePointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_sie_scores))
+            var _query_ptr_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_text_tok.ptr))
+            var _doc_ptrs_ext = Pointer[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin](unsafe_from_address=Int(_doc_ptrs))
+            var _doc_lens_ext = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_doc_lens))
+            var _scores_ext = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_sie_scores))
             var _ok = _client.score(
                 _query_ptr_ext, _text_tok.length,
                 _doc_ptrs_ext, _doc_lens_ext, _doc_count,
@@ -3570,7 +3570,7 @@ def handle_ft_hybrid(
                 # Overwrite the RRF scores for the packed window with SIE
                 # scores, then selection-sort top _k by descending SIE score.
                 for _i in range(_doc_count):
-                    _rrf_tmp[_i] = _sie_scores[_i]
+                    _rrf_tmp[_i] = _sie_scores[unsafe_offset=_i]
                 var _resort_n = _k if _k < _doc_count else _doc_count
                 for _i in range(_resort_n):
                     var _mx = _i; var _ms = _rrf_tmp[_i]
@@ -3579,12 +3579,12 @@ def handle_ft_hybrid(
                     if _mx != _i:
                         var _ti = _all_ids[_i]; _all_ids[_i] = _all_ids[_mx]; _all_ids[_mx] = _ti
                         var _ts = _rrf_tmp[_i]; _rrf_tmp[_i] = _rrf_tmp[_mx]; _rrf_tmp[_mx] = _ts
-            _sie_scores.free()
+            _sie_scores.unsafe_free()
 
         for _b in _doc_bufs:
-            if is_not_null(_b): _b.free()
-        _doc_ptrs.free()
-        _doc_lens.free()
+            if is_not_null(_b): _b.unsafe_free()
+        _doc_ptrs.unsafe_free()
+        _doc_lens.unsafe_free()
 
         # Emit final top-k from whatever order we ended on (SIE if score()
         # succeeded; RRF otherwise).
@@ -3616,25 +3616,25 @@ def handle_ft_hybrid(
 
 @always_inline
 def handle_ft_search(
-    tokens: UnsafePointer[RESP3Token, MutUntrackedOrigin],
+    tokens: Pointer[RESP3Token, MutUntrackedOrigin],
     i: Int,
     num_tokens: Int,
     mut hnsw: HNSWGraph,
-    shared_hnsw: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-    keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+    shared_hnsw: Pointer[SharedHNSWView, MutUntrackedOrigin],
+    keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     worker_id: Int,
-    shard_query_seq: UnsafePointer[UInt64, MutUntrackedOrigin],
+    shard_query_seq: Pointer[UInt64, MutUntrackedOrigin],
     mut scratch_dists: List[Float32],
     mut p3_batch_start_node: Int,
     # Deferred shard state (UnsafePointer to Array fields on SlowPathHandler)
-    deferred_fds: UnsafePointer[Array[Int32, 16], MutUntrackedOrigin],
-    deferred_seqs: UnsafePointer[Array[UInt64, 16], MutUntrackedOrigin],
-    deferred_ks: UnsafePointer[Array[Int32, 16], MutUntrackedOrigin],
-    deferred_n_shards: UnsafePointer[Array[Int32, 16], MutUntrackedOrigin],
-    deferred_active: UnsafePointer[Array[UInt32, 16], MutUntrackedOrigin],
-    deferred_done: UnsafePointer[Array[UInt32, 16], MutUntrackedOrigin],
-    deferred_drain_ticks: UnsafePointer[Array[Int32, 16], MutUntrackedOrigin],
-    deferred_count: UnsafePointer[Int, MutUntrackedOrigin],
+    deferred_fds: Pointer[Array[Int32, 16], MutUntrackedOrigin],
+    deferred_seqs: Pointer[Array[UInt64, 16], MutUntrackedOrigin],
+    deferred_ks: Pointer[Array[Int32, 16], MutUntrackedOrigin],
+    deferred_n_shards: Pointer[Array[Int32, 16], MutUntrackedOrigin],
+    deferred_active: Pointer[Array[UInt32, 16], MutUntrackedOrigin],
+    deferred_done: Pointer[Array[UInt32, 16], MutUntrackedOrigin],
+    deferred_drain_ticks: Pointer[Array[Int32, 16], MutUntrackedOrigin],
+    deferred_count: Pointer[Int, MutUntrackedOrigin],
     # I/O
     fd: Int32,
     mut writer: ResponseWriter,
@@ -3678,8 +3678,8 @@ def handle_ft_search(
     var _rows = shared_hnsw[].ingested() if is_not_null(shared_hnsw) else 0
     if ci + 2 < num_tokens:
         ci += 1  # move to index name token
-        var idx_name_tok_ptr = tokens[ci].ptr
-        var idx_name_tok_len = tokens[ci].length
+        var idx_name_tok_ptr = tokens[unsafe_offset=ci].ptr
+        var idx_name_tok_len = tokens[unsafe_offset=ci].length
         # gh #138: no index exists anywhere → error, not an empty array.
         # A client cannot otherwise distinguish "the store lost its index"
         # (process restarted, WAL replayed keys but no FT.CREATE) from
@@ -3705,7 +3705,7 @@ def handle_ft_search(
             # attacker-supplied name from inflating the error response.
             var _nolen = idx_name_tok_len if idx_name_tok_len < 64 else 64
             for _ni in range(_nolen):
-                _nomsg += chr(Int(idx_name_tok_ptr[_ni]))
+                _nomsg += chr(Int(idx_name_tok_ptr[unsafe_offset=_ni]))
             # ASCII only: RESP error strings get decoded by clients under
             # whatever codec they were configured with.
             _nomsg += "' - not created on this server (FT.CREATE first); if the server restarted, its index was not persisted"
@@ -3713,15 +3713,15 @@ def handle_ft_search(
             writer.flush_response(fd, server, kq)
             return -1  # signal caller to return consumed_bytes
         # Phase 3.2: check for BM25 or HYBRID sub-mode BEFORE reading qstr
-        var _mode_tok_len = tokens[ci + 1].length if ci + 1 < num_tokens else 0
-        var _mode_tok_ptr = tokens[ci + 1].ptr   if ci + 1 < num_tokens else null_ptr[UInt8, MutUntrackedOrigin]()
+        var _mode_tok_len = tokens[unsafe_offset=ci + 1].length if ci + 1 < num_tokens else 0
+        var _mode_tok_ptr = tokens[unsafe_offset=ci + 1].ptr   if ci + 1 < num_tokens else null_ptr[UInt8, MutUntrackedOrigin]()
         # BM25 check: b(98),m(109),2(50),5(53) len=4
-        var _is_bm25 = _mode_tok_len == 4 and (_mode_tok_ptr[0]|0x20)==98 and (_mode_tok_ptr[1]|0x20)==109 and _mode_tok_ptr[2]==50 and _mode_tok_ptr[3]==53
+        var _is_bm25 = _mode_tok_len == 4 and (_mode_tok_ptr[unsafe_offset=0]|0x20)==98 and (_mode_tok_ptr[unsafe_offset=1]|0x20)==109 and _mode_tok_ptr[unsafe_offset=2]==50 and _mode_tok_ptr[unsafe_offset=3]==53
         # HYBRID check: h(104),y(121),b(98),r(114),i(105),d(100) len=6
-        var _is_hybrid = _mode_tok_len == 6 and (_mode_tok_ptr[0]|0x20)==104 and (_mode_tok_ptr[1]|0x20)==121 and (_mode_tok_ptr[2]|0x20)==98 and (_mode_tok_ptr[3]|0x20)==114 and (_mode_tok_ptr[4]|0x20)==105 and (_mode_tok_ptr[5]|0x20)==100
+        var _is_hybrid = _mode_tok_len == 6 and (_mode_tok_ptr[unsafe_offset=0]|0x20)==104 and (_mode_tok_ptr[unsafe_offset=1]|0x20)==121 and (_mode_tok_ptr[unsafe_offset=2]|0x20)==98 and (_mode_tok_ptr[unsafe_offset=3]|0x20)==114 and (_mode_tok_ptr[unsafe_offset=4]|0x20)==105 and (_mode_tok_ptr[unsafe_offset=5]|0x20)==100
         if _is_bm25 and ci + 2 < num_tokens:
             # FT.SEARCH index BM25 "query text" [K k] [K1 <f>] [B <f>]
-            var _bm25_text_tok = tokens[ci + 2]
+            var _bm25_text_tok = tokens[unsafe_offset=ci + 2]
             var _bm25_k = 10
             var _bm25_k1 = BM25_DEFAULT_K1
             var _bm25_b  = BM25_DEFAULT_B
@@ -3731,28 +3731,27 @@ def handle_ft_search(
             # its evaluation harness uses without restarting the server.
             var _oi = ci + 1
             while _oi + 1 < num_tokens:
-                var _ol = tokens[_oi].length
-                var _op = tokens[_oi].ptr
-                var _vp = tokens[_oi + 1].ptr
-                var _vl = tokens[_oi + 1].length
-                if _ol == 1 and (_op[0]|0x20) == 107:      # K
+                var _ol = tokens[unsafe_offset=_oi].length
+                var _op = tokens[unsafe_offset=_oi].ptr
+                var _vp = tokens[unsafe_offset=_oi + 1].ptr
+                var _vl = tokens[unsafe_offset=_oi + 1].length
+                if _ol == 1 and (_op[unsafe_offset=0]|0x20) == 107:      # K
                     var _kv = 0
                     for _ki in range(_vl):
-                        var _kc = Int(_vp[_ki])
+                        var _kc = Int(_vp[unsafe_offset=_ki])
                         if _kc >= 48 and _kc <= 57: _kv = _kv * 10 + (_kc - 48)
                     if _kv > 0: _bm25_k = _kv
-                elif _ol == 2 and (_op[0]|0x20) == 107 and _op[1] == 49:  # K1
+                elif _ol == 2 and (_op[unsafe_offset=0]|0x20) == 107 and _op[unsafe_offset=1] == 49:  # K1
                     var _k1v = parse_filter_float(_vp, _vl)
                     if _k1v < 0.0 or _k1v > 100.0: _bm25_bad = "K1 (want 0 <= K1 <= 100)"
                     else: _bm25_k1 = _k1v
-                elif _ol == 1 and (_op[0]|0x20) == 98:     # B
+                elif _ol == 1 and (_op[unsafe_offset=0]|0x20) == 98:     # B
                     var _bv = parse_filter_float(_vp, _vl)
                     if _bv < 0.0 or _bv > 1.0: _bm25_bad = "B (want 0 <= B <= 1)"
                     else: _bm25_b = _bv
                 else:
                     break
                 _oi += 2
-            ci = _oi - 1
             if _bm25_bad.byte_length() > 0:
                 writer.append_error_response("ERR BM25 parameter out of range: " + _bm25_bad)
                 writer.flush_response(fd, server, kq)
@@ -3764,7 +3763,7 @@ def handle_ft_search(
                 var _nbmsg = String("ERR BM25 index for '")
                 var _nblen = idx_name_tok_len if idx_name_tok_len < 64 else 64
                 for _ni in range(_nblen):
-                    _nbmsg += chr(Int(idx_name_tok_ptr[_ni]))
+                    _nbmsg += chr(Int(idx_name_tok_ptr[unsafe_offset=_ni]))
                 _nbmsg += ("' is not built - the schema needs a TEXT field, docs need that field set "
                            "(HSET <integer-id> <field> <text>, or FT.ADDTEXT <index> <integer-id> <text>), "
                            "and FT.OPTIMIZE must run after ingest")
@@ -3798,26 +3797,26 @@ def handle_ft_search(
             var _hk = 10
             var _ji = ci + 1
             while _ji < num_tokens:
-                var _jtok = tokens[_ji]
+                var _jtok = tokens[unsafe_offset=_ji]
                 var _jl = _jtok.length; var _jp = _jtok.ptr
                 # VECTOR_QUERY (12 bytes: v,e,c,t,o,r,_,q,u,e,r,y)
-                if _jl == 12 and (_jp[0]|0x20)==118 and (_jp[6])==95 and (_jp[7]|0x20)==113:
+                if _jl == 12 and (_jp[unsafe_offset=0]|0x20)==118 and (_jp[unsafe_offset=6])==95 and (_jp[unsafe_offset=7]|0x20)==113:
                     if _ji + 1 < num_tokens:
-                        _hvec_ptr = tokens[_ji + 1].ptr
-                        _hvec_len = tokens[_ji + 1].length
+                        _hvec_ptr = tokens[unsafe_offset=_ji + 1].ptr
+                        _hvec_len = tokens[unsafe_offset=_ji + 1].length
                         _ji += 1
                 # TEXT_QUERY (10 bytes: t,e,x,t,_,q,u,e,r,y)
-                elif _jl == 10 and (_jp[0]|0x20)==116 and (_jp[4])==95 and (_jp[5]|0x20)==113:
+                elif _jl == 10 and (_jp[unsafe_offset=0]|0x20)==116 and (_jp[unsafe_offset=4])==95 and (_jp[unsafe_offset=5]|0x20)==113:
                     if _ji + 1 < num_tokens:
-                        _htext_ptr = tokens[_ji + 1].ptr
-                        _htext_len = tokens[_ji + 1].length
+                        _htext_ptr = tokens[unsafe_offset=_ji + 1].ptr
+                        _htext_len = tokens[unsafe_offset=_ji + 1].length
                         _ji += 1
                 # K keyword
-                elif _jl == 1 and (_jp[0]|0x20)==107:
+                elif _jl == 1 and (_jp[unsafe_offset=0]|0x20)==107:
                     if _ji + 1 < num_tokens:
                         var _kv2 = 0
-                        for _ki2 in range(tokens[_ji + 1].length):
-                            var _kc2 = Int(tokens[_ji + 1].ptr[_ki2])
+                        for _ki2 in range(tokens[unsafe_offset=_ji + 1].length):
+                            var _kc2 = Int(tokens[unsafe_offset=_ji + 1].ptr[unsafe_offset=_ki2])
                             if _kc2 >= 48 and _kc2 <= 57: _kv2 = _kv2 * 10 + (_kc2 - 48)
                         if _kv2 > 0: _hk = _kv2
                         _ji += 1
@@ -3833,7 +3832,7 @@ def handle_ft_search(
                     var _sef = Int(150.0 * sqrt(sqrt(_str)))
                     if _sef > _st_ef: _st_ef = _sef
                 try:
-                    var _hfp32 = _hvec_ptr.bitcast[Float32]()
+                    var _hfp32 = _hvec_ptr.unsafe_bitcast[Float32]()
                     _hvec_ids = hnsw.search_fp32_scored(_hfp32, _hk * 4, _hvec_scores, _st_ef)
                     # drop-in: rows written after an automatic build (RRF reads
                     # ranks, so both sides go to metric units before merging)
@@ -3844,7 +3843,7 @@ def handle_ft_search(
                 except: pass
             elif not _live and _rows > 0 and _hvec_len == shared_hnsw[].pre_dim * 4:
                 # drop-in: no built index serves here yet; the vector leg is exact
-                exact_knn(shared_hnsw, _hvec_ptr.bitcast[Float32](), _hk * 4, 0, _rows,
+                exact_knn(shared_hnsw, _hvec_ptr.unsafe_bitcast[Float32](), _hk * 4, 0, _rows,
                           _hvec_ids, _hvec_scores, FtFilters(), keyspace)
             # Run BM25 search (if text provided)
             var _hbm25_scores = List[Float32]()
@@ -3900,7 +3899,7 @@ def handle_ft_search(
         # valid FT.SEARCH reply shape — which a client cannot tell from "no
         # neighbours"; that is how every pion-mcp vector tool shipped returning
         # nothing. The query token is read in place (no String copy).
-        var q_tok = tokens[ci + 1]
+        var q_tok = tokens[unsafe_offset=ci + 1]
         ci += 1  # move to query string token
         var qp = q_tok.ptr
         var ql = q_tok.length
@@ -3917,7 +3916,7 @@ def handle_ft_search(
         var vec_param_l = 0
         var arrow = -1
         for qi in range(ql - 1):
-            if qp[qi] == 61 and qp[qi + 1] == 62:   # "=>"
+            if qp[unsafe_offset=qi] == 61 and qp[unsafe_offset=qi + 1] == 62:   # "=>"
                 arrow = qi; break
         if arrow < 0:
             q_err = ("ERR unsupported FT.SEARCH query '" + _bytes_str(qp, ql)
@@ -3928,66 +3927,66 @@ def handle_ft_search(
         else:
             # [KNN <k> @<field> $<param> [EF_RUNTIME <n>|$<p>] [AS <alias>]]
             var p = arrow + 2
-            while p < ql and qp[p] == 32: p += 1
-            var ok = p < ql and qp[p] == 91          # '['
+            while p < ql and qp[unsafe_offset=p] == 32: p += 1
+            var ok = p < ql and qp[unsafe_offset=p] == 91          # '['
             p += 1
-            while p < ql and qp[p] == 32: p += 1
-            ok = ok and p + 3 < ql and (qp[p] | 0x20) == 107 and (qp[p + 1] | 0x20) == 110 \
-                 and (qp[p + 2] | 0x20) == 110 and qp[p + 3] == 32
+            while p < ql and qp[unsafe_offset=p] == 32: p += 1
+            ok = ok and p + 3 < ql and (qp[unsafe_offset=p] | 0x20) == 107 and (qp[unsafe_offset=p + 1] | 0x20) == 110 \
+                 and (qp[unsafe_offset=p + 2] | 0x20) == 110 and qp[unsafe_offset=p + 3] == 32
             p += 4
-            while p < ql and qp[p] == 32: p += 1
+            while p < ql and qp[unsafe_offset=p] == 32: p += 1
             var kv = 0
             var kd = 0
-            while ok and p < ql and qp[p] >= 48 and qp[p] <= 57 and kd < 7:
-                kv = kv * 10 + Int(qp[p] - 48); p += 1; kd += 1
+            while ok and p < ql and qp[unsafe_offset=p] >= 48 and qp[unsafe_offset=p] <= 57 and kd < 7:
+                kv = kv * 10 + Int(qp[unsafe_offset=p] - 48); p += 1; kd += 1
             ok = ok and kd > 0          # KNN 0 is valid: an empty result, as in RediSearch
             k = kv
-            while p < ql and qp[p] == 32: p += 1
-            ok = ok and p < ql and qp[p] == 64       # '@'
+            while p < ql and qp[unsafe_offset=p] == 32: p += 1
+            ok = ok and p < ql and qp[unsafe_offset=p] == 64       # '@'
             var f0 = p + 1
             p = f0
-            while p < ql and qp[p] != 32 and qp[p] != 93: p += 1
+            while p < ql and qp[unsafe_offset=p] != 32 and qp[unsafe_offset=p] != 93: p += 1
             var f_len = p - f0
-            opts.field_p = qp + f0
+            opts.field_p = qp.unsafe_offset(f0)
             opts.field_l = f_len
-            while p < ql and qp[p] == 32: p += 1
-            ok = ok and p < ql and qp[p] == 36       # '$'
+            while p < ql and qp[unsafe_offset=p] == 32: p += 1
+            ok = ok and p < ql and qp[unsafe_offset=p] == 36       # '$'
             var v0 = p + 1
             p = v0
-            while p < ql and qp[p] != 32 and qp[p] != 93: p += 1
-            vec_param_p = qp + v0
+            while p < ql and qp[unsafe_offset=p] != 32 and qp[unsafe_offset=p] != 93: p += 1
+            vec_param_p = qp.unsafe_offset(v0)
             vec_param_l = p - v0
             ok = ok and vec_param_l > 0
             # optional clauses up to ']'
-            while ok and p < ql and qp[p] != 93:
-                if qp[p] == 32:
+            while ok and p < ql and qp[unsafe_offset=p] != 93:
+                if qp[unsafe_offset=p] == 32:
                     p += 1; continue
                 var w0 = p
-                while p < ql and qp[p] != 32 and qp[p] != 93: p += 1
+                while p < ql and qp[unsafe_offset=p] != 32 and qp[unsafe_offset=p] != 93: p += 1
                 var w_len = p - w0
-                while p < ql and qp[p] == 32: p += 1
+                while p < ql and qp[unsafe_offset=p] == 32: p += 1
                 var a0 = p
-                while p < ql and qp[p] != 32 and qp[p] != 93: p += 1
+                while p < ql and qp[unsafe_offset=p] != 32 and qp[unsafe_offset=p] != 93: p += 1
                 var a_len = p - a0
                 if a_len == 0:
                     ok = False
-                elif w_len == 10 and arg_eq(qp + w0, 10, "ef_runtime"):
-                    if qp[a0] == 36:
-                        ef_param_p = qp + a0 + 1; ef_param_l = a_len - 1
+                elif w_len == 10 and arg_eq(qp.unsafe_offset(w0), 10, "ef_runtime"):
+                    if qp[unsafe_offset=a0] == 36:
+                        ef_param_p = qp.unsafe_offset(a0).unsafe_offset(1); ef_param_l = a_len - 1
                     else:
                         var ev = 0
                         for e in range(a_len):
-                            var ec = Int(qp[a0 + e])
+                            var ec = Int(qp[unsafe_offset=a0 + e])
                             if ec < 48 or ec > 57: ok = False
                             else: ev = ev * 10 + (ec - 48)
                         if ok and ev > 0: ef_query = ev
-                elif w_len == 2 and arg_eq(qp + w0, 2, "as"):
+                elif w_len == 2 and arg_eq(qp.unsafe_offset(w0), 2, "as"):
                     # The score's field name (else __<field>_score)
-                    opts.alias_p = qp + a0
+                    opts.alias_p = qp.unsafe_offset(a0)
                     opts.alias_l = a_len
                 else:
                     ok = False
-            ok = ok and p < ql and qp[p] == 93
+            ok = ok and p < ql and qp[unsafe_offset=p] == 93
             if not ok:
                 q_err = ("ERR unsupported KNN clause in '" + _bytes_str(qp, ql)
                          + "' - expected [KNN <k> @<field> $<param> [EF_RUNTIME <n>] [AS <alias>]]")
@@ -4004,12 +4003,12 @@ def handle_ft_search(
                 var f_ok = f_len == vf_len
                 if f_ok:
                     for fb in range(f_len):
-                        if (qp[f0 + fb] | 0x20) != vf_name[fb]:
+                        if (qp[unsafe_offset=f0 + fb] | 0x20) != vf_name[fb]:
                             f_ok = False; break
                 if not f_ok:
                     var _vfn = String("")
                     for fb in range(vf_len): _vfn += chr(Int(vf_name[fb]))
-                    q_err = ("ERR KNN field '@" + _bytes_str(qp + f0, f_len)
+                    q_err = ("ERR KNN field '@" + _bytes_str(qp.unsafe_offset(f0), f_len)
                              + "' is not this index's vector field '@" + _vfn + "'")
         # Auto-scale ef with dataset size: ef = max(ef, 150 * (N/50K)^0.25)
         # At 50K: ef=150 (baseline). At 5M: ef≈475. Prevents recall regression at scale.
@@ -4037,7 +4036,7 @@ def handle_ft_search(
         var sort = FtSort()
         var j2 = ci + 1
         while j2 < num_tokens and not filters.failed() and q_err.byte_length() == 0:
-            var jl2 = tokens[j2].length; var jp2 = tokens[j2].ptr
+            var jl2 = tokens[unsafe_offset=j2].length; var jp2 = tokens[unsafe_offset=j2].ptr
             if jl2 == 6 and arg_eq(jp2, 6, "filter"):
                 # gh #367: every documented form parses, anything else refuses.
                 var used = filters.parse_filter_arg(tokens, j2, num_tokens, shared_hnsw)
@@ -4046,10 +4045,10 @@ def handle_ft_search(
             elif jl2 == 6 and arg_eq(jp2, 6, "params"):
                 if j2 + 1 < num_tokens:
                     var cnt2 = 0
-                    var cp2 = tokens[j2 + 1].ptr
-                    var cnt_ok = tokens[j2 + 1].length > 0
-                    for ci2 in range(tokens[j2 + 1].length):
-                        var cc = Int(cp2[ci2])
+                    var cp2 = tokens[unsafe_offset=j2 + 1].ptr
+                    var cnt_ok = tokens[unsafe_offset=j2 + 1].length > 0
+                    for ci2 in range(tokens[unsafe_offset=j2 + 1].length):
+                        var cc = Int(cp2[unsafe_offset=ci2])
                         if cc < 48 or cc > 57: cnt_ok = False
                         else: cnt2 = cnt2 * 10 + (cc - 48)
                     if not cnt_ok or cnt2 % 2 != 0 or j2 + 1 + cnt2 >= num_tokens:
@@ -4069,8 +4068,8 @@ def handle_ft_search(
                 var lo_v = ParsedInt(0, False)
                 var ln_v = ParsedInt(0, False)
                 if lo_ok:
-                    lo_v = parse_int64_strict(tokens[j2 + 1].ptr, tokens[j2 + 1].length)
-                    ln_v = parse_int64_strict(tokens[j2 + 2].ptr, tokens[j2 + 2].length)
+                    lo_v = parse_int64_strict(tokens[unsafe_offset=j2 + 1].ptr, tokens[unsafe_offset=j2 + 1].length)
+                    ln_v = parse_int64_strict(tokens[unsafe_offset=j2 + 2].ptr, tokens[unsafe_offset=j2 + 2].length)
                 if not lo_ok or not lo_v.ok or not ln_v.ok or lo_v.value < 0 or ln_v.value < 0 \
                         or lo_v.value > 1000000000 or ln_v.value > 1000000000:
                     q_err = "LIMIT needs two numeric arguments"
@@ -4083,10 +4082,10 @@ def handle_ft_search(
                 # it, AS and the name included. RETURN 0 is NOCONTENT. The
                 # errors are RediSearch's, word for word.
                 var rn = 0
-                var rn_ok = j2 + 1 < num_tokens and tokens[j2 + 1].length > 0
+                var rn_ok = j2 + 1 < num_tokens and tokens[unsafe_offset=j2 + 1].length > 0
                 if rn_ok:
-                    for rdi in range(tokens[j2 + 1].length):
-                        var rdc = Int(tokens[j2 + 1].ptr[rdi])
+                    for rdi in range(tokens[unsafe_offset=j2 + 1].length):
+                        var rdc = Int(tokens[unsafe_offset=j2 + 1].ptr[unsafe_offset=rdi])
                         if rdc < 48 or rdc > 57: rn_ok = False
                         else: rn = rn * 10 + (rdc - 48)
                 if not rn_ok:
@@ -4111,15 +4110,15 @@ def handle_ft_search(
                 if j2 + 1 >= num_tokens:
                     q_err = "SORTBY needs a field name"
                     break
-                sort.p = tokens[j2 + 1].ptr
-                sort.l = tokens[j2 + 1].length
+                sort.p = tokens[unsafe_offset=j2 + 1].ptr
+                sort.l = tokens[unsafe_offset=j2 + 1].length
                 sort.set = True
                 j2 += 1
                 if j2 + 1 < num_tokens:
-                    var sl = tokens[j2 + 1].length
-                    if sl == 3 and arg_eq(tokens[j2 + 1].ptr, 3, "asc"):
+                    var sl = tokens[unsafe_offset=j2 + 1].length
+                    if sl == 3 and arg_eq(tokens[unsafe_offset=j2 + 1].ptr, 3, "asc"):
                         j2 += 1
-                    elif sl == 4 and arg_eq(tokens[j2 + 1].ptr, 4, "desc"):
+                    elif sl == 4 and arg_eq(tokens[unsafe_offset=j2 + 1].ptr, 4, "desc"):
                         sort.desc = True
                         j2 += 1
             elif arg_eq(jp2, jl2, "dialect") or arg_eq(jp2, jl2, "timeout") or arg_eq(jp2, jl2, "slop") \
@@ -4136,7 +4135,7 @@ def handle_ft_search(
                 # INFIELDS <n> <field>...: which TEXT fields a text term searches
                 var nf = ParsedInt(0, False)
                 if j2 + 1 < num_tokens:
-                    nf = parse_int64_strict(tokens[j2 + 1].ptr, tokens[j2 + 1].length)
+                    nf = parse_int64_strict(tokens[unsafe_offset=j2 + 1].ptr, tokens[unsafe_offset=j2 + 1].length)
                 if not nf.ok or nf.value < 0 or j2 + 1 + Int(nf.value) >= num_tokens:
                     q_err = "Bad arguments for INFIELDS: Could not convert argument to expected type"
                     break
@@ -4147,12 +4146,12 @@ def handle_ft_search(
                 # TEXT a text term matched, and a KNN query matches no term.
                 var sub_ok = True
                 while j2 + 1 < num_tokens:
-                    var sp = tokens[j2 + 1].ptr
-                    var sl2 = tokens[j2 + 1].length
+                    var sp = tokens[unsafe_offset=j2 + 1].ptr
+                    var sl2 = tokens[unsafe_offset=j2 + 1].length
                     if arg_eq(sp, sl2, "fields"):
                         var nfs = ParsedInt(0, False)
                         if j2 + 2 < num_tokens:
-                            nfs = parse_int64_strict(tokens[j2 + 2].ptr, tokens[j2 + 2].length)
+                            nfs = parse_int64_strict(tokens[unsafe_offset=j2 + 2].ptr, tokens[unsafe_offset=j2 + 2].length)
                         if not nfs.ok or nfs.value < 0 or j2 + 2 + Int(nfs.value) >= num_tokens:
                             sub_ok = False
                             break
@@ -4190,20 +4189,20 @@ def handle_ft_search(
         if q_err.byte_length() == 0 and vec_param_l > 0:
             var found = False
             for pi in range(params_n):
-                var nt = tokens[params_at + 2 * pi]
+                var nt = tokens[unsafe_offset=params_at + 2 * pi]
                 if nt.length == vec_param_l:
                     var same = True
                     for b in range(vec_param_l):
-                        if nt.ptr[b] != vec_param_p[b]: same = False; break
+                        if nt.ptr[unsafe_offset=b] != vec_param_p[unsafe_offset=b]: same = False; break
                     if same:
                         found = True
-                        var vt = tokens[params_at + 2 * pi + 1]
+                        var vt = tokens[unsafe_offset=params_at + 2 * pi + 1]
                         # the served graph's DIM; before a build, the defined index's
                         var _qdim = hnsw.dim
                         if not _live and is_not_null(shared_hnsw) and shared_hnsw[].pre_dim > 0:
                             _qdim = shared_hnsw[].pre_dim
                         if vt.length == _qdim * 4:
-                            blob_ptr = vt.ptr.bitcast[Float32]()
+                            blob_ptr = vt.ptr.unsafe_bitcast[Float32]()
                             blob_set = True
                         else:
                             q_err = ("ERR query vector $" + _bytes_str(vec_param_p, vec_param_l) + " is "
@@ -4215,16 +4214,16 @@ def handle_ft_search(
         if q_err.byte_length() == 0 and ef_param_l > 0:
             var ef_found = False
             for pi in range(params_n):
-                var nt = tokens[params_at + 2 * pi]
+                var nt = tokens[unsafe_offset=params_at + 2 * pi]
                 if nt.length == ef_param_l:
                     var same = True
                     for b in range(ef_param_l):
-                        if nt.ptr[b] != ef_param_p[b]: same = False; break
+                        if nt.ptr[unsafe_offset=b] != ef_param_p[unsafe_offset=b]: same = False; break
                     if same:
-                        var vt = tokens[params_at + 2 * pi + 1]
+                        var vt = tokens[unsafe_offset=params_at + 2 * pi + 1]
                         var ev = 0
                         for e in range(vt.length):
-                            var ec = Int(vt.ptr[e])
+                            var ec = Int(vt.ptr[unsafe_offset=e])
                             if ec >= 48 and ec <= 57: ev = ev * 10 + (ec - 48)
                         if ev > 0: ef_query = ev
                         ef_found = True
@@ -4243,7 +4242,7 @@ def handle_ft_search(
             if idx_name_tok_len != hnsw.index_name_len: idx_ok = False
             else:
                 for ni in range(idx_name_tok_len):
-                    if idx_name_tok_ptr[ni] != hnsw.index_name[ni]: idx_ok = False; break
+                    if idx_name_tok_ptr[unsafe_offset=ni] != hnsw.index_name[ni]: idx_ok = False; break
         elif is_not_null(shared_hnsw) and shared_hnsw[].index_name_len > 0:
             # gh #403: a worker that has not borrowed yet has no local name, and
             # used to accept ANY name here — the same query answered `[0]` on
@@ -4258,7 +4257,7 @@ def handle_ft_search(
         if not idx_ok:
             var _wmsg = String("ERR index '")
             var _wlen = idx_name_tok_len if idx_name_tok_len < 64 else 64
-            for _wi in range(_wlen): _wmsg += chr(Int(idx_name_tok_ptr[_wi]))
+            for _wi in range(_wlen): _wmsg += chr(Int(idx_name_tok_ptr[unsafe_offset=_wi]))
             _wmsg += "' is not the index loaded on this server - it holds one index at a time and currently serves '"
             if _by_local:
                 for _wi in range(hnsw.index_name_len): _wmsg += chr(Int(hnsw.index_name[_wi]))
@@ -4322,7 +4321,7 @@ def handle_ft_search(
                 for other in range(n_shards2):
                     if other == worker_id: continue
                     var is_ready = (is_not_null(shared_hnsw[].shard_ready) and
-                        Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].shard_ready + other * 8, UInt64(0)) > 0)
+                        Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].shard_ready.unsafe_offset(other * 8), UInt64(0)) > 0)
                     if is_ready:
                         active_shards[other] = True
                         active_count += 1
@@ -4361,22 +4360,22 @@ def handle_ft_search(
                     for c in range(n_shards2):
                         if c == worker_id: continue
                         var qidx = c * n_shards2 + worker_id
-                        if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].query_ready + qidx, UInt64(0)) == 0: continue
-                        var slot = shard_bus[].query_slots[qidx]
-                        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shard_bus[].query_ready + qidx, UInt64(0))
+                        if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].query_ready.unsafe_offset(qidx), UInt64(0)) == 0: continue
+                        var slot = shard_bus[].query_slots[unsafe_offset=qidx]
+                        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shard_bus[].query_ready.unsafe_offset(qidx), UInt64(0))
                         scratch_dists.clear()
                         try:
                             var sids = hnsw.search_fp32_scored(slot.query_fp32, Int(slot.k), scratch_dists, Int(slot.ef))
                             shard_bus[].write_result(c, worker_id, sids, scratch_dists, slot.seq)
                         except:
-                            shard_bus[].result_counts[c * n_shards2 + worker_id] = 0
-                            shard_bus[].result_seq[c * n_shards2 + worker_id] = slot.seq
-                            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shard_bus[].result_ready + c * n_shards2 + worker_id, UInt64(1))
+                            shard_bus[].result_counts[unsafe_offset=c * n_shards2 + worker_id] = 0
+                            shard_bus[].result_seq[unsafe_offset=c * n_shards2 + worker_id] = slot.seq
+                            Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shard_bus[].result_ready.unsafe_offset(c * n_shards2).unsafe_offset(worker_id), UInt64(1))
                     for other2 in range(n_shards2):
                         if done_arr[other2]: continue
                         var ridx = worker_id * n_shards2 + other2
-                        if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].result_ready + ridx, UInt64(0)) != 0:
-                            if shard_bus[].result_seq[ridx] == query_seq:
+                        if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].result_ready.unsafe_offset(ridx), UInt64(0)) != 0:
+                            if shard_bus[].result_seq[unsafe_offset=ridx] == query_seq:
                                 done_arr[other2] = True
                                 pending -= 1
                     spin += 1
@@ -4387,17 +4386,17 @@ def handle_ft_search(
 
                 for shard in range(n_shards2):
                     var idx2 = worker_id * n_shards2 + shard
-                    if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].result_ready + idx2, UInt64(0)) == 0: continue
-                    if shard_bus[].result_seq[idx2] != query_seq: continue
+                    if Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shard_bus[].result_ready.unsafe_offset(idx2), UInt64(0)) == 0: continue
+                    if shard_bus[].result_seq[unsafe_offset=idx2] != query_seq: continue
 
-                    var cnt = Int(shard_bus[].result_counts[idx2])
+                    var cnt = Int(shard_bus[].result_counts[unsafe_offset=idx2])
                     if cnt < 0 or cnt > MAX_SHARD_K: cnt = 0
-                    var base_ids = shard_bus[].result_ids + idx2 * MAX_SHARD_K
-                    var base_scores = shard_bus[].result_scores + idx2 * MAX_SHARD_K
+                    var base_ids = shard_bus[].result_ids.unsafe_offset(idx2 * MAX_SHARD_K)
+                    var base_scores = shard_bus[].result_scores.unsafe_offset(idx2 * MAX_SHARD_K)
 
                     for r in range(cnt):
-                        all_res_ids.append(Int(base_ids[r]))
-                        all_res_scores.append(base_scores[r])
+                        all_res_ids.append(Int(base_ids[unsafe_offset=r]))
+                        all_res_scores.append(base_scores[unsafe_offset=r])
 
                 # 5. Extract top-k via simple selection sort
                 var n_all = len(all_res_ids)

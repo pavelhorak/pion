@@ -1,5 +1,5 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.math import sqrt
 from std.memory import alloc, unsafe_memset, unsafe_memcpy
 from std.atomic import Atomic, Ordering
@@ -53,7 +53,7 @@ def hk_buf_bytes(hk_max: Int) -> Int:
 
 @always_inline
 def _hk_ctl(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int) -> Pointer[UInt64, MutUntrackedOrigin]:
-    return (buf + hk_max * HK_ENTRY).bitcast[UInt64]()
+    return (buf.unsafe_offset(hk_max * HK_ENTRY)).unsafe_bitcast[UInt64]()
 
 
 @always_inline
@@ -65,33 +65,33 @@ def hk_get(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int, slot: Int,
     frees a copy while such a slot can be read (hk_clear)."""
     if is_null(buf) or slot < 0 or slot >= hk_max:
         return False
-    var e = buf + slot * HK_ENTRY
-    var l = Int(e[0])
+    var e = buf.unsafe_offset(slot * HK_ENTRY)
+    var l = Int(e[unsafe_offset=0])
     if l == 0:
         return False
     if l <= HK_INLINE_MAX:
-        kp = e + 1
+        kp = e.unsafe_offset(1)
         kl = l
         return True
-    if e[0] != HK_LONG:
+    if e[unsafe_offset=0] != HK_LONG:
         return False
-    var a = Int((e + 8).bitcast[UInt64]()[0])
+    var a = Int((e.unsafe_offset(8)).unsafe_bitcast[UInt64]()[unsafe_offset=0])
     if a == 0:
         return False
     var blk = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=a)
-    kp = blk + 8
-    kl = Int(blk.bitcast[UInt64]()[0])
+    kp = blk.unsafe_offset(8)
+    kl = Int(blk.unsafe_bitcast[UInt64]()[unsafe_offset=0])
     return True
 
 
 def _hk_release(e: Pointer[UInt8, MutUntrackedOrigin]):
     """Entry `e` empty again; its key copy freed."""
-    if e[0] == HK_LONG:
-        var a = Int((e + 8).bitcast[UInt64]()[0])
+    if e[unsafe_offset=0] == HK_LONG:
+        var a = Int((e.unsafe_offset(8)).unsafe_bitcast[UInt64]()[unsafe_offset=0])
         if a != 0:
-            Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=a).free()
-        (e + 8).bitcast[UInt64]()[0] = 0
-    e[0] = 0
+            Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=a).unsafe_free()
+        (e.unsafe_offset(8)).unsafe_bitcast[UInt64]()[unsafe_offset=0] = 0
+    e[unsafe_offset=0] = 0
 
 
 def hk_put(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int, slot: Int,
@@ -101,17 +101,17 @@ def hk_put(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int, slot: Int,
     write theirs before any worker serves."""
     if is_null(buf) or slot < 0 or slot >= hk_max:
         return
-    var e = buf + slot * HK_ENTRY
+    var e = buf.unsafe_offset(slot * HK_ENTRY)
     _hk_release(e)
     if klen <= HK_INLINE_MAX:
-        unsafe_memcpy(dest=e + 1, src=key, count=klen)
-        e[0] = UInt8(klen)
+        unsafe_memcpy(dest=e.unsafe_offset(1), src=key, count=klen)
+        e[unsafe_offset=0] = UInt8(klen)
         return
-    var blk = alloc[UInt8](8 + klen)
-    blk.bitcast[UInt64]()[0] = UInt64(klen)
-    unsafe_memcpy(dest=blk + 8, src=key, count=klen)
-    (e + 8).bitcast[UInt64]()[0] = UInt64(Int(blk))
-    e[0] = HK_LONG
+    var blk = unsafe_alloc[UInt8](8 + klen)
+    blk.unsafe_bitcast[UInt64]()[unsafe_offset=0] = UInt64(klen)
+    unsafe_memcpy(dest=blk.unsafe_offset(8), src=key, count=klen)
+    (e.unsafe_offset(8)).unsafe_bitcast[UInt64]()[unsafe_offset=0] = UInt64(Int(blk))
+    e[unsafe_offset=0] = HK_LONG
     var ctl = _hk_ctl(buf, hk_max)
     var top = UInt64(slot + 1)
     var cur = Atomic[Scalar[DType.uint64]].load[ordering=Ordering.RELAXED](ctl)
@@ -134,7 +134,7 @@ def hk_clear(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int):
     if top > hk_max:
         top = hk_max
     for s in range(top):
-        _hk_release(buf + s * HK_ENTRY)
+        _hk_release(buf.unsafe_offset(s * HK_ENTRY))
     Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](ctl, UInt64(0))
 
 
@@ -148,7 +148,7 @@ def hk_claim(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int, slot: Int,
     its records): the slot is someone else's document."""
     if is_null(buf) or slot < 0 or slot >= hk_max:
         return True
-    var lock = _hk_ctl(buf, hk_max) + 1
+    var lock = _hk_ctl(buf, hk_max).unsafe_offset(1)
     while True:
         var free = UInt64(0)
         if Atomic[Scalar[DType.uint64]].compare_exchange(lock, free, UInt64(1)):
@@ -163,7 +163,7 @@ def hk_claim(buf: Pointer[UInt8, MutUntrackedOrigin], hk_max: Int, slot: Int,
         same = False
     else:
         for b in range(klen):
-            if ep[b] != key[b]:
+            if ep[unsafe_offset=b] != key[unsafe_offset=b]:
                 same = False
                 break
     Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](lock, UInt64(0))
@@ -632,7 +632,7 @@ struct SharedHNSWView(Movable):
     @always_inline
     def slot_dead(self, slot: Int) -> Bool:
         """#46: the document at `slot` left the keyspace, or its vector left it."""
-        return Int(self.vec_dead) != 0 and slot >= 0 and slot < self.hk_max_elements and self.vec_dead[slot] != 0
+        return Int(self.vec_dead) != 0 and slot >= 0 and slot < self.hk_max_elements and self.vec_dead[unsafe_offset=slot] != 0
 
     @always_inline
     def any_dead(self) -> Bool:
@@ -640,9 +640,9 @@ struct SharedHNSWView(Movable):
 
     def mark_dead(self, slot: Int):
         """#46: slot `slot` is dead (any worker; the count is atomic)."""
-        if Int(self.vec_dead) == 0 or slot < 0 or slot >= self.hk_max_elements or self.vec_dead[slot] != 0:
+        if Int(self.vec_dead) == 0 or slot < 0 or slot >= self.hk_max_elements or self.vec_dead[unsafe_offset=slot] != 0:
             return
-        self.vec_dead[slot] = 1
+        self.vec_dead[unsafe_offset=slot] = 1
         _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](self.vec_dead_count, UInt64(1))
 
     def new_generation(mut self):
@@ -659,7 +659,7 @@ struct SharedHNSWView(Movable):
             _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELEASE](self.vec_gen, UInt64(1))
         # Drop-in: no slot is written yet, so the exact scan sees none
         if Int(self.ingest_ids) != 0 and self.hk_max_elements > 0:
-            unsafe_memset(self.ingest_ids.bitcast[UInt8](), 0xFF, self.hk_max_elements * 4)
+            unsafe_memset(self.ingest_ids.unsafe_bitcast[UInt8](), 0xFF, self.hk_max_elements * 4)
 
     def key_in_prefixes(self, key: Pointer[UInt8, MutUntrackedOrigin], klen: Int) -> Bool:
         """The index's PREFIX list takes `key`: it starts with one of them
@@ -668,13 +668,13 @@ struct SharedHNSWView(Movable):
         if n <= 0 or Int(self.pre_prefixes) == 0:
             return True
         for p in range(n):
-            var slot = self.pre_prefixes + p * PREFIX_SLOT
-            var pl = Int(slot[0])
+            var slot = self.pre_prefixes.unsafe_offset(p * PREFIX_SLOT)
+            var pl = Int(slot[unsafe_offset=0])
             if pl > klen:
                 continue
             var ok = True
             for b in range(pl):
-                if key[b] != slot[1 + b]:
+                if key[unsafe_offset=b] != slot[unsafe_offset=1 + b]:
                     ok = False
                     break
             if ok:
@@ -688,10 +688,10 @@ struct SharedHNSWView(Movable):
         add_ingest_vector checks, comes last. Both hold every slot
         add_ingest_vector can hand out (it bounds them by hk_max_elements)."""
         var id_cap = cap if cap > self.hk_max_elements else self.hk_max_elements
-        var ids = alloc[Int32](id_cap)
-        unsafe_memset(ids.bitcast[UInt8](), 0xFF, id_cap * 4)
+        var ids = unsafe_alloc[Int32](id_cap)
+        unsafe_memset(ids.unsafe_bitcast[UInt8](), 0xFF, id_cap * 4)
         self.ingest_ids = ids
-        self.ingest_fp32 = alloc[Float32](id_cap * dim)
+        self.ingest_fp32 = unsafe_alloc[Float32](id_cap * dim)
 
     def fill_ingest_row(self, slot: Int, vector: Pointer[Float32, MutUntrackedOrigin]):
         """Row `slot` from `vector`, as add_ingest_vector writes one (normalized
@@ -706,7 +706,7 @@ struct SharedHNSWView(Movable):
     def clear_ingest_row(self, slot: Int):
         """Row `slot` zeroed: a warm load's graph row whose document is gone."""
         var dim = self.pre_dim
-        unsafe_memset((self.ingest_fp32 + slot * dim).bitcast[UInt8](), 0, dim * 4)
+        unsafe_memset((self.ingest_fp32.unsafe_offset(slot * dim)).unsafe_bitcast[UInt8](), 0, dim * 4)
 
     def _normalize_row(self, off: Int):
         # gh #271: under COSINE the index stores unit vectors. FT.OPTIMIZE both
@@ -749,7 +749,7 @@ struct SharedHNSWView(Movable):
         but the newest rows."""
         if Int(self.ingest_count) == 0 or Int(self.ingest_fp32) == 0:
             return 0
-        var n = Int(self.ingest_count.load[volatile=True]())
+        var n = Int(self.ingest_count.unsafe_load[volatile=True]())
         if self.hk_max_elements > 0 and n > self.hk_max_elements:
             n = self.hk_max_elements
         return n

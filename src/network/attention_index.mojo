@@ -14,8 +14,8 @@ Memory per 128K context, 40 layers, INT8 1024d:
   ~68 MB per layer * 40 = 2.7 GB per session (fits single Pion worker)
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 from std.collections import List
@@ -189,47 +189,47 @@ struct AttentionIndex(Movable):
         # Only allocate when enabled — avoid wasting memory/cache when --kvcache not set
         var n_slots = MAX_ATTEND_SESSIONS * MAX_ATTEND_LAYERS if enabled else 1
 
-        var _s = alloc[AttendSessionMeta](MAX_ATTEND_SESSIONS if enabled else 1)
+        var _s = unsafe_alloc[AttendSessionMeta](MAX_ATTEND_SESSIONS if enabled else 1)
         self.sessions = Pointer[AttendSessionMeta, MutUntrackedOrigin](unsafe_from_address=Int(_s))
         var n_sessions = MAX_ATTEND_SESSIONS if enabled else 1
         for si in range(n_sessions):
             self.sessions[unsafe_offset=si] = AttendSessionMeta()
 
-        var _idx = alloc[Pointer[HNSWGraph, MutUntrackedOrigin]](n_slots)
+        var _idx = unsafe_alloc[Pointer[HNSWGraph, MutUntrackedOrigin]](n_slots)
         self.indexes = Pointer[Pointer[HNSWGraph, MutUntrackedOrigin], MutUntrackedOrigin](
             unsafe_from_address=Int(_idx))
         for ii in range(n_slots):
             self.indexes[unsafe_offset=ii] = null_ptr[HNSWGraph, MutUntrackedOrigin]()
 
-        var _val = alloc[Pointer[Float32, MutUntrackedOrigin]](n_slots)
+        var _val = unsafe_alloc[Pointer[Float32, MutUntrackedOrigin]](n_slots)
         self.values = Pointer[Pointer[Float32, MutUntrackedOrigin], MutUntrackedOrigin](
             unsafe_from_address=Int(_val))
         for vi in range(n_slots):
             self.values[unsafe_offset=vi] = null_ptr[Float32, MutUntrackedOrigin]()
 
         # INT8 value compression
-        var _vi8 = alloc[Pointer[Int8, MutUntrackedOrigin]](n_slots)
+        var _vi8 = unsafe_alloc[Pointer[Int8, MutUntrackedOrigin]](n_slots)
         self.values_int8 = Pointer[Pointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin](
             unsafe_from_address=Int(_vi8))
         for vi in range(n_slots):
             self.values_int8[unsafe_offset=vi] = null_ptr[Int8, MutUntrackedOrigin]()
-        var _vs = alloc[Float32](n_slots)
+        var _vs = unsafe_alloc[Float32](n_slots)
         self.values_scale = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_vs))
-        var _vm = alloc[Float32](n_slots)
+        var _vm = unsafe_alloc[Float32](n_slots)
         self.values_min = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_vm))
 
-        var _ks = alloc[Pointer[Float32, MutUntrackedOrigin]](n_slots)
+        var _ks = unsafe_alloc[Pointer[Float32, MutUntrackedOrigin]](n_slots)
         self.key_staging = Pointer[Pointer[Float32, MutUntrackedOrigin], MutUntrackedOrigin](
             unsafe_from_address=Int(_ks))
         for ki in range(n_slots):
             self.key_staging[unsafe_offset=ki] = null_ptr[Float32, MutUntrackedOrigin]()
 
         # M4: per-layer V format + turbo4 blob arrays
-        var _vf = alloc[UInt8](n_slots)
+        var _vf = unsafe_alloc[UInt8](n_slots)
         self.values_format = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_vf))
         for fi in range(n_slots):
             self.values_format[unsafe_offset=fi] = QFMT_INT8
-        var _vt = alloc[Pointer[Int8, MutUntrackedOrigin]](n_slots)
+        var _vt = unsafe_alloc[Pointer[Int8, MutUntrackedOrigin]](n_slots)
         self.values_turbo4 = Pointer[Pointer[Int8, MutUntrackedOrigin], MutUntrackedOrigin](
             unsafe_from_address=Int(_vt))
         for ti in range(n_slots):
@@ -241,15 +241,15 @@ struct AttentionIndex(Movable):
         self.query_scratch_f_cap = 0
         self.query_scratch_i_cap = 0
 
-        var _sc = alloc[Int](n_slots)
+        var _sc = unsafe_alloc[Int](n_slots)
         self.staging_cap = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_sc))
         for ci in range(n_slots):
             self.staging_cap[unsafe_offset=ci] = 0
-        var _lt = alloc[Int](n_slots)
+        var _lt = unsafe_alloc[Int](n_slots)
         self.layer_tokens = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(_lt))
         for ci in range(n_slots):
             self.layer_tokens[unsafe_offset=ci] = 0
-        var _kn = alloc[Pointer[Float32, MutUntrackedOrigin]](n_slots)
+        var _kn = unsafe_alloc[Pointer[Float32, MutUntrackedOrigin]](n_slots)
         self.key_norms = Pointer[Pointer[Float32, MutUntrackedOrigin], MutUntrackedOrigin](
             unsafe_from_address=Int(_kn))
         for ci in range(n_slots):
@@ -262,13 +262,13 @@ struct AttentionIndex(Movable):
         if floats_needed > self.query_scratch_f_cap:
             if is_not_null(self.query_scratch_f):
                 self.query_scratch_f.unsafe_free()
-            var p = alloc[Float32](floats_needed)
+            var p = unsafe_alloc[Float32](floats_needed)
             self.query_scratch_f = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(p))
             self.query_scratch_f_cap = floats_needed
         if ints_needed > self.query_scratch_i_cap:
             if is_not_null(self.query_scratch_i):
                 self.query_scratch_i.unsafe_free()
-            var p = alloc[Int](ints_needed)
+            var p = unsafe_alloc[Int](ints_needed)
             self.query_scratch_i = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(p))
             self.query_scratch_i_cap = ints_needed
 
@@ -373,7 +373,7 @@ struct AttentionIndex(Movable):
                 var meta = AttendSessionMeta()
                 meta.active = True
                 meta.session_hash = self._hash_bytes(sid_ptr, sid_len)
-                var id_copy = alloc[UInt8](sid_len)
+                var id_copy = unsafe_alloc[UInt8](sid_len)
                 unsafe_memcpy(dest=id_copy, src=sid_ptr, count=sid_len)
                 meta.session_id_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(id_copy))
                 meta.session_id_len = sid_len
@@ -451,7 +451,7 @@ struct AttentionIndex(Movable):
         if is_null(self.key_staging[unsafe_offset=slot]):
             # First allocation: size for exactly what we need (+ headroom)
             var cap = max(needed * 2, INITIAL_STAGING_TOKENS)
-            var ks_ptr = alloc[Float32](cap * key_dim)
+            var ks_ptr = unsafe_alloc[Float32](cap * key_dim)
             self.key_staging[unsafe_offset=slot] = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(ks_ptr))
             # gh #131 §6: quantize block-format V on ingest — allocate the packed blob
             # instead of an FP32 staging buffer, skipping one full FP32 pass + buffer at
@@ -466,11 +466,11 @@ struct AttentionIndex(Movable):
                 and (val_dim % 32) == 0)
             if ingest_quant:
                 var bpt = self._bytes_per_token(vf0, val_dim, meta.rope_dim)
-                var _tb = alloc[Int8](cap * bpt)
+                var _tb = unsafe_alloc[Int8](cap * bpt)
                 self.values_turbo4[unsafe_offset=slot] = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_tb))
                 self.values_format[unsafe_offset=slot] = vf0
             else:
-                var val_ptr = alloc[Float32](cap * val_dim)
+                var val_ptr = unsafe_alloc[Float32](cap * val_dim)
                 self.values[unsafe_offset=slot] = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(val_ptr))
             self.staging_cap[unsafe_offset=slot] = cap
         elif needed > self.staging_cap[unsafe_offset=slot]:
@@ -482,14 +482,14 @@ struct AttentionIndex(Movable):
             while new_cap < needed:
                 new_cap *= 2
             var old_ks = self.key_staging[unsafe_offset=slot]
-            var _nks = alloc[Float32](new_cap * key_dim)
+            var _nks = unsafe_alloc[Float32](new_cap * key_dim)
             var nks = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_nks))
             unsafe_memcpy(dest=nks, src=old_ks, count=base * key_dim)
             old_ks.unsafe_free()
             self.key_staging[unsafe_offset=slot] = nks
             if is_not_null(self.values[unsafe_offset=slot]):
                 var old_v = self.values[unsafe_offset=slot]
-                var _nv = alloc[Float32](new_cap * val_dim)
+                var _nv = unsafe_alloc[Float32](new_cap * val_dim)
                 var nv = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_nv))
                 unsafe_memcpy(dest=nv, src=old_v, count=base * val_dim)
                 old_v.unsafe_free()
@@ -498,7 +498,7 @@ struct AttentionIndex(Movable):
                 var vfg = self.values_format[unsafe_offset=slot]
                 var bptg = self._bytes_per_token(vfg, val_dim, meta.rope_dim)
                 var old_t = self.values_turbo4[unsafe_offset=slot]
-                var _nt = alloc[Int8](new_cap * bptg)
+                var _nt = unsafe_alloc[Int8](new_cap * bptg)
                 var nt = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_nt))
                 unsafe_memcpy(dest=nt, src=old_t, count=base * bptg)
                 old_t.unsafe_free()
@@ -558,7 +558,7 @@ struct AttentionIndex(Movable):
 
         # Create HNSW sized to actual token count (not MAX — saves memory)
         var hnsw_cap = max(n_tokens + 100, 1000)  # small headroom
-        var hnsw_ptr = alloc[HNSWGraph](1)
+        var hnsw_ptr = unsafe_alloc[HNSWGraph](1)
         # gh #391: M=16 / ef_construction=100 (was 4 / 16, where a stored key
         # found itself 1 time in 5 at 128K tokens).
         hnsw_ptr.unsafe_write(HNSWGraph(hnsw_cap, key_dim, M=16, ef_construction=100))
@@ -571,13 +571,13 @@ struct AttentionIndex(Movable):
         # other key, lose their inbound links, and a query for one could not
         # reach it — 52-61% self-match at 128K even with M=16, 92.5% at
         # ef=1000. The staging buffer is freed below, so normalize in place.
-        var kn = alloc[Float32](max(n_tokens, 1))
+        var kn = unsafe_alloc[Float32](max(n_tokens, 1))
         for ti in range(n_tokens):
             var row = staging.unsafe_offset(ti * key_dim)
             var ss = Float32(0.0)
             for d in range(key_dim):
                 ss += row[unsafe_offset=d] * row[unsafe_offset=d]
-            kn[ti] = sqrt(ss)
+            kn[unsafe_offset=ti] = sqrt(ss)
             l2_normalize_fp32(row, row, key_dim)
         self.key_norms[unsafe_offset=slot] = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(kn))
         hnsw[].distance_metric = 1       # search_fp32_scored normalizes the query
@@ -616,7 +616,7 @@ struct AttentionIndex(Movable):
                 # Block-quantized path (turbo4/turbo3/turbo2/fp8/hybrid).
                 var bytes_per_token = self._bytes_per_token(vf, val_dim, meta.rope_dim)
                 var blob_size = n_tokens * bytes_per_token
-                var _tb = alloc[Int8](blob_size)
+                var _tb = unsafe_alloc[Int8](blob_size)
                 var turbo_buf = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_tb))
                 for ti in range(n_tokens):
                     var src = fp32_vals.unsafe_offset(ti * val_dim)
@@ -637,7 +637,7 @@ struct AttentionIndex(Movable):
             elif vf == QFMT_FP16:
                 # FP16 path: simple truncation, 2× memory reduction vs FP32.
                 var fp16_count = total_vals
-                var _f16 = alloc[Int8](fp16_count * 2)  # Float16 = 2 bytes
+                var _f16 = unsafe_alloc[Int8](fp16_count * 2)  # Float16 = 2 bytes
                 var fp16_buf = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_f16))
                 var f16_ptr = fp16_buf.unsafe_bitcast[Float16]()
                 for vi in range(fp16_count):
@@ -659,7 +659,7 @@ struct AttentionIndex(Movable):
                     vrange = Float32(1.0)
                 var scale = Float32(254.0) / vrange
 
-                var _i8 = alloc[Int8](total_vals)
+                var _i8 = unsafe_alloc[Int8](total_vals)
                 var int8_vals = Pointer[Int8, MutUntrackedOrigin](unsafe_from_address=Int(_i8))
                 for vi in range(total_vals):
                     var normalized = (fp32_vals[unsafe_offset=vi] - vmin) * scale
@@ -827,7 +827,7 @@ struct AttentionIndex(Movable):
                 comptime WF = 8
                 var d = 0
                 while d + WF <= meta.value_dim:
-                    out_values.store(dst_off + d, f16_ptr.load[width=WF](src_off + d).cast[DType.float32]())
+                    out_values.unsafe_store(dst_off + d, f16_ptr.unsafe_load[width=WF](src_off + d).cast[DType.float32]())
                     d += WF
                 while d < meta.value_dim:
                     out_values[unsafe_offset=dst_off + d] = f16_ptr[unsafe_offset=src_off + d].cast[DType.float32]()
@@ -846,8 +846,8 @@ struct AttentionIndex(Movable):
                 var c127 = SIMD[DType.float32, WI](127.0)
                 var d = 0
                 while d + WI <= meta.value_dim:
-                    var f = i8_store.load[width=WI](src_off + d).cast[DType.float32]() + c127
-                    out_values.store(dst_off + d, f * inv_v + vmin_v)
+                    var f = i8_store.unsafe_load[width=WI](src_off + d).cast[DType.float32]() + c127
+                    out_values.unsafe_store(dst_off + d, f * inv_v + vmin_v)
                     d += WI
                 while d < meta.value_dim:
                     var i8_val = Float32(Int(i8_store[unsafe_offset=src_off + d]) + 127)

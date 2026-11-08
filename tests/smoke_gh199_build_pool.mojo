@@ -9,14 +9,14 @@
 # it on 3 spawned pthreads + the caller. Exercises heap allocation (List),
 # atomics, and pointer arithmetic — the runtime surface the real build worker
 # needs.
-from std.memory.unsafe_pointer import UnsafePointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
 
 
 @export
-def pion_gh199_smoke_lane(ctx: UnsafePointer[UInt64, MutUntrackedOrigin], idx: Int64):
+def pion_gh199_smoke_lane(ctx: Pointer[UInt64, MutUntrackedOrigin], idx: Int64) abi("C"):
     var l = List[Int]()
     for i in range(1000):
         l.append(i)
@@ -28,14 +28,14 @@ def pion_gh199_smoke_lane(ctx: UnsafePointer[UInt64, MutUntrackedOrigin], idx: I
 
 
 def main():
-    var counter = alloc[UInt64](1)
-    counter[0] = 0
+    var counter = unsafe_alloc[UInt64](1)
+    counter[unsafe_offset=0] = 0
     var sym = String("pion_gh199_smoke_lane") + "\0"
     var rc = external_call["pion_build_pool_run_sym", Int32](
         sym.unsafe_ptr(), counter, Int64(4))
     # expect: 4 lanes × 1000 (acc is even) + (0+1+2+3) = 4006
-    print("rc=", rc, " counter=", counter[0], " expect=4006")
-    if rc == 0 and counter[0] == 4006:
+    print("rc=", rc, " counter=", counter[unsafe_offset=0], " expect=4006")
+    if rc == 0 and counter[unsafe_offset=0] == 4006:
         print("SMOKE OK — Mojo defs run on foreign pthreads")
     else:
         print("SMOKE FAILED")

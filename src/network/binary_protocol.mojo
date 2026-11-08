@@ -28,7 +28,6 @@ Status:
 """
 
 from src.common.ptr import is_not_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 
@@ -456,7 +455,7 @@ def parse_attend_prefix_query_fused(body: Pointer[UInt8, MutUntrackedOrigin],
     req.Q_ptr = body.unsafe_offset(data_start)
     req.K_suf_ptr = body.unsafe_offset(data_start).unsafe_offset(q_bytes)
     req.V_suf_ptr = body.unsafe_offset(data_start).unsafe_offset(q_bytes).unsafe_offset(ks_bytes)
-    req.head_map_ptr = body.unsafe_offset(data_start).unsafe_offset(q_bytes).unsafe_offset(ks_bytes) + ks_bytes
+    req.head_map_ptr = body.unsafe_offset(data_start).unsafe_offset(q_bytes).unsafe_offset(ks_bytes).unsafe_offset(ks_bytes)
     # gh #60 Step 1: optional trailing 4-byte fa_window override.
     # Old consumers send exactly `data_start + need` bytes → fa_window stays -1.
     # New consumers append a u32 → parse it. Forward-compatible.

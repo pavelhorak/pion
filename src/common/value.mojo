@@ -1,5 +1,5 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, stack_allocation, unsafe_memset
 from std.memory.unsafe import bitcast
 from std.collections import Span
@@ -35,9 +35,9 @@ def _load_u64_le(ptr: Pointer[UInt8, MutUntrackedOrigin], avail: Int) -> UInt64:
     if avail <= 0:
         return 0
     if avail >= 8:
-        return ptr.unsafe_bitcast[UInt64]().load()
+        return ptr.unsafe_bitcast[UInt64]().unsafe_load()
     if (Int(ptr) & 0xFFF) <= 0xFF8:
-        return ptr.unsafe_bitcast[UInt64]().load[volatile=True]()
+        return ptr.unsafe_bitcast[UInt64]().unsafe_load[volatile=True]()
     var w: UInt64 = 0
     for i in range(avail):
         w |= UInt64(ptr[unsafe_offset=i]) << UInt64(i * 8)
@@ -162,12 +162,12 @@ struct GenericValue(Copyable, Movable, Defaultable, ImplicitlyCopyable, Hashable
                 # Main 8-byte loop (all full blocks except possibly last)
                 var full_blocks = l // 8
                 for i in range(full_blocks):
-                    h = Self._wyhash_mix(h ^ p.load(i), 0xe7037ed1a0b428db)
+                    h = Self._wyhash_mix(h ^ p.unsafe_load(i), 0xe7037ed1a0b428db)
                 # AHash-style tail: overlapping read of last 8 bytes eliminates
                 # per-byte scalar loop. Safe because heap strings are always >23 bytes.
                 var tail_bytes = l - full_blocks * 8
                 if tail_bytes > 0:
-                    var last8 = (self.as_string().unsafe_offset(l) - 8).unsafe_bitcast[UInt64]().load()
+                    var last8 = self.as_string().unsafe_offset(l - 8).unsafe_bitcast[UInt64]().unsafe_load()
                     h = Self._wyhash_mix(h ^ last8, 0xe7037ed1a0b428db)
                 return Int(h)
         return Int(self._data0)
@@ -286,13 +286,13 @@ struct GenericValue(Copyable, Movable, Defaultable, ImplicitlyCopyable, Hashable
             if length > 0:
                 var c0 = d0 >> 8
                 for i in range(min(length, 7)):
-                    dest.store(i, UInt8((c0 >> UInt64(i * 8)) & 0xFF))
+                    dest.unsafe_store(i, UInt8((c0 >> UInt64(i * 8)) & 0xFF))
             if length > 7:
                 for i in range(min(length - 7, 8)):
-                    dest.store(7 + i, UInt8((d1 >> UInt64(i * 8)) & 0xFF))
+                    dest.unsafe_store(7 + i, UInt8((d1 >> UInt64(i * 8)) & 0xFF))
             if length > 15:
                 for i in range(min(length - 15, 8)):
-                    dest.store(15 + i, UInt8((d2 >> UInt64(i * 8)) & 0xFF))
+                    dest.unsafe_store(15 + i, UInt8((d2 >> UInt64(i * 8)) & 0xFF))
         else:
             var src = self.as_string()
             var length = self.string_len()
@@ -338,7 +338,7 @@ struct GenericValue(Copyable, Movable, Defaultable, ImplicitlyCopyable, Hashable
         if self.is_string():
             var length = self.string_len()
             if length == 0: return ""
-            var buf = alloc[UInt8](length)
+            var buf = unsafe_alloc[UInt8](length)
             self.copy_to(buf)
             # gh #181: `String(buf, length)` is not a from-bytes constructor in
             # Mojo b2 — it formatted the POINTER ("0x1349…"), so every __str__
@@ -456,7 +456,7 @@ struct GenericValue(Copyable, Movable, Defaultable, ImplicitlyCopyable, Hashable
         var cap = min_bytes if min_bytes > src_len else src_len
         if cap <= 0:
             cap = 1
-        var out = alloc[UInt8](cap)
+        var out = unsafe_alloc[UInt8](cap)
         if src_len > 0:
             self.copy_to(out)
         if cap > src_len:
@@ -612,7 +612,7 @@ struct GenericValue(Copyable, Movable, Defaultable, ImplicitlyCopyable, Hashable
             res._data1 = packed[1]
             res._data2 = packed[2]
         else:
-            var new_ptr = alloc[UInt8](length)
+            var new_ptr = unsafe_alloc[UInt8](length)
             unsafe_memcpy(dest=new_ptr, src=ptr, count=length)
             res.type = ValueType(ValueType.STRING)
             res._data0 = UInt64(Int(new_ptr))
@@ -653,7 +653,7 @@ struct GenericValue(Copyable, Movable, Defaultable, ImplicitlyCopyable, Hashable
             res._data1 = d1
             res._data2 = d2
         else:
-            var ptr = alloc[UInt8](length + 1)
+            var ptr = unsafe_alloc[UInt8](length + 1)
             for i in range(length):
                 ptr[unsafe_offset=i] = val.as_bytes()[i]
             ptr[unsafe_offset=length] = 0

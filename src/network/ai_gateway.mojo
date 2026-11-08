@@ -21,7 +21,7 @@ Configuration (via LLMConfig and EmbeddingConfig in PionConfig):
 Enable: config.llm.enabled = True and config.embedding.enabled = True
 """
 
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.collections import List, Span
@@ -97,14 +97,14 @@ struct FLAREGateway(Movable):
         self.emb_client = EmbeddingClient(emb_host, emb_port, emb_model, dimensions)
         self.nle = NLEmbeddingEngine(nle_enabled)
         self.llm = LLMClient(llm_host, llm_port, llm_model, llm_enabled)
-        self.embed_buf    = alloc[Float32](dimensions)
-        self.generated_buf = alloc[UInt8](FLARE_GENERATED_MAX)
-        self.context_buf   = alloc[UInt8](FLARE_CONTEXT_MAX)
-        self.prompt_buf    = alloc[UInt8](FLARE_PROMPT_MAX)
-        self.chunk_buf     = alloc[UInt8](FLARE_CHUNK_MAX)
-        self.search_buf    = alloc[UInt8](FLARE_SEARCH_MAX)
-        self.min_lp_buf    = alloc[Float32](1)
-        self.done_buf      = alloc[UInt8](1)
+        self.embed_buf    = unsafe_alloc[Float32](dimensions)
+        self.generated_buf = unsafe_alloc[UInt8](FLARE_GENERATED_MAX)
+        self.context_buf   = unsafe_alloc[UInt8](FLARE_CONTEXT_MAX)
+        self.prompt_buf    = unsafe_alloc[UInt8](FLARE_PROMPT_MAX)
+        self.chunk_buf     = unsafe_alloc[UInt8](FLARE_CHUNK_MAX)
+        self.search_buf    = unsafe_alloc[UInt8](FLARE_SEARCH_MAX)
+        self.min_lp_buf    = unsafe_alloc[Float32](1)
+        self.done_buf      = unsafe_alloc[UInt8](1)
 
     def __moveinit__(out self, deinit take: Self):
         self.hnsw         = take.hnsw^

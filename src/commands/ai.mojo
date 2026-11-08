@@ -1,6 +1,6 @@
 """AI commands: AI.CHAT, AI.FLARE, AI.COMPLETE, AI.SEMANTIC_CACHE, AI.MEMORY."""
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.collections import Array, List
 from std.memory import alloc, unsafe_memcpy, stack_allocation
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
@@ -78,7 +78,7 @@ def handle_ai_chat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         if not llm_client.enabled:
             writer.append_error_response("ERR LLM not enabled (set LLMConfig.enabled=True and start max serve)")
         else:
-            var _out = alloc[UInt8](1024 * 1024)
+            var _out = unsafe_alloc[UInt8](1024 * 1024)
             var _out_mb = _out
             var _out_len = llm_client.complete(
                 _prompt_tok.ptr,
@@ -171,7 +171,7 @@ def handle_ai_flare(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
                 if not flare.enabled:
                     writer.append_error_response("ERR AI.FLARE requires embedding.enabled=True and llm.enabled=True")
                 else:
-                    var _fl_out = alloc[UInt8](4 * 1024 * 1024)
+                    var _fl_out = unsafe_alloc[UInt8](4 * 1024 * 1024)
                     var _fl_out_mb = _fl_out
                     var _fl_out_len = flare.run(
                         _fl_query_tok.ptr,
@@ -258,7 +258,7 @@ def handle_ai_complete(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
                 var _ac_host = scache.client.host
                 var _ac_port = scache.client.port
                 var _ac_use_model = _ac_model if _ac_model.byte_length() > 0 else llm_client.model
-                var _ac_out = alloc[UInt8](1024 * 1024)
+                var _ac_out = unsafe_alloc[UInt8](1024 * 1024)
                 var _ac_out_mb = _ac_out
                 var _ac_logprob = stack_allocation[1, Float32]()
                 var _ac_done = stack_allocation[1, UInt8]()
@@ -407,7 +407,7 @@ def handle_ai_embed(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
             var text_tok = tokens[unsafe_offset=ii + 1]
             ii += 1
             var dims = scache.dimensions
-            var emb_buf = alloc[Float32](dims)
+            var emb_buf = unsafe_alloc[Float32](dims)
             var ok = scache.embed_into(
                 text_tok.ptr.unsafe_bitcast[UInt8](), text_tok.length, emb_buf)
             if ok:
@@ -434,7 +434,7 @@ def handle_ai_generate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
         var prompt_tok = tokens[unsafe_offset=ii + 1]
         ii += 1
         # Parse optional KEYS, MAX_TOKENS
-        var context_buf = alloc[UInt8](65536)
+        var context_buf = unsafe_alloc[UInt8](65536)
         var ctx_len = 0
         var max_tokens = 256
         while ii + 1 < num_tokens:
@@ -469,7 +469,7 @@ def handle_ai_generate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
                                 val.copy_to(context_buf.unsafe_offset(ctx_len))
                                 ctx_len += vlen
                         elif val.type.value == ValueType.INT:
-                            var int_buf = alloc[UInt8](24)
+                            var int_buf = unsafe_alloc[UInt8](24)
                             var il = format_int_to_buf(int_buf, 0, Int64(val._data0))
                             if ctx_len + il + 1 < 65536:
                                 unsafe_memcpy(dest=context_buf.unsafe_offset(ctx_len), src=int_buf, count=il)
@@ -498,7 +498,7 @@ def handle_ai_generate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             context_buf, ctx_len, max_tokens)
         if req_id > 0:
             # Blocking receive (single-worker mode, acceptable latency)
-            var resp_body = alloc[UInt8](INFER_RECV_BUF_SIZE)
+            var resp_body = unsafe_alloc[UInt8](INFER_RECV_BUF_SIZE)
             var resp = inference_bridge.recv_response_blocking(
                 resp_body, INFER_RECV_BUF_SIZE)
             if resp.status == INFER_STATUS_OK and resp.body_len >= 4:
@@ -543,7 +543,7 @@ def handle_ai_loadmodel(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int,
         var req_id = inference_bridge.send_load_model_request(
             model_tok.ptr.unsafe_bitcast[UInt8](), model_tok.length, model_type)
         if req_id > 0:
-            var resp_body = alloc[UInt8](4096)
+            var resp_body = unsafe_alloc[UInt8](4096)
             var resp = inference_bridge.recv_response_blocking(resp_body, 4096)
             if resp.status == INFER_STATUS_OK:
                 writer.append_ok_response()

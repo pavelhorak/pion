@@ -1,8 +1,8 @@
 """List commands: LINDEX, LSET, LINSERT, LREM, LTRIM, LPOS, LMOVE."""
+from std.memory.alloc import unsafe_alloc
 from src.common.utils import strict_atol, arg_eq, parse_int64_strict, ParsedInt
 from src.common.container_free import remove_and_free
 from src.common.ptr import is_not_null, is_null
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
 from std.collections import Array
@@ -39,7 +39,6 @@ def _elem_eq(v: GenericValue, p: Pointer[UInt8, MutUntrackedOrigin], l: Int,
 def handle_lindex(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """LINDEX key index → bulk string at index, or nil."""
     if i + 2 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var idx_str = tokens[unsafe_offset=i+2].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
@@ -117,7 +116,6 @@ def handle_lindex(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
 def handle_lset(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], wal: Pointer[WAL, MutUntrackedOrigin]) raises -> Int:
     """LSET key index value → +OK or error."""
     if i + 3 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var idx_str2 = tokens[unsafe_offset=i+2].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
@@ -191,7 +189,6 @@ def handle_lset(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 def handle_linsert(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], wal: Pointer[WAL, MutUntrackedOrigin]) raises -> Int:
     """LINSERT key BEFORE|AFTER pivot value → list length or -1."""
     if i + 4 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var ins_tp = tokens[unsafe_offset=i+2].ptr; var ins_tl = tokens[unsafe_offset=i+2].length
         # BEFORE|AFTER, whole word, checked before the key as Redis does: a
@@ -214,7 +211,7 @@ def handle_linsert(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 # — indistinguishable from "pivot not found", so a caller could
                 # not tell a missing pivot from an unsupported representation.
                 var li_elems = list_ptr[].owned_elems()
-                var li_scratch = alloc[UInt8](64)
+                var li_scratch = unsafe_alloc[UInt8](64)
                 var li_at = -1
                 for li_j in range(len(li_elems)):
                     if _elem_eq(li_elems[li_j], pivot_tok.ptr, pivot_tok.length, li_scratch):
@@ -296,7 +293,6 @@ def handle_linsert(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
 def handle_lrem(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], wal: Pointer[WAL, MutUntrackedOrigin]) raises -> Int:
     """LREM key count value → number of removed elements."""
     if i + 3 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var count_str2 = tokens[unsafe_offset=i+2].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
@@ -324,7 +320,7 @@ def handle_lrem(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
                 # when in fact the elements are still there.
                 var lr_abs = lrem_count if lrem_count >= 0 else -lrem_count
                 var lr_elems = list_ptr[].owned_elems()
-                var lr_scratch = alloc[UInt8](64)
+                var lr_scratch = unsafe_alloc[UInt8](64)
                 var lr_total = 0
                 for lr_j in range(len(lr_elems)):
                     if _elem_eq(lr_elems[lr_j], val_tok3.ptr, val_tok3.length, lr_scratch):
@@ -363,13 +359,13 @@ def handle_lrem(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
             else:
                 var lrem_abs = lrem_count if lrem_count >= 0 else -lrem_count
                 var removed = 0
-                var new_zip_buf = alloc[UInt8](list_ptr[].zip_cap)
+                var new_zip_buf = unsafe_alloc[UInt8](list_ptr[].zip_cap)
                 var new_zip_len3 = 0
                 var old_len3 = list_ptr[].zip_len
-                var zoff5 = 0; var zi5 = 0; var lsz5 = list_ptr[].size
+                var zoff5: Int; var lsz5 = list_ptr[].size
                 # For count>0: head->tail; count<0: tail->head; count=0: all
                 # Simple approach: collect all, filter, rebuild
-                var entries_buf = alloc[UInt8](old_len3)
+                var entries_buf = unsafe_alloc[UInt8](old_len3)
                 unsafe_memcpy(dest=entries_buf, src=list_ptr[].zip_buf, count=old_len3)
                 # Count total entries matching
                 var match_count_tot = 0
@@ -426,7 +422,6 @@ def handle_lrem(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 def handle_ltrim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], wal: Pointer[WAL, MutUntrackedOrigin]) raises -> Int:
     """LTRIM key start stop → +OK."""
     if i + 3 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
         var lt_start = strict_atol(tokens[unsafe_offset=i+2].value())
@@ -510,7 +505,7 @@ def handle_ltrim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                 _ = wal[].append(2, tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
                 writer.append_ok_response()
             else:
-                var new_zip_buf2 = alloc[UInt8](list_ptr[].zip_cap)
+                var new_zip_buf2 = unsafe_alloc[UInt8](list_ptr[].zip_cap)
                 var new_zip_len4 = 0; var new_size4 = 0
                 var zoff6 = 0; var zi6 = 0
                 while zi6 < lsz6:
@@ -536,7 +531,6 @@ def handle_ltrim(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 def handle_lpos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]) raises -> Int:
     """LPOS key element [RANK rank] [COUNT count] [MAXLEN maxlen] → index or array of indices."""
     if i + 2 < num_tokens:
-        var key_str = tokens[unsafe_offset=i+1].value()
         var key_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var val = keyspace[].get(key_v)
         var elem_tok = tokens[unsafe_offset=i+2]
@@ -614,7 +608,7 @@ def handle_lpos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
                 # element of any list past 1024 entries — a wrong answer, not a
                 # refusal, and the element really is in the list.
                 var lp_elems = list_ptr[].get_all()
-                var lp_scratch = alloc[UInt8](64)
+                var lp_scratch = unsafe_alloc[UInt8](64)
                 for lp_j in range(len(lp_elems)):
                     if _elem_eq(lp_elems[lp_j], elem_tok.ptr, elem_tok.length, lp_scratch):
                         rank_seen += 1
@@ -670,7 +664,6 @@ def handle_lpos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 def handle_lmove(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], mut dispatcher: CommandDispatcher) raises -> Int:
     """LMOVE source destination LEFT|RIGHT LEFT|RIGHT → bulk string of moved element."""
     if i + 4 < num_tokens:
-        var src_str4 = tokens[unsafe_offset=i+1].value()
         var dst_str4 = tokens[unsafe_offset=i+2].value()
         # LEFT|RIGHT, whole words, checked before either key as Redis does
         # (getListPositionFromObjectOrReply). The first letter alone decided:

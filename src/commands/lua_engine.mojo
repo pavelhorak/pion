@@ -11,9 +11,9 @@ One LuaEngine per worker, shared-nothing. FUNCTION libraries are persisted as
 WAL records 35 (LOAD), 36 (DELETE) and 37 (FLUSH), and written into snapshots.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.memory import alloc, unsafe_memcpy
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from src.common.utils import arg_eq, parse_int64_strict, bytes_to_string
 from src.network.response_writer import ResponseWriter
@@ -34,9 +34,9 @@ struct LuaEngine(Movable):
             Pointer[NoneType, MutUntrackedOrigin]](Int64(-1), Int64(-1))
         self.enabled = is_not_null(self.state)
 
-    def __init__(out self, *, deinit take: Self):
-        self.state = take.state
-        self.enabled = take.enabled
+    def __init__(out self, *, deinit move: Self):
+        self.state = move.state
+        self.enabled = move.enabled
 
 
 def _help_script() -> List[String]:
@@ -166,10 +166,10 @@ struct _Args(Movable):
     def __init__(out self, tokens: Pointer[RESP3Token, MutUntrackedOrigin], first: Int, nk: Int, end: Int):
         self.nk = nk
         self.na = end - first - nk
-        self.kp = alloc[Pointer[UInt8, MutUntrackedOrigin]](nk + 1)
-        self.kl = alloc[Int64](nk + 1)
-        self.ap = alloc[Pointer[UInt8, MutUntrackedOrigin]](self.na + 1)
-        self.al = alloc[Int64](self.na + 1)
+        self.kp = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](nk + 1)
+        self.kl = unsafe_alloc[Int64](nk + 1)
+        self.ap = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](self.na + 1)
+        self.al = unsafe_alloc[Int64](self.na + 1)
         for k in range(nk):
             self.kp[unsafe_offset=k] = tokens[unsafe_offset=first + k].ptr
             self.kl[unsafe_offset=k] = Int64(tokens[unsafe_offset=first + k].length)
@@ -177,13 +177,13 @@ struct _Args(Movable):
             self.ap[unsafe_offset=k] = tokens[unsafe_offset=first + nk + k].ptr
             self.al[unsafe_offset=k] = Int64(tokens[unsafe_offset=first + nk + k].length)
 
-    def __init__(out self, *, deinit take: Self):
-        self.kp = take.kp
-        self.kl = take.kl
-        self.nk = take.nk
-        self.ap = take.ap
-        self.al = take.al
-        self.na = take.na
+    def __init__(out self, *, deinit move: Self):
+        self.kp = move.kp
+        self.kl = move.kl
+        self.nk = move.nk
+        self.ap = move.ap
+        self.al = move.al
+        self.na = move.na
 
     def free(mut self):
         self.kp.unsafe_free()
@@ -225,7 +225,7 @@ def handle_eval(
     var numkeys = _numkeys(tokens, i + 2, num_tokens - i - 3, writer, False)
     if numkeys < 0:
         return extra
-    var sha = alloc[UInt8](41)
+    var sha = unsafe_alloc[UInt8](41)
     var st = external_call["pion_lua_load_script", Int32](
         lua[].state, tokens[unsafe_offset=i + 1].ptr, Int64(tokens[unsafe_offset=i + 1].length), sha)
     if st < 0:
@@ -259,7 +259,7 @@ def handle_evalsha(
     if t.length != 40:
         writer.append_error_response("NOSCRIPT No matching script. Please use EVAL.")
         return extra
-    var sha = alloc[UInt8](41)
+    var sha = unsafe_alloc[UInt8](41)
     unsafe_memcpy(dest=sha, src=t.ptr, count=40)
     sha[unsafe_offset=40] = 0
     _run_script(lua, sha, tokens, i, num_tokens, numkeys, ro, writer, host)
@@ -288,7 +288,7 @@ def handle_script(
         if argc != 3:
             _subcommand_arity_error("script", sub, writer)
             return extra
-        var sha = alloc[UInt8](41)
+        var sha = unsafe_alloc[UInt8](41)
         var st = external_call["pion_lua_load_script", Int32](
             lua[].state, tokens[unsafe_offset=i + 2].ptr, Int64(tokens[unsafe_offset=i + 2].length), sha)
         if st < 0:
@@ -301,7 +301,7 @@ def handle_script(
             _subcommand_arity_error("script", sub, writer)
             return extra
         writer.append_array_header(argc - 2)
-        var sha = alloc[UInt8](41)
+        var sha = unsafe_alloc[UInt8](41)
         for a in range(i + 2, num_tokens):
             var t = tokens[unsafe_offset=a]
             var found = Int32(0)
@@ -355,8 +355,8 @@ def _log_library(wal: Pointer[WAL, MutUntrackedOrigin], code: Pointer[UInt8, Mut
     """WAL record 35: the library's name as the key, its code as the value."""
     if is_null(wal):
         return
-    var name = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
-    var nlen = alloc[Int64](1)
+    var name = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+    var nlen = unsafe_alloc[Int64](1)
     nlen[unsafe_offset=0] = 0
     if external_call["pion_lua_library_name_of", Int64](code, Int64(clen), name, nlen) == 1:
         _ = wal[].append_kv(35, name[unsafe_offset=0], Int(nlen[unsafe_offset=0]), code, clen)
@@ -386,9 +386,9 @@ def _restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens
     if count < 0:
         writer.append_error_response("ERR DUMP payload version or checksum are wrong")
         return
-    var ep = alloc[Int64](1)
-    var namep = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
-    var nlen = alloc[Int64](1)
+    var ep = unsafe_alloc[Int64](1)
+    var namep = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+    var nlen = unsafe_alloc[Int64](1)
     if policy == 0:
         # APPEND: a library that already exists aborts the whole restore
         for k in range(Int(count)):
@@ -403,7 +403,7 @@ def _restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens
                 return
     # Keep the current libraries, so a failure can put them back.
     var saved_n = external_call["pion_lua_function_dump", Int64](lua[].state)
-    var saved = alloc[UInt8](Int(saved_n) + 1)
+    var saved = unsafe_alloc[UInt8](Int(saved_n) + 1)
     unsafe_memcpy(dest=saved, src=external_call["pion_lua_out", Pointer[UInt8, MutUntrackedOrigin]](lua[].state),
                   count=Int(saved_n))
     if policy == 2:
@@ -418,7 +418,7 @@ def _restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens
     if failed:
         # the error the failed load built, then the previous libraries back
         var en = external_call["pion_lua_out_len", Int64](lua[].state)
-        var err = alloc[UInt8](Int(en) + 1)
+        var err = unsafe_alloc[UInt8](Int(en) + 1)
         unsafe_memcpy(dest=err, src=external_call["pion_lua_out", Pointer[UInt8, MutUntrackedOrigin]](lua[].state),
                       count=Int(en))
         external_call["pion_lua_function_flush", NoneType](lua[].state)

@@ -4,10 +4,10 @@ Per-fd command queuing with WATCH optimistic locking.
 MULTI enters queuing mode, EXEC replays atomically.
 WATCH snapshots key versions; EXEC aborts if any watched key was modified.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.value import GenericValue
 from src.common.hash_map import StripedHashMap
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.collections import Array, Dict
 from std.memory import unsafe_memcpy, unsafe_memset
@@ -98,30 +98,30 @@ struct TransactionState(Movable):
     var client_names: Dict[Int, String]
 
     def __init__(out self):
-        self.in_multi = alloc[UInt8](MAX_TX_FDS)
+        self.in_multi = unsafe_alloc[UInt8](MAX_TX_FDS)
         unsafe_memset(self.in_multi, 0, MAX_TX_FDS)
-        self.queues = alloc[Pointer[QueuedCommand, MutUntrackedOrigin]](MAX_TX_FDS)
+        self.queues = unsafe_alloc[Pointer[QueuedCommand, MutUntrackedOrigin]](MAX_TX_FDS)
         unsafe_memset(self.queues.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 8)
-        self.queue_counts = alloc[Int32](MAX_TX_FDS)
+        self.queue_counts = unsafe_alloc[Int32](MAX_TX_FDS)
         unsafe_memset(self.queue_counts.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 4)
-        self.queue_caps = alloc[Int32](MAX_TX_FDS)
+        self.queue_caps = unsafe_alloc[Int32](MAX_TX_FDS)
         unsafe_memset(self.queue_caps.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 4)
-        self.dirty = alloc[UInt8](MAX_TX_FDS)
+        self.dirty = unsafe_alloc[UInt8](MAX_TX_FDS)
         unsafe_memset(self.dirty, 0, MAX_TX_FDS)
-        self.key_versions = alloc[UInt64](KEY_VERSION_SLOTS)
+        self.key_versions = unsafe_alloc[UInt64](KEY_VERSION_SLOTS)
         unsafe_memset(self.key_versions.unsafe_bitcast[UInt8](), 0, KEY_VERSION_SLOTS * 8)
-        self.watch_keys = alloc[Pointer[WatchedKey, MutUntrackedOrigin]](MAX_TX_FDS)
+        self.watch_keys = unsafe_alloc[Pointer[WatchedKey, MutUntrackedOrigin]](MAX_TX_FDS)
         unsafe_memset(self.watch_keys.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 8)
-        self.watch_counts = alloc[Int32](MAX_TX_FDS)
+        self.watch_counts = unsafe_alloc[Int32](MAX_TX_FDS)
         unsafe_memset(self.watch_counts.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 4)
-        self.watch_caps = alloc[Int32](MAX_TX_FDS)
+        self.watch_caps = unsafe_alloc[Int32](MAX_TX_FDS)
         unsafe_memset(self.watch_caps.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 4)
-        self.authed = alloc[UInt8](MAX_TX_FDS)
+        self.authed = unsafe_alloc[UInt8](MAX_TX_FDS)
         unsafe_memset(self.authed, 0, MAX_TX_FDS)
-        self.tenant_id = alloc[Int16](MAX_TX_FDS)
+        self.tenant_id = unsafe_alloc[Int16](MAX_TX_FDS)
         # 0xFF in every byte = Int16(-1) in every slot (unbound).
         unsafe_memset(self.tenant_id.unsafe_bitcast[UInt8](), 0xFF, MAX_TX_FDS * 2)
-        self.resp_proto = alloc[UInt8](MAX_TX_FDS)
+        self.resp_proto = unsafe_alloc[UInt8](MAX_TX_FDS)
         unsafe_memset(self.resp_proto, 2, MAX_TX_FDS)
         self.client_names = Dict[Int, String]()
 
@@ -139,7 +139,7 @@ struct TransactionState(Movable):
     def start_multi(mut self, fd: Int32):
         self.in_multi[unsafe_offset=Int(fd)] = 1
         if is_null(self.queues[unsafe_offset=Int(fd)]):
-            self.queues[unsafe_offset=Int(fd)] = alloc[QueuedCommand](INITIAL_QUEUED_CMDS)
+            self.queues[unsafe_offset=Int(fd)] = unsafe_alloc[QueuedCommand](INITIAL_QUEUED_CMDS)
             for i in range(INITIAL_QUEUED_CMDS):
                 (self.queues[unsafe_offset=Int(fd)].unsafe_offset(i)).unsafe_write(QueuedCommand())
             self.queue_caps[unsafe_offset=Int(fd)] = Int32(INITIAL_QUEUED_CMDS)
@@ -178,7 +178,7 @@ struct TransactionState(Movable):
         if cap >= MAX_QUEUED_CMDS: return False
         var new_cap = cap * 2 if cap > 0 else INITIAL_QUEUED_CMDS
         if new_cap > MAX_QUEUED_CMDS: new_cap = MAX_QUEUED_CMDS
-        var fresh = alloc[QueuedCommand](new_cap)
+        var fresh = unsafe_alloc[QueuedCommand](new_cap)
         var old = self.queues[unsafe_offset=Int(fd)]
         var cnt = Int(self.queue_counts[unsafe_offset=Int(fd)])
         # Element-wise: QueuedCommand is a POD pair, and growth is amortised
@@ -202,7 +202,7 @@ struct TransactionState(Movable):
         var cnt = Int(self.queue_counts[unsafe_offset=Int(fd)])
         if cnt >= Int(self.queue_caps[unsafe_offset=Int(fd)]):
             if not self._grow_queue(fd): return False
-        var copy = alloc[UInt8](cmd_len)
+        var copy = unsafe_alloc[UInt8](cmd_len)
         unsafe_memcpy(dest=copy, src=cmd_data, count=cmd_len)
         self.queues[unsafe_offset=Int(fd)][unsafe_offset=cnt].data = copy
         self.queues[unsafe_offset=Int(fd)][unsafe_offset=cnt].length = cmd_len
@@ -270,7 +270,7 @@ struct TransactionState(Movable):
     def bump_key_version(mut self, key_ptr: Pointer[UInt8, MutUntrackedOrigin], key_len: Int):
         """Increment version for a key's slot. Called on every mutation (SET, DEL, HSET, etc.)."""
         var slot = Self.key_slot(key_ptr, key_len)
-        self.key_versions[slot] += 1
+        self.key_versions[unsafe_offset=slot] += 1
 
     def _grow_watch(mut self, fd: Int32) -> Bool:
         """Double this fd's watch list. False only at MAX_WATCHED_KEYS."""
@@ -278,7 +278,7 @@ struct TransactionState(Movable):
         if cap >= MAX_WATCHED_KEYS: return False
         var new_cap = cap * 2 if cap > 0 else INITIAL_WATCHED_KEYS
         if new_cap > MAX_WATCHED_KEYS: new_cap = MAX_WATCHED_KEYS
-        var fresh = alloc[WatchedKey](new_cap)
+        var fresh = unsafe_alloc[WatchedKey](new_cap)
         var old = self.watch_keys[unsafe_offset=Int(fd)]
         var wc = Int(self.watch_counts[unsafe_offset=Int(fd)])
         for i in range(new_cap):

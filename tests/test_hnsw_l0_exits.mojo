@@ -23,6 +23,7 @@
 #   pixi run mojo build -I . tests/test_hnsw_l0_exits.mojo -Xlinker build/metal_stubs.o \
 #       -o build/t && build/t
 
+from std.memory.alloc import unsafe_alloc
 from src.vector.hnsw import HNSWGraph
 from std.memory import alloc, unsafe_memset
 from std.random import random_float64, seed
@@ -31,47 +32,47 @@ from std.random import random_float64, seed
 
 def reach_from_entry(g: HNSWGraph) -> Int:
     var n = g.num_nodes
-    var seen = alloc[UInt8](n)
+    var seen = unsafe_alloc[UInt8](n)
     unsafe_memset(seen, 0, n)
     var q = List[Int]()
     q.append(g.entry_point_id)
-    seen[g.entry_point_id] = 1
+    seen[unsafe_offset=g.entry_point_id] = 1
     var head = 0
     while head < len(q):
         var x = q[head]
         head += 1
-        for k in range(g.nodes[x].get_neighbor_count(0)):
-            var nb = g.nodes[x].get_neighbor(0, k)
-            if nb >= 0 and nb < n and seen[nb] == 0:
-                seen[nb] = 1
+        for k in range(g.nodes[unsafe_offset=x].get_neighbor_count(0)):
+            var nb = g.nodes[unsafe_offset=x].get_neighbor(0, k)
+            if nb >= 0 and nb < n and seen[unsafe_offset=nb] == 0:
+                seen[unsafe_offset=nb] = 1
                 q.append(nb)
     var c = len(q)
-    seen.free()
+    seen.unsafe_free()
     return c
 
 
 def reach_entry(g: HNSWGraph) -> Int:
     """How many nodes have a level-0 path TO the entry point."""
     var n = g.num_nodes
-    var back = alloc[UInt8](n)
+    var back = unsafe_alloc[UInt8](n)
     unsafe_memset(back, 0, n)
-    back[g.entry_point_id] = 1
+    back[unsafe_offset=g.entry_point_id] = 1
     var changed = True
     while changed:
         changed = False
         for i in range(n):
-            if back[i] != 0:
+            if back[unsafe_offset=i] != 0:
                 continue
-            for k in range(g.nodes[i].get_neighbor_count(0)):
-                var nb = g.nodes[i].get_neighbor(0, k)
-                if nb >= 0 and nb < n and back[nb] != 0:
-                    back[i] = 1
+            for k in range(g.nodes[unsafe_offset=i].get_neighbor_count(0)):
+                var nb = g.nodes[unsafe_offset=i].get_neighbor(0, k)
+                if nb >= 0 and nb < n and back[unsafe_offset=nb] != 0:
+                    back[unsafe_offset=i] = 1
                     changed = True
                     break
     var c = 0
     for i in range(n):
-        c += Int(back[i])
-    back.free()
+        c += Int(back[unsafe_offset=i])
+    back.unsafe_free()
     return c
 
 
@@ -81,21 +82,21 @@ def close_region(mut g: HNSWGraph, center: Int, size: Int, cap: Int) -> List[Int
     var n = g.num_nodes
     var d = List[Float32]()
     for i in range(n):
-        d.append(g._dist_int8_int8(g.nodes[center].vector, g.nodes[i].vector))
+        d.append(g._dist_int8_int8(g.nodes[unsafe_offset=center].vector, g.nodes[unsafe_offset=i].vector))
     var members = List[Int]()
-    var taken = alloc[UInt8](n)
+    var taken = unsafe_alloc[UInt8](n)
     unsafe_memset(taken, 0, n)
-    taken[g.entry_point_id] = 1
+    taken[unsafe_offset=g.entry_point_id] = 1
     while len(members) < size:
         var best = -1
         for i in range(n):
-            if taken[i] == 0 and (best < 0 or d[i] < d[best]):
+            if taken[unsafe_offset=i] == 0 and (best < 0 or d[i] < d[best]):
                 best = i
-        taken[best] = 1
+        taken[unsafe_offset=best] = 1
         members.append(best)
-    taken.free()
+    taken.unsafe_free()
     for x in members:
-        var off = g.nodes[x]._get_offset(0)
+        var off = g.nodes[unsafe_offset=x]._get_offset(0)
         var cnt = 0
         var used = List[Int]()
         while cnt < cap and cnt < size - 1:
@@ -104,43 +105,43 @@ def close_region(mut g: HNSWGraph, center: Int, size: Int, cap: Int) -> List[Int
             for y in members:
                 if y == x or y in used:
                     continue
-                var dy = g._dist_int8_int8(g.nodes[x].vector, g.nodes[y].vector)
+                var dy = g._dist_int8_int8(g.nodes[unsafe_offset=x].vector, g.nodes[unsafe_offset=y].vector)
                 if best < 0 or dy < bd:
                     best = y
                     bd = dy
             used.append(best)
-            g.nodes[x].neighbors[off + cnt] = UInt32(best)
+            g.nodes[unsafe_offset=x].neighbors[unsafe_offset=off + cnt] = UInt32(best)
             cnt += 1
-        g.nodes[x].neighbor_counts[0] = UInt32(cnt)
+        g.nodes[unsafe_offset=x].neighbor_counts[unsafe_offset=0] = UInt32(cnt)
     return members^
 
 
 def links_out(g: HNSWGraph, members: List[Int]) -> Int:
     """How many members have at least one level-0 link out of the set."""
     var n = g.num_nodes
-    var inside = alloc[UInt8](n)
+    var inside = unsafe_alloc[UInt8](n)
     unsafe_memset(inside, 0, n)
     for x in members:
-        inside[x] = 1
+        inside[unsafe_offset=x] = 1
     var leave = 0
     for x in members:
-        for k in range(g.nodes[x].get_neighbor_count(0)):
-            if inside[g.nodes[x].get_neighbor(0, k)] == 0:
+        for k in range(g.nodes[unsafe_offset=x].get_neighbor_count(0)):
+            if inside[unsafe_offset=g.nodes[unsafe_offset=x].get_neighbor(0, k)] == 0:
                 leave += 1
                 break
-    inside.free()
+    inside.unsafe_free()
     return leave
 
 
 def built(n: Int, dim: Int) raises -> HNSWGraph:
     seed(405)
     var g = HNSWGraph(n, dim, M=8, ef_construction=64)
-    var v = alloc[Float32](dim)
+    var v = unsafe_alloc[Float32](dim)
     for i in range(n):
         for j in range(dim):
-            v[j] = Float32(random_float64() * 2.0 - 1.0)
+            v[unsafe_offset=j] = Float32(random_float64() * 2.0 - 1.0)
         g.add_vector(i, v)
-    v.free()
+    v.unsafe_free()
     g.build_index()
     return g^
 
@@ -150,38 +151,38 @@ def strand_beside(mut g: HNSWGraph, center: Int, members: List[Int]) -> Int:
     unreachable: every level-0 link to it is removed. Its own list stays, so
     it still reaches the entry point. Returns it."""
     var n = g.num_nodes
-    var inside = alloc[UInt8](n)
+    var inside = unsafe_alloc[UInt8](n)
     unsafe_memset(inside, 0, n)
     for x in members:
-        inside[x] = 1
+        inside[unsafe_offset=x] = 1
     var u = -1
     var ud = Float32(0.0)
     for i in range(n):
-        if inside[i] != 0 or i == g.entry_point_id:
+        if inside[unsafe_offset=i] != 0 or i == g.entry_point_id:
             continue
         var out = False
-        for k in range(g.nodes[i].get_neighbor_count(0)):
-            if inside[g.nodes[i].get_neighbor(0, k)] == 0:
+        for k in range(g.nodes[unsafe_offset=i].get_neighbor_count(0)):
+            if inside[unsafe_offset=g.nodes[unsafe_offset=i].get_neighbor(0, k)] == 0:
                 out = True
         if not out:
             continue
-        var di = g._dist_int8_int8(g.nodes[center].vector, g.nodes[i].vector)
+        var di = g._dist_int8_int8(g.nodes[unsafe_offset=center].vector, g.nodes[unsafe_offset=i].vector)
         if u < 0 or di < ud:
             u = i
             ud = di
-    inside.free()
+    inside.unsafe_free()
     for i in range(n):
         if i == u:
             continue
-        var off = g.nodes[i]._get_offset(0)
-        var c = g.nodes[i].get_neighbor_count(0)
+        var off = g.nodes[unsafe_offset=i]._get_offset(0)
+        var c = g.nodes[unsafe_offset=i].get_neighbor_count(0)
         var w = 0
         for k in range(c):
-            var nb = g.nodes[i].get_neighbor(0, k)
+            var nb = g.nodes[unsafe_offset=i].get_neighbor(0, k)
             if nb != u:
-                g.nodes[i].neighbors[off + w] = UInt32(nb)
+                g.nodes[unsafe_offset=i].neighbors[unsafe_offset=off + w] = UInt32(nb)
                 w += 1
-        g.nodes[i].neighbor_counts[0] = UInt32(w)
+        g.nodes[unsafe_offset=i].neighbor_counts[unsafe_offset=0] = UInt32(w)
     return u
 
 

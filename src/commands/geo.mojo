@@ -14,11 +14,11 @@ centre and its eight neighbours as Redis does, so an unsorted reply and ANY
 pick the same members. Coordinates print as Redis 8's addReplyDouble prints
 them.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, null_ptr
 from src.common.utils import arg_eq, parse_redis_double, DOUBLE_VALUE, parse_int64_strict, format_float64_to_buf, format_score
 from src.common.container_free import remove_and_free
 from std.memory import alloc, stack_allocation
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from src.network.resp3 import RESP3Token
 from src.network.response_writer import ResponseWriter
@@ -58,7 +58,7 @@ def _geo_unit(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Float64:
 
 def _fmt_f6(v: Float64) -> String:
     """C's "%f", for the error message Redis builds with it."""
-    var buf = alloc[UInt8](400)
+    var buf = unsafe_alloc[UInt8](400)
     var n = Int(external_call["pion_fmt_fixed", Int64](v, Int32(6), buf, Int64(400)))
     var s = String("")
     if n > 0:
@@ -72,11 +72,11 @@ def _lonlat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut writer:
             mut lon: Float64, mut lat: Float64) -> Bool:
     """extractLongLatOrReply: two floats (string2d), within the WGS84 range
     Redis indexes. Writes the error on failure."""
-    var a = parse_redis_double(tokens[j].ptr, tokens[j].length, DOUBLE_VALUE)
+    var a = parse_redis_double(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, DOUBLE_VALUE)
     if not a.ok:
         writer.append_error_response("ERR value is not a valid float")
         return False
-    var b = parse_redis_double(tokens[j + 1].ptr, tokens[j + 1].length, DOUBLE_VALUE)
+    var b = parse_redis_double(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length, DOUBLE_VALUE)
     if not b.ok:
         writer.append_error_response("ERR value is not a valid float")
         return False
@@ -91,14 +91,14 @@ def _lonlat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut writer:
 def _distance(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut writer: ResponseWriter,
               mut radius: Float64, mut conversion: Float64) -> Bool:
     """extractDistanceOrReply: a non-negative radius and a unit."""
-    var r = parse_redis_double(tokens[j].ptr, tokens[j].length, DOUBLE_VALUE)
+    var r = parse_redis_double(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, DOUBLE_VALUE)
     if not r.ok:
         writer.append_error_response("ERR need numeric radius")
         return False
     if r.value < 0:
         writer.append_error_response("ERR radius cannot be negative")
         return False
-    var u = _geo_unit(tokens[j + 1].ptr, tokens[j + 1].length)
+    var u = _geo_unit(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
     if u < 0:
         writer.append_error_response("ERR unsupported unit provided. please use M, KM, FT, MI")
         return False
@@ -110,18 +110,18 @@ def _distance(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut write
 def _box(tokens: Pointer[RESP3Token, MutUntrackedOrigin], j: Int, mut writer: ResponseWriter,
          mut width: Float64, mut height: Float64, mut conversion: Float64) -> Bool:
     """extractBoxOrReply: non-negative width and height, and a unit."""
-    var w = parse_redis_double(tokens[j].ptr, tokens[j].length, DOUBLE_VALUE)
+    var w = parse_redis_double(tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, DOUBLE_VALUE)
     if not w.ok:
         writer.append_error_response("ERR need numeric width")
         return False
-    var h = parse_redis_double(tokens[j + 1].ptr, tokens[j + 1].length, DOUBLE_VALUE)
+    var h = parse_redis_double(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length, DOUBLE_VALUE)
     if not h.ok:
         writer.append_error_response("ERR need numeric height")
         return False
     if h.value < 0 or w.value < 0:
         writer.append_error_response("ERR height or width cannot be negative")
         return False
-    var u = _geo_unit(tokens[j + 2].ptr, tokens[j + 2].length)
+    var u = _geo_unit(tokens[unsafe_offset=j + 2].ptr, tokens[unsafe_offset=j + 2].length)
     if u < 0:
         writer.append_error_response("ERR unsupported unit provided. please use M, KM, FT, MI")
         return False
@@ -175,7 +175,7 @@ def handle_geoadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     var ch = False
     var j = i + 2
     while j < num_tokens:
-        var t = tokens[j]
+        var t = tokens[unsafe_offset=j]
         if arg_eq(t.ptr, t.length, "nx"): nx = True
         elif arg_eq(t.ptr, t.length, "xx"): xx = True
         elif arg_eq(t.ptr, t.length, "ch"): ch = True
@@ -195,7 +195,7 @@ def handle_geoadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         if not _lonlat(tokens, j + k * 3, writer, lon, lat):
             return num_tokens - 1 - i
         scores.append(Float64(geohash_align52(geohash_encode(lat, lon, GEO_STEP_MAX))))
-    var kt = tokens[i + 1]
+    var kt = tokens[unsafe_offset=i + 1]
     var key = GenericValue.borrow(kt.ptr, kt.length)
     var v = keyspace[].get(key)
     if not v.is_none() and not _is_geo_type(v):
@@ -207,7 +207,7 @@ def handle_geoadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     var added = 0
     var changed = 0
     for k in range(n):
-        var mt = tokens[j + k * 3 + 2]
+        var mt = tokens[unsafe_offset=j + k * 3 + 2]
         var exists = False
         var old: Float64 = 0
         if is_not_null(zp):
@@ -243,7 +243,7 @@ def handle_geopos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     if num_tokens - i < 2:
         writer.append_error_response("ERR wrong number of arguments for 'geopos' command")
         return 0
-    var v = keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+    var v = keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length))
     if not v.is_none() and not _is_geo_type(v):
         writer.append_error_response(_E_WRONGTYPE)
         return num_tokens - 1 - i
@@ -251,7 +251,7 @@ def handle_geopos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     for j in range(i + 2, num_tokens):
         var lon: Float64 = 0
         var lat: Float64 = 0
-        if v.is_none() or not _member_lonlat(_zset_of(v), tokens[j].ptr, tokens[j].length, lon, lat):
+        if v.is_none() or not _member_lonlat(_zset_of(v), tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, lon, lat):
             writer.append_null_array_response()
             continue
         writer.append_array_header(2)
@@ -269,14 +269,14 @@ def handle_geodist(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         return 0
     var to_meter = 1.0
     if argc == 5:
-        to_meter = _geo_unit(tokens[i + 4].ptr, tokens[i + 4].length)
+        to_meter = _geo_unit(tokens[unsafe_offset=i + 4].ptr, tokens[unsafe_offset=i + 4].length)
         if to_meter < 0:
             writer.append_error_response("ERR unsupported unit provided. please use M, KM, FT, MI")
             return argc - 1
     elif argc > 5:
         writer.append_error_response("ERR syntax error")
         return argc - 1
-    var v = keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+    var v = keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length))
     if v.is_none():
         writer.append_null_response()
         return argc - 1
@@ -288,8 +288,8 @@ def handle_geodist(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     var lon2: Float64 = 0
     var lat2: Float64 = 0
     var zp = _zset_of(v)
-    if (not _member_lonlat(zp, tokens[i + 2].ptr, tokens[i + 2].length, lon1, lat1)
-            or not _member_lonlat(zp, tokens[i + 3].ptr, tokens[i + 3].length, lon2, lat2)):
+    if (not _member_lonlat(zp, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, lon1, lat1)
+            or not _member_lonlat(zp, tokens[unsafe_offset=i + 3].ptr, tokens[unsafe_offset=i + 3].length, lon2, lat2)):
         writer.append_null_response()
         return argc - 1
     _append_distance(writer, geohash_distance(lon1, lat1, lon2, lat2) / to_meter)
@@ -303,7 +303,7 @@ def handle_geohash(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     if num_tokens - i < 2:
         writer.append_error_response("ERR wrong number of arguments for 'geohash' command")
         return 0
-    var v = keyspace[].get(GenericValue.borrow(tokens[i + 1].ptr, tokens[i + 1].length))
+    var v = keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length))
     if not v.is_none() and not _is_geo_type(v):
         writer.append_error_response(_E_WRONGTYPE)
         return num_tokens - 1 - i
@@ -313,7 +313,7 @@ def handle_geohash(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     for j in range(i + 2, num_tokens):
         var lon: Float64 = 0
         var lat: Float64 = 0
-        if v.is_none() or not _member_lonlat(_zset_of(v), tokens[j].ptr, tokens[j].length, lon, lat):
+        if v.is_none() or not _member_lonlat(_zset_of(v), tokens[unsafe_offset=j].ptr, tokens[unsafe_offset=j].length, lon, lat):
             writer.append_null_response()
             continue
         var bits = geohash_encode_wgs84(lat, lon, GEO_STEP_MAX).bits
@@ -321,7 +321,7 @@ def handle_geohash(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             var idx = 0
             if c < 10:
                 idx = Int((bits >> UInt64(52 - (c + 1) * 5)) & 0x1F)
-            buf[unsafe_offset=c] = B32.unsafe_ptr()[unsafe_offset=idx]
+            buf[unsafe_offset=c] = B32.ptr()[unsafe_offset=idx]
         writer.append_bulk_string_response(buf, 11)
     return num_tokens - 1 - i
 
@@ -391,7 +391,7 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         writer.append_error_response("ERR wrong number of arguments for '" + name + "' command")
         return 0
     var src = i + 2 if kind == GEO_SEARCHSTORE else i + 1
-    var zv = keyspace[].get(GenericValue.borrow(tokens[src].ptr, tokens[src].length))
+    var zv = keyspace[].get(GenericValue.borrow(tokens[unsafe_offset=src].ptr, tokens[unsafe_offset=src].length))
     if not zv.is_none() and not _is_geo_type(zv):
         writer.append_error_response(_E_WRONGTYPE)
         return consumed
@@ -417,7 +417,7 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     elif kind == GEO_RADIUS_MEMBER:
         base = i + 5
         if has_src:
-            if not _member_lonlat(zp, tokens[i + 2].ptr, tokens[i + 2].length, lon, lat):
+            if not _member_lonlat(zp, tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, lon, lat):
                 writer.append_error_response("ERR could not decode requested zset member")
                 return consumed
             if not _distance(tokens, i + 3, writer, radius, conversion):
@@ -439,7 +439,7 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     var search = kind == GEO_SEARCH or kind == GEO_SEARCHSTORE
     var j = base
     while j < num_tokens:
-        var t = tokens[j]
+        var t = tokens[unsafe_offset=j]
         var left = num_tokens - j - 1   # arguments after this one
         if arg_eq(t.ptr, t.length, "withdist"):
             withdist = True
@@ -454,7 +454,7 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         elif arg_eq(t.ptr, t.length, "desc"):
             sort = 2
         elif arg_eq(t.ptr, t.length, "count") and left >= 1:
-            var c = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var c = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not c.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return consumed
@@ -471,7 +471,7 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         elif arg_eq(t.ptr, t.length, "storedist") and kind == GEO_SEARCHSTORE:
             storedist = True
         elif arg_eq(t.ptr, t.length, "frommember") and left >= 1 and search and not fromloc:
-            if has_src and not _member_lonlat(zp, tokens[j + 1].ptr, tokens[j + 1].length, lon, lat):
+            if has_src and not _member_lonlat(zp, tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length, lon, lat):
                 writer.append_error_response("ERR could not decode requested zset member")
                 return consumed
             frommember = True
@@ -505,10 +505,10 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
             writer.append_error_response("ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options")
         return consumed
     if search and not (frommember or fromloc):
-        writer.append_error_response("ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for " + _cmd_text(tokens[i]))
+        writer.append_error_response("ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for " + _cmd_text(tokens[unsafe_offset=i]))
         return consumed
     if search and not (byradius or bybox):
-        writer.append_error_response("ERR exactly one of BYRADIUS and BYBOX can be specified for " + _cmd_text(tokens[i]))
+        writer.append_error_response("ERR exactly one of BYRADIUS and BYBOX can be specified for " + _cmd_text(tokens[unsafe_offset=i]))
         return consumed
     if any and count == 0:
         writer.append_error_response("ERR the ANY argument requires COUNT argument")
@@ -516,7 +516,7 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 
     if not has_src:
         if store >= 0:
-            _store_drop(keyspace, ttl_map, wal, tokens[store])
+            _store_drop(keyspace, ttl_map, wal, tokens[unsafe_offset=store])
             writer.append_int_response(0)
         else:
             writer.append_empty_array_response()
@@ -587,7 +587,7 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
 
     # STORE / STOREDIST: the result replaces the destination, its TTL with
     # it; nothing found deletes it.
-    var dt = tokens[store]
+    var dt = tokens[unsafe_offset=store]
     if returned == 0:
         _store_drop(keyspace, ttl_map, wal, dt)
         writer.append_int_response(0)

@@ -8,6 +8,7 @@ Issue #31 (A4) + A12 fold-in. Wire surface:
   STATE.FREE   <sid>
   STATE.INFO   [sid]
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.utils import strict_atol
 
 from src.network.state_store import (
@@ -17,7 +18,6 @@ from src.network.state_store import (
 from src.network.response_writer import ResponseWriter
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from std.collections import Array
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 
 
@@ -169,7 +169,7 @@ def handle_state_read(
         writer.append_error_response("ERR STATE.READ: length exceeds 4MB single-read cap")
         return 1
 
-    var _dst = alloc[UInt8](Int(length))
+    var _dst = unsafe_alloc[UInt8](Int(length))
     var dst = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_dst))
     var rc = state.read_bytes(slot, Int(offset), Int(length), dst)
     if rc >= 0:

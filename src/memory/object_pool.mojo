@@ -1,4 +1,4 @@
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc, unsafe_memset
 from std.sys import size_of
 
@@ -10,7 +10,7 @@ struct ObjectPool[T: AnyType](Movable):
     def __init__(out self, capacity: Int):
         self.capacity = capacity
         self.head = 0
-        self.free_list = alloc[Pointer[Self.T, MutUntrackedOrigin]](capacity)
+        self.free_list = unsafe_alloc[Pointer[Self.T, MutUntrackedOrigin]](capacity)
 
         # Every object starts ZEROED, as `_acquire_overflow` hands them out.
         # A list caller reset()s it (a zero SlabList is an empty list), and a
@@ -24,14 +24,14 @@ struct ObjectPool[T: AnyType](Movable):
         # again. A constructed SlabSkipList(1024) was overwritten without being
         # freed.
         for i in range(capacity):
-            var obj = alloc[Self.T](1)
+            var obj = unsafe_alloc[Self.T](1)
             unsafe_memset(obj.unsafe_bitcast[UInt8](), 0, size_of[Self.T]())
             self.free_list[unsafe_offset=i] = obj
 
-    def __init__(out self, *, deinit take: Self):
-        self.capacity = take.capacity
-        self.head = take.head
-        self.free_list = take.free_list
+    def __init__(out self, *, deinit move: Self):
+        self.capacity = move.capacity
+        self.head = move.head
+        self.free_list = move.free_list
 
     @always_inline
     def acquire(mut self) -> Pointer[Self.T, MutUntrackedOrigin]:
@@ -60,7 +60,7 @@ struct ObjectPool[T: AnyType](Movable):
         sites, several of them arms inside `process_data_plane`. Keeping the
         memset inline bloated the fast-path loop for a branch that is not taken
         until the pool is exhausted. Same reasoning as the WAL's `_make_room`."""
-        var fresh = alloc[Self.T](1)
+        var fresh = unsafe_alloc[Self.T](1)
         unsafe_memset(fresh.unsafe_bitcast[UInt8](), 0, size_of[Self.T]())
         return fresh
 

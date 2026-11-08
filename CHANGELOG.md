@@ -20,7 +20,17 @@ enumerated — there were roughly 1,100 of them.
 ### Changed
 
 - **Mojo 1.2.0.** The toolchain moved from 1.1.0, with the closed vector library
-  rebuilt on all three platforms. The engine compiled unchanged.
+  rebuilt on all three platforms. The engine needed one change: Mojo 1.2 refuses
+  two signatures for one C function, and a Linux-only `write()` call declared a
+  second one.
+- **No compiler warnings.** Mojo 1.2 printed 7,154 deprecation warnings building
+  the server. Every site it reports, on macOS and both Linux targets and in the
+  tests, now uses the 1.2 spelling: `Pointer`, `unsafe_offset`, `unsafe_alloc`,
+  `unsafe_free`, `unsafe_bitcast`, `unsafe_load`/`unsafe_store`, `abi("C")` on the
+  exported entry points, and `deinit move` move constructors. The 54 warnings
+  about values nothing read are fixed as well: gone are 31 slow-path `value()`
+  calls that each built a heap String, and a 4 MB buffer the XDP loop allocated
+  and never used.
 
 ## [1.0.9] — 2026-11-04
 

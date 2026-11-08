@@ -1,8 +1,8 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, null_ptr
 from src.common.container_free import free_graveyard
 from std.collections import List
 from std.memory import alloc
-from std.memory.unsafe_pointer import Pointer
 
 from src.actor.shard_manager import ShardManager
 from src.actor.shard import Shard
@@ -73,17 +73,17 @@ struct Pion:
         self.shard_manager = ShardManager(node_list_copy^)
 
         # === Phase 1: Allocate all Pointers (lightweight — just mmap metadata) ===
-        self.wal = alloc[WAL](1)
-        self.blobs = alloc[BlobStore](1)
-        self.raft = alloc[RaftNode](1)
-        self.keyspace = alloc[StripedHashMap](1)
-        self.ttl_map = alloc[SlabHashMap](1)
-        self.hash_map_pool = alloc[ObjectPool[SlabHashMap]](1)
-        self.skip_list_pool = alloc[ObjectPool[SlabSkipList]](1)
-        self.list_pool = alloc[ObjectPool[SlabList]](1)
-        self.ai_queue = alloc[LockFreeRingBuffer](1)
+        self.wal = unsafe_alloc[WAL](1)
+        self.blobs = unsafe_alloc[BlobStore](1)
+        self.raft = unsafe_alloc[RaftNode](1)
+        self.keyspace = unsafe_alloc[StripedHashMap](1)
+        self.ttl_map = unsafe_alloc[SlabHashMap](1)
+        self.hash_map_pool = unsafe_alloc[ObjectPool[SlabHashMap]](1)
+        self.skip_list_pool = unsafe_alloc[ObjectPool[SlabSkipList]](1)
+        self.list_pool = unsafe_alloc[ObjectPool[SlabList]](1)
+        self.ai_queue = unsafe_alloc[LockFreeRingBuffer](1)
         _ = self.ai_queue[].__init__(1024)
-        self.vec_tomb = alloc[VecTomb](1)
+        self.vec_tomb = unsafe_alloc[VecTomb](1)
         if is_not_null(shared_hnsw):
             self.vec_tomb.unsafe_write(VecTomb(shared_hnsw[].vec_dead, shared_hnsw[].vec_dead_count,
                                                shared_hnsw[].hk_max_elements, shared_hnsw[].vec_gen))
@@ -304,7 +304,7 @@ struct Pion:
             if cluster[].is_replica and config.cluster.primary_host != "":
                 # Replica mode: connect to primary's replication port
                 var repl_port = config.cluster.primary_port + REPL_PORT_OFFSET
-                cluster[].repl_drain_buf = alloc[UInt8](4194304)  # 4MB drain buffer
+                cluster[].repl_drain_buf = unsafe_alloc[UInt8](4194304)  # 4MB drain buffer
                 var recv_ok = self.replica_recv.setup(config.cluster.primary_host, repl_port, config.server.port)
                 if recv_ok:
                     cluster[].repl_replica_handle = self.replica_recv.handle

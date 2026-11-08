@@ -1,6 +1,6 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.list import SlabList
 from src.common.value import GenericValue, ValueType
-from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc
 from std.testing import assert_true, assert_equal
 
@@ -24,17 +24,17 @@ def values_match(val: GenericValue, expected: String) -> Bool:
     if val.type.value == ValueType.STRING_SSO and expected_val.type.value == ValueType.STRING_SSO:
         return val == expected_val
     # For STRING (from_ptr_unsafe in lrange), compare bytes
-    var buf1 = alloc[UInt8](l1)
-    var buf2 = alloc[UInt8](l2)
+    var buf1 = unsafe_alloc[UInt8](l1)
+    var buf2 = unsafe_alloc[UInt8](l2)
     val.copy_to(buf1)
     expected_val.copy_to(buf2)
     var same = True
     for i in range(l1):
-        if buf1[i] != buf2[i]:
+        if buf1[unsafe_offset=i] != buf2[unsafe_offset=i]:
             same = False
             break
-    buf1.free()
-    buf2.free()
+    buf1.unsafe_free()
+    buf2.unsafe_free()
     return same
 
 

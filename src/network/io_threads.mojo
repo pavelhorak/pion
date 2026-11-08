@@ -34,11 +34,11 @@ The poller is per platform (the `_poll_*` / `_ev_*` helpers below): epoll,
 edge-triggered, on Linux; kqueue with EV_CLEAR on macOS. Everything above them
 is shared.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
 from std.memory import alloc, unsafe_memset, stack_allocation
-from std.memory.unsafe_pointer import Pointer
 from std.sys import CompilationTarget
 from src.network.server import EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLET, EPOLLEXCLUSIVE
 from src.network.server import EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
@@ -82,30 +82,30 @@ struct IOHub(Movable):
         self.listen_fd = listen_fd
         self.listen_fd2 = Int32(-1)
         self.buf_cap = buf_cap
-        self.stop = alloc[UInt64](8)
+        self.stop = unsafe_alloc[UInt64](8)
         self.stop[] = 0
-        self.rings_in = alloc[UInt64](n_io * IO_RING_WORDS)
-        self.rings_out = alloc[UInt64](n_io * IO_RING_WORDS)
-        unsafe_memset(self.rings_in.bitcast[UInt8](), 0, n_io * IO_RING_WORDS * 8)
-        unsafe_memset(self.rings_out.bitcast[UInt8](), 0, n_io * IO_RING_WORDS * 8)
-        self.io_evfd = alloc[Int32](n_io)
-        self.io_sleep = alloc[UInt64](n_io * 8)
-        unsafe_memset(self.io_sleep.bitcast[UInt8](), 0, n_io * 64)
+        self.rings_in = unsafe_alloc[UInt64](n_io * IO_RING_WORDS)
+        self.rings_out = unsafe_alloc[UInt64](n_io * IO_RING_WORDS)
+        unsafe_memset(self.rings_in.unsafe_bitcast[UInt8](), 0, n_io * IO_RING_WORDS * 8)
+        unsafe_memset(self.rings_out.unsafe_bitcast[UInt8](), 0, n_io * IO_RING_WORDS * 8)
+        self.io_evfd = unsafe_alloc[Int32](n_io)
+        self.io_sleep = unsafe_alloc[UInt64](n_io * 8)
+        unsafe_memset(self.io_sleep.unsafe_bitcast[UInt8](), 0, n_io * 64)
         # macOS: an I/O thread's wake-up fd is its own kqueue (see io_ring.mojo).
         for t in range(n_io):
             self.io_evfd[unsafe_offset=t] = wake_new()
         self.exec_evfd = wake_new()
-        self.exec_sleep = alloc[UInt64](8)
+        self.exec_sleep = unsafe_alloc[UInt64](8)
         self.exec_sleep[] = 0
         self.client_buffers = client_buffers
         self.wctx = wctx
-        self.in_len = alloc[Int](IO_MAX_FDS)
-        self.handed = alloc[Int](IO_MAX_FDS)
-        self.closing = alloc[UInt8](IO_MAX_FDS)
-        self.out_wait = alloc[UInt8](IO_MAX_FDS)
-        self.owner_ep = alloc[Int32](IO_MAX_FDS)
-        self.owner_t = alloc[Int32](IO_MAX_FDS)
-        self.out_lock = alloc[UInt32](IO_MAX_FDS)
+        self.in_len = unsafe_alloc[Int](IO_MAX_FDS)
+        self.handed = unsafe_alloc[Int](IO_MAX_FDS)
+        self.closing = unsafe_alloc[UInt8](IO_MAX_FDS)
+        self.out_wait = unsafe_alloc[UInt8](IO_MAX_FDS)
+        self.owner_ep = unsafe_alloc[Int32](IO_MAX_FDS)
+        self.owner_t = unsafe_alloc[Int32](IO_MAX_FDS)
+        self.out_lock = unsafe_alloc[UInt32](IO_MAX_FDS)
         for i in range(IO_MAX_FDS):
             self.in_len[unsafe_offset=i] = 0
             self.handed[unsafe_offset=i] = 0
@@ -187,8 +187,8 @@ def _poll_wait(ep: Int32, events: Pointer[UInt8, MutUntrackedOrigin],
     comptime if CompilationTarget.is_linux():
         return Int(external_call["epoll_wait", Int32](ep, events, Int32(IO_EVENTS), Int32(timeout_ms)))
     else:
-        ts[0] = 0
-        ts[1] = timeout_ms * 1_000_000
+        ts[unsafe_offset=0] = 0
+        ts[unsafe_offset=1] = timeout_ms * 1_000_000
         return Int(external_call["kevent", Int32](ep, null_ptr[UInt8, MutUntrackedOrigin](), Int32(0),
                                                   events, Int32(IO_EVENTS), ts))
 
@@ -198,7 +198,7 @@ def _ev_fd(events: Pointer[UInt8, MutUntrackedOrigin], i: Int) -> Int32:
     comptime if CompilationTarget.is_linux():
         return epoll_ev_fd(events, i)
     else:
-        return Int32(events.unsafe_offset(i * KEV_BYTES).bitcast[UInt64]()[])
+        return Int32(events.unsafe_offset(i * KEV_BYTES).unsafe_bitcast[UInt64]()[])
 
 
 @always_inline
@@ -215,7 +215,7 @@ def _ev_what(events: Pointer[UInt8, MutUntrackedOrigin], i: Int, evfd: Int32) ->
             r |= EV_IN
         return r
     else:
-        var f = events.unsafe_offset(i * KEV_BYTES + 8).bitcast[Int16]()[]
+        var f = events.unsafe_offset(i * KEV_BYTES + 8).unsafe_bitcast[Int16]()[]
         if f == EVFILT_USER:
             return EV_WAKE
         if f == EVFILT_WRITE:
@@ -331,7 +331,7 @@ struct _IOThread:
         var ci = Int(fd)
         var buf = self.hub[].client_buffers[unsafe_offset=ci]
         if is_null(buf):
-            buf = alloc[UInt8](self.hub[].buf_cap)
+            buf = unsafe_alloc[UInt8](self.hub[].buf_cap)
             self.hub[].client_buffers[unsafe_offset=ci] = buf
         var eof = False
         while True:
@@ -462,8 +462,8 @@ def io_thread_main(hub: Pointer[IOHub, MutUntrackedOrigin], t: Int):
     if hub[].listen_fd2 >= 0:
         _poll_listen(ep, hub[].listen_fd2)
     var st = _IOThread(hub, t, ep)
-    var events = alloc[UInt8](IO_EVENTS * KEV_BYTES)    # the larger of epoll's and kqueue's record
-    var ts = alloc[Int](2)
+    var events = unsafe_alloc[UInt8](IO_EVENTS * KEV_BYTES)    # the larger of epoll's and kqueue's record
+    var ts = unsafe_alloc[Int](2)
     var flag = hub[].io_sleep.unsafe_offset(t * 8)
     var idle = 0
     while hub[].stop[] == 0:

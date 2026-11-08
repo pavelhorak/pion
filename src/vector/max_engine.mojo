@@ -18,7 +18,6 @@ Post-Mojo-1.0 plan (H1 2026):
 """
 
 from src.common.ptr import is_not_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.ffi import external_call

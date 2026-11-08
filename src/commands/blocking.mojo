@@ -15,9 +15,9 @@ Inside MULTI/EXEC, inside a script and on the XDP lane a blocking command
 cannot park, and an empty result answers nil at once, as in Redis.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, null_ptr
 from std.memory import alloc, unsafe_memcpy
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from src.common.hash_map import StripedHashMap
 from src.common.value import GenericValue, ValueType
@@ -65,12 +65,12 @@ struct BlockedClientRegistry(Movable):
 
     def __init__(out self):
         self.clients = List[BlockedClient]()
-        self.count_ptr = alloc[Int](1)
+        self.count_ptr = unsafe_alloc[Int](1)
         self.count_ptr[unsafe_offset=0] = 0
 
-    def __init__(out self, *, deinit take: Self):
-        self.clients = take.clients^
-        self.count_ptr = take.count_ptr
+    def __init__(out self, *, deinit move: Self):
+        self.clients = move.clients^
+        self.count_ptr = move.count_ptr
 
     @always_inline
     def _count(self) -> Int:
@@ -98,11 +98,11 @@ struct BlockedClientRegistry(Movable):
 def parse_block_timeout(t: RESP3Token, now_ms: Int64, mut writer: ResponseWriter) -> Int64:
     """The deadline in ms (0 = none), or -1 with Redis's error written:
     getTimeoutFromObjectOrReply for seconds (src/ffi/fcntl_wrap.c)."""
-    var out = alloc[Int64](1)
+    var out = unsafe_alloc[Int64](1)
     out[unsafe_offset=0] = 0
     var rc = external_call["pion_parse_block_timeout", Int64](t.ptr, Int64(t.length), now_ms, out)
     var v = out[unsafe_offset=0]
-    out.free()
+    out.unsafe_free()
     if rc == 1:
         writer.append_error_response("ERR timeout is not a float or out of range")
         return -1

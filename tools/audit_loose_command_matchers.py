@@ -20,8 +20,8 @@ if len(__import__("sys").argv) > 1:          # a directory holding the two files
     SRC = Path(__import__("sys").argv[1])
 TL = re.compile(r"\btl\s*==\s*(\d+)")
 CL = re.compile(r"\bcmd_len\s*==\s*(\d+)")
-FOLDED = re.compile(r"\(\s*(?:tp|buffer)\[\s*(?:cmd_start \+ )?(\d+)\s*\]\s*\|\s*0x20\s*\)\s*==\s*(\d+)")
-EXACT = re.compile(r"(?<![|\w])(?:tp|buffer)\[\s*(?:cmd_start \+ )?(\d+)\s*\]\s*==\s*(\d+)")
+FOLDED = re.compile(r"\(\s*(?:tp|buffer)\[\s*(?:unsafe_offset=\s*)?(?:cmd_start \+ )?(\d+)\s*\]\s*\|\s*0x20\s*\)\s*==\s*(\d+)")
+EXACT = re.compile(r"(?<![|\w])(?:tp|buffer)\[\s*(?:unsafe_offset=\s*)?(?:cmd_start \+ )?(\d+)\s*\]\s*==\s*(\d+)")
 CM = re.compile(r"cmd_matches_(\d+)\s*\(")
 B0 = re.compile(r"\bb0_lower\s*==\s*(\d+)")
 

@@ -1,5 +1,5 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
 from std.memory import unsafe_memset, unsafe_memcpy, stack_allocation
@@ -80,11 +80,11 @@ struct SlabHashMap(Movable):
         self.vec_tomb = null_ptr[VecTomb, MutUntrackedOrigin]()
         self.vec_gen = 0
         self.rehashes = 0
-        self.metadata = alloc[UInt8](real_cap + 16 + 8)
+        self.metadata = unsafe_alloc[UInt8](real_cap + 16 + 8)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), real_cap + 16)
         unsafe_memset(self.metadata.unsafe_offset(real_cap + 16), UInt8(0), 8)   # no access table
-        self.keys = alloc[GenericValue](real_cap)
-        self.values = alloc[GenericValue](real_cap)
+        self.keys = unsafe_alloc[GenericValue](real_cap)
+        self.values = unsafe_alloc[GenericValue](real_cap)
         for i in range(real_cap):
             (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
             (self.values.unsafe_offset(i)).unsafe_write(GenericValue())
@@ -107,18 +107,18 @@ struct SlabHashMap(Movable):
     # StripedHashMap.touch and src/commands/evict.mojo.
     @always_inline
     def access_table(self) -> Pointer[UInt32, MutUntrackedOrigin]:
-        var a = (self.metadata.unsafe_offset(self.capacity + 16)).unsafe_bitcast[Int]().load[alignment=1]()
+        var a = (self.metadata.unsafe_offset(self.capacity + 16)).unsafe_bitcast[Int]().unsafe_load[alignment=1]()
         return Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=a)
 
     @always_inline
     def _set_access_table(mut self, t: Pointer[UInt32, MutUntrackedOrigin]):
-        (self.metadata.unsafe_offset(self.capacity + 16)).unsafe_bitcast[Int]().store[alignment=1](Int(t))
+        (self.metadata.unsafe_offset(self.capacity + 16)).unsafe_bitcast[Int]().unsafe_store[alignment=1](Int(t))
 
     def enable_access_table(mut self):
         if Int(self.access_table()) != 0:
             return
         # One word past the slots: may this table grow (set_may_grow).
-        var t = alloc[UInt32](self.capacity + 1)
+        var t = unsafe_alloc[UInt32](self.capacity + 1)
         unsafe_memset(t.unsafe_bitcast[UInt8](), UInt8(0), self.capacity * 4)
         t[unsafe_offset=self.capacity] = 1
         self._set_access_table(t)
@@ -155,7 +155,7 @@ struct SlabHashMap(Movable):
         var h2_vec = SIMD[DType.uint8, width](h2)
         var empty_vec = SIMD[DType.uint8, width](Self.EMPTY)
         while True:
-            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
             var mbits = _movemask16(meta_chunk.eq(h2_vec))
             while mbits != 0:
                 var slot_idx = (idx + count_trailing_zeros(mbits)) & mask
@@ -185,7 +185,7 @@ struct SlabHashMap(Movable):
         comptime width = 16
         var i = 0
         while i < self.capacity:
-            var meta = (self.metadata.unsafe_offset(i)).load[width=width]()
+            var meta = (self.metadata.unsafe_offset(i)).unsafe_load[width=width]()
             var occ = _movemask16(
                 (meta & SIMD[DType.uint8, width](0x80)).eq(SIMD[DType.uint8, width](0)))
             while occ != 0:
@@ -240,11 +240,11 @@ struct SlabHashMap(Movable):
         var old = self.get(key)
         var n = old.string_len()
         if old.is_string() and value.is_string() and n == value.string_len():
-            var sa = alloc[UInt8](24)
-            var sb = alloc[UInt8](24)
+            var sa = unsafe_alloc[UInt8](24)
+            var sb = unsafe_alloc[UInt8](24)
             var same = external_call["memcmp", Int32](old.as_string_safe(sa), value.as_string_safe(sb), n) == 0
-            sa.free()
-            sb.free()
+            sa.unsafe_free()
+            sb.unsafe_free()
             if same:
                 return
         self.drop_vector()
@@ -278,7 +278,7 @@ struct SlabHashMap(Movable):
 
     def set_field_deadline(mut self, field: GenericValue, deadline_ns: Int64):
         if Int(self.field_ttl) == 0:
-            self.field_ttl = alloc[SlabHashMap](1)
+            self.field_ttl = unsafe_alloc[SlabHashMap](1)
             self.field_ttl.unsafe_write(SlabHashMap(16))
         self.field_ttl[].set(field, GenericValue.from_int(deadline_ns))
 
@@ -375,7 +375,7 @@ struct SlabHashMap(Movable):
                 var next_idx = (idx + 16) & mask
                 prefetch(self.metadata.unsafe_offset(next_idx))
 
-                var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+                var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
 
                 var mbits = _movemask16(meta_chunk.eq(h2_vec))
                 while mbits != 0:
@@ -457,7 +457,7 @@ struct SlabHashMap(Movable):
                 var next_idx = (idx + 16) & mask
                 prefetch(self.metadata.unsafe_offset(next_idx))
 
-                var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+                var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
 
                 var mbits = _movemask16(meta_chunk.eq(h2_vec))
                 while mbits != 0:
@@ -537,7 +537,7 @@ struct SlabHashMap(Movable):
             var next_idx = (idx + 16) & mask
             prefetch(self.metadata.unsafe_offset(next_idx))
 
-            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
 
             var mbits = _movemask16(meta_chunk.eq(h2_vec))
             while mbits != 0:
@@ -578,7 +578,7 @@ struct SlabHashMap(Movable):
             var next_idx = (idx + 16) & mask
             prefetch(self.metadata.unsafe_offset(next_idx))
 
-            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
 
             var mbits = _movemask16(meta_chunk.eq(h2_vec))
             while mbits != 0:
@@ -617,7 +617,7 @@ struct SlabHashMap(Movable):
             while True:
                 var next_idx = (idx + 16) & mask
                 prefetch(self.metadata.unsafe_offset(next_idx))
-                var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+                var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
                 var mbits = _movemask16(meta_chunk.eq(h2_vec))
                 while mbits != 0:
                     var slot_idx = (idx + count_trailing_zeros(mbits)) & mask
@@ -673,7 +673,7 @@ struct SlabHashMap(Movable):
         while True:
             var next_idx = (idx + 16) & mask
             prefetch(self.metadata.unsafe_offset(next_idx))
-            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
             var mbits = _movemask16(meta_chunk.eq(h2_vec))
             while mbits != 0:
                 var slot_idx = (idx + count_trailing_zeros(mbits)) & mask
@@ -719,7 +719,7 @@ struct SlabHashMap(Movable):
         while True:
             var next_idx = (idx + 16) & mask
             prefetch(self.metadata.unsafe_offset(next_idx))
-            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
             var mbits = _movemask16(meta_chunk.eq(h2_vec))
             while mbits != 0:
                 var slot_idx = (idx + count_trailing_zeros(mbits)) & mask
@@ -774,7 +774,7 @@ struct SlabHashMap(Movable):
             var next_idx = (idx + 16) & mask
             prefetch(self.metadata.unsafe_offset(next_idx))
 
-            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
 
             var mbits = _movemask16(meta_chunk.eq(h2_vec))
             while mbits != 0:
@@ -814,7 +814,7 @@ struct SlabHashMap(Movable):
             var next_idx = (idx + 16) & mask
             prefetch(self.metadata.unsafe_offset(next_idx))
 
-            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
 
             var mbits = _movemask16(meta_chunk.eq(h2_vec))
             while mbits != 0:
@@ -868,7 +868,7 @@ struct SlabHashMap(Movable):
             var next_idx = (idx + 16) & mask
             prefetch(self.metadata.unsafe_offset(next_idx))
 
-            var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
 
             var mbits = _movemask16(meta_chunk.eq(h2_vec))
             while mbits != 0:
@@ -932,7 +932,7 @@ struct SlabHashMap(Movable):
             s += 1
         var high = SIMD[DType.uint8, 16](128)
         while s + 16 <= end:
-            var chunk = (self.metadata.unsafe_offset(s)).load[width=16]()
+            var chunk = (self.metadata.unsafe_offset(s)).unsafe_load[width=16]()
             var live = _movemask16(chunk.lt(high))
             if live != 0:
                 return s + count_trailing_zeros(live)
@@ -977,7 +977,7 @@ struct SlabHashMap(Movable):
         self.capacity = new_cap
         self.size = 0
         self.tombstones = 0
-        self.metadata = alloc[UInt8](self.capacity + 16 + 8)
+        self.metadata = unsafe_alloc[UInt8](self.capacity + 16 + 8)
         unsafe_memset(self.metadata, UInt8(Self.EMPTY), self.capacity + 16)
         unsafe_memset(self.metadata.unsafe_offset(self.capacity + 16), UInt8(0), 8)
         # The stamps move with their entries: a tombstone purge rebuilds the
@@ -988,8 +988,8 @@ struct SlabHashMap(Movable):
             self.enable_access_table()
             new_table = self.access_table()
             new_table[unsafe_offset=self.capacity] = old_table[unsafe_offset=old_cap]
-        self.keys = alloc[GenericValue](self.capacity)
-        self.values = alloc[GenericValue](self.capacity)
+        self.keys = unsafe_alloc[GenericValue](self.capacity)
+        self.values = unsafe_alloc[GenericValue](self.capacity)
         for i in range(self.capacity):
             (self.keys.unsafe_offset(i)).unsafe_write(GenericValue())
             (self.values.unsafe_offset(i)).unsafe_write(GenericValue())
@@ -1010,7 +1010,7 @@ struct SlabHashMap(Movable):
                 
                 var found = False
                 while not found:
-                    var meta_chunk = (self.metadata.unsafe_offset(idx)).load[width=width]()
+                    var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=width]()
                     var ebits = _movemask16(meta_chunk.eq(empty_vec))
                     if ebits != 0:
                         var slot_idx = (idx + count_trailing_zeros(ebits)) & mask
@@ -1052,7 +1052,7 @@ struct SlabHashMap(Movable):
             self.values[unsafe_offset=i] = GenericValue()
         self.size = 0
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         # #46: every route that drops a hash ends here (DEL, expiry, FLUSHALL,
         # an overwrite, a pop or HDEL that empties it): its vector dies with it
         if self.vec_slot >= 0 and Int(self.vec_tomb) != 0:
@@ -1167,7 +1167,7 @@ struct EvictState(Movable):
         self.prev_keys = 0
         self.avg_bytes = 0.0
         self.evicted = 0
-        self.pool = alloc[EvictPoolEntry](16)
+        self.pool = unsafe_alloc[EvictPoolEntry](16)
         self.pool_n = 0
 
     def __moveinit__(out self, deinit take: Self):
@@ -1298,11 +1298,11 @@ struct StripedHashMap(Movable):
         self.active_expire = True
         self.expire_hides_only = False
         self.vec_maps = null_ptr[SlabHashMap, MutUntrackedOrigin]()
-        self.graveyard = alloc[List[GenericValue]](1)
+        self.graveyard = unsafe_alloc[List[GenericValue]](1)
         self.graveyard.unsafe_write(List[GenericValue]())
-        self.field_ttl_index = alloc[SlabHashMap](1)
+        self.field_ttl_index = unsafe_alloc[SlabHashMap](1)
         self.field_ttl_index.unsafe_write(SlabHashMap(16))
-        self.shards = alloc[SlabHashMap](8)
+        self.shards = unsafe_alloc[SlabHashMap](8)
         for i in range(8):
             (self.shards.unsafe_offset(i)).unsafe_write(SlabHashMap(shard_cap))
             self.shards[unsafe_offset=i].graveyard = self.graveyard
@@ -1320,7 +1320,7 @@ struct StripedHashMap(Movable):
         self.track_access = take.track_access
         self.evict = take.evict
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if Int(self.evict) != 0:
             self.evict[].pool.unsafe_free()
             self.evict.unsafe_deinit_pointee()
@@ -1352,7 +1352,7 @@ struct StripedHashMap(Movable):
     def enable_expiry_log(mut self):
         """Queue expired keys for the WAL (state.mojo, when a WAL is open)."""
         if Int(self.expired_log) == 0:
-            self.expired_log = alloc[List[UInt8]](1)
+            self.expired_log = unsafe_alloc[List[UInt8]](1)
             self.expired_log.unsafe_write(List[UInt8]())
 
     def deadline(self, key: GenericValue) -> Int64:
@@ -1449,7 +1449,7 @@ struct StripedHashMap(Movable):
         map's stored keys unless the caller is done with it: the removal
         frees the stored key."""
         if Int(self.expired_log) != 0:
-            var buf = alloc[UInt8](24)
+            var buf = unsafe_alloc[UInt8](24)
             var kl = key.string_len()
             var kp = key.as_string_safe(buf)
             var log = self.expired_log
@@ -1458,7 +1458,7 @@ struct StripedHashMap(Movable):
             log[].append(UInt8((kl >> 16) & 0xFF))
             log[].append(UInt8((kl >> 24) & 0xFF))
             for b in range(kl):
-                log[].append(kp[b])
+                log[].append(kp[unsafe_offset=b])
             buf.unsafe_free()
         if Int(self.ttl_map) != 0:
             _ = self.ttl_map[].remove_generic(key)
@@ -1612,7 +1612,7 @@ struct StripedHashMap(Movable):
     def _vec_alloc(mut self):
         if Int(self.vec_maps) != 0:
             return
-        self.vec_maps = alloc[SlabHashMap](VEC_KEY_SHARDS + 1)
+        self.vec_maps = unsafe_alloc[SlabHashMap](VEC_KEY_SHARDS + 1)
         for i in range(VEC_KEY_SHARDS + 1):
             (self.vec_maps.unsafe_offset(i)).unsafe_write(SlabHashMap(16))
 

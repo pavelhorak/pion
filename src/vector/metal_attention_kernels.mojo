@@ -30,7 +30,6 @@
 # On Linux: this struct is a no-op stub (ready=False; attend returns 0).
 
 from std.sys.info import CompilationTarget
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.math import sqrt, exp

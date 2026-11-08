@@ -12,7 +12,6 @@ on it), and a kqueue of its own for the executor.
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
 from std.memory import stack_allocation, unsafe_memset
-from std.memory.unsafe_pointer import Pointer
 from std.sys import CompilationTarget
 from src.common.ptr import null_ptr
 
@@ -113,10 +112,10 @@ def kev_change(kq: Int32, ident: Int, filter: Int16, flags: UInt16, fflags: UInt
     """macOS: apply one kevent change, return no events."""
     var ev = stack_allocation[KEV_BYTES, UInt8]()
     unsafe_memset(ev, 0, KEV_BYTES)
-    ev.bitcast[UInt64]()[] = UInt64(ident)
-    ev.unsafe_offset(8).bitcast[Int16]()[] = filter
-    ev.unsafe_offset(10).bitcast[UInt16]()[] = flags
-    ev.unsafe_offset(12).bitcast[UInt32]()[] = fflags
+    ev.unsafe_bitcast[UInt64]()[] = UInt64(ident)
+    ev.unsafe_offset(8).unsafe_bitcast[Int16]()[] = filter
+    ev.unsafe_offset(10).unsafe_bitcast[UInt16]()[] = flags
+    ev.unsafe_offset(12).unsafe_bitcast[UInt32]()[] = fflags
     return external_call["kevent", Int32](kq, ev, Int32(1), null_ptr[UInt8, MutUntrackedOrigin](),
                                           Int32(0), null_ptr[NoneType, MutUntrackedOrigin]())
 
@@ -153,15 +152,15 @@ def wake_wait(fd: Int32, timeout_ms: Int):
     """Sleep until fd is signalled or timeout_ms passes (the executor's sleep)."""
     comptime if CompilationTarget.is_linux():
         var pfd = stack_allocation[2, Int32]()   # struct pollfd {int fd; short events; short revents}
-        pfd[0] = fd
-        pfd[1] = Int32(1)                        # events = POLLIN, revents = 0
+        pfd[unsafe_offset=0] = fd
+        pfd[unsafe_offset=1] = Int32(1)                        # events = POLLIN, revents = 0
         if external_call["poll", Int32](pfd, Int64(1), Int32(timeout_ms)) > 0:
             evfd_drain(fd)
     else:
         var ev = stack_allocation[KEV_BYTES, UInt8]()
         var ts = stack_allocation[2, Int]()      # struct timespec
-        ts[0] = 0
-        ts[1] = timeout_ms * 1_000_000
+        ts[unsafe_offset=0] = 0
+        ts[unsafe_offset=1] = timeout_ms * 1_000_000
         _ = external_call["kevent", Int32](fd, null_ptr[UInt8, MutUntrackedOrigin](), Int32(0),
                                            ev, Int32(1), ts)
 

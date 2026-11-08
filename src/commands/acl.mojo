@@ -17,9 +17,9 @@ anything, and an empty LIST and CAT. Now:
     answer Redis's no-ACL-file error, which is Pion's situation.
 """
 
+from std.memory.alloc import unsafe_alloc
 from std.collections import List
 from std.memory import alloc
-from std.memory.unsafe_pointer import Pointer
 from std.ffi import external_call
 from src.common.ptr import is_not_null
 from src.common.utils import bytes_to_string
@@ -65,9 +65,9 @@ struct AclLog(Movable):
         self.entries = List[AclLogEntry]()
         self.next_id = 0
 
-    def __init__(out self, *, deinit take: Self):
-        self.entries = take.entries^
-        self.next_id = take.next_id
+    def __init__(out self, *, deinit move: Self):
+        self.entries = move.entries^
+        self.next_id = move.next_id
 
     def add(mut self, var reason: String, var context: String, var object: String, var username: String,
             var client_info: String):
@@ -103,7 +103,7 @@ struct AclLog(Movable):
             _kv_str(writer, "context", e.context)
             _kv_str(writer, "object", e.object)
             _kv_str(writer, "username", e.username)
-            writer.append_bulk_string_response("age-seconds".unsafe_ptr(), 11)
+            writer.append_bulk_string_response("age-seconds".ptr(), 11)
             var age = _seconds_text(now - e.created_ms)
             writer.append_double_response(age.unsafe_ptr(), age.byte_length())
             _kv_str(writer, "client-info", e.client_info)
@@ -146,20 +146,20 @@ def _ci(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, lit: StaticString) -> Boo
         return False
     var lp = lit.unsafe_ptr()
     for k in range(n):
-        var c = p[k]
+        var c = p[unsafe_offset=k]
         if c >= 65 and c <= 90:
             c += 32
-        if c != lp[k]:
+        if c != lp[unsafe_offset=k]:
             return False
     return True
 
 
 @always_inline
 def sha256_hex(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> String:
-    var out = alloc[UInt8](64)
+    var out = unsafe_alloc[UInt8](64)
     external_call["pion_sha256_hex", NoneType](p, Int64(n), out)
     var s = bytes_to_string(out, 64)
-    out.free()
+    out.unsafe_free()
     return s
 
 
@@ -185,7 +185,7 @@ struct AclUsers:
                 var np = self.tenants[].name_ptr(t)
                 var eq = True
                 for k in range(n):
-                    if np[k] != p[k]:
+                    if np[unsafe_offset=k] != p[unsafe_offset=k]:
                         eq = False
                         break
                 if eq:
@@ -207,7 +207,7 @@ struct AclUsers:
             _ = self.requirepass
             return h
         var pp = self.tenants[].pass_buf.unsafe_offset(u * MAX_TENANT_PASS)
-        return sha256_hex(pp, Int(self.tenants[].pass_lens[u]))
+        return sha256_hex(pp, Int(self.tenants[].pass_lens[unsafe_offset=u]))
 
     def command_rules(self, u: Int) -> String:
         """The user's commands as ACL rules: +@all for default, -@all and
@@ -220,7 +220,7 @@ struct AclUsers:
         var nl = names.byte_length()
         var start = 0
         for k in range(nl + 1):
-            if k == nl or np[k] == 32:
+            if k == nl or np[unsafe_offset=k] == 32:
                 if k > start:
                     var p = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(np) + start)
                     if tenant_keyspec(p, k - start).allowed:
@@ -260,7 +260,7 @@ def _same(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, lit: StaticString) -> B
         return False
     var lp = lit.unsafe_ptr()
     for k in range(n):
-        if p[k] != lp[k]:
+        if p[unsafe_offset=k] != lp[unsafe_offset=k]:
             return False
     return True
 
@@ -271,16 +271,16 @@ def _parse_long(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, mut out: Int64) -
         return False
     var k = 0
     var neg = False
-    if p[0] == 45:
+    if p[unsafe_offset=0] == 45:
         neg = True
         k = 1
         if n == 1:
             return False
-    if p[k] == 48 and n - k > 1:
+    if p[unsafe_offset=k] == 48 and n - k > 1:
         return False
     var v = UInt64(0)
     while k < n:
-        var c = p[k]
+        var c = p[unsafe_offset=k]
         if c < 48 or c > 57:
             return False
         var d = UInt64(c - 48)
@@ -312,7 +312,7 @@ def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int
     if argc < 2:
         writer.append_error_response("ERR wrong number of arguments for 'acl' command")
         return
-    var sub = tokens[i + 1]
+    var sub = tokens[unsafe_offset=i + 1]
     var sp = sub.ptr
     var sl = sub.length
     if _ci(sp, sl, "whoami"):
@@ -351,17 +351,17 @@ def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int
         if argc != 3:
             writer.append_error_response("ERR wrong number of arguments for 'acl|getuser' command")
             return
-        var u = users.find(tokens[i + 2].ptr, tokens[i + 2].length)
+        var u = users.find(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
         if u == -2:
             writer.append_null_response()
             return
         writer.append_map_header(6)
-        writer.append_bulk_string_response("flags".unsafe_ptr(), 5)
+        writer.append_bulk_string_response("flags".ptr(), 5)
         var f = users.flags(u)
         writer.append_set_header(len(f))
         for k in range(len(f)):
             writer.append_bulk_string_response(f[k].unsafe_ptr(), f[k].byte_length())
-        writer.append_bulk_string_response("passwords".unsafe_ptr(), 9)
+        writer.append_bulk_string_response("passwords".ptr(), 9)
         var h = users.password_hash(u)
         if h.byte_length() > 0:
             writer.append_array_header(1)
@@ -372,7 +372,7 @@ def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int
         _kv_str(writer, "commands", cr)
         _kv_str(writer, "keys", users.key_rule(u))
         _kv_str(writer, "channels", String("&*") if u < 0 else String(""))
-        writer.append_bulk_string_response("selectors".unsafe_ptr(), 9)
+        writer.append_bulk_string_response("selectors".ptr(), 9)
         writer.append_array_header(0)
     elif _ci(sp, sl, "cat"):
         if argc > 3:
@@ -381,13 +381,13 @@ def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int
         if argc == 2:
             _write_words(writer, ACL_CATEGORIES)
             return
-        var c = tokens[i + 2]
-        var low = alloc[UInt8](c.length + 1)
+        var c = tokens[unsafe_offset=i + 2]
+        var low = unsafe_alloc[UInt8](c.length + 1)
         for k in range(c.length):
-            var b = c.ptr[k]
-            low[k] = b + 32 if b >= 65 and b <= 90 else b
+            var b = c.ptr[unsafe_offset=k]
+            low[unsafe_offset=k] = b + 32 if b >= 65 and b <= 90 else b
         var members = acl_category_commands(low, c.length)
-        low.free()
+        low.unsafe_free()
         if members == "?":
             writer.append_error_response("ERR Unknown category '" + bytes_to_string(c.ptr, c.length) + "'")
             return
@@ -398,31 +398,31 @@ def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int
             return
         var bits = Int64(256)
         if argc == 3:
-            if not _parse_long(tokens[i + 2].ptr, tokens[i + 2].length, bits):
+            if not _parse_long(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, bits):
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return
             if bits <= 0 or bits > 4096:
                 writer.append_error_response("ERR ACL GENPASS argument must be the number of bits for the output "
                                              + "password, a positive number up to 4096")
                 return
-        var out = alloc[UInt8](1025)
+        var out = unsafe_alloc[UInt8](1025)
         var n = Int(external_call["pion_genpass_hex", Int64](bits, out))
         if n <= 0:
-            out.free()
+            out.unsafe_free()
             writer.append_error_response("ERR failed to read random bytes")
             return
         writer.append_bulk_string_response(out, n)
-        out.free()
+        out.unsafe_free()
     elif _ci(sp, sl, "dryrun"):
         if argc < 4:
             writer.append_error_response("ERR wrong number of arguments for 'acl|dryrun' command")
             return
-        var u = users.find(tokens[i + 2].ptr, tokens[i + 2].length)
+        var u = users.find(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
         if u == -2:
-            writer.append_error_response("ERR User '" + bytes_to_string(tokens[i + 2].ptr, tokens[i + 2].length)
+            writer.append_error_response("ERR User '" + bytes_to_string(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
                                          + "' not found")
             return
-        var c = tokens[i + 3]
+        var c = tokens[unsafe_offset=i + 3]
         if not command_exists(c.ptr, c.length):
             writer.append_error_response("ERR Command '" + bytes_to_string(c.ptr, c.length) + "' not found")
             return
@@ -444,7 +444,7 @@ def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int
             return
         var count = 10
         if argc == 3:
-            var a = tokens[i + 2]
+            var a = tokens[unsafe_offset=i + 2]
             if _ci(a.ptr, a.length, "reset"):
                 log.entries.clear()
                 writer.append_ok_response()
@@ -466,11 +466,11 @@ def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int
             writer.append_error_response("ERR wrong number of arguments for 'acl|deluser' command")
             return
         for k in range(i + 2, end):
-            if _same(tokens[k].ptr, tokens[k].length, "default"):
+            if _same(tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length, "default"):
                 writer.append_error_response("ERR The 'default' user cannot be removed")
                 return
         for k in range(i + 2, end):
-            if users.find(tokens[k].ptr, tokens[k].length) >= 0:
+            if users.find(tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length) >= 0:
                 writer.append_error_response("ERR ACL DELUSER is not supported: Pion's --tenant users are "
                                              + "fixed at startup")
                 return
@@ -522,12 +522,12 @@ def handle_acl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int
 
 
 def _lower(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> String:
-    var b = alloc[UInt8](n + 1)
+    var b = unsafe_alloc[UInt8](n + 1)
     for k in range(n):
-        var c = p[k]
-        b[k] = c + 32 if c >= 65 and c <= 90 else c
+        var c = p[unsafe_offset=k]
+        b[unsafe_offset=k] = c + 32 if c >= 65 and c <= 90 else c
     var s = bytes_to_string(b, n)
-    b.free()
+    b.unsafe_free()
     return s
 
 
@@ -538,14 +538,14 @@ def _write_words(mut writer: ResponseWriter, words: StaticString):
     var count = 0
     var start = 0
     for k in range(n + 1):
-        if k == n or p[k] == 32:
+        if k == n or p[unsafe_offset=k] == 32:
             if k > start:
                 count += 1
             start = k + 1
     writer.append_array_header(count)
     start = 0
     for k in range(n + 1):
-        if k == n or p[k] == 32:
+        if k == n or p[unsafe_offset=k] == 32:
             if k > start:
                 writer.append_bulk_string_response(
                     Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(p) + start), k - start)

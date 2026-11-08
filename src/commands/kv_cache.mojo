@@ -13,7 +13,6 @@ docs but no handler exists — eviction is automatic.
 """
 
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.collections import Array
 
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS

@@ -17,8 +17,8 @@ Similarity metric:
 Capacity: 10,000 entries per worker (configurable via CACHE_MAX_ENTRIES comptime).
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.collections import List, Span
@@ -86,7 +86,7 @@ struct SemanticCache(Movable):
         self.count = 0
         self.threshold = threshold
         self.dimensions = dimensions
-        self.embed_buf = alloc[Float32](dimensions)
+        self.embed_buf = unsafe_alloc[Float32](dimensions)
         self.enabled = enabled
         self.bridge = null_ptr[InferenceBridge, MutUntrackedOrigin]()
         self.nle = NLEmbeddingEngine(nle_enabled)
@@ -154,7 +154,7 @@ struct SemanticCache(Movable):
                 if is_not_null(self.prefix_scratch):
                     self.prefix_scratch.unsafe_free()
                 var newcap = need * 2
-                self.prefix_scratch = alloc[UInt8](newcap)
+                self.prefix_scratch = unsafe_alloc[UInt8](newcap)
                 self.prefix_scratch_cap = newcap
             unsafe_memcpy(dest=self.prefix_scratch, src=pfx.unsafe_ptr(), count=pfx_len)
             unsafe_memcpy(dest=self.prefix_scratch.unsafe_offset(pfx_len), src=text_ptr, count=text_len)
@@ -275,10 +275,10 @@ struct SemanticCache(Movable):
         for e in range(self.count):
             if e >= len(self.owners) or self.owners[e] != owner:
                 continue
-            var nidx = self.hnsw.node_map[e]
+            var nidx = self.hnsw.node_map[unsafe_offset=e]
             if nidx < 0 or nidx >= self.hnsw.num_nodes:
                 continue
-            d.append(self.hnsw._dist_int8_int8(self.hnsw.query_int8, self.hnsw.nodes[nidx].vector))
+            d.append(self.hnsw._dist_int8_int8(self.hnsw.query_int8, self.hnsw.nodes[unsafe_offset=nidx].vector))
             e_ids.append(e)
         var order = _argsort(d)
         var take = min(k, len(order))
@@ -362,9 +362,9 @@ struct SemanticCache(Movable):
         if with_workspace:
             var ws = self.workspace_at(hit_id)
             writer.append_map_header(2)
-            writer.append_bulk_string_response("response".unsafe_ptr(), 8)
+            writer.append_bulk_string_response("response".ptr(), 8)
             writer.append_bulk_string_response(resp.unsafe_ptr(), resp.byte_length())
-            writer.append_bulk_string_response("workspace".unsafe_ptr(), 9)
+            writer.append_bulk_string_response("workspace".ptr(), 9)
             if ws.byte_length() > 0:
                 writer.append_bulk_string_response(ws.unsafe_ptr(), ws.byte_length())
             else:

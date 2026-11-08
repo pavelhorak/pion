@@ -21,8 +21,8 @@ Each worker has its own registry, as it has its own keyspace: with
 it runs on. IDs are unique across the workers.
 """
 
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc, unsafe_memset
-from std.memory.unsafe_pointer import Pointer
 from std.collections import List, Dict
 from std.ffi import external_call
 from src.network.response_writer import ResponseWriter
@@ -55,21 +55,21 @@ struct ClientRegistry(Movable):
     var ticks_per_ms: Float64
 
     def __init__(out self):
-        self.ids = alloc[UInt64](CLIENT_MAX_FDS)
-        unsafe_memset(self.ids.bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
-        self.ctime_ms = alloc[Int64](CLIENT_MAX_FDS)
-        unsafe_memset(self.ctime_ms.bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
-        self.atime = alloc[UInt64](CLIENT_MAX_FDS)
-        unsafe_memset(self.atime.bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
-        self.reply = alloc[UInt8](CLIENT_MAX_FDS)
+        self.ids = unsafe_alloc[UInt64](CLIENT_MAX_FDS)
+        unsafe_memset(self.ids.unsafe_bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
+        self.ctime_ms = unsafe_alloc[Int64](CLIENT_MAX_FDS)
+        unsafe_memset(self.ctime_ms.unsafe_bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
+        self.atime = unsafe_alloc[UInt64](CLIENT_MAX_FDS)
+        unsafe_memset(self.atime.unsafe_bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
+        self.reply = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
         unsafe_memset(self.reply, 0, CLIENT_MAX_FDS)
-        self.no_touch = alloc[UInt8](CLIENT_MAX_FDS)
+        self.no_touch = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
         unsafe_memset(self.no_touch, 0, CLIENT_MAX_FDS)
-        self.no_evict = alloc[UInt8](CLIENT_MAX_FDS)
+        self.no_evict = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
         unsafe_memset(self.no_evict, 0, CLIENT_MAX_FDS)
-        self.postponed = alloc[UInt8](CLIENT_MAX_FDS)
+        self.postponed = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
         unsafe_memset(self.postponed, 0, CLIENT_MAX_FDS)
-        self.close_after = alloc[UInt8](CLIENT_MAX_FDS)
+        self.close_after = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
         unsafe_memset(self.close_after, 0, CLIENT_MAX_FDS)
         self.lib_name = Dict[Int, String]()
         self.lib_ver = Dict[Int, String]()
@@ -81,51 +81,51 @@ struct ClientRegistry(Movable):
         self.pause_changed = False
         self.ticks_per_ms = external_call["pion_ticks_per_us", Float64]() * 1000.0
 
-    def __init__(out self, *, deinit take: Self):
-        self.ids = take.ids
-        self.ctime_ms = take.ctime_ms
-        self.atime = take.atime
-        self.reply = take.reply
-        self.no_touch = take.no_touch
-        self.no_evict = take.no_evict
-        self.postponed = take.postponed
-        self.close_after = take.close_after
-        self.lib_name = take.lib_name^
-        self.lib_ver = take.lib_ver^
-        self.reply_off_count = take.reply_off_count
-        self.pause_until_ms = take.pause_until_ms
-        self.pause_all = take.pause_all
-        self.paused_fds = take.paused_fds^
-        self.released = take.released^
-        self.pause_changed = take.pause_changed
-        self.ticks_per_ms = take.ticks_per_ms
+    def __init__(out self, *, deinit move: Self):
+        self.ids = move.ids
+        self.ctime_ms = move.ctime_ms
+        self.atime = move.atime
+        self.reply = move.reply
+        self.no_touch = move.no_touch
+        self.no_evict = move.no_evict
+        self.postponed = move.postponed
+        self.close_after = move.close_after
+        self.lib_name = move.lib_name^
+        self.lib_ver = move.lib_ver^
+        self.reply_off_count = move.reply_off_count
+        self.pause_until_ms = move.pause_until_ms
+        self.pause_all = move.pause_all
+        self.paused_fds = move.paused_fds^
+        self.released = move.released^
+        self.pause_changed = move.pause_changed
+        self.ticks_per_ms = move.ticks_per_ms
 
     def on_accept(mut self, fd: Int32):
         var f = Int(fd)
         if f < 0 or f >= CLIENT_MAX_FDS:
             return
         self._forget(f)
-        self.ids[f] = external_call["pion_next_client_id", UInt64]()
-        self.ctime_ms[f] = external_call["pion_unix_ms", Int64]()
-        self.atime[f] = external_call["pion_ticks", UInt64]()
+        self.ids[unsafe_offset=f] = external_call["pion_next_client_id", UInt64]()
+        self.ctime_ms[unsafe_offset=f] = external_call["pion_unix_ms", Int64]()
+        self.atime[unsafe_offset=f] = external_call["pion_ticks", UInt64]()
 
     def on_close(mut self, fd: Int32):
         var f = Int(fd)
         if f < 0 or f >= CLIENT_MAX_FDS:
             return
         self._forget(f)
-        self.ids[f] = 0
+        self.ids[unsafe_offset=f] = 0
 
     def _forget(mut self, f: Int):
         """Whatever the fd's previous connection left behind."""
-        if self.reply[f] != REPLY_ON:
+        if self.reply[unsafe_offset=f] != REPLY_ON:
             self.reply_off_count -= 1
-        self.reply[f] = REPLY_ON
-        self.no_touch[f] = 0
-        self.no_evict[f] = 0
-        self.close_after[f] = 0
-        if self.postponed[f] != 0:
-            self.postponed[f] = 0
+        self.reply[unsafe_offset=f] = REPLY_ON
+        self.no_touch[unsafe_offset=f] = 0
+        self.no_evict[unsafe_offset=f] = 0
+        self.close_after[unsafe_offset=f] = 0
+        if self.postponed[unsafe_offset=f] != 0:
+            self.postponed[unsafe_offset=f] = 0
             for k in range(len(self.paused_fds)):
                 if Int(self.paused_fds[k]) == f:
                     _ = self.paused_fds.pop(k)
@@ -148,19 +148,19 @@ struct ClientRegistry(Movable):
         receive buffer."""
         var f = Int(fd)
         if f >= 0 and f < CLIENT_MAX_FDS:
-            self.atime[f] = external_call["pion_ticks", UInt64]()
+            self.atime[unsafe_offset=f] = external_call["pion_ticks", UInt64]()
 
     def id_of(self, fd: Int32) -> UInt64:
         var f = Int(fd)
         if f < 0 or f >= CLIENT_MAX_FDS:
             return 0
-        return self.ids[f]
+        return self.ids[unsafe_offset=f]
 
     def fd_of(self, id: UInt64) -> Int32:
         if id == 0:
             return -1
         for f in range(CLIENT_MAX_FDS):
-            if self.ids[f] == id:
+            if self.ids[unsafe_offset=f] == id:
                 return Int32(f)
         return -1
 
@@ -169,22 +169,22 @@ struct ClientRegistry(Movable):
         if f < 0 or f >= CLIENT_MAX_FDS or self.ticks_per_ms <= 0:
             return 0
         var now = external_call["pion_ticks", UInt64]()
-        if now <= self.atime[f]:
+        if now <= self.atime[unsafe_offset=f]:
             return 0
-        return Int64(Float64(now - self.atime[f]) / self.ticks_per_ms) // 1000
+        return Int64(Float64(now - self.atime[unsafe_offset=f]) / self.ticks_per_ms) // 1000
 
     def age_s(self, fd: Int32) -> Int64:
         var f = Int(fd)
         if f < 0 or f >= CLIENT_MAX_FDS:
             return 0
-        return (external_call["pion_unix_ms", Int64]() - self.ctime_ms[f]) // 1000
+        return (external_call["pion_unix_ms", Int64]() - self.ctime_ms[unsafe_offset=f]) // 1000
 
     def set_reply(mut self, fd: Int32, mode: UInt8):
         var f = Int(fd)
         if f < 0 or f >= CLIENT_MAX_FDS:
             return
-        var was_on = self.reply[f] == REPLY_ON
-        self.reply[f] = mode
+        var was_on = self.reply[unsafe_offset=f] == REPLY_ON
+        self.reply[unsafe_offset=f] = mode
         var now_on = mode == REPLY_ON
         if was_on and not now_on:
             self.reply_off_count += 1
@@ -206,9 +206,9 @@ struct ClientRegistry(Movable):
     def release(mut self, fd: Int32):
         """Let one held client go now (CLIENT KILL of it)."""
         var f = Int(fd)
-        if f < 0 or f >= CLIENT_MAX_FDS or self.postponed[f] == 0:
+        if f < 0 or f >= CLIENT_MAX_FDS or self.postponed[unsafe_offset=f] == 0:
             return
-        self.postponed[f] = 0
+        self.postponed[unsafe_offset=f] = 0
         for k in range(len(self.paused_fds)):
             if self.paused_fds[k] == fd:
                 _ = self.paused_fds.pop(k)
@@ -218,8 +218,8 @@ struct ClientRegistry(Movable):
     def hold(mut self, fd: Int32):
         """The pause holds fd's next command."""
         var f = Int(fd)
-        if f >= 0 and f < CLIENT_MAX_FDS and self.postponed[f] == 0:
-            self.postponed[f] = 1
+        if f >= 0 and f < CLIENT_MAX_FDS and self.postponed[unsafe_offset=f] == 0:
+            self.postponed[unsafe_offset=f] = 1
             self.paused_fds.append(fd)
 
     @always_inline
@@ -230,21 +230,21 @@ struct ClientRegistry(Movable):
 
 def peer_addr(fd: Int32) -> String:
     """ip:port of the connection's peer ("" without one)."""
-    var buf = alloc[UInt8](64)
+    var buf = unsafe_alloc[UInt8](64)
     var n = Int(external_call["pion_peer_id", Int64](fd, buf, Int64(64)))
     var s = String(StringSpan[MutUntrackedOrigin](
         unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=buf, length=n))) if n > 0 else String("")
-    buf.free()
+    buf.unsafe_free()
     return s
 
 
 def local_addr(fd: Int32) -> String:
     """ip:port of this end of the connection ("" without one)."""
-    var buf = alloc[UInt8](64)
+    var buf = unsafe_alloc[UInt8](64)
     var n = Int(external_call["pion_local_id", Int64](fd, buf, Int64(64)))
     var s = String(StringSpan[MutUntrackedOrigin](
         unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=buf, length=n))) if n > 0 else String("")
-    buf.free()
+    buf.unsafe_free()
     return s
 
 
@@ -318,10 +318,10 @@ def _ci_eq(p: Pointer[UInt8, MutUntrackedOrigin], n: Int, lit: StaticString) -> 
         return False
     var lp = lit.unsafe_ptr()
     for k in range(n):
-        var c = p[k]
+        var c = p[unsafe_offset=k]
         if c >= 65 and c <= 90:
             c += 32
-        if c != lp[k]:
+        if c != lp[unsafe_offset=k]:
             return False
     return True
 
@@ -360,13 +360,13 @@ def _sift(mut v: List[UInt64], root0: Int, n: Int):
 
 def lower_bytes(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> String:
     """The bytes lowercased (ASCII), as a String."""
-    var b = alloc[UInt8](n + 1)
+    var b = unsafe_alloc[UInt8](n + 1)
     for k in range(n):
-        var c = p[k]
-        b[k] = c + 32 if c >= 65 and c <= 90 else c
+        var c = p[unsafe_offset=k]
+        b[unsafe_offset=k] = c + 32 if c >= 65 and c <= 90 else c
     var s = String(StringSpan[MutUntrackedOrigin](
         unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=b, length=n))) if n > 0 else String("")
-    b.free()
+    b.unsafe_free()
     return s
 
 

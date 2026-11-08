@@ -26,7 +26,6 @@ cut, as in Redis, so a page can be short or empty while the walk goes on.
 Empty slots are skipped 16 at a time (SIMD), so walking a sparse table to its
 end is cheap. A collection of at most SCAN_SMALL entries comes back whole.
 """
-from std.memory.unsafe_pointer import Pointer
 from std.collections import List
 from src.common.hash_map import SlabHashMap, StripedHashMap
 from src.common.utils import format_int_to_buf, int_string_len

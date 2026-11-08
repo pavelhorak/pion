@@ -19,7 +19,7 @@ matches EmbeddingClient — a score array of 50 floats is far below that.
 Thread-safety: each worker creates its own client, matching EmbeddingClient.
 """
 
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.ffi import external_call
@@ -147,7 +147,7 @@ struct RerankClient(Movable):
 
         # ── Open TCP ──────────────────────────────────────────────────────
         var chost = self.host
-        var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_slice(), Int32(self.port))
+        var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_span(), Int32(self.port))
         if fd < 0:
             return False
 
@@ -165,7 +165,7 @@ struct RerankClient(Movable):
             + 2 * total_text_bytes
             + n_docs * 4                        # "", + commas + brackets per doc
         )
-        var body_buf = alloc[UInt8](max_body)
+        var body_buf = unsafe_alloc[UInt8](max_body)
         var bp = 0
 
         # ── Build JSON body ───────────────────────────────────────────────
@@ -204,7 +204,7 @@ struct RerankClient(Movable):
         req_hdr += String("\r\nConnection: close\r\n\r\n")
         var hdr_len = req_hdr.byte_length()
 
-        var req_buf = alloc[UInt8](hdr_len + body_len + 1)
+        var req_buf = unsafe_alloc[UInt8](hdr_len + body_len + 1)
         unsafe_memcpy(dest=req_buf, src=req_hdr.unsafe_ptr(), count=hdr_len)
         unsafe_memcpy(dest=req_buf.unsafe_offset(hdr_len), src=body_buf, count=body_len)
         body_buf.unsafe_free()
@@ -217,7 +217,7 @@ struct RerankClient(Movable):
 
         # ── Receive (read until close) ────────────────────────────────────
         var buf_size = 4 * 1024 * 1024
-        var buf = alloc[UInt8](buf_size)
+        var buf = unsafe_alloc[UInt8](buf_size)
         var total_read = 0
         var nr: Int64 = 1
         while nr > 0 and total_read < buf_size - 1:

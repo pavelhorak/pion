@@ -5,7 +5,6 @@ Build: mojo build --target-triple arm64-apple-ios17.0 --emit object -I . src/lib
 """
 
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
 from std.memory import unsafe_memcpy, unsafe_memset

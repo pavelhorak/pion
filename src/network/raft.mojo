@@ -13,7 +13,6 @@ Raft port = main port + 30000 (e.g., 31974 for port 1974).
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.collections import List
 from std.ffi import external_call
-from std.memory.unsafe_pointer import Pointer
 
 comptime CMD_ID_SET   = 1
 comptime CMD_ID_HSET  = 2
@@ -65,7 +64,7 @@ struct RaftNode(Movable):
         self.node_id = take.node_id^
         self.handle = take.handle
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if is_not_null(self.handle):
             external_call["pion_raft_stop", NoneType](self.handle)
 

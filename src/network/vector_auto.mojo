@@ -55,8 +55,8 @@ worker during a build, so a wait cannot deadlock: it ends at the building
 worker's next housekeeping tick after the thread is done.
 """
 
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc, unsafe_memcpy
-from std.memory.unsafe_pointer import UnsafePointer
 from std.atomic import Atomic, Ordering
 from std.ffi import external_call
 from std.time import perf_counter_ns
@@ -90,8 +90,8 @@ struct VectorAuto(Movable):
     """One worker's side of the automatic build."""
     var seen: Int             # ingest count at the last tick
     var since_ns: UInt64      # when it last changed
-    var job: UnsafePointer[NoneType, MutUntrackedOrigin]   # pion_bg_start_sym handle
-    var ctx: UnsafePointer[Int64, MutUntrackedOrigin]      # the thread's arguments
+    var job: Pointer[NoneType, MutUntrackedOrigin]   # pion_bg_start_sym handle
+    var ctx: Pointer[Int64, MutUntrackedOrigin]      # the thread's arguments
     var snapshot: Int         # rows the running build covers
     var failed_at: Int        # ingest count a build failed at: not retried until it moves
     var t0_ns: UInt64
@@ -119,28 +119,28 @@ def auto_worker(st: UInt64) -> Int:
 
 
 @always_inline
-def auto_load(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> UInt64:
+def auto_load(shared: Pointer[SharedHNSWView, MutUntrackedOrigin]) -> UInt64:
     if is_null(shared) or is_null(shared[].auto_state):
         return 0
     return Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared[].auto_state, UInt64(0))
 
 
-def auto_building_here(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int) -> Bool:
+def auto_building_here(shared: Pointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int) -> Bool:
     """A background build of THIS worker's graph is running or unfinished."""
     var st = auto_load(shared)
     return auto_phase(st) != AUTO_IDLE and auto_worker(st) == worker_id
 
 
-def _set(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int, phase: Int):
+def _set(shared: Pointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int, phase: Int):
     var v = UInt64(0) if phase == AUTO_IDLE else (UInt64(worker_id) << 8) | UInt64(phase)
     Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](shared[].auto_state, v)
 
 
 def vector_auto_tick(mut hnsw: HNSWGraph,
-                     shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-                     keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                     shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+                     keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                      mut dispatcher: CommandDispatcher,
-                     tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+                     tomb: Pointer[VecTomb, MutUntrackedOrigin],
                      worker_id: Int,
                      mut st: VectorAuto):
     """Every housekeeping tick (engine.mojo): move this worker's build along,
@@ -200,10 +200,10 @@ def vector_auto_tick(mut hnsw: HNSWGraph,
     _start(hnsw, shared, worker_id, rows, ready, st)
 
 
-def vector_backfill_now(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-                        keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-                        wal: UnsafePointer[WAL, MutUntrackedOrigin],
-                        tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+def vector_backfill_now(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+                        keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                        wal: Pointer[WAL, MutUntrackedOrigin],
+                        tomb: Pointer[VecTomb, MutUntrackedOrigin],
                         worker_id: Int, mut st: VectorAuto):
     """After an FT.CREATE that opened ingest: index the hashes already in this
     worker's keyspace now, before the +OK leaves, and ask every other worker to
@@ -218,10 +218,10 @@ def vector_backfill_now(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
     _backfill(shared, keyspace, wal, tomb, worker_id)
 
 
-def _backfill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-              keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-              wal: UnsafePointer[WAL, MutUntrackedOrigin],
-              tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+def _backfill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+              keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+              wal: Pointer[WAL, MutUntrackedOrigin],
+              tomb: Pointer[VecTomb, MutUntrackedOrigin],
               worker_id: Int):
     var t0 = UInt64(perf_counter_ns())
     var n = backfill_index(shared, keyspace, wal, tomb)
@@ -232,7 +232,7 @@ def _backfill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
 
 
 def _start(mut hnsw: HNSWGraph,
-           shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+           shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
            worker_id: Int, rows: Int, ready: UInt64, mut st: VectorAuto):
     """On this worker's loop, holding auto_state = BUILDING."""
     # Ingest was quiet, so every slot of the snapshot should be written; a
@@ -259,17 +259,17 @@ def _start(mut hnsw: HNSWGraph,
     # #46: a fresh id per build, as FT.OPTIMIZE gives one
     var bid = UInt64(perf_counter_ns()) ^ (UInt64(Int(external_call["random", Int64]())) << 20)
     hnsw.build_id = bid if bid != 0 else UInt64(1)
-    var ctx = alloc[Int64](4)
-    ctx[0] = Int64(Int(UnsafePointer(to=hnsw)))
-    ctx[1] = Int64(Int(shared))
-    ctx[2] = Int64(rows)
-    ctx[3] = Int64(worker_id)
+    var ctx = unsafe_alloc[Int64](4)
+    ctx[unsafe_offset=0] = Int64(Int(Pointer(to=hnsw)))
+    ctx[unsafe_offset=1] = Int64(Int(shared))
+    ctx[unsafe_offset=2] = Int64(rows)
+    ctx[unsafe_offset=3] = Int64(worker_id)
     var sym = String("pion_vector_auto_build") + "\0"
-    var job = external_call["pion_bg_start_sym", UnsafePointer[NoneType, MutUntrackedOrigin]](
+    var job = external_call["pion_bg_start_sym", Pointer[NoneType, MutUntrackedOrigin]](
         sym.unsafe_ptr(), ctx)
     if is_null(job):
         print("[vector] auto-build could not start a thread; FT.SEARCH stays exact (FT.OPTIMIZE builds)")
-        ctx.free()
+        ctx.unsafe_free()
         st.failed_at = rows
         _set(shared, worker_id, AUTO_IDLE)
         return
@@ -282,10 +282,10 @@ def _start(mut hnsw: HNSWGraph,
 
 
 def _publish(mut hnsw: HNSWGraph,
-             shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-             keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+             shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+             keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
              mut dispatcher: CommandDispatcher,
-             tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+             tomb: Pointer[VecTomb, MutUntrackedOrigin],
              worker_id: Int, st: VectorAuto):
     """BUILT -> SAVING, on this worker's loop: what FT.OPTIMIZE does after its
     build, minus freeing the ingest buffer (the delta lives there)."""
@@ -294,7 +294,7 @@ def _publish(mut hnsw: HNSWGraph,
     hnsw.publish_to_shared(shared, worker_id)
     record_all_dead(shared, tomb, dispatcher)
     if is_not_null(shared[].vec_stats):
-        _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](shared[].vec_stats + 1, UInt64(1))
+        _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](shared[].vec_stats.unsafe_offset(1), UInt64(1))
     var ms = (UInt64(perf_counter_ns()) - st.t0_ns) // 1_000_000
     print("[vector] auto-build: " + String(hnsw.num_nodes) + " vectors indexed in "
           + String(Int(ms)) + " ms; FT.SEARCH uses the graph now")
@@ -302,10 +302,10 @@ def _publish(mut hnsw: HNSWGraph,
 
 
 def _advance(mut hnsw: HNSWGraph,
-             shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-             keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+             shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+             keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
              mut dispatcher: CommandDispatcher,
-             tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+             tomb: Pointer[VecTomb, MutUntrackedOrigin],
              worker_id: Int, mut st: VectorAuto, block: Bool):
     """This worker's build, one step (or, with `block`, to the end)."""
     while True:
@@ -320,7 +320,7 @@ def _advance(mut hnsw: HNSWGraph,
                 external_call["pion_bg_join", NoneType](st.job)
             st.job = null_ptr[NoneType, MutUntrackedOrigin]()
             if is_not_null(st.ctx):
-                st.ctx.free()
+                st.ctx.unsafe_free()
             st.ctx = null_ptr[Int64, MutUntrackedOrigin]()
             if ph == AUTO_FAILED:
                 print("[vector] auto-build of " + String(st.snapshot)
@@ -338,10 +338,10 @@ def _advance(mut hnsw: HNSWGraph,
 
 
 def vector_auto_await(mut hnsw: HNSWGraph,
-                      shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-                      keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                      shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+                      keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                       mut dispatcher: CommandDispatcher,
-                      tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+                      tomb: Pointer[VecTomb, MutUntrackedOrigin],
                       worker_id: Int,
                       mut st: VectorAuto):
     """Return once no automatic build is running: before FT.CREATE,
@@ -362,17 +362,17 @@ def vector_auto_await(mut hnsw: HNSWGraph,
     _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE_RELEASE](shared[].auto_waiters, UInt64.MAX)
 
 
-def auto_worker_of(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin]) -> Int:
+def auto_worker_of(shared: Pointer[SharedHNSWView, MutUntrackedOrigin]) -> Int:
     """The worker whose graph an unfinished automatic build belongs to (-1: none)."""
     var st = auto_load(shared)
     return auto_worker(st) if auto_phase(st) != AUTO_IDLE else -1
 
 
 def vector_auto_hold(mut hnsw: HNSWGraph,
-                     shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-                     keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
+                     shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+                     keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
                      mut dispatcher: CommandDispatcher,
-                     tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+                     tomb: Pointer[VecTomb, MutUntrackedOrigin],
                      worker_id: Int,
                      mut st: VectorAuto):
     """For FT.CREATE, FT.DROPINDEX and FT.OPTIMIZE: wait out any automatic
@@ -390,7 +390,7 @@ def vector_auto_hold(mut hnsw: HNSWGraph,
             return
 
 
-def vector_auto_release(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
+def vector_auto_release(shared: Pointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
     """End this worker's vector_auto_hold."""
     var st = auto_load(shared)
     if auto_phase(st) == AUTO_HOLD and auto_worker(st) == worker_id:
@@ -398,7 +398,7 @@ def vector_auto_release(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin
 
 
 def reopen_after_load(hnsw: HNSWGraph,
-                      shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
+                      shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
                       worker_id: Int):
     """Restart: `hnsw` was just warm-loaded and published (state.mojo phase 6,
     on the loading worker, before the others stop waiting for the load).
@@ -433,7 +433,7 @@ def reopen_after_load(hnsw: HNSWGraph,
         shared[].open_ingest(hnsw.max_elements, hnsw.dim)
         Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
             shared[].ingest_count, UInt64(hnsw.num_nodes))
-        shared[].restart_refill[1] = 1
+        shared[].restart_refill[unsafe_offset=1] = 1
         external_call["pion_full_fence", NoneType]()
         shared[].pre_index_ready = True
         print("[vector] index '" + name + "' loaded (" + String(hnsw.num_nodes)
@@ -446,10 +446,10 @@ def reopen_after_load(hnsw: HNSWGraph,
           + " vector_unindexed_writes. FT.DROPINDEX then FT.CREATE indexes every hash.")
 
 
-def vector_restart_refill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin],
-                          keyspace: UnsafePointer[StripedHashMap, MutUntrackedOrigin],
-                          wal: UnsafePointer[WAL, MutUntrackedOrigin],
-                          tomb: UnsafePointer[VecTomb, MutUntrackedOrigin],
+def vector_restart_refill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
+                          keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
+                          wal: Pointer[WAL, MutUntrackedOrigin],
+                          tomb: Pointer[VecTomb, MutUntrackedOrigin],
                           worker_id: Int):
     """Restart, on every worker after restore_index_state (which refilled the
     rows of the graph's documents this worker holds): add this worker's
@@ -461,7 +461,7 @@ def vector_restart_refill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrig
     before that: a search reads those rows (the delta merge rescores the
     graph's results from them), and a rebuild builds from them."""
     var rr = shared[].restart_refill if is_not_null(shared) else null_ptr[UInt64, MutUntrackedOrigin]()
-    if is_null(rr) or Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](rr + 1, UInt64(0)) == 0:
+    if is_null(rr) or Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](rr.unsafe_offset(1), UInt64(0)) == 0:
         return
     var t0 = UInt64(perf_counter_ns())
     var added = backfill_index(shared, keyspace, wal, tomb)
@@ -472,10 +472,10 @@ def vector_restart_refill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrig
     var before = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE_RELEASE](rr, UInt64.MAX)
     if before == 1:
         _finish_refill(shared, worker_id)
-        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](rr + 1, UInt64(0))
+        Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](rr.unsafe_offset(1), UInt64(0))
         return
     var waited_ms = 0
-    while Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](rr + 1, UInt64(0)) != 0:
+    while Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](rr.unsafe_offset(1), UInt64(0)) != 0:
         _ = external_call["usleep", Int32](Int32(1000))
         waited_ms += 1
         if waited_ms >= 600_000:
@@ -484,7 +484,7 @@ def vector_restart_refill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrig
             break
 
 
-def _finish_refill(shared: UnsafePointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
+def _finish_refill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin], worker_id: Int):
     """The last worker's half of vector_restart_refill."""
     external_call["pion_full_fence", NoneType]()
     var n = shared[].num_nodes

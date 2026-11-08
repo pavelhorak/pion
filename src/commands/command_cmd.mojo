@@ -17,7 +17,7 @@ command_info.mojo:
   * COMMAND DOCS: each command's group; Pion carries no command documentation.
 """
 
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.collections import List
 from src.network.resp3 import RESP3Token
@@ -37,7 +37,7 @@ def _words(s: StaticString) -> List[String]:
     var n = s.byte_length()
     var start = 0
     for k in range(n + 1):
-        if k == n or p[k] == 32:
+        if k == n or p[unsafe_offset=k] == 32:
             if k > start:
                 out.append(String(StringSpan[MutUntrackedOrigin](
                     unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
@@ -68,7 +68,7 @@ def write_command_info(mut writer: ResponseWriter, tp: Pointer[UInt8, MutUntrack
     # A Pion-only command: what Pion's own table knows.
     var lower = String("")
     for k in range(tl):
-        var c = tp[k]
+        var c = tp[unsafe_offset=k]
         if c >= 65 and c <= 90:
             c += 32
         lower += chr(Int(c))
@@ -119,12 +119,12 @@ struct KeyRef(Copyable, Movable, ImplicitlyCopyable):
 
 def _num(s: Pointer[UInt8, MutUntrackedOrigin], mut at: Int, end: Int) -> Int:
     var neg = False
-    if at < end and s[at] == 45:
+    if at < end and s[unsafe_offset=at] == 45:
         neg = True
         at += 1
     var v = 0
-    while at < end and s[at] >= 48 and s[at] <= 57:
-        v = v * 10 + Int(s[at]) - 48
+    while at < end and s[unsafe_offset=at] >= 48 and s[unsafe_offset=at] <= 57:
+        v = v * 10 + Int(s[unsafe_offset=at]) - 48
         at += 1
     return -v if neg else v
 
@@ -133,8 +133,8 @@ def _tok_eq_ci(t: RESP3Token, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> 
     if t.length != n:
         return False
     for k in range(n):
-        var a = t.ptr[k]
-        var b = p[k]
+        var a = t.ptr[unsafe_offset=k]
+        var b = p[unsafe_offset=k]
         if a >= 97 and a <= 122:
             a -= 32
         if b >= 97 and b <= 122:
@@ -150,14 +150,14 @@ def _parse_ll(t: RESP3Token, mut out: Int) -> Bool:
         return False
     var k = 0
     var neg = False
-    if t.ptr[0] == 45:
+    if t.ptr[unsafe_offset=0] == 45:
         if t.length == 1:
             return False
         neg = True
         k = 1
     var v = 0
     while k < t.length:
-        var c = t.ptr[k]
+        var c = t.ptr[unsafe_offset=k]
         if c < 48 or c > 57:
             return False
         v = v * 10 + Int(c) - 48
@@ -175,17 +175,17 @@ def _spec_keys(specs: StaticString, tokens: Pointer[RESP3Token, MutUntrackedOrig
     var at = 0
     while at < n:
         var end = at
-        while end < n and s[end] != 59:     # ';'
+        while end < n and s[unsafe_offset=end] != 59:     # ';'
             end += 1
         var colon = at
-        while colon < end and s[colon] != 58:
+        while colon < end and s[unsafe_offset=colon] != 58:
             colon += 1
         var c = at
         var first = 0
-        if s[c] == 73:                     # 'I' index
+        if s[unsafe_offset=c] == 73:                     # 'I' index
             c += 1
             first = _num(s, c, colon)
-        elif s[c] == 75:                   # 'K' startfrom '=' keyword
+        elif s[unsafe_offset=c] == 75:                   # 'K' startfrom '=' keyword
             c += 1
             var startfrom = _num(s, c, colon)
             c += 1                         # '='
@@ -193,7 +193,7 @@ def _spec_keys(specs: StaticString, tokens: Pointer[RESP3Token, MutUntrackedOrig
             # The keyword runs up to FK: FK's letter, then digits, commas and
             # '-'. Step back over those to find the letter.
             var scan = colon - 1
-            while scan > kw and ((s[scan] >= 48 and s[scan] <= 57) or s[scan] == 44 or s[scan] == 45):
+            while scan > kw and ((s[unsafe_offset=scan] >= 48 and s[unsafe_offset=scan] <= 57) or s[unsafe_offset=scan] == 44 or s[unsafe_offset=scan] == 45):
                 scan -= 1
             var kwlen = scan - kw
             c = scan
@@ -203,7 +203,7 @@ def _spec_keys(specs: StaticString, tokens: Pointer[RESP3Token, MutUntrackedOrig
             while True:
                 if i >= argc or i < 1:
                     break
-                if _tok_eq_ci(tokens[base + i], s + kw, kwlen):
+                if _tok_eq_ci(tokens[unsafe_offset=base + i], s.unsafe_offset(kw), kwlen):
                     first = i + 1
                     break
                 if i == end_index:
@@ -215,9 +215,9 @@ def _spec_keys(specs: StaticString, tokens: Pointer[RESP3Token, MutUntrackedOrig
         else:
             keys.clear()
             return False                   # unknown begin_search
-        var last = 0
-        var step = 1
-        if s[c] == 82:                     # 'R' lastkey,keystep,limit
+        var last: Int
+        var step: Int
+        if s[unsafe_offset=c] == 82:                     # 'R' lastkey,keystep,limit
             c += 1
             var lastkey = _num(s, c, colon)
             c += 1
@@ -230,7 +230,7 @@ def _spec_keys(specs: StaticString, tokens: Pointer[RESP3Token, MutUntrackedOrig
                 last = argc + lastkey
             else:
                 last = first + ((argc - first) // limit + lastkey)
-        elif s[c] == 78:                   # 'N' keynumidx,firstkey,keystep
+        elif s[unsafe_offset=c] == 78:                   # 'N' keynumidx,firstkey,keystep
             c += 1
             var keynumidx = _num(s, c, colon)
             c += 1
@@ -241,7 +241,7 @@ def _spec_keys(specs: StaticString, tokens: Pointer[RESP3Token, MutUntrackedOrig
                 keys.clear()
                 return False
             var numkeys = 0
-            if not _parse_ll(tokens[base + first + keynumidx], numkeys) or numkeys < 0:
+            if not _parse_ll(tokens[unsafe_offset=base + first + keynumidx], numkeys) or numkeys < 0:
                 keys.clear()
                 return False
             first += firstkey
@@ -287,7 +287,7 @@ def _proc_keys(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int, tokens: Pointer[
         var store = -1
         var i = 2
         while i < argc:
-            var t = tokens[base + i]
+            var t = tokens[unsafe_offset=base + i]
             if arg_eq(t.ptr, t.length, "limit"):
                 i += 2
             elif arg_eq(t.ptr, t.length, "get") or arg_eq(t.ptr, t.length, "by"):
@@ -304,9 +304,9 @@ def _proc_keys(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int, tokens: Pointer[
         if argc > 6:
             var i = 6
             while i < argc:
-                var t = tokens[base + i]
+                var t = tokens[unsafe_offset=base + i]
                 if arg_eq(t.ptr, t.length, "keys"):
-                    if tokens[base + 3].length > 0:
+                    if tokens[unsafe_offset=base + 3].length > 0:
                         return True        # Redis: the key argument must be empty; no keys
                     first = i + 1
                     num = argc - first
@@ -323,7 +323,7 @@ def _proc_keys(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int, tokens: Pointer[
         var streams = -1
         var i = 1
         while i < argc:
-            var t = tokens[base + i]
+            var t = tokens[unsafe_offset=base + i]
             if arg_eq(t.ptr, t.length, "block") or arg_eq(t.ptr, t.length, "count"):
                 i += 1
             elif arg_eq(t.ptr, t.length, "group"):
@@ -347,7 +347,7 @@ def _proc_keys(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int, tokens: Pointer[
         var stored = -1
         var i = 5
         while i < argc:
-            var t = tokens[base + i]
+            var t = tokens[unsafe_offset=base + i]
             if (arg_eq(t.ptr, t.length, "store") or arg_eq(t.ptr, t.length, "storedist")) and i + 1 < argc:
                 stored = i + 1
                 i += 1
@@ -358,7 +358,7 @@ def _proc_keys(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int, tokens: Pointer[
         return True
     if arg_eq(tp, tl, "set"):
         for i in range(3, argc):
-            var t = tokens[base + i]
+            var t = tokens[unsafe_offset=base + i]
             if arg_eq(t.ptr, t.length, "get"):
                 out.append(ProcKey(1, _F_RW_ACCESS_UPDATE))
                 return True
@@ -369,7 +369,7 @@ def _proc_keys(tp: Pointer[UInt8, MutUntrackedOrigin], tl: Int, tokens: Pointer[
         var i = 2
         while i < argc:
             var rem = argc - i - 1
-            var t = tokens[base + i]
+            var t = tokens[unsafe_offset=base + i]
             if arg_eq(t.ptr, t.length, "get") and rem >= 2:
                 i += 2
             elif (arg_eq(t.ptr, t.length, "set") or arg_eq(t.ptr, t.length, "incrby")) and rem >= 3:
@@ -395,15 +395,15 @@ def _write_flags(mut writer: ResponseWriter, s: Pointer[UInt8, MutUntrackedOrigi
     if n > 0:
         count = 1
         for k in range(n):
-            if s[k] == 44:
+            if s[unsafe_offset=k] == 44:
                 count += 1
     writer.append_set_header(count)
     var start = 0
     for k in range(n + 1):
-        if k == n or s[k] == 44:
+        if k == n or s[unsafe_offset=k] == 44:
             writer.append_status_response(String(StringSpan[MutUntrackedOrigin](
                 unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](
-                    unsafe_ptr=s + start, length=k - start))))
+                    unsafe_ptr=s.unsafe_offset(start), length=k - start))))
             start = k + 1
 
 
@@ -411,13 +411,13 @@ def _getkeys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens
              mut writer: ResponseWriter, with_flags: Bool):
     var base = i + 2
     var argc = num_tokens - base
-    var name = tokens[base]
+    var name = tokens[unsafe_offset=base]
     var tp = name.ptr
     var tl = name.length
     if not command_exists(tp, tl):
         writer.append_error_response("ERR Invalid command specified")
         return
-    var specs = cmd_keyspecs(tp, tl)
+    var specs: StaticString = cmd_keyspecs(tp, tl)
     var plist = List[ProcKey]()
     var has_proc = _proc_keys(tp, tl, tokens, base, argc, plist)
     if specs.byte_length() == 0 and not has_proc:
@@ -437,14 +437,13 @@ def _getkeys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens
             return
         writer.append_array_header(len(plist))
         for k in range(len(plist)):
-            var t = tokens[base + plist[k].pos]
+            var t = tokens[unsafe_offset=base + plist[k].pos]
             if with_flags:
                 writer.append_array_header(2)
                 writer.append_bulk_string_response(t.ptr, t.length)
-                var f = plist[k].flags
+                var f: StaticString = plist[k].flags
                 _write_flags(writer, Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(f.unsafe_ptr())),
                              f.byte_length())
-                _ = f^          # read through a pointer that does not keep it alive
             else:
                 writer.append_bulk_string_response(t.ptr, t.length)
         return
@@ -458,14 +457,13 @@ def _getkeys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens
         return
     writer.append_array_header(len(keys))
     for k in range(len(keys)):
-        var t = tokens[base + keys[k].pos]
+        var t = tokens[unsafe_offset=base + keys[k].pos]
         if with_flags:
             writer.append_array_header(2)
             writer.append_bulk_string_response(t.ptr, t.length)
-            _write_flags(writer, sp + keys[k].flags, keys[k].flen)
+            _write_flags(writer, sp.unsafe_offset(keys[k].flags), keys[k].flen)
         else:
             writer.append_bulk_string_response(t.ptr, t.length)
-    _ = specs^          # static, but `sp` would not keep a String alive
 
 
 def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int,
@@ -476,7 +474,7 @@ def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     if argc == 1:
         _write_all_info(writer)
         return 0
-    var sub = tokens[i + 1]
+    var sub = tokens[unsafe_offset=i + 1]
     var sp = sub.ptr
     var sl = sub.length
     if arg_eq(sp, sl, "count"):
@@ -490,7 +488,7 @@ def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         else:
             writer.append_array_header(argc - 2)
             for k in range(i + 2, num_tokens):
-                if not write_command_info(writer, tokens[k].ptr, tokens[k].length):
+                if not write_command_info(writer, tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length):
                     writer.append_null_response()
     elif arg_eq(sp, sl, "docs"):
         var names = List[String]()
@@ -498,13 +496,13 @@ def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             names = _words(PION_COMMAND_NAMES)
         else:
             for k in range(i + 2, num_tokens):
-                if command_exists(tokens[k].ptr, tokens[k].length):
-                    names.append(tokens[k].text_value().lower())
+                if command_exists(tokens[unsafe_offset=k].ptr, tokens[unsafe_offset=k].length):
+                    names.append(tokens[unsafe_offset=k].text_value().lower())
         writer.append_map_header(len(names))
         for k in range(len(names)):
             writer.append_bulk_string_response(_pp(names[k]), names[k].byte_length())
             writer.append_map_header(1)
-            writer.append_bulk_string_response("group".unsafe_ptr(), 5)
+            writer.append_bulk_string_response("group".ptr(), 5)
             var g = cmd_doc_group(_pp(names[k]), names[k].byte_length())
             writer.append_bulk_string_response(g.unsafe_ptr(), g.byte_length())
     elif arg_eq(sp, sl, "list"):
@@ -518,9 +516,9 @@ def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             writer.append_array_header(len(names))
             for k in range(len(names)):
                 writer.append_bulk_string_response(_pp(names[k]), names[k].byte_length())
-        elif argc == 5 and arg_eq(tokens[i + 2].ptr, tokens[i + 2].length, "filterby"):
-            var kind = tokens[i + 3]
-            var arg = tokens[i + 4]
+        elif argc == 5 and arg_eq(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length, "filterby"):
+            var kind = tokens[unsafe_offset=i + 3]
+            var arg = tokens[unsafe_offset=i + 4]
             var picked = List[String]()
             if arg_eq(kind.ptr, kind.length, "module"):
                 if arg_eq(arg.ptr, arg.length, "search"):
@@ -536,14 +534,14 @@ def handle_command(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                 # are lowercase, so the pattern is lowered once
                 # (on the heap: a short String's bytes live in the String itself,
                 # on this stack, and may not go to an out-of-line call, gh #349)
-                var low = alloc[UInt8](arg.length + 1)
+                var low = unsafe_alloc[UInt8](arg.length + 1)
                 for b in range(arg.length):
-                    var c = arg.ptr[b]
-                    low[b] = c + 32 if c >= 65 and c <= 90 else c
+                    var c = arg.ptr[unsafe_offset=b]
+                    low[unsafe_offset=b] = c + 32 if c >= 65 and c <= 90 else c
                 for k in range(len(names)):
                     if _glob_match(low, arg.length, 0, _pp(names[k]), names[k].byte_length(), 0):
                         picked.append(names[k])
-                low.free()
+                low.unsafe_free()
             else:
                 writer.append_error_response("ERR syntax error")
                 return argc - 1

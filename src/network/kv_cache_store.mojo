@@ -24,8 +24,8 @@ Lifecycle (gh #80):
     once internal node usage reaches KVCACHE_HNSW_CAPACITY.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 from std.collections import List
@@ -63,7 +63,7 @@ comptime KVCACHE_FETCH_K = 8
 @always_inline
 def _kvcache_now_ns() -> Int64:
     """Current CLOCK_REALTIME in nanoseconds (same as fast_path._get_now_ns)."""
-    var ts = alloc[Int64](2)
+    var ts = unsafe_alloc[Int64](2)
     _ = external_call["clock_gettime", Int32](Int32(0), ts)
     var result = ts[unsafe_offset=0] * Int64(1_000_000_000) + ts[unsafe_offset=1]
     ts.unsafe_free()
@@ -131,13 +131,13 @@ struct KVCacheStore(Movable):
         self.expired = 0
         if enabled:
             self.hnsw = HNSWGraph(KVCACHE_HNSW_CAPACITY, dimensions, M=16, ef_construction=64)
-            self.entries = alloc[KVCacheEntry](KVCACHE_MAX_ENTRIES)
+            self.entries = unsafe_alloc[KVCacheEntry](KVCACHE_MAX_ENTRIES)
             for idx in range(KVCACHE_MAX_ENTRIES):
                 self.entries[unsafe_offset=idx] = KVCacheEntry()
         else:
             # Minimal init — no heavy allocations when disabled
             self.hnsw = HNSWGraph(1, 1)
-            var _e = alloc[KVCacheEntry](1)
+            var _e = unsafe_alloc[KVCacheEntry](1)
             self.entries = Pointer[KVCacheEntry, MutUntrackedOrigin](unsafe_from_address=Int(_e))
 
     def __moveinit__(out self, deinit take: Self):
@@ -241,21 +241,21 @@ struct KVCacheStore(Movable):
         self.hnsw.insert_no_compact(slot, embedding_ptr)
 
         # Copy blob bytes (we own this memory — caller's buffer may be reused)
-        var blob_copy = alloc[UInt8](blob_size)
+        var blob_copy = unsafe_alloc[UInt8](blob_size)
         unsafe_memcpy(dest=blob_copy, src=blob_ptr.unsafe_bitcast[UInt8](), count=blob_size)
 
         # Copy cache_id
-        var id_copy = alloc[UInt8](cache_id_len)
+        var id_copy = unsafe_alloc[UInt8](cache_id_len)
         unsafe_memcpy(dest=id_copy, src=cache_id_ptr, count=cache_id_len)
 
         # Copy model tag
         var mt_copy = null_ptr[UInt8, MutUntrackedOrigin]()
         if model_len > 0:
-            mt_copy = alloc[UInt8](model_len)
+            mt_copy = unsafe_alloc[UInt8](model_len)
             unsafe_memcpy(dest=mt_copy, src=model_ptr, count=model_len)
 
         # Copy FP32 embedding (needed to re-insert on HNSW rebuild)
-        var embed_copy = alloc[Float32](self.dimensions)
+        var embed_copy = unsafe_alloc[Float32](self.dimensions)
         unsafe_memcpy(dest=embed_copy.unsafe_bitcast[UInt8](), src=embedding_ptr.unsafe_bitcast[UInt8](),
                count=self.dimensions * 4)
 
@@ -345,7 +345,7 @@ struct KVCacheStore(Movable):
     def info(self, mut writer: ResponseWriter) raises:
         """Write KV.INFO response with cache statistics."""
         # Build a simple key-value response as a bulk string
-        var buf = alloc[UInt8](4096)
+        var buf = unsafe_alloc[UInt8](4096)
         var off = 0
 
         # entries

@@ -9,8 +9,8 @@ Arguments follow Redis's bitops.c (public #31): every argument is parsed and
 every key type-checked before anything is written, so a refused command
 changes nothing, and each error is the one Redis sends for that input.
 """
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr, is_not_null
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy, unsafe_memset
 from std.bit import pop_count
 from src.network.resp3 import RESP3Token
@@ -51,7 +51,7 @@ def _popcount(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Int:
     var c = 0
     var k = 0
     while k + 8 <= n:
-        c += Int(pop_count(p.unsafe_offset(k).unsafe_bitcast[UInt64]().load()))
+        c += Int(pop_count(p.unsafe_offset(k).unsafe_bitcast[UInt64]().unsafe_load()))
         k += 8
     while k < n:
         c += Int(pop_count(p[unsafe_offset=k]))
@@ -120,7 +120,7 @@ def handle_bitcount(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
     if not v.is_string_like():
         writer.append_error_response(_E_WRONGTYPE)
         return 0
-    var scratch = alloc[UInt8](32)
+    var scratch = unsafe_alloc[UInt8](32)
     var blen = 0
     var p = v.bitmap_view(scratch, blen)
     var count = 0
@@ -189,7 +189,7 @@ def handle_bitpos(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
     if not v.is_string_like():
         writer.append_error_response(_E_WRONGTYPE)
         return 0
-    var scratch = alloc[UInt8](32)
+    var scratch = unsafe_alloc[UInt8](32)
     var blen = 0
     var p = v.bitmap_view(scratch, blen)
     # The search range, in bits, inclusive.
@@ -378,7 +378,7 @@ def handle_bitfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
     while j < num_tokens:
         var rem = num_tokens - j - 1
         var t = tokens[unsafe_offset=j]
-        var opcode = -1
+        var opcode: Int
         if arg_eq(t.ptr, t.length, "get") and rem >= 2:
             opcode = _BF_GET
         elif arg_eq(t.ptr, t.length, "set") and rem >= 3:
@@ -430,7 +430,7 @@ def handle_bitfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
         writer.append_error_response(_E_WRONGTYPE)
         return 0
 
-    var scratch = alloc[UInt8](32)
+    var scratch = unsafe_alloc[UInt8](32)
     var p = null_ptr[UInt8, MutUntrackedOrigin]()
     var blen = 0
     if writes:
@@ -440,7 +440,7 @@ def handle_bitfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
             blen = v.bitmap_len()
         else:
             if v.is_none():
-                p = alloc[UInt8](need)
+                p = unsafe_alloc[UInt8](need)
                 unsafe_memset(p, 0, need)
                 blen = need
             else:
@@ -462,8 +462,8 @@ def handle_bitfield(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num
             var raw = _bf_get(p, blen, op.offset, op.bits)
             writer.append_int_response(_bf_sext(raw, op.bits) if op.signed else Int64(raw))
             continue
-        var store = UInt64(0)
-        var reply = Int64(0)
+        var store: UInt64
+        var reply: Int64
         var failed = False
         if op.signed:
             var old = _bf_sext(_bf_get(p, blen, op.offset, op.bits), op.bits)
@@ -540,7 +540,7 @@ def handle_bitop(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
         writer.append_error_response("ERR wrong number of arguments for 'bitop' command")
         return 0
     var o = tokens[unsafe_offset=i + 1]
-    var op = -1
+    var op: Int
     var opname = String("")
     if arg_eq(o.ptr, o.length, "and"):
         op = _OP_AND
@@ -594,11 +594,11 @@ def handle_bitop(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
 
     # res = the op over the sources; acc = OR of the sources after the first
     # (DIFF/DIFF1/ANDOR) or the bits seen at least twice (ONE).
-    var res = alloc[UInt8](maxlen)
-    var acc = alloc[UInt8](maxlen)
+    var res = unsafe_alloc[UInt8](maxlen)
+    var acc = unsafe_alloc[UInt8](maxlen)
     unsafe_memset(res, 0, maxlen)
     unsafe_memset(acc, 0, maxlen)
-    var scratch = alloc[UInt8](32)
+    var scratch = unsafe_alloc[UInt8](32)
     for k in range(nsrc):
         var n = 0
         var sp = null_ptr[UInt8, MutUntrackedOrigin]()
@@ -663,7 +663,7 @@ def handle_pfmerge(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             if not _wtv.is_none() and _wtv.type.value != ValueType.HLL:
                 writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                 return _i - i
-        var _pfm_res = alloc[UInt8](HLL_REGISTERS)
+        var _pfm_res = unsafe_alloc[UInt8](HLL_REGISTERS)
         var _pfm_resp = _pfm_res
         unsafe_memset(_pfm_resp, 0, HLL_REGISTERS)
         # Merge dest into result first (if exists)
@@ -704,7 +704,7 @@ def handle_pfselftest(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
     if num_tokens - i != 1:
         writer.append_error_response("ERR wrong number of arguments for 'pfselftest' command")
         return 0
-    var regs = alloc[UInt8](HLL_REGISTERS)
+    var regs = unsafe_alloc[UInt8](HLL_REGISTERS)
     # Redis's seed: two rand() calls.
     var seed = UInt64(Int(external_call["rand", Int32]())) | (UInt64(Int(external_call["rand", Int32]())) << 32)
     # Test 1: random registers (0..51, the most a 64-bit hash with p=14 sets).
@@ -714,11 +714,11 @@ def handle_pfselftest(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
             x ^= x << 13
             x ^= x >> 7
             x ^= x << 17
-            regs.store(r, UInt8(Int(x % 52)))
+            regs.unsafe_store(r, UInt8(Int(x % 52)))
         var E = Float64(0.0)
         var zeros = 0
         for r in range(HLL_REGISTERS):
-            var v = Int(regs.load(r))
+            var v = Int(regs.unsafe_load(r))
             if v == 0:
                 zeros += 1
             else:
@@ -737,10 +737,10 @@ def handle_pfselftest(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
     unsafe_memset(regs, 0, HLL_REGISTERS)
     var relerr = 1.04 / sqrt(Float64(HLL_REGISTERS))
     var checkpoint = 1
-    var ele = alloc[UInt8](8)
+    var ele = unsafe_alloc[UInt8](8)
     for j in range(1, 10_000_001):
         var e = UInt64(j) ^ seed
-        ele.unsafe_bitcast[UInt64]().store(0, e)
+        ele.unsafe_bitcast[UInt64]().unsafe_store(0, e)
         _ = hll_add(regs, GenericValue.borrow(ele, 8))
         if j == checkpoint:
             var abserr = checkpoint - hll_count(regs)
@@ -789,7 +789,7 @@ def handle_pfdebug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         var regs = v.as_hll()
         writer.append_array_header(HLL_REGISTERS)
         for r in range(HLL_REGISTERS):
-            writer.append_int_response(Int64(Int(regs.load(r))))
+            writer.append_int_response(Int64(Int(regs.unsafe_load(r))))
     elif arg_eq(sub.ptr, sub.length, "decode"):
         writer.append_error_response("ERR HLL encoding is not sparse")
     elif arg_eq(sub.ptr, sub.length, "encoding"):

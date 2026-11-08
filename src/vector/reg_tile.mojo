@@ -25,7 +25,6 @@ Rules for a kernel built on it:
   (the tail-call alloca rule).
 """
 from std.collections import Array
-from std.memory.unsafe_pointer import UnsafePointer
 
 
 struct RegTile[dtype: DType, rows: Int, width: Int](Copyable, Movable):
@@ -65,7 +64,7 @@ def pack_rows[rows: Int](vals: Array[Float32, rows]) -> SIMD[DType.float32, rows
     return out
 
 
-comptime I8Ptr = UnsafePointer[Int8, MutUntrackedOrigin]
+comptime I8Ptr = Pointer[Int8, MutUntrackedOrigin]
 
 
 @always_inline

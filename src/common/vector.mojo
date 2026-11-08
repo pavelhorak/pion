@@ -1,4 +1,3 @@
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.sys import size_of
 

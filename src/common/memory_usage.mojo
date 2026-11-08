@@ -1,5 +1,4 @@
 """MEMORY USAGE's estimate of what one key holds, which eviction also steers by."""
-from std.memory.unsafe_pointer import Pointer
 from src.common.value import GenericValue, ValueType
 from src.common.hash_map import SlabHashMap
 from src.common.list import SlabList
@@ -22,16 +21,16 @@ def memory_usage(v: GenericValue, key_len: Int, samples: Int) -> Int64:
     elif t == ValueType.HLL:
         total += Int64(HLL_REGISTERS)
     elif t == ValueType.HASH:
-        var m = v.as_hash().bitcast[SlabHashMap]()
+        var m = v.as_hash().unsafe_bitcast[SlabHashMap]()
         total += Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
     elif t == ValueType.SET:
-        var m = v.as_set().bitcast[SlabHashMap]()
+        var m = v.as_set().unsafe_bitcast[SlabHashMap]()
         total += Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
     elif t == ValueType.LIST:
-        var l = v.as_list().bitcast[SlabList]()
+        var l = v.as_list().unsafe_bitcast[SlabList]()
         total += Int64(l[].size) * 34 + 64
     elif t == ValueType.ZSET or t == ValueType.GEO:
-        var z = v.as_zset().bitcast[SlabSkipList]()
+        var z = v.as_zset().unsafe_bitcast[SlabSkipList]()
         var m = Pointer[SlabHashMap, MutUntrackedOrigin](unsafe_from_address=Int(Pointer(to=z[].members)))
         total += Int64(z[].length) * 96 + Int64(m[].capacity) * 65 + _sampled_payload(m, samples)
     return total
@@ -43,13 +42,13 @@ def _sampled_payload(m: Pointer[SlabHashMap, MutUntrackedOrigin], samples: Int) 
     var seen = 0
     var bytes = Int64(0)
     for slot in range(m[].capacity):
-        var md = m[].metadata[slot]
+        var md = m[].metadata[unsafe_offset=slot]
         if md == 0x80 or md == 0xFF:
             continue
-        if m[].keys[slot].type.value == ValueType.STRING:
-            bytes += Int64(m[].keys[slot].string_len())
-        if m[].values[slot].type.value == ValueType.STRING:
-            bytes += Int64(m[].values[slot].string_len())
+        if m[].keys[unsafe_offset=slot].type.value == ValueType.STRING:
+            bytes += Int64(m[].keys[unsafe_offset=slot].string_len())
+        if m[].values[unsafe_offset=slot].type.value == ValueType.STRING:
+            bytes += Int64(m[].values[unsafe_offset=slot].string_len())
         seen += 1
         if samples > 0 and seen >= samples:
             break

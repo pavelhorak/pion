@@ -17,9 +17,9 @@ restored key was gone after a restart, and MIGRATE did not log the deletion of
 the keys it moved, so they came back on the source.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import remove_and_free
-from std.memory.unsafe_pointer import Pointer
 from std.collections import Span
 from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
@@ -37,7 +37,7 @@ comptime PION_DUMP_VERSION = 0x5001
 
 
 def _u32(p: Pointer[UInt8, MutUntrackedOrigin], at: Int) -> Int:
-    return Int(p[at]) | (Int(p[at + 1]) << 8) | (Int(p[at + 2]) << 16) | (Int(p[at + 3]) << 24)
+    return Int(p[unsafe_offset=at]) | (Int(p[unsafe_offset=at + 1]) << 8) | (Int(p[unsafe_offset=at + 2]) << 16) | (Int(p[unsafe_offset=at + 3]) << 24)
 
 
 def dump_payload(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
@@ -47,10 +47,10 @@ def dump_payload(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
     if v.is_none():
         return List[UInt8]()
     var sink = RecordSink(Int32(-1))
-    var ehdr = alloc[UInt8](16)
-    var vbuf = alloc[UInt8](64)
-    var fbuf = alloc[UInt8](64)
-    var scored = alloc[UInt8](8)
+    var ehdr = unsafe_alloc[UInt8](16)
+    var vbuf = unsafe_alloc[UInt8](64)
+    var fbuf = unsafe_alloc[UInt8](64)
+    var scored = unsafe_alloc[UInt8](8)
     write_key_records(sink, kp, kl, v, null_ptr[BlobStore, MutUntrackedOrigin](), True, ehdr, vbuf, fbuf, scored)
     ehdr.unsafe_free()
     vbuf.unsafe_free()
@@ -71,7 +71,7 @@ def handle_dump(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
     if num_tokens - i != 2:
         writer.append_error_response("ERR wrong number of arguments for 'dump' command")
         return 0
-    var payload = dump_payload(keyspace, tokens[i + 1].ptr, tokens[i + 1].length)
+    var payload = dump_payload(keyspace, tokens[unsafe_offset=i + 1].ptr, tokens[unsafe_offset=i + 1].length)
     if len(payload) == 0:
         writer.append_null_response()
     else:
@@ -86,12 +86,12 @@ def _payload_ok(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
     (the version included, as Redis's verifyDumpPayload)."""
     if n < 10:
         return False
-    var ver = Int(p[n - 10]) | (Int(p[n - 9]) << 8)
+    var ver = Int(p[unsafe_offset=n - 10]) | (Int(p[unsafe_offset=n - 9]) << 8)
     if ver != PION_DUMP_VERSION:
         return False
     var want = UInt64(0)
     for k in range(8):
-        want |= UInt64(Int(p[n - 8 + k])) << UInt64(8 * k)
+        want |= UInt64(Int(p[unsafe_offset=n - 8 + k])) << UInt64(8 * k)
     return external_call["pion_crc64", UInt64](UInt64(0), p, Int64(n - 8)) == want
 
 
@@ -123,7 +123,7 @@ def _record_family(cmd: Int) -> Int:
 def _u64(p: Pointer[UInt8, MutUntrackedOrigin], at: Int) -> UInt64:
     var v = UInt64(0)
     for k in range(8):
-        v |= UInt64(Int(p[at + k])) << UInt64(8 * k)
+        v |= UInt64(Int(p[unsafe_offset=at + k])) << UInt64(8 * k)
     return v
 
 
@@ -142,7 +142,7 @@ def _records_ok(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
         if off + 13 > n:
             return False
         var elen = _u32(p, off)
-        var cmd = Int(p[off + 4])
+        var cmd = Int(p[unsafe_offset=off + 4])
         var kl = _u32(p, off + 5)
         if off + 9 + kl + 4 > n:
             return False
@@ -153,7 +153,7 @@ def _records_ok(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
         if f == 0 or (family >= 0 and f != family):
             return False
         family = f
-        var v = p + (off + 13 + kl)
+        var v = p.unsafe_offset((off + 13 + kl))
         if cmd == 5:                                  # [4B fl][field][4B vl][value]
             if vl < 8:
                 return False
@@ -169,7 +169,7 @@ def _records_ok(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
         elif cmd == 9 or cmd == 15:                   # [8B score][member]
             if vl < 8:
                 return False
-            var score = v.unsafe_bitcast[Float64]().load[volatile=True]()
+            var score = v.unsafe_bitcast[Float64]().unsafe_load[volatile=True]()
             if score != score:                        # NaN
                 return False
         elif cmd == 16:
@@ -213,22 +213,22 @@ def _records_ok(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
 
 
 def restore_name(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int) -> String:
-    return tokens[i].text_value().lower()
+    return tokens[unsafe_offset=i].text_value().lower()
 
 
 def _atoi(p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Int:
     """C's atoi, as Redis reads MIGRATE's port: leading spaces, a sign, then
     digits up to the first other byte; 0 when there are none."""
     var k = 0
-    while k < n and (p[k] == 32 or (p[k] >= 9 and p[k] <= 13)):
+    while k < n and (p[unsafe_offset=k] == 32 or (p[unsafe_offset=k] >= 9 and p[unsafe_offset=k] <= 13)):
         k += 1
     var neg = False
-    if k < n and (p[k] == 43 or p[k] == 45):
-        neg = p[k] == 45
+    if k < n and (p[unsafe_offset=k] == 43 or p[unsafe_offset=k] == 45):
+        neg = p[unsafe_offset=k] == 45
         k += 1
     var v = 0
-    while k < n and p[k] >= 48 and p[k] <= 57 and v < 1_000_000_000:
-        v = v * 10 + Int(p[k] - 48)
+    while k < n and p[unsafe_offset=k] >= 48 and p[unsafe_offset=k] <= 57 and v < 1_000_000_000:
+        v = v * 10 + Int(p[unsafe_offset=k] - 48)
         k += 1
     return -v if neg else v
 
@@ -252,14 +252,14 @@ def handle_restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     var freq = Int64(-1)
     var j = i + 4
     while j < num_tokens:
-        var o = tokens[j]
+        var o = tokens[unsafe_offset=j]
         var more = num_tokens - j - 1
         if arg_eq(o.ptr, o.length, "replace"):
             replace = True
         elif arg_eq(o.ptr, o.length, "absttl"):
             absttl = True
         elif arg_eq(o.ptr, o.length, "idletime") and more >= 1 and freq == -1:
-            var r = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var r = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not r.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return False
@@ -269,7 +269,7 @@ def handle_restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             idle = r.value
             j += 1
         elif arg_eq(o.ptr, o.length, "freq") and more >= 1 and idle == -1:
-            var r = parse_int64_strict(tokens[j + 1].ptr, tokens[j + 1].length)
+            var r = parse_int64_strict(tokens[unsafe_offset=j + 1].ptr, tokens[unsafe_offset=j + 1].length)
             if not r.ok:
                 writer.append_error_response("ERR value is not an integer or out of range")
                 return False
@@ -282,20 +282,20 @@ def handle_restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             writer.append_error_response("ERR syntax error")
             return False
         j += 1
-    var kt = tokens[i + 1]
+    var kt = tokens[unsafe_offset=i + 1]
     var key = GenericValue.borrow(kt.ptr, kt.length)
     var exists = not keyspace[].get(key).is_none()
     if exists and not replace:
         writer.append_error_response("BUSYKEY Target key name already exists.")
         return False
-    var ttl = parse_int64_strict(tokens[i + 2].ptr, tokens[i + 2].length)
+    var ttl = parse_int64_strict(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
     if not ttl.ok:
         writer.append_error_response("ERR value is not an integer or out of range")
         return False
     if ttl.value < 0:
         writer.append_error_response("ERR Invalid TTL value, must be >= 0")
         return False
-    var pt = tokens[i + 3]
+    var pt = tokens[unsafe_offset=i + 3]
     if not _payload_ok(pt.ptr, pt.length):
         writer.append_error_response("ERR DUMP payload version or checksum are wrong")
         return False
@@ -318,10 +318,10 @@ def handle_restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         deadline_ns = ms_to_deadline_ns(when_ms)
     var off = 0
     while off < body:
-        var cmd = UInt8(pt.ptr[off + 4])
+        var cmd = UInt8(pt.ptr[unsafe_offset=off + 4])
         var rkl = _u32(pt.ptr, off + 5)
         var vl = _u32(pt.ptr, off + 9 + rkl)
-        var vp = pt.ptr + (off + 13 + rkl)
+        var vp = pt.ptr.unsafe_offset((off + 13 + rkl))
         if cmd == 1:
             keyspace[].set(key, GenericValue.borrow(vp, vl))
         else:
@@ -339,15 +339,15 @@ def handle_restore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
 
 
 def _put_bulk(mut out: List[UInt8], p: Pointer[UInt8, MutUntrackedOrigin], n: Int):
-    var tmp = alloc[UInt8](24)
+    var tmp = unsafe_alloc[UInt8](24)
     out.append(36)
     var e = format_int_to_buf(tmp, 0, Int64(n))
     for k in range(e):
-        out.append(tmp[k])
+        out.append(tmp[unsafe_offset=k])
     out.append(13)
     out.append(10)
     for k in range(n):
-        out.append(p[k])
+        out.append(p[unsafe_offset=k])
     out.append(13)
     out.append(10)
     tmp.unsafe_free()
@@ -358,11 +358,11 @@ def _put_str(mut out: List[UInt8], s: String):
 
 
 def _put_header(mut out: List[UInt8], n: Int):
-    var tmp = alloc[UInt8](24)
+    var tmp = unsafe_alloc[UInt8](24)
     out.append(42)
     var e = format_int_to_buf(tmp, 0, Int64(n))
     for k in range(e):
-        out.append(tmp[k])
+        out.append(tmp[unsafe_offset=k])
     out.append(13)
     out.append(10)
     tmp.unsafe_free()
@@ -393,7 +393,7 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     var num_keys = 1
     var j = i + 6
     while j < num_tokens:
-        var o = tokens[j]
+        var o = tokens[unsafe_offset=j]
         var more = num_tokens - j - 1
         if arg_eq(o.ptr, o.length, "copy"):
             copy_flag = True
@@ -413,12 +413,11 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             auth_pass = j + 2
             j += 2
         elif arg_eq(o.ptr, o.length, "keys"):
-            if tokens[i + 3].length != 0:
+            if tokens[unsafe_offset=i + 3].length != 0:
                 writer.append_error_response("ERR When using MIGRATE KEYS option, the key argument must be set to the empty string")
                 return deleted^
             first_key = j + 1
             num_keys = num_tokens - j - 1
-            j = num_tokens
             break
         else:
             writer.append_error_response("ERR syntax error")
@@ -426,12 +425,12 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         j += 1
     # Redis checks the timeout and the db; the port is read with atoi, so a
     # bad one fails to connect
-    var timeout = parse_int64_strict(tokens[i + 5].ptr, tokens[i + 5].length)
-    var db = parse_int64_strict(tokens[i + 4].ptr, tokens[i + 4].length)
+    var timeout = parse_int64_strict(tokens[unsafe_offset=i + 5].ptr, tokens[unsafe_offset=i + 5].length)
+    var db = parse_int64_strict(tokens[unsafe_offset=i + 4].ptr, tokens[unsafe_offset=i + 4].length)
     if not timeout.ok or not db.ok:
         writer.append_error_response("ERR value is not an integer or out of range")
         return deleted^
-    var port = _atoi(tokens[i + 2].ptr, tokens[i + 2].length)
+    var port = _atoi(tokens[unsafe_offset=i + 2].ptr, tokens[unsafe_offset=i + 2].length)
     var timeout_ms = Int(timeout.value) if timeout.value > 0 and timeout.value < 1 << 31 else 1000
     # the keys that exist, with their payloads and remaining TTLs
     var present = List[Int]()
@@ -439,7 +438,7 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     var ttls = List[Int64]()
     var now_ms = Int64(_get_now_ns() // 1_000_000)
     for k in range(first_key, first_key + num_keys):
-        var t = tokens[k]
+        var t = tokens[unsafe_offset=k]
         var p = dump_payload(keyspace, t.ptr, t.length)
         if len(p) == 0:
             continue
@@ -458,7 +457,7 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     if len(present) == 0:
         writer.append_status_response("NOKEY")
         return deleted^
-    var host = tokens[i + 1].value() + "\0"
+    var host = tokens[unsafe_offset=i + 1].value() + "\0"
     var fd = external_call["pion_tcp_connect_host", Int32](host.unsafe_ptr(), Int32(port), Int32(timeout_ms))
     _ = host^                                  # alive through the call (ASAP destruction)
     if fd < 0:
@@ -471,8 +470,8 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         _put_header(out, 3 if auth_user >= 0 else 2)
         _put_str(out, "AUTH")
         if auth_user >= 0:
-            _put_bulk(out, tokens[auth_user].ptr, tokens[auth_user].length)
-        _put_bulk(out, tokens[auth_pass].ptr, tokens[auth_pass].length)
+            _put_bulk(out, tokens[unsafe_offset=auth_user].ptr, tokens[unsafe_offset=auth_user].length)
+        _put_bulk(out, tokens[unsafe_offset=auth_pass].ptr, tokens[unsafe_offset=auth_pass].length)
         expected += 1
     if db.value != 0:
         _put_header(out, 2)
@@ -481,7 +480,7 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         expected += 1
     var first_restore = expected
     for k in range(len(present)):
-        var t = tokens[present[k]]
+        var t = tokens[unsafe_offset=present[k]]
         _put_header(out, 5 if replace_flag else 4)
         _put_str(out, "RESTORE-ASKING" if cluster_mode else "RESTORE")
         _put_bulk(out, t.ptr, t.length)
@@ -496,7 +495,7 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     _ = out^                                   # alive through the call (ASAP destruction)
     var ok = wrote
     var error = String("")
-    var line = alloc[UInt8](1024)
+    var line = unsafe_alloc[UInt8](1024)
     var moved = List[Bool]()
     var setup_failed = False       # AUTH or SELECT refused: Redis deletes no key
     for r in range(expected):
@@ -506,10 +505,10 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         if n < 0:
             ok = False
             break
-        var is_err = n > 0 and line[0] == 45      # '-'
+        var is_err = n > 0 and line[unsafe_offset=0] == 45      # '-'
         if is_err and error.byte_length() == 0 and n > 1:
             error = String(StringSpan[MutUntrackedOrigin](
-                unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=line + 1, length=n - 1)))
+                unsafe_from_utf8=Span[UInt8, MutUntrackedOrigin](unsafe_ptr=line.unsafe_offset(1), length=n - 1)))
         if r < first_restore:
             if is_err:
                 setup_failed = True
@@ -524,7 +523,7 @@ def handle_migrate(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
     if not copy_flag:
         for k in range(len(moved)):
             if moved[k]:
-                var t = tokens[present[k]]
+                var t = tokens[unsafe_offset=present[k]]
                 var kv = GenericValue.borrow(t.ptr, t.length)
                 _ = remove_and_free(keyspace, kv)
                 if is_not_null(ttl_map):

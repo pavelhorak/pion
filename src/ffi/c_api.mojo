@@ -2,7 +2,6 @@ from src.common.ptr import null_ptr
 from src.actor.shard_manager import ShardManager
 from src.vector.hnsw import HNSWGraph
 from src.common.config import PionConfig
-from std.memory.unsafe_pointer import Pointer
 
 @fieldwise_init
 struct PionHandle:

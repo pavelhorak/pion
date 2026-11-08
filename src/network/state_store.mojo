@@ -20,8 +20,8 @@ Memory budgets (per worker):
   - MAX_TOTAL_BYTES    = 1 GB total across all sessions
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy, unsafe_memset
 
@@ -81,7 +81,7 @@ struct StateStore(Movable):
         self.total_writes = 0
         self.total_reads = 0
         if enabled:
-            var raw = alloc[StateSession](MAX_STATE_SESSIONS)
+            var raw = unsafe_alloc[StateSession](MAX_STATE_SESSIONS)
             self.sessions = Pointer[StateSession, MutUntrackedOrigin](
                 unsafe_from_address=Int(raw))
             for i in range(MAX_STATE_SESSIONS):
@@ -149,11 +149,11 @@ struct StateStore(Movable):
             return -5
 
         # Copy sid into owned storage so caller's RESP buffer can be reused.
-        var _sid = alloc[UInt8](sid_len)
+        var _sid = unsafe_alloc[UInt8](sid_len)
         var sid_copy = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_sid))
         unsafe_memcpy(dest=sid_copy, src=sid_ptr, count=sid_len)
 
-        var _buf = alloc[UInt8](size)
+        var _buf = unsafe_alloc[UInt8](size)
         var buf = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf))
         unsafe_memset(buf, 0, size)
 

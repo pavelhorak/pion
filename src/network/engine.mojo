@@ -1,10 +1,10 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import free_graveyard
 from src.commands.evict import evict_configure, evict_tick
 from src.network.vector_ingest import log_dead_slots, sync_vector_records
 from src.network.vector_auto import vector_auto_tick
 from std.sys.info import CompilationTarget
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc, unsafe_memcpy, stack_allocation
 from std.ffi import external_call
 from std.collections import List
@@ -156,21 +156,21 @@ struct NetworkEngine:
         self.num_workers = num_workers
 
 
-        self.client_buffer_lens = alloc[Int](65536)
-        self.client_buffers = alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
+        self.client_buffer_lens = unsafe_alloc[Int](65536)
+        self.client_buffers = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
         for i in range(65536):
             self.client_buffer_lens[unsafe_offset=i] = 0
             self.client_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
 
         # P4: local_affinity[fd] = 1 when connection was accepted on this worker's secondary port.
-        self.local_affinity = alloc[UInt8](65536)
+        self.local_affinity = unsafe_alloc[UInt8](65536)
         unsafe_memset(self.local_affinity.unsafe_bitcast[UInt8](), 0, 65536)
         self.secondary_listen_fd = secondary_listen_fd
         self.binary_listen_fd = binary_listen_fd
         # io_uring: heap-allocated so ResponseWriter can hold a pointer to it.
-        self.ring = alloc[IOUring](1)
+        self.ring = unsafe_alloc[IOUring](1)
         self.ring[unsafe_offset=0] = IOUring()
-        self.uring_recv_armed = alloc[UInt8](65536)
+        self.uring_recv_armed = unsafe_alloc[UInt8](65536)
         unsafe_memset(self.uring_recv_armed.unsafe_bitcast[UInt8](), 0, 65536)
         self.multishot_bufs = null_ptr[UInt8, MutUntrackedOrigin]()
         self.multishot_active = False
@@ -202,7 +202,7 @@ struct NetworkEngine:
         # --no-wal: skip WAL append on writes and WAL sync per tick (benchmark mode)
         if config.server.no_wal:
             self.fast_path.has_wal = False
-        self.pending_changes = alloc[KEvent](64)
+        self.pending_changes = unsafe_alloc[KEvent](64)
         self.pending_change_count = 0
         self.over_maxmemory = False
 
@@ -602,7 +602,7 @@ struct NetworkEngine:
             # right after its last use, so the parse below would read freed
             # memory (it did: the allocator reused the first bytes).
             var flen = len(reg[].clients[k].frame)
-            var frame = alloc[UInt8](flen + 1)
+            var frame = unsafe_alloc[UInt8](flen + 1)
             unsafe_memcpy(dest=frame, src=reg[].clients[k].frame.unsafe_ptr(), count=flen)
             reg[].remove_at(k)                 # the next client is now at k
             self.slow_path.parked_waits.unpark_fd(fd)
@@ -617,7 +617,7 @@ struct NetworkEngine:
             _ = self.slow_path.process_slow_path(frame, flen, fd, self.writer, self.server, kq,
                                                  hnsw, db_size, self.config)
             self.slow_path.monitor_skip = False
-            frame.free()
+            frame.unsafe_free()
             self.slow_path.can_park_wait = park
             self._resume_unparked(fd, kq, hnsw, db_size, uring_group)
 
@@ -662,7 +662,7 @@ struct NetworkEngine:
             reg[].pause_changed = False
             for k in range(len(reg[].paused_fds)):
                 var f = reg[].paused_fds[k]
-                reg[].postponed[Int(f)] = 0
+                reg[].postponed[unsafe_offset=Int(f)] = 0
                 go.append(f)
             reg[].paused_fds.clear()
         for k in range(len(reg[].released)):
@@ -703,7 +703,7 @@ struct NetworkEngine:
                 buf.unsafe_offset(used).unsafe_bitcast[NoneType](), left)
         if left == cap:
             # One record bigger than the whole buffer: grow it, or it never fits.
-            var bigger = alloc[UInt8](cap * 2)
+            var bigger = unsafe_alloc[UInt8](cap * 2)
             unsafe_memcpy(dest=bigger, src=buf, count=left)
             buf.unsafe_free()
             cl[].repl_drain_buf = bigger
@@ -732,12 +732,12 @@ struct NetworkEngine:
         _ = self.slow_path.snapshot_engine.take_snapshot(
             self.fast_path.keyspace, self.worker_id, UInt64(0),
             null_ptr[BlobStore, MutUntrackedOrigin](), self.fast_path.ttl_map, path)
-        var fd = external_call["pion_open_rdonly", Int32](path.as_c_string_slice())
+        var fd = external_call["pion_open_rdonly", Int32](path.as_c_string_span())
         if fd < 0:
             print("Replication: FULLRESYNC snapshot could not be read back from " + path)
             return
         var size = Int(external_call["pion_file_size", Int64](fd))
-        var data = alloc[UInt8](max(size, 1))
+        var data = unsafe_alloc[UInt8](max(size, 1))
         var got = 0
         while got < size:
             var r = Int(external_call["pion_read", Int64](fd, data.unsafe_offset(got), size - got))
@@ -745,7 +745,7 @@ struct NetworkEngine:
                 break
             got += r
         _ = external_call["close", Int32](fd)
-        _ = external_call["unlink", Int32](path.as_c_string_slice())
+        _ = external_call["unlink", Int32](path.as_c_string_span())
         if got == size and size >= SNAP_HDR_LEN:
             external_call["pion_repl_primary_provide_snapshot", NoneType](
                 h, data.unsafe_offset(SNAP_HDR_LEN), UInt64(size - SNAP_HDR_LEN), tail)
@@ -1022,7 +1022,7 @@ struct NetworkEngine:
         if self.server.fd < 0 and not self.server.listen():
             pass  # non-fatal — XDP can work without TCP fallback
         var tcp_listen_fd = self.server.fd
-        var tcp_active_fds = alloc[Int32](256)  # up to 256 TCP loopback clients
+        var tcp_active_fds = unsafe_alloc[Int32](256)  # up to 256 TCP loopback clients
         var tcp_active_count = 0
 
         var kq = Int32(-1)
@@ -1033,8 +1033,6 @@ struct NetworkEngine:
               + " tcp_fallback=" + String(Int(tcp_listen_fd)))
 
         # Pre-allocate response buffer for XDP path (same as ResponseWriter's 4MB buffer)
-        var xdp_response_buf = alloc[UInt8](4194304)
-        var xdp_response_len = 0
 
         while True:
             # ── Phase 1: Poll AF_XDP RX ring for incoming frames ──
@@ -1094,7 +1092,7 @@ struct NetworkEngine:
                 # Allocate client buffer for this virtual connection if needed
                 if vci < 65536:
                     if self.client_buffers[unsafe_offset=vci] == null_ptr[UInt8, MutUntrackedOrigin]():
-                        self.client_buffers[unsafe_offset=vci] = alloc[UInt8](CLIENT_BUF_SIZE)
+                        self.client_buffers[unsafe_offset=vci] = unsafe_alloc[UInt8](CLIENT_BUF_SIZE)
                         self.client_buffer_lens[unsafe_offset=vci] = 0
 
                     # Copy payload into client buffer (needed for partial frame accumulation)
@@ -1170,7 +1168,7 @@ struct NetworkEngine:
                         # Allocate client buffer for this TCP fd
                         var ci = Int(new_fd)
                         if ci < 65536 and self.client_buffers[unsafe_offset=ci] == null_ptr[UInt8, MutUntrackedOrigin]():
-                            self.client_buffers[unsafe_offset=ci] = alloc[UInt8](CLIENT_BUF_SIZE)
+                            self.client_buffers[unsafe_offset=ci] = unsafe_alloc[UInt8](CLIENT_BUF_SIZE)
                             self.client_buffer_lens[unsafe_offset=ci] = 0
                     else:
                         self.server.close_client(new_fd)
@@ -1298,7 +1296,7 @@ struct NetworkEngine:
         # 256 × 16KB = 4MB of provided buffers. Falls back to per-fd recv if kernel
         # doesn't support multishot (< 6.0) or provide_buffers fails.
         var buf_group_id = UInt16(self.worker_id)
-        self.multishot_bufs = alloc[UInt8](PBUF_RING_ENTRIES * PBUF_SIZE)
+        self.multishot_bufs = unsafe_alloc[UInt8](PBUF_RING_ENTRIES * PBUF_SIZE)
         # gh #478: touch the whole pool now. The kernel hands provided buffers
         # out first-in first-out (a recycled one goes to the back), so traffic
         # walks all 256 of them, and each page became resident the first time
@@ -1490,7 +1488,7 @@ struct NetworkEngine:
                         # Allocate recv buffer and clear any stale send state.
                         if self.client_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                             self.client_buffers[unsafe_offset=ci].unsafe_free()
-                        self.client_buffers[unsafe_offset=ci] = alloc[UInt8](CLIENT_BUF_SIZE)
+                        self.client_buffers[unsafe_offset=ci] = unsafe_alloc[UInt8](CLIENT_BUF_SIZE)
                         if self.writer.ctx[].pending_buffers[unsafe_offset=ci] != null_ptr[UInt8, MutUntrackedOrigin]():
                             self.writer.ctx[].pending_buffers[unsafe_offset=ci].unsafe_free()
                             self.writer.ctx[].pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
@@ -1683,7 +1681,7 @@ struct NetworkEngine:
             _ = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, self.binary_listen_fd, listen_flags)
 
         # Raw bytes, read through epoll_ev_*: x86-64's epoll_event is packed (12 B).
-        var events = alloc[UInt8](1024 * 16)
+        var events = unsafe_alloc[UInt8](1024 * 16)
         # Pass epfd as kq — _flush_kqueue will use kevent_add_write/kevent_del_write
         # which now dispatch to epoll_ctl on Linux when kq >= 0.
         var kq = epfd
@@ -1786,7 +1784,7 @@ struct NetworkEngine:
 
                     var client_idx = Int(fd)
                     if self.client_buffers[unsafe_offset=client_idx] == null_ptr[UInt8, MutUntrackedOrigin]():
-                        self.client_buffers[unsafe_offset=client_idx] = alloc[UInt8](CLIENT_BUF_SIZE)
+                        self.client_buffers[unsafe_offset=client_idx] = unsafe_alloc[UInt8](CLIENT_BUF_SIZE)
                     var client_buffer = self.client_buffers[unsafe_offset=client_idx]
 
                     var stored_len = self.client_buffer_lens[unsafe_offset=client_idx]
@@ -1928,7 +1926,7 @@ struct NetworkEngine:
         # reads it. Allocate it before any thread starts, so its pointers never change.
         if is_null(self.writer.ctx[].ovf_lens):
             self.writer.ctx[]._ovf_init()
-        var hub = alloc[IOHub](1)
+        var hub = unsafe_alloc[IOHub](1)
         hub.unsafe_write(IOHub(n_io, self.server.fd, CLIENT_BUF_SIZE, self.client_buffers, self.writer.ctx))
         hub[].listen_fd2 = self.secondary_listen_fd
         self.writer.ctx[].io_locks = hub[].out_lock
@@ -1945,7 +1943,7 @@ struct NetworkEngine:
         print("--- Pion IO-THREADS Engine Active --- worker=" + String(self.worker_id) +
               " io_threads=" + String(n_io) + " (+1 executor)")
         var kq = Int32(-3)       # not -1 (the XDP no-op flush): flushes go to _flush_kqueue's io_mode branch
-        var need_wake = alloc[UInt8](n_io)
+        var need_wake = unsafe_alloc[UInt8](n_io)
         var idle = 0
         var last_tick = _get_now_ns()
         while True:
@@ -2052,8 +2050,8 @@ struct NetworkEngine:
         if self.binary_listen_fd >= 0:
             self.server.kevent_add_read(kq, self.binary_listen_fd, edge_triggered=False)
 
-        var events = alloc[KEvent](1024)
-        var timeout = alloc[Int](2)
+        var events = unsafe_alloc[KEvent](1024)
+        var timeout = unsafe_alloc[Int](2)
         timeout[unsafe_offset=0] = 0 # 0 seconds
         timeout[unsafe_offset=1] = 1000000 # 1ms in nanoseconds
 
@@ -2168,7 +2166,7 @@ struct NetworkEngine:
                 else:
                     var client_idx = Int(fd)
                     if self.client_buffers[unsafe_offset=client_idx] == null_ptr[UInt8, MutUntrackedOrigin]():
-                        self.client_buffers[unsafe_offset=client_idx] = alloc[UInt8](CLIENT_BUF_SIZE)
+                        self.client_buffers[unsafe_offset=client_idx] = unsafe_alloc[UInt8](CLIENT_BUF_SIZE)
                     var client_buffer = self.client_buffers[unsafe_offset=client_idx]
 
                     var stored_len = self.client_buffer_lens[unsafe_offset=client_idx]

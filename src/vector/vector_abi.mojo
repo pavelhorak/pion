@@ -14,7 +14,6 @@ The closed routines are entered once per query (beam) or once per matrix op
 (beam_view.mojo, quant_beam_view.mojo) whose field order is ABI.
 """
 from std.ffi import external_call
-from std.memory.unsafe_pointer import UnsafePointer
 from std.sys import is_defined, CompilationTarget
 
 from .beam_view import BeamView1536
@@ -31,7 +30,7 @@ comptime VECTOR_ABI_VERSION = 1
 
 
 @always_inline
-def beam_search_1536(v: UnsafePointer[BeamView1536, MutUntrackedOrigin]):
+def beam_search_1536(v: Pointer[BeamView1536, MutUntrackedOrigin]):
     comptime if HELD_VECTOR:
         _ = external_call["pion_v_beam_1536", Int](v)
     else:
@@ -39,7 +38,7 @@ def beam_search_1536(v: UnsafePointer[BeamView1536, MutUntrackedOrigin]):
 
 
 @always_inline
-def quant_beam_search_1536(v: UnsafePointer[QuantBeamView1536, MutUntrackedOrigin]):
+def quant_beam_search_1536(v: Pointer[QuantBeamView1536, MutUntrackedOrigin]):
     """KIND in the view: 0 = PolarQuant INT4, 1 = NanoQuant INT2, 2 = TurboQuant INT3 + QJL."""
     comptime if HELD_VECTOR:
         _ = external_call["pion_v_quant_beam_1536", Int](v)

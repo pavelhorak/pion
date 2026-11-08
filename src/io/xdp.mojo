@@ -17,8 +17,8 @@ The improvement comes from eliminating:
 Requirements: Linux 5.4+, CAP_NET_ADMIN, AF_XDP-capable NIC driver.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.ffi import external_call
 from std.memory import unsafe_memset, unsafe_memcpy
@@ -137,7 +137,7 @@ struct XDPEngine:
 
         var iface_cstr = interface
         self.handle = external_call["pion_xdp_create", Pointer[NoneType, MutUntrackedOrigin]](
-            iface_cstr.as_c_string_slice(), Int32(queue_id), port
+            iface_cstr.as_c_string_span(), Int32(queue_id), port
         )
         if is_null(self.handle):
             return False
@@ -151,12 +151,12 @@ struct XDPEngine:
             return False
 
         # Allocate connection table (65536 entries, one per source port)
-        self.connections = alloc[TCPConnection](65536)
+        self.connections = unsafe_alloc[TCPConnection](65536)
         unsafe_memset(self.connections.unsafe_bitcast[UInt8](), 0, 65536 * 16)  # sizeof(TCPConnection) ≈ 16
 
         # Allocate batch buffers
-        self.rx_addrs = alloc[UInt64](XDP_BATCH_SIZE)
-        self.rx_lens = alloc[UInt32](XDP_BATCH_SIZE)
+        self.rx_addrs = unsafe_alloc[UInt64](XDP_BATCH_SIZE)
+        self.rx_lens = unsafe_alloc[UInt32](XDP_BATCH_SIZE)
 
         self.active = True
         print("XDP engine active: " + interface + " queue=" + String(queue_id) + " port=" + String(Int(port)))
@@ -174,7 +174,7 @@ struct XDPEngine:
 
         var iface_cstr = interface
         self.handle = external_call["pion_xdp_create_worker", Pointer[NoneType, MutUntrackedOrigin]](
-            iface_cstr.as_c_string_slice(), Int32(queue_id), port,
+            iface_cstr.as_c_string_span(), Int32(queue_id), port,
             shared_xskmap_fd, shared_bpf_fd
         )
         if is_null(self.handle):
@@ -188,11 +188,11 @@ struct XDPEngine:
             self.handle = null_ptr[NoneType, MutUntrackedOrigin]()
             return False
 
-        self.connections = alloc[TCPConnection](65536)
+        self.connections = unsafe_alloc[TCPConnection](65536)
         unsafe_memset(self.connections.unsafe_bitcast[UInt8](), 0, 65536 * 16)
 
-        self.rx_addrs = alloc[UInt64](XDP_BATCH_SIZE)
-        self.rx_lens = alloc[UInt32](XDP_BATCH_SIZE)
+        self.rx_addrs = unsafe_alloc[UInt64](XDP_BATCH_SIZE)
+        self.rx_lens = unsafe_alloc[UInt32](XDP_BATCH_SIZE)
 
         self.active = True
         print("XDP worker active: " + interface + " queue=" + String(queue_id) + " port=" + String(Int(port)))
@@ -231,12 +231,12 @@ struct XDPEngine:
         _ = payload_ptr; _ = seq; _ = ack; _ = flags; _ = sport
 
         # Stack variables for the out-params
-        var pp = alloc[UInt64](1)  # pointer to payload pointer
-        var sq = alloc[UInt32](1)
-        var ak = alloc[UInt32](1)
-        var fl = alloc[UInt8](1)
-        var sp = alloc[UInt16](1)
-        var dp = alloc[UInt16](1)
+        var pp = unsafe_alloc[UInt64](1)  # pointer to payload pointer
+        var sq = unsafe_alloc[UInt32](1)
+        var ak = unsafe_alloc[UInt32](1)
+        var fl = unsafe_alloc[UInt8](1)
+        var sp = unsafe_alloc[UInt16](1)
+        var dp = unsafe_alloc[UInt16](1)
 
         var payload_len = external_call["pion_xdp_extract_tcp_payload", Int32](
             frame.unsafe_bitcast[NoneType](), Int32(frame_len),

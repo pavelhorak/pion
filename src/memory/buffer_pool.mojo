@@ -1,6 +1,5 @@
 from std.collections import Dict, List
 from .slab_allocator import SlabAllocator
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.sys import size_of
 from std.math import min, max

@@ -24,6 +24,7 @@ Two kinds of number, kept apart on purpose:
     avoided). Larger models cost more per token, so the estimate is
     conservative for them; it is labelled an estimate wherever it is shown.
 """
+from std.memory.alloc import unsafe_alloc
 from std.ffi import external_call
 from std.memory import alloc
 
@@ -33,7 +34,7 @@ comptime LEDGER_EST_PREFILL_US_PER_TOKEN: UInt64 = 555
 
 @always_inline
 def _ledger_now_ns() -> Int64:
-    var ts = alloc[Int64](2)
+    var ts = unsafe_alloc[Int64](2)
     _ = external_call["clock_gettime", Int32](Int32(0), ts)
     var r = ts[unsafe_offset=0] * Int64(1_000_000_000) + ts[unsafe_offset=1]
     ts.unsafe_free()

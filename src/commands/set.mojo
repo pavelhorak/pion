@@ -1,10 +1,10 @@
 """Set commands: SCARD, SMEMBERS, SREM, SMOVE, SINTER, SINTERCARD, SUNION, SDIFF, *STORE, SSCAN, SRANDMEMBER, SISMEMBER, SMISMEMBER."""
+from std.memory.alloc import unsafe_alloc
 from src.common.container_free import remove_and_free
 from src.common.ptr import is_not_null, null_ptr
 from src.commands.scan_opts import parse_scan_opts, scan_no_opts
 from src.commands.scan_walk import walk_map, append_scan_header
 from src.common.utils import rand_count, strict_atol, _glob_match, _glob_all, scan_cursor, scan_count, arg_eq, parse_int64_strict
-from std.memory.unsafe_pointer import Pointer
 from std.collections import Array
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
@@ -269,7 +269,7 @@ def handle_smove(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                                     tokens[unsafe_offset=i+3].ptr, tokens[unsafe_offset=i+3].length)
                 var dst_val = keyspace[].get(dst_vs)
                 if dst_val.is_none() or dst_val.type.value != ValueType.SET:
-                    var ns = alloc[SlabHashMap](1); ns.unsafe_write(SlabHashMap(16))
+                    var ns = unsafe_alloc[SlabHashMap](1); ns.unsafe_write(SlabHashMap(16))
                     ns[].set(mem_vs, GenericValue.from_int(1))
                     var sv = GenericValue(); sv.type = ValueType(ValueType.SET)
                     sv.set_ptr(ns.unsafe_bitcast[NoneType]()); keyspace[].set(dst_vs, sv)
@@ -355,7 +355,7 @@ def handle_sinterstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
         var dst_sis_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         var first_sis_v = GenericValue.borrow(tokens[unsafe_offset=i+2].ptr, tokens[unsafe_offset=i+2].length)
         var first_sis = keyspace[].get(first_sis_v)
-        var res_sis = alloc[SlabHashMap](1); res_sis.unsafe_write(SlabHashMap(16))
+        var res_sis = unsafe_alloc[SlabHashMap](1); res_sis.unsafe_write(SlabHashMap(16))
         if not first_sis.is_none() and first_sis.type.value == ValueType.SET:
             var fsis_ptr = first_sis.as_set().unsafe_bitcast[SlabHashMap]()
             for slot in range(fsis_ptr[].capacity):
@@ -461,7 +461,7 @@ def handle_sunion(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             if not chk.is_none() and chk.type.value != ValueType.SET:
                 writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
                 return 0
-        var tmp_su = alloc[SlabHashMap](1); tmp_su.unsafe_write(SlabHashMap(64))
+        var tmp_su = unsafe_alloc[SlabHashMap](1); tmp_su.unsafe_write(SlabHashMap(64))
         var j_su = i + 1
         while j_su < num_tokens:
             var su_v = GenericValue.borrow(tokens[unsafe_offset=j_su].ptr, tokens[unsafe_offset=j_su].length)
@@ -492,7 +492,7 @@ def handle_sunionstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
     """SUNIONSTORE destination key [key ...] → integer count of members in resulting set."""
     if i + 2 < num_tokens:
         var dst_sus_v = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
-        var res_sus = alloc[SlabHashMap](1); res_sus.unsafe_write(SlabHashMap(64))
+        var res_sus = unsafe_alloc[SlabHashMap](1); res_sus.unsafe_write(SlabHashMap(64))
         var j_sus = i + 2
         while j_sus < num_tokens:
             var sus_v = GenericValue.borrow(tokens[unsafe_offset=j_sus].ptr, tokens[unsafe_offset=j_sus].length)
@@ -587,7 +587,7 @@ def handle_sdiffstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
                 return num_tokens - 1 - i
             _sds_scan += 1
         var first_sds = keyspace[].get(first_sds_v)
-        var res_sds = alloc[SlabHashMap](1); res_sds.unsafe_write(SlabHashMap(16))
+        var res_sds = unsafe_alloc[SlabHashMap](1); res_sds.unsafe_write(SlabHashMap(16))
         if not first_sds.is_none() and first_sds.type.value == ValueType.SET:
             var fsds_ptr = first_sds.as_set().unsafe_bitcast[SlabHashMap]()
             for slot in range(fsds_ptr[].capacity):
@@ -641,7 +641,7 @@ def handle_sscan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
         else:
             var ssp = val_ss.as_set().unsafe_bitcast[SlabHashMap]()
             var ss_all = not so.has_match or _glob_all(ss_pat_p, ss_pat_l)
-            var ss_mb = alloc[UInt8](24)
+            var ss_mb = unsafe_alloc[UInt8](24)
             # #50: a COUNT-bounded step from the cursor, not the whole set.
             var ss_w = List[Int]()
             var ss_next = walk_map(ssp, ss_cursor, so.count, ss_w)

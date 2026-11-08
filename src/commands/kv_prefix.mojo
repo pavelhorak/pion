@@ -21,6 +21,7 @@ Three commands:
     Global stats: registered prefix count, total tokens cached.
 """
 
+from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.io.wal import WAL
 from src.network.v_store import (
@@ -37,7 +38,6 @@ from src.common.metrics import ValueLedger
 from src.common.utils import strict_atol, arg_eq
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from std.collections import Array
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.atomic import Atomic, Ordering
@@ -219,14 +219,14 @@ def handle_kv_prefix_register(
 
     # Build sid_k = "<ns>_pk"
     var total = ns_len + 3
-    var _buf_k = alloc[UInt8](total)
+    var _buf_k = unsafe_alloc[UInt8](total)
     var sid_k_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf_k))
     unsafe_memcpy(dest=sid_k_ptr, src=ns_ptr, count=ns_len)
     sid_k_ptr[unsafe_offset=ns_len] = UInt8(95)      # '_'
     sid_k_ptr[unsafe_offset=ns_len + 1] = UInt8(112) # 'p'
     sid_k_ptr[unsafe_offset=ns_len + 2] = UInt8(107) # 'k'
 
-    var _buf_v = alloc[UInt8](total)
+    var _buf_v = unsafe_alloc[UInt8](total)
     var sid_v_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf_v))
     unsafe_memcpy(dest=sid_v_ptr, src=ns_ptr, count=ns_len)
     sid_v_ptr[unsafe_offset=ns_len] = UInt8(95)
@@ -240,7 +240,7 @@ def handle_kv_prefix_register(
     if idx_v >= 0:
         vstore.wal_append_create(sid_v_ptr, total, Int(kv_dim), vquant)
     if idx_k >= 0:
-        vstore.prefix_prefill_us[idx_k] = prefill_us   # gh #262 (0 = not reported)
+        vstore.prefix_prefill_us[unsafe_offset=idx_k] = prefill_us   # gh #262 (0 = not reported)
 
     # gh #71: attach the optional block-hash table to the K-side session and
     # log it as a WAL op=4 record. Must run AFTER wal_append_create so replay
@@ -340,12 +340,12 @@ def handle_kv_prefix_lookup(
 
     var total = ns_len + 3
 
-    var _buf_k = alloc[UInt8](total)
+    var _buf_k = unsafe_alloc[UInt8](total)
     var sid_k_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf_k))
     unsafe_memcpy(dest=sid_k_ptr, src=ns_ptr, count=ns_len)
     sid_k_ptr[unsafe_offset=ns_len] = UInt8(95); sid_k_ptr[unsafe_offset=ns_len + 1] = UInt8(112); sid_k_ptr[unsafe_offset=ns_len + 2] = UInt8(107)
 
-    var _buf_v = alloc[UInt8](total)
+    var _buf_v = unsafe_alloc[UInt8](total)
     var sid_v_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf_v))
     unsafe_memcpy(dest=sid_v_ptr, src=ns_ptr, count=ns_len)
     sid_v_ptr[unsafe_offset=ns_len] = UInt8(95); sid_v_ptr[unsafe_offset=ns_len + 1] = UInt8(112); sid_v_ptr[unsafe_offset=ns_len + 2] = UInt8(118)
@@ -367,8 +367,8 @@ def handle_kv_prefix_lookup(
     var _lk_tokens = 0
     var _lk_prefill_us = UInt64(0)
     if hit and idx_k >= 0:
-        _lk_tokens = vstore.tokens_per_layer[idx_k * MAX_VS_LAYERS]
-        _lk_prefill_us = vstore.prefix_prefill_us[idx_k]
+        _lk_tokens = vstore.tokens_per_layer[unsafe_offset=idx_k * MAX_VS_LAYERS]
+        _lk_prefill_us = vstore.prefix_prefill_us[unsafe_offset=idx_k]
     if hit and opt_tokens >= 0:
         # The caller's own count of what it restored replaces the namespace's;
         # so does its measured time (a registered PREFILL_MS was for the
@@ -383,10 +383,10 @@ def handle_kv_prefix_lookup(
 
     if hit:
         ledger.record_kvprefix_hit(_lk_tokens, _lk_prefill_us)
-        writer.append_to_response("+HIT\r\n".unsafe_ptr(), 6)
+        writer.append_to_response("+HIT\r\n".ptr(), 6)
     else:
         ledger.record_kvprefix_miss()
-        writer.append_to_response("+MISS\r\n".unsafe_ptr(), 7)
+        writer.append_to_response("+MISS\r\n".ptr(), 7)
     return 1
 
 
@@ -428,7 +428,7 @@ def handle_kv_prefix_drop(
         var ns_ptr = t.ptr
         var ns_len = Int(t.length)
         var total = ns_len + 3
-        var _b = alloc[UInt8](total)
+        var _b = unsafe_alloc[UInt8](total)
         var sid = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_b))
         unsafe_memcpy(dest=sid, src=ns_ptr, count=ns_len)
         sid[unsafe_offset=ns_len] = UInt8(95); sid[unsafe_offset=ns_len + 1] = UInt8(112)
@@ -479,7 +479,7 @@ def handle_kv_prefix_owner(
     var total = ns_len + 3
 
     # The directory entries are keyed on the K-side sid (<ns>_pk). Build it.
-    var _buf_k = alloc[UInt8](total)
+    var _buf_k = unsafe_alloc[UInt8](total)
     var sid_k_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf_k))
     unsafe_memcpy(dest=sid_k_ptr, src=ns_ptr, count=ns_len)
     sid_k_ptr[unsafe_offset=ns_len] = UInt8(95); sid_k_ptr[unsafe_offset=ns_len + 1] = UInt8(112); sid_k_ptr[unsafe_offset=ns_len + 2] = UInt8(107)
@@ -542,7 +542,7 @@ def handle_kv_prefix_blocks(
     var total = ns_len + 3
 
     # K-side session carries the block table (mirrors KV.PREFIX.OWNER's keying).
-    var _buf_k = alloc[UInt8](total)
+    var _buf_k = unsafe_alloc[UInt8](total)
     var sid_k_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf_k))
     unsafe_memcpy(dest=sid_k_ptr, src=ns_ptr, count=ns_len)
     sid_k_ptr[unsafe_offset=ns_len] = UInt8(95); sid_k_ptr[unsafe_offset=ns_len + 1] = UInt8(112); sid_k_ptr[unsafe_offset=ns_len + 2] = UInt8(107)
@@ -558,7 +558,7 @@ def handle_kv_prefix_blocks(
             var s = String("ERR KV.PREFIX.BLOCKS session lives on worker ") + String(owner)
             writer.append_error_response(s)
         else:
-            writer.append_to_response("+UNKNOWN\r\n".unsafe_ptr(), 10)
+            writer.append_to_response("+UNKNOWN\r\n".ptr(), 10)
         return 1
     sid_k_ptr.unsafe_free()
 
@@ -566,13 +566,13 @@ def handle_kv_prefix_blocks(
     var bcnt = vstore.sessions[unsafe_offset=idx_k].block_count
     var hp   = vstore.sessions[unsafe_offset=idx_k].block_hashes
     if Int(bsz) == 0 or is_null(hp):
-        writer.append_to_response("+UNKNOWN\r\n".unsafe_ptr(), 10)
+        writer.append_to_response("+UNKNOWN\r\n".ptr(), 10)
         return 1
 
     # Reply is one bulk string: [block_size 4B LE][block_count 4B LE][hashes].
     var blob_bytes = Int(bcnt) * 8
     var total_bytes = 8 + blob_bytes
-    var _rbuf = alloc[UInt8](total_bytes)
+    var _rbuf = unsafe_alloc[UInt8](total_bytes)
     var rb = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_rbuf))
     rb.unsafe_bitcast[UInt32]()[unsafe_offset=0]       = bsz
     (rb.unsafe_offset(4)).unsafe_bitcast[UInt32]()[unsafe_offset=0] = bcnt
@@ -627,7 +627,7 @@ def handle_kv_prefix_membership(
     var probe = blob_tok.ptr.unsafe_bitcast[UInt64]()
 
     var total = ns_len + 3
-    var _buf_k = alloc[UInt8](total)
+    var _buf_k = unsafe_alloc[UInt8](total)
     var sid_k_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_buf_k))
     unsafe_memcpy(dest=sid_k_ptr, src=ns_ptr, count=ns_len)
     sid_k_ptr[unsafe_offset=ns_len] = UInt8(95); sid_k_ptr[unsafe_offset=ns_len + 1] = UInt8(112); sid_k_ptr[unsafe_offset=ns_len + 2] = UInt8(107)
@@ -642,14 +642,14 @@ def handle_kv_prefix_membership(
             var s = String("ERR KV.PREFIX.MEMBERSHIP session lives on worker ") + String(owner)
             writer.append_error_response(s)
         else:
-            writer.append_to_response("+UNKNOWN\r\n".unsafe_ptr(), 10)
+            writer.append_to_response("+UNKNOWN\r\n".ptr(), 10)
         return 1
     sid_k_ptr.unsafe_free()
 
     var bcnt = Int(vstore.sessions[unsafe_offset=idx_k].block_count)
     var hps  = vstore.sessions[unsafe_offset=idx_k].block_hashes_sorted
     if Int(vstore.sessions[unsafe_offset=idx_k].block_size) == 0 or is_null(hps):
-        writer.append_to_response("+UNKNOWN\r\n".unsafe_ptr(), 10)
+        writer.append_to_response("+UNKNOWN\r\n".ptr(), 10)
         return 1
 
     # Build the bitmap via binary search on the sorted parallel array. At
@@ -657,7 +657,7 @@ def handle_kv_prefix_membership(
     # gh #71 originally shipped with (which hit ~6.5 ms p50; we target ≤ 100 µs
     # server-side and ≤ 1 ms e2e over loopback).
     var bitmap_bytes = (Int(hc) + 7) // 8
-    var _bm = alloc[UInt8](bitmap_bytes if bitmap_bytes > 0 else 1)
+    var _bm = unsafe_alloc[UInt8](bitmap_bytes if bitmap_bytes > 0 else 1)
     var bm = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_bm))
     for bi in range(bitmap_bytes):
         bm[unsafe_offset=bi] = UInt8(0)
@@ -933,11 +933,11 @@ def handle_kv_prefix_warm(
 
     # Build derived sids: "<ns>_pk" / "<ns>_pv".
     var total = ns_len + 3
-    var _bk = alloc[UInt8](total)
+    var _bk = unsafe_alloc[UInt8](total)
     var sid_k_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_bk))
     unsafe_memcpy(dest=sid_k_ptr, src=ns_ptr, count=ns_len)
     sid_k_ptr[unsafe_offset=ns_len] = UInt8(95); sid_k_ptr[unsafe_offset=ns_len + 1] = UInt8(112); sid_k_ptr[unsafe_offset=ns_len + 2] = UInt8(107)
-    var _bv = alloc[UInt8](total)
+    var _bv = unsafe_alloc[UInt8](total)
     var sid_v_ptr = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(_bv))
     unsafe_memcpy(dest=sid_v_ptr, src=ns_ptr, count=ns_len)
     sid_v_ptr[unsafe_offset=ns_len] = UInt8(95); sid_v_ptr[unsafe_offset=ns_len + 1] = UInt8(112); sid_v_ptr[unsafe_offset=ns_len + 2] = UInt8(118)
@@ -1014,14 +1014,14 @@ def handle_kv_prefix_warm(
         # Allocate per-layer staging: V-store flat fetch buffer + transposed
         # output. Free at the end of each layer; this keeps peak memory at
         # 4 × floats × 4 bytes ≈ 4 MB at H=8 N=4096 D=128.
-        var _ids = alloc[Int32](Int(N))
+        var _ids = unsafe_alloc[Int32](Int(N))
         var ids_ptr = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=Int(_ids))
         for ti in range(N):
             ids_ptr[unsafe_offset=ti] = Int32(ti)
 
-        var _kf = alloc[Float32](floats)
+        var _kf = unsafe_alloc[Float32](floats)
         var k_flat_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_kf))
-        var _vf = alloc[Float32](floats)
+        var _vf = unsafe_alloc[Float32](floats)
         var v_flat_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_vf))
 
         var got_k = vstore.fetch_tokens(idx_k, li, ids_ptr, Int(N), k_flat_ptr)
@@ -1038,9 +1038,9 @@ def handle_kv_prefix_warm(
         # Transpose [N, H*D] → [H, N, D]:
         #   src[n, h, d] = src_flat[n * (H*D) + h * D + d]
         #   dst[h, n, d] = dst_flat[h * (N*D) + n * D + d]
-        var _kt = alloc[Float32](floats)
+        var _kt = unsafe_alloc[Float32](floats)
         var k_tp_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_kt))
-        var _vt = alloc[Float32](floats)
+        var _vt = unsafe_alloc[Float32](floats)
         var v_tp_ptr = Pointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(_vt))
         var HD = Int(H) * Int(D)
         var ND = Int(N) * Int(D)

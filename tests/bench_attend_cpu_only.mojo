@@ -1,4 +1,4 @@
-from std.memory.unsafe_pointer import UnsafePointer, alloc
+from std.memory.unsafe_pointer import alloc
 from std.math import sqrt
 from std.random import random_float64
 from src.vector.metal_attention_kernels import cpu_attend_reference

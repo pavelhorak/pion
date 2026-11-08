@@ -1,25 +1,25 @@
+from std.memory.alloc import unsafe_alloc
 from src.common.value import GenericValue, ValueType
-from std.memory.unsafe_pointer import UnsafePointer
 from std.memory import alloc
 from std.testing import assert_true, assert_equal
 
 
-def fill_buf(buf: UnsafePointer[UInt8, MutUntrackedOrigin], s: String, length: Int):
+def fill_buf(buf: Pointer[UInt8, MutUntrackedOrigin], s: String, length: Int):
     """Copy string bytes into a pre-allocated UInt8 buffer."""
     var b = s.as_bytes()
     for i in range(length):
-        buf[i] = b[i]
+        buf[unsafe_offset=i] = b[i]
 
 
 def test_sso_from_ptr() raises:
     """Verify from_ptr with <=23 bytes produces STRING_SSO."""
     print("  test_sso_from_ptr...")
-    var buf = alloc[UInt8](8)
+    var buf = unsafe_alloc[UInt8](8)
     fill_buf(buf, "hello", 5)
     var val = GenericValue.from_ptr(buf, 5)
     assert_equal(val.type.value, ValueType.STRING_SSO)
     assert_equal(val.string_len(), 5)
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 
@@ -27,24 +27,24 @@ def test_heap_from_ptr() raises:
     """Verify from_ptr with >23 bytes produces heap STRING."""
     print("  test_heap_from_ptr...")
     var s = "abcdefghijklmnopqrstuvwxyz"  # 26 bytes
-    var buf = alloc[UInt8](26)
+    var buf = unsafe_alloc[UInt8](26)
     fill_buf(buf, s, 26)
     var val = GenericValue.from_ptr(buf, 26)
     assert_equal(val.type.value, ValueType.STRING)
     assert_equal(val.string_len(), 26)
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 
 def test_from_ptr_unsafe_always_string() raises:
     """Verify from_ptr_unsafe always produces STRING type, never SSO."""
     print("  test_from_ptr_unsafe_always_string...")
-    var buf = alloc[UInt8](4)
+    var buf = unsafe_alloc[UInt8](4)
     fill_buf(buf, "hi", 2)
     var val = GenericValue.from_ptr_unsafe(buf, 2)
     assert_equal(val.type.value, ValueType.STRING)
     assert_equal(val.string_len(), 2)
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 
@@ -53,7 +53,7 @@ def test_sso_vs_unsafe_not_equal() raises:
     are NOT equal. __eq__ returns False on type mismatch. This is why
     from_ptr_unsafe must never be used for hash map key lookups (T3.3 bug)."""
     print("  test_sso_vs_unsafe_not_equal...")
-    var buf = alloc[UInt8](8)
+    var buf = unsafe_alloc[UInt8](8)
     fill_buf(buf, "testkey", 7)
     var sso_val = GenericValue.from_ptr(buf, 7)
     var str_val = GenericValue.from_ptr_unsafe(buf, 7)
@@ -61,15 +61,15 @@ def test_sso_vs_unsafe_not_equal() raises:
     assert_equal(str_val.type.value, ValueType.STRING)
     # They must NOT be equal despite having the same bytes
     assert_true(not (sso_val == str_val), "SSO and STRING with same bytes must NOT be equal")
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 
 def test_two_sso_from_ptr_equal() raises:
     """CRITICAL: Two from_ptr keys with same bytes <=23B should be equal (both SSO)."""
     print("  test_two_sso_from_ptr_equal...")
-    var buf1 = alloc[UInt8](8)
-    var buf2 = alloc[UInt8](8)
+    var buf1 = unsafe_alloc[UInt8](8)
+    var buf2 = unsafe_alloc[UInt8](8)
     fill_buf(buf1, "mykey", 5)
     fill_buf(buf2, "mykey", 5)
     var val1 = GenericValue.from_ptr(buf1, 5)
@@ -77,8 +77,8 @@ def test_two_sso_from_ptr_equal() raises:
     assert_equal(val1.type.value, ValueType.STRING_SSO)
     assert_equal(val2.type.value, ValueType.STRING_SSO)
     assert_true(val1 == val2, "Two SSO values with same bytes must be equal")
-    buf1.free()
-    buf2.free()
+    buf1.unsafe_free()
+    buf2.unsafe_free()
     print("    PASS")
 
 
@@ -86,8 +86,8 @@ def test_two_heap_from_ptr_equal() raises:
     """CRITICAL: Two from_ptr keys with same bytes >23B should be equal (both heap STRING)."""
     print("  test_two_heap_from_ptr_equal...")
     var s = "abcdefghijklmnopqrstuvwxyz01"  # 28 bytes
-    var buf1 = alloc[UInt8](28)
-    var buf2 = alloc[UInt8](28)
+    var buf1 = unsafe_alloc[UInt8](28)
+    var buf2 = unsafe_alloc[UInt8](28)
     fill_buf(buf1, s, 28)
     fill_buf(buf2, s, 28)
     var val1 = GenericValue.from_ptr(buf1, 28)
@@ -95,23 +95,23 @@ def test_two_heap_from_ptr_equal() raises:
     assert_equal(val1.type.value, ValueType.STRING)
     assert_equal(val2.type.value, ValueType.STRING)
     assert_true(val1 == val2, "Two heap STRING values with same bytes must be equal")
-    buf1.free()
-    buf2.free()
+    buf1.unsafe_free()
+    buf2.unsafe_free()
     print("    PASS")
 
 
 def test_hash_consistency_sso() raises:
     """Two equal SSO values should have the same __hash__."""
     print("  test_hash_consistency_sso...")
-    var buf1 = alloc[UInt8](8)
-    var buf2 = alloc[UInt8](8)
+    var buf1 = unsafe_alloc[UInt8](8)
+    var buf2 = unsafe_alloc[UInt8](8)
     fill_buf(buf1, "hashme", 6)
     fill_buf(buf2, "hashme", 6)
     var val1 = GenericValue.from_ptr(buf1, 6)
     var val2 = GenericValue.from_ptr(buf2, 6)
     assert_equal(val1.__hash__(), val2.__hash__())
-    buf1.free()
-    buf2.free()
+    buf1.unsafe_free()
+    buf2.unsafe_free()
     print("    PASS")
 
 
@@ -119,15 +119,15 @@ def test_hash_consistency_heap() raises:
     """Two equal heap STRING values should have the same __hash__."""
     print("  test_hash_consistency_heap...")
     var s = "abcdefghijklmnopqrstuvwxyz1234"  # 30 bytes
-    var buf1 = alloc[UInt8](30)
-    var buf2 = alloc[UInt8](30)
+    var buf1 = unsafe_alloc[UInt8](30)
+    var buf2 = unsafe_alloc[UInt8](30)
     fill_buf(buf1, s, 30)
     fill_buf(buf2, s, 30)
     var val1 = GenericValue.from_ptr(buf1, 30)
     var val2 = GenericValue.from_ptr(buf2, 30)
     assert_equal(val1.__hash__(), val2.__hash__())
-    buf1.free()
-    buf2.free()
+    buf1.unsafe_free()
+    buf2.unsafe_free()
     print("    PASS")
 
 
@@ -135,12 +135,12 @@ def test_sso_boundary_22_bytes() raises:
     """Test at exactly 22 bytes -- should be SSO."""
     print("  test_sso_boundary_22_bytes...")
     var s = "abcdefghijklmnopqrstuv"  # 22 bytes
-    var buf = alloc[UInt8](22)
+    var buf = unsafe_alloc[UInt8](22)
     fill_buf(buf, s, 22)
     var val = GenericValue.from_ptr(buf, 22)
     assert_equal(val.type.value, ValueType.STRING_SSO)
     assert_equal(val.string_len(), 22)
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 
@@ -148,12 +148,12 @@ def test_sso_boundary_23_bytes() raises:
     """Test at exactly 23 bytes -- should be SSO (boundary)."""
     print("  test_sso_boundary_23_bytes...")
     var s = "abcdefghijklmnopqrstuvw"  # 23 bytes
-    var buf = alloc[UInt8](23)
+    var buf = unsafe_alloc[UInt8](23)
     fill_buf(buf, s, 23)
     var val = GenericValue.from_ptr(buf, 23)
     assert_equal(val.type.value, ValueType.STRING_SSO)
     assert_equal(val.string_len(), 23)
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 
@@ -161,12 +161,12 @@ def test_sso_boundary_24_bytes() raises:
     """Test at exactly 24 bytes -- should be heap STRING."""
     print("  test_sso_boundary_24_bytes...")
     var s = "abcdefghijklmnopqrstuvwx"  # 24 bytes
-    var buf = alloc[UInt8](24)
+    var buf = unsafe_alloc[UInt8](24)
     fill_buf(buf, s, 24)
     var val = GenericValue.from_ptr(buf, 24)
     assert_equal(val.type.value, ValueType.STRING)
     assert_equal(val.string_len(), 24)
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 
@@ -228,13 +228,13 @@ def test_from_string_sso() raises:
     """Verify from_string with short string produces SSO that matches from_ptr."""
     print("  test_from_string_sso...")
     var val1 = GenericValue.from_string("test")
-    var buf = alloc[UInt8](4)
+    var buf = unsafe_alloc[UInt8](4)
     fill_buf(buf, "test", 4)
     var val2 = GenericValue.from_ptr(buf, 4)
     assert_equal(val1.type.value, ValueType.STRING_SSO)
     assert_true(val1 == val2, "from_string and from_ptr should produce equal values")
     assert_equal(val1.__hash__(), val2.__hash__())
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 
@@ -259,12 +259,12 @@ def test_empty_string() raises:
 def test_hash_and_pack_sso() raises:
     """Verify hash_and_pack_sso produces same hash as from_ptr for SSO keys."""
     print("  test_hash_and_pack_sso...")
-    var buf = alloc[UInt8](10)
+    var buf = unsafe_alloc[UInt8](10)
     fill_buf(buf, "lookup_key", 10)
     var val = GenericValue.from_ptr(buf, 10)
     var packed = GenericValue.hash_and_pack_sso(buf, 10)
     assert_equal(Int(packed[0]), val.__hash__())
-    buf.free()
+    buf.unsafe_free()
     print("    PASS")
 
 

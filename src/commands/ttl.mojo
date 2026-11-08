@@ -3,7 +3,6 @@ from src.common.utils import strict_atol, ms_to_deadline_ns, I64_MAX
 from src.common.container_free import remove_and_free
 from src.common.ptr import is_not_null, null_ptr
 from src.io.wal import WAL
-from std.memory.unsafe_pointer import Pointer
 from std.collections import Array
 from src.network.resp3 import RESP3Token, MAX_CMD_TOKENS
 from src.network.response_writer import ResponseWriter
@@ -163,7 +162,6 @@ def handle_pexpireat(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, nu
 def handle_ttl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
     """TTL key → seconds remaining (-1=no TTL, -2=not found)."""
     if i + 1 < num_tokens:
-        var key = tokens[unsafe_offset=i+1].value()
         var key_gv = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         if keyspace[].get(key_gv).is_none():
             writer.append_int_response(Int64(-2))
@@ -198,7 +196,6 @@ def handle_ttl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_toke
 def handle_pttl(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter, keyspace: Pointer[StripedHashMap, MutUntrackedOrigin], ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin]) raises -> Int:
     """PTTL key → milliseconds remaining (-1=no TTL, -2=not found)."""
     if i + 1 < num_tokens:
-        var key = tokens[unsafe_offset=i+1].value()
         var key_gv = GenericValue.borrow(tokens[unsafe_offset=i+1].ptr, tokens[unsafe_offset=i+1].length)
         if keyspace[].get(key_gv).is_none():
             writer.append_int_response(Int64(-2))

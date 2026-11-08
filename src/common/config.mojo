@@ -1,7 +1,6 @@
 from src.common.env import Environment
 from std.sys import CompilationTarget
 from std.ffi import external_call
-from std.memory.unsafe_pointer import Pointer
 from src.common.ptr import is_not_null
 
 @fieldwise_init
@@ -127,7 +126,7 @@ struct ServerConfig(Copyable, Movable, ImplicitlyCopyable):
         if self.io_threads > 1 or self.workers != 1 or kvcache or self.use_xdp or self.use_iouring:
             return False
         var p = external_call["getenv", Pointer[UInt8, MutUntrackedOrigin]](
-            "PION_IO_THREADS\0".unsafe_ptr())
+            "PION_IO_THREADS\0".ptr())
         if is_not_null(p):
             var n = 0
             var i = 0

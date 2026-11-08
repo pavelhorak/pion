@@ -1,4 +1,3 @@
-from std.memory.unsafe_pointer import Pointer
 from std.memory import alloc
 from src.vector.kernels import l2_distance_int8
 from std.collections import List

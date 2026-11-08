@@ -59,7 +59,6 @@ warning rather than failing the write.
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.hash_map import StripedHashMap, SlabHashMap
 from src.common.value import GenericValue
-from std.memory.unsafe_pointer import Pointer
 from std.memory import unsafe_memcpy
 from std.ffi import external_call
 from std.collections import Array
@@ -160,10 +159,10 @@ struct BlobStore(Movable):
         """Map segment n if the file is already there. Returns False on the first gap."""
         var path = self._seg_path(n)
         var probe = path
-        if external_call["access", Int32](probe.as_c_string_slice(), Int32(0)) != 0:
+        if external_call["access", Int32](probe.as_c_string_span(), Int32(0)) != 0:
             return False
         var cpath = path
-        var fd = external_call["pion_wal_open", Int32](cpath.as_c_string_slice())
+        var fd = external_call["pion_wal_open", Int32](cpath.as_c_string_span())
         if fd < 0:
             return False
         # The on-disk size is authoritative: an oversized segment (single payload
@@ -192,7 +191,7 @@ struct BlobStore(Movable):
     def _create_segment(mut self, n: Int, size: Int) -> Bool:
         var path = self._seg_path(n)
         var cpath = path
-        var fd = external_call["pion_wal_open", Int32](cpath.as_c_string_slice())
+        var fd = external_call["pion_wal_open", Int32](cpath.as_c_string_span())
         if fd < 0:
             return False
         if external_call["pion_wal_ftruncate", Int32](fd, Int(size)) != 0:
@@ -368,7 +367,7 @@ struct BlobStore(Movable):
         var tmp_prefix = self.prefix + ".compact"
         for n in range(BLOB_MAX_SEGMENTS):
             var stale = tmp_prefix + "." + String(n)
-            _ = external_call["unlink", Int32](stale.as_c_string_slice())
+            _ = external_call["unlink", Int32](stale.as_c_string_span())
 
         var fresh = BlobStore(tmp_prefix, self.worker_id, True)
         var moved = 0
@@ -393,7 +392,7 @@ struct BlobStore(Movable):
                     fresh.close()
                     for n in range(BLOB_MAX_SEGMENTS):
                         var abandoned = tmp_prefix + "." + String(n)
-                        _ = external_call["unlink", Int32](abandoned.as_c_string_slice())
+                        _ = external_call["unlink", Int32](abandoned.as_c_string_span())
                     return False
                 var np = fresh.ptr_at(nseg, noff, vlen)
                 if is_not_null(np):
@@ -408,7 +407,7 @@ struct BlobStore(Movable):
         self.close()
         for n in range(old_segs):
             var old = self._seg_path(n)
-            _ = external_call["unlink", Int32](old.as_c_string_slice())
+            _ = external_call["unlink", Int32](old.as_c_string_span())
 
         # Rename the fresh files into the canonical names. The mappings survive:
         # they are bound to the inode, not the path.
@@ -416,7 +415,7 @@ struct BlobStore(Movable):
             var from_p = tmp_prefix + "." + String(n)
             var to_p = self._seg_path(n)
             _ = external_call["rename", Int32](
-                from_p.as_c_string_slice(), to_p.as_c_string_slice())
+                from_p.as_c_string_span(), to_p.as_c_string_span())
 
         # Adopt the fresh store's open segments.
         for n in range(fresh.seg_count):

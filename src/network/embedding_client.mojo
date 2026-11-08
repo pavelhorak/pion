@@ -12,7 +12,7 @@ Hot-path note: embed() opens a new TCP connection per call.  For the semantic ca
 this is acceptable (called only for AI.SEMANTIC_CACHE commands, not per KV op).
 """
 
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.memory import unsafe_memcpy
 from std.ffi import external_call
@@ -87,7 +87,7 @@ struct EmbeddingClient(Movable):
              out_vec: Pointer[Float32, MutUntrackedOrigin]) -> Bool:
         """Blocking HTTP POST; fills out_vec[0..dimensions-1]. Returns True on success."""
         var chost = self.host
-        var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_slice(), Int32(self.port))
+        var fd = external_call["pion_connect_tcp", Int32](chost.as_c_string_span(), Int32(self.port))
         if fd < 0: return False
 
         # ── Build JSON body ─────────────────────────────────────────────────
@@ -103,7 +103,7 @@ struct EmbeddingClient(Movable):
 
         # Upper-bound body size: prefix + model + mid + text*2 (escaping) + suffix
         var max_body = prefix_len + model_len + mid_len + text_len * 2 + suffix_len + 4
-        var body_buf = alloc[UInt8](max_body)
+        var body_buf = unsafe_alloc[UInt8](max_body)
         var bp = 0
 
         unsafe_memcpy(dest=body_buf, src=prefix.unsafe_ptr(), count=prefix_len); bp += prefix_len
@@ -135,7 +135,7 @@ struct EmbeddingClient(Movable):
         req_hdr += String("\r\nConnection: close\r\n\r\n")
         var hdr_len = req_hdr.byte_length()
 
-        var req_buf = alloc[UInt8](hdr_len + body_len + 1)
+        var req_buf = unsafe_alloc[UInt8](hdr_len + body_len + 1)
         unsafe_memcpy(dest=req_buf, src=req_hdr.unsafe_ptr(), count=hdr_len)
         unsafe_memcpy(dest=req_buf.unsafe_offset(hdr_len), src=body_buf, count=body_len)
         body_buf.unsafe_free()
@@ -150,7 +150,7 @@ struct EmbeddingClient(Movable):
 
         # ── Receive (read until close) ────────────────────────────────────────
         var buf_size = 4 * 1024 * 1024   # 4MB: plenty for 1536-float responses
-        var buf = alloc[UInt8](buf_size)
+        var buf = unsafe_alloc[UInt8](buf_size)
         var total_read = 0
         var nr: Int64 = 1
         while nr > 0 and total_read < buf_size - 1:

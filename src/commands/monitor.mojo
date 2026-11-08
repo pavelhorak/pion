@@ -22,9 +22,9 @@ may not touch the keyspace ("Replica can't interact with the keyspace"), as in
 Redis, where a monitor is a kind of replica.
 """
 
+from std.memory.alloc import unsafe_alloc
 from std.ffi import external_call
 from std.memory import alloc
-from std.memory.unsafe_pointer import Pointer
 from src.network.resp3 import RESP3Token
 from src.common.utils import arg_eq
 
@@ -39,9 +39,9 @@ struct MonitorRegistry(Movable):
         self.fds = List[Int32]()
         self.pending = List[UInt8]()
 
-    def __init__(out self, *, deinit take: Self):
-        self.fds = take.fds^
-        self.pending = take.pending^
+    def __init__(out self, *, deinit move: Self):
+        self.fds = move.fds^
+        self.pending = move.pending^
 
     @always_inline
     def count(self) -> Int:
@@ -68,17 +68,17 @@ struct MonitorRegistry(Movable):
 def monitor_line(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: Int, fd: Int32) -> List[UInt8]:
     """The MONITOR line for tokens[i:end], sent by `fd` (-1: a script)."""
     var argc = end - i
-    var argv = alloc[Pointer[UInt8, MutUntrackedOrigin]](argc)
-    var lens = alloc[Int64](argc)
+    var argv = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](argc)
+    var lens = unsafe_alloc[Int64](argc)
     # a literal's bytes are static: the pointer outlives this frame
-    var redp = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int("(redacted)".unsafe_ptr()))
-    var name = tokens[i]
+    var redp = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int("(redacted)".ptr()))
+    var name = tokens[unsafe_offset=i]
     var is_auth = arg_eq(name.ptr, name.length, "auth")
     var is_hello = arg_eq(name.ptr, name.length, "hello")
     var is_migrate = arg_eq(name.ptr, name.length, "migrate")
     var redact_left = 0
     for k in range(argc):
-        var t = tokens[i + k]
+        var t = tokens[unsafe_offset=i + k]
         var hide = (is_auth and k > 0) or redact_left > 0
         if redact_left > 0:
             redact_left -= 1
@@ -89,19 +89,19 @@ def monitor_line(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, end: I
         elif k > 0 and is_migrate and arg_eq(t.ptr, t.length, "auth2"):
             redact_left = 2
         if hide:
-            argv[k] = redp
-            lens[k] = Int64(10)
+            argv[unsafe_offset=k] = redp
+            lens[unsafe_offset=k] = Int64(10)
         else:
-            argv[k] = t.ptr
-            lens[k] = Int64(t.length)
-    var out = alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
+            argv[unsafe_offset=k] = t.ptr
+            lens[unsafe_offset=k] = Int64(t.length)
+    var out = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](1)
     var n = external_call["pion_monitor_line", Int64](Int32(fd), Int64(argc), argv, lens, out)
     var line = List[UInt8]()
-    var lp = out[0]
+    var lp = out[unsafe_offset=0]
     if n > 0:
         line.reserve(Int(n))
         for b in range(Int(n)):
-            line.append(lp[b])
+            line.append(lp[unsafe_offset=b])
     external_call["pion_lcs_free", NoneType](lp)
     out.unsafe_free()
     argv.unsafe_free()

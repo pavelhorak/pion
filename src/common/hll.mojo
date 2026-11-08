@@ -1,4 +1,4 @@
-from std.memory.unsafe_pointer import Pointer
+from std.memory.alloc import unsafe_alloc
 from std.memory import alloc
 from std.math import sqrt, log
 from std.memory.unsafe import bitcast
@@ -29,7 +29,7 @@ def murmur3_64(data: Pointer[UInt8, MutUntrackedOrigin], length: Int, seed: UInt
 
     var blocks = data.unsafe_bitcast[UInt64]()
     for i in range(nblocks):
-        var k1 = blocks.load(i)
+        var k1 = blocks.unsafe_load(i)
         k1 *= c1
         k1 = (k1 << 31) | (k1 >> (64 - 31))
         k1 *= c2
@@ -40,13 +40,13 @@ def murmur3_64(data: Pointer[UInt8, MutUntrackedOrigin], length: Int, seed: UInt
     var tail = data.unsafe_offset(nblocks * 8)
     var k1: UInt64 = 0
     var remainder = length & 7
-    if remainder == 7: k1 ^= UInt64(tail.load(6)) << 48
-    if remainder >= 6: k1 ^= UInt64(tail.load(5)) << 40
-    if remainder >= 5: k1 ^= UInt64(tail.load(4)) << 32
-    if remainder >= 4: k1 ^= UInt64(tail.load(3)) << 24
-    if remainder >= 3: k1 ^= UInt64(tail.load(2)) << 16
-    if remainder >= 2: k1 ^= UInt64(tail.load(1)) << 8
-    if remainder >= 1: k1 ^= UInt64(tail.load(0))
+    if remainder == 7: k1 ^= UInt64(tail.unsafe_load(6)) << 48
+    if remainder >= 6: k1 ^= UInt64(tail.unsafe_load(5)) << 40
+    if remainder >= 5: k1 ^= UInt64(tail.unsafe_load(4)) << 32
+    if remainder >= 4: k1 ^= UInt64(tail.unsafe_load(3)) << 24
+    if remainder >= 3: k1 ^= UInt64(tail.unsafe_load(2)) << 16
+    if remainder >= 2: k1 ^= UInt64(tail.unsafe_load(1)) << 8
+    if remainder >= 1: k1 ^= UInt64(tail.unsafe_load(0))
     
     if remainder > 0:
       k1 *= c1
@@ -61,7 +61,7 @@ def hll_add(registers: Pointer[UInt8, MutUntrackedOrigin], element: GenericValue
     var hash: UInt64
     if element.is_string():
         if element.string_len() > 0:
-            var _sbuf = alloc[UInt8](24)
+            var _sbuf = unsafe_alloc[UInt8](24)
             var ptr = element.as_string_safe(_sbuf)
             hash = murmur3_64(ptr, element.string_len(), 0)
             _sbuf.unsafe_free()
@@ -83,8 +83,8 @@ def hll_add(registers: Pointer[UInt8, MutUntrackedOrigin], element: GenericValue
     if rank > 64 - HLL_P + 1:
         rank = 64 - HLL_P + 1
     
-    if rank > Int(registers.load(index)):
-        registers.store(index, UInt8(rank))
+    if rank > Int(registers.unsafe_load(index)):
+        registers.unsafe_store(index, UInt8(rank))
         return True
     return False
 
@@ -121,8 +121,8 @@ def hll_count(registers: Pointer[UInt8, MutUntrackedOrigin]) -> Int:
 
     var i = 0
     while i + 2 * W <= HLL_REGISTERS:
-        var r0 = registers.load[width=W](i).cast[DType.uint64]()
-        var r1 = registers.load[width=W](i + W).cast[DType.uint64]()
+        var r0 = registers.unsafe_load[width=W](i).cast[DType.uint64]()
+        var r1 = registers.unsafe_load[width=W](i + W).cast[DType.uint64]()
         var m0 = r0.eq(zero_u)
         var m1 = r1.eq(zero_u)
         # 2^-r via exponent-field construction (no divide).
@@ -139,7 +139,7 @@ def hll_count(registers: Pointer[UInt8, MutUntrackedOrigin]) -> Int:
 
     # Scalar tail (HLL_REGISTERS is a multiple of 16 today, so this is normally empty).
     while i < HLL_REGISTERS:
-        var reg_val = Int(registers.load(i))
+        var reg_val = Int(registers.unsafe_load(i))
         if reg_val == 0:
             zeros += 1
         else:
@@ -160,10 +160,10 @@ def hll_merge(dest: Pointer[UInt8, MutUntrackedOrigin], src: Pointer[UInt8, MutU
     comptime W = 32
     var i = 0
     while i + W <= HLL_REGISTERS:
-        dest.store(i, max(dest.load[width=W](i), src.load[width=W](i)))
+        dest.unsafe_store(i, max(dest.unsafe_load[width=W](i), src.unsafe_load[width=W](i)))
         i += W
     while i < HLL_REGISTERS:
-        var src_val = src.load(i)
-        if src_val > dest.load(i):
-            dest.store(i, src_val)
+        var src_val = src.unsafe_load(i)
+        if src_val > dest.unsafe_load(i):
+            dest.unsafe_store(i, src_val)
         i += 1

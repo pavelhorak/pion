@@ -1,4 +1,4 @@
-"""epoll_wait results decode correctly when several events come back at once.
+"""The epoll_wait results decode correctly when several events come back at once.
 
 x86-64 Linux packs `struct epoll_event` to 12 bytes; aarch64 does not (16).
 The epoll loop once read every event as a 16-byte Mojo struct, so on x86-64
@@ -10,9 +10,9 @@ that each decoded fd and mask is one it registered.
 
     pixi run mojo build -I . tests/test_epoll_event_layout.mojo -o build/t && build/t
 """
+from std.memory.alloc import unsafe_alloc
 from std.ffi import external_call
 from std.memory import alloc, stack_allocation
-from std.memory.unsafe_pointer import Pointer
 from std.sys import CompilationTarget
 from src.network.server import EPOLLIN, EPOLL_CTL_ADD, EPOLL_EV_SIZE, EPOLL_EV_DATA
 from src.network.server import epoll_ev_events, epoll_ev_fd, epoll_ctl_fd
@@ -50,7 +50,7 @@ def _run() raises:
             raise Error("epoll_ctl failed")
         want.append(r)
 
-    var events = alloc[UInt8](16 * 16)
+    var events = unsafe_alloc[UInt8](16 * 16)
     var n = Int(external_call["epoll_wait", Int32](ep, events, Int32(16), Int32(1000)))
     if n != 3:
         raise Error("expected 3 ready events in one epoll_wait, got " + String(n))
