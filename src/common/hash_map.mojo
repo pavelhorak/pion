@@ -8,7 +8,7 @@ from std.bit import count_trailing_zeros
 from std.math import iota
 from std.sys import size_of, CompilationTarget
 from std.collections import List
-from src.common.value import GenericValue, ValueType, BLOB_TAG
+from src.common.value import GenericValue, ValueType, BLOB_TAG, BORROW_TAG
 from src.common.prng import Xoshiro256PlusPlus
 from src.common.vec_tomb import VecTomb
 from src.common.utils import format_int_to_buf
@@ -1148,6 +1148,862 @@ struct SlabHashMap(Movable):
             _table_free(self.values, self.capacity)
 
 
+# ── The keyspace's table: 8-byte slots, one allocation per key ──────────────
+#
+# A keyspace slot is a word: the address of the key's ENTRY, one allocation
+# holding the key and its value, with bit 0 saying which kind of entry it is.
+# The metadata array is SlabHashMap's (h2 fingerprint, the 16 mirror bytes,
+# the access-table word). A SlabHashMap slot is a 32-byte key and a 32-byte
+# value, 65 bytes with its metadata byte; a key cost 72-127 bytes more than in
+# Redis, whatever the value size (benchmarks/reproducers/memory_per_key.py).
+# Here a slot is 9 bytes, and a string value is stored with its key:
+#
+#   S entry (bit 0 clear): a string value, its bytes inline
+#     [klen:1][key bytes][vlen:4][value bytes]
+#   G entry (bit 0 set): any other value, or a string the caller handed over
+#     on the heap (an owned STRING), or in the blob arena
+#     [GenericValue:32][klen:1][key bytes]
+#
+# A key of 255 bytes or more writes 255 in the length byte and its length in
+# the 4 bytes after it. The key's length byte and bytes are laid out as a
+# STRING_SSO's three words are ([len][chars 0-6], [7-14], [15-22]), so a
+# lookup key of up to 23 bytes compares as up to three masked words. A
+# compare may load every word the key covers, which the entry's size allows
+# for (_ks_s_size, _ks_g_size); it loads a word only after the ones before it
+# matched, so only a key of the lookup key's length is read that far.
+#
+# What a lookup returns is what SlabHashMap returned: a G entry's value as it
+# is stored; an S entry's value as GenericValue.borrow() of its bytes, which
+# is a self-contained STRING_SSO up to 23 bytes and above that a STRING
+# pointing into the entry, tagged BORROW_TAG. A heap STRING value is
+# overwritten, freed and moved by its owner exactly as before: a reader must
+# not keep one past a write to its key. The map copies a borrowed value it is
+# given (an S entry), and keeps an owned heap STRING as it is (a G entry), so
+# no caller's value is freed under it.
+#
+# Entries do not move when the table is rebuilt; only slot words do.
+
+comptime KS_G = 1
+
+
+@always_inline
+def _ks_mask(nbytes: Int) -> UInt64:
+    """The low `nbytes` (1 to 8) bytes of a word."""
+    return (~UInt64(0)) >> UInt64(64 - 8 * nbytes)
+
+
+@always_inline
+def _ks_round(n: Int) -> Int:
+    return (n + 15) & ~15
+
+
+@always_inline
+def _ks_key_hdr(klen: Int) -> Int:
+    return 1 if klen < 255 else 5
+
+
+@always_inline
+def _ks_cover(klen: Int) -> Int:
+    """The bytes a key compare may load: the words the key's length byte and
+    bytes span."""
+    return (klen + 8) & ~7
+
+
+@always_inline
+def _ks_s_size(klen: Int, vlen: Int) -> Int:
+    var need = _ks_key_hdr(klen) + klen + 4 + vlen
+    var cover = _ks_cover(klen)
+    return _ks_round(need if need > cover else cover)
+
+
+@always_inline
+def _ks_g_size(klen: Int) -> Int:
+    var need = 32 + _ks_key_hdr(klen) + klen
+    var cover = 32 + _ks_cover(klen)
+    return _ks_round(need if need > cover else cover)
+
+
+@always_inline
+def _ks_key_region(e: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+    """Where entry `e`'s key length byte is: at the start of an S entry, after
+    the GenericValue of a G entry."""
+    return Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=(e & ~7) + ((e & KS_G) << 5))
+
+
+@always_inline
+def _ks_gv(e: Int) -> Pointer[GenericValue, MutUntrackedOrigin]:
+    """A G entry's value."""
+    return Pointer[GenericValue, MutUntrackedOrigin](unsafe_from_address=e & ~7)
+
+
+@always_inline
+def _ks_klen(kr: Pointer[UInt8, MutUntrackedOrigin]) -> Int:
+    var b = Int(kr[unsafe_offset=0])
+    if b < 255:
+        return b
+    return Int(kr.unsafe_offset(1).unsafe_bitcast[UInt32]().unsafe_load[alignment=1]())
+
+
+@always_inline
+def _ks_load_word(p: Pointer[UInt8, MutUntrackedOrigin], i: Int) -> UInt64:
+    return p.unsafe_offset(8 * i).unsafe_bitcast[UInt64]().unsafe_load[alignment=1]()
+
+
+@always_inline
+def _ks_key_eq_sso(kr: Pointer[UInt8, MutUntrackedOrigin], d0: UInt64, d1: UInt64, d2: UInt64) -> Bool:
+    """Is the key at `kr` the STRING_SSO key (d0, d1, d2)? Its first byte is
+    the lookup key's length, so a later word is loaded only when the entry's
+    key is that long."""
+    var n = Int(d0 & 0xFF) + 1
+    var w0 = _ks_load_word(kr, 0)
+    if n <= 8:
+        return ((w0 ^ d0) & _ks_mask(n)) == 0
+    if w0 != d0:
+        return False
+    var w1 = _ks_load_word(kr, 1)
+    if n <= 16:
+        return ((w1 ^ d1) & _ks_mask(n - 8)) == 0
+    if w1 != d1:
+        return False
+    var w2 = _ks_load_word(kr, 2)
+    return ((w2 ^ d2) & _ks_mask(n - 16)) == 0
+
+
+@always_inline
+def _ks_key_eq_bytes(kr: Pointer[UInt8, MutUntrackedOrigin], p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    """Is the key at `kr` the n bytes at `p` (a key over 23 bytes)?"""
+    var b = Int(kr[unsafe_offset=0])
+    var kp: Pointer[UInt8, MutUntrackedOrigin]
+    if n < 255:
+        if b != n:
+            return False
+        kp = kr.unsafe_offset(1)
+    else:
+        if b != 255 or Int(kr.unsafe_offset(1).unsafe_bitcast[UInt32]().unsafe_load[alignment=1]()) != n:
+            return False
+        kp = kr.unsafe_offset(5)
+    return external_call["memcmp", Int32](kp, p, n) == 0
+
+
+@always_inline
+def _ks_key_eq(kr: Pointer[UInt8, MutUntrackedOrigin], key: GenericValue) -> Bool:
+    if key.type.value == ValueType.STRING_SSO:
+        return _ks_key_eq_sso(kr, key._data0, key._data1, key._data2)
+    if key.type.value == ValueType.STRING:
+        return _ks_key_eq_bytes(kr, key.as_string(), key.string_len())
+    return False
+
+
+@always_inline
+def _ks_key_value(kr: Pointer[UInt8, MutUntrackedOrigin]) -> GenericValue:
+    """The key at `kr` as a lookup key would be: STRING_SSO up to 23 bytes,
+    else a STRING borrowing the entry's bytes (BORROW_TAG)."""
+    var klen = _ks_klen(kr)
+    var res = GenericValue()
+    if klen <= 23:
+        var n = klen + 1
+        res.type = ValueType(ValueType.STRING_SSO)
+        var w0 = _ks_load_word(kr, 0)
+        if n <= 8:
+            res._data0 = w0 & _ks_mask(n)
+            return res
+        res._data0 = w0
+        var w1 = _ks_load_word(kr, 1)
+        if n <= 16:
+            res._data1 = w1 & _ks_mask(n - 8)
+            return res
+        res._data1 = w1
+        res._data2 = _ks_load_word(kr, 2) & _ks_mask(n - 16)
+        return res
+    res.type = ValueType(ValueType.STRING)
+    res._data0 = UInt64(Int(kr) + _ks_key_hdr(klen))
+    res._data1 = UInt64(klen)
+    res._data2 = BORROW_TAG
+    return res
+
+
+@always_inline
+def _ks_put_key(kr: Pointer[UInt8, MutUntrackedOrigin], key: GenericValue) -> Pointer[UInt8, MutUntrackedOrigin]:
+    """Write `key` (a string) at `kr`; returns the address after it."""
+    var klen = key.string_len()
+    if key.type.value == ValueType.STRING_SSO:
+        # Its words ARE the region's bytes, zero past the key.
+        var w = kr.unsafe_bitcast[UInt64]()
+        w.unsafe_store[alignment=1](key._data0)
+        if klen >= 8:
+            w.unsafe_offset(1).unsafe_store[alignment=1](key._data1)
+        if klen >= 16:
+            w.unsafe_offset(2).unsafe_store[alignment=1](key._data2)
+        return kr.unsafe_offset(1 + klen)
+    var kp: Pointer[UInt8, MutUntrackedOrigin]
+    if klen < 255:
+        kr[unsafe_offset=0] = UInt8(klen)
+        kp = kr.unsafe_offset(1)
+    else:
+        kr[unsafe_offset=0] = UInt8(255)
+        kr.unsafe_offset(1).unsafe_bitcast[UInt32]().unsafe_store[alignment=1](UInt32(klen))
+        kp = kr.unsafe_offset(5)
+    unsafe_memcpy(dest=kp, src=key.as_string(), count=klen)
+    return kp.unsafe_offset(klen)
+
+
+@always_inline
+def _ks_copy(dst: Pointer[UInt8, MutUntrackedOrigin], src: Pointer[UInt8, MutUntrackedOrigin], n: Int):
+    """memcpy for the short values most writes carry, inline: two overlapping
+    loads and stores for up to 16 bytes, which never touch a byte outside
+    either range."""
+    if n > 16:
+        unsafe_memcpy(dest=dst, src=src, count=n)
+    elif n >= 8:
+        var a = src.unsafe_bitcast[UInt64]().unsafe_load[alignment=1]()
+        var b = src.unsafe_offset(n - 8).unsafe_bitcast[UInt64]().unsafe_load[alignment=1]()
+        dst.unsafe_bitcast[UInt64]().unsafe_store[alignment=1](a)
+        dst.unsafe_offset(n - 8).unsafe_bitcast[UInt64]().unsafe_store[alignment=1](b)
+    elif n >= 4:
+        var a = src.unsafe_bitcast[UInt32]().unsafe_load[alignment=1]()
+        var b = src.unsafe_offset(n - 4).unsafe_bitcast[UInt32]().unsafe_load[alignment=1]()
+        dst.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](a)
+        dst.unsafe_offset(n - 4).unsafe_bitcast[UInt32]().unsafe_store[alignment=1](b)
+    elif n > 0:
+        var a = src[unsafe_offset=0]
+        var b = src[unsafe_offset=n >> 1]
+        var c = src[unsafe_offset=n - 1]
+        dst[unsafe_offset=0] = a
+        dst[unsafe_offset=n >> 1] = b
+        dst[unsafe_offset=n - 1] = c
+
+
+@always_inline
+def _ks_wants_s(v: GenericValue) -> Bool:
+    """A value the map copies into an S entry: an SSO string, or a borrowed
+    one. An owned heap STRING (the caller handed it over) and everything else
+    is kept as it is, in a G entry."""
+    return v.type.value == ValueType.STRING_SSO \
+        or (v.type.value == ValueType.STRING and v._data2 == BORROW_TAG)
+
+
+@always_inline
+def _ks_str_value(kr: Pointer[UInt8, MutUntrackedOrigin], klen: Int) -> GenericValue:
+    """An S entry's value, read through its key region of a known key length."""
+    var vp = kr.unsafe_offset(_ks_key_hdr(klen) + klen)
+    var vlen = Int(vp.unsafe_bitcast[UInt32]().unsafe_load[alignment=1]())
+    return GenericValue.borrow(vp.unsafe_offset(4), vlen)
+
+
+@always_inline
+def ks_entry_value(e: Int) -> GenericValue:
+    """What entry `e` holds, as a lookup returns it."""
+    if (e & KS_G) != 0:
+        return _ks_gv(e)[]
+    var kr = _ks_key_region(e)
+    return _ks_str_value(kr, _ks_klen(kr))
+
+
+def ks_key_bytes(klen: Int, v: GenericValue) -> Int:
+    """What a key of `klen` bytes holding `v` (as a lookup returns it) takes
+    in its shard: its slot (8 bytes and a metadata byte) and its entry. An
+    SSO or borrowed string is in an S entry, which holds its bytes; anything
+    else is in a G entry, and what the value points to is not counted."""
+    if _ks_wants_s(v):
+        return 9 + _ks_s_size(klen, v.string_len())
+    return 9 + _ks_g_size(klen)
+
+
+@always_inline
+def ks_entry_key_eq_sso(e: Int, d0: UInt64, d1: UInt64, d2: UInt64) -> Bool:
+    """Is entry `e`'s key the STRING_SSO key (d0, d1, d2)? (The GET burst.)"""
+    return _ks_key_eq_sso(_ks_key_region(e), d0, d1, d2)
+
+
+@always_inline
+def ks_entry_key_ptr(e: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+    """Where entry `e`'s key starts, to prefetch."""
+    return _ks_key_region(e)
+
+
+@always_inline
+def ks_entry_str(e: Int, klen: Int, mut vlen: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+    """An S entry's value bytes and length, for a caller that knows the key's
+    length (it just matched it). Null for a G entry."""
+    if (e & KS_G) != 0:
+        return null_ptr[UInt8, MutUntrackedOrigin]()
+    var vp = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=e).unsafe_offset(_ks_key_hdr(klen) + klen)
+    vlen = Int(vp.unsafe_bitcast[UInt32]().unsafe_load[alignment=1]())
+    return vp.unsafe_offset(4)
+
+
+@always_inline
+def _ks_alloc(nbytes: Int) -> Int:
+    """An entry of `nbytes` (a multiple of 16), 8-byte aligned so bit 0 of
+    its address is free for the kind."""
+    return Int(unsafe_alloc[UInt64](nbytes >> 3))
+
+
+@always_inline
+def _ks_free(e: Int):
+    Pointer[UInt64, MutUntrackedOrigin](unsafe_from_address=e & ~7).unsafe_free()
+
+
+@always_inline
+def _ks_new_s(key: GenericValue, vptr: Pointer[UInt8, MutUntrackedOrigin], vlen: Int) -> Int:
+    var klen = key.string_len()
+    var e = _ks_alloc(_ks_s_size(klen, vlen))
+    var vp = _ks_put_key(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=e), key)
+    vp.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](UInt32(vlen))
+    _ks_copy(vp.unsafe_offset(4), vptr, vlen)
+    return e
+
+
+@always_inline
+def _ks_new_s_value(key: GenericValue, value: GenericValue) -> Int:
+    """An S entry for a string `value` (_ks_wants_s)."""
+    var vlen = value.string_len()
+    if value.type.value != ValueType.STRING_SSO:
+        return _ks_new_s(key, value.as_string(), vlen)
+    var klen = key.string_len()
+    var e = _ks_alloc(_ks_s_size(klen, vlen))
+    var vp = _ks_put_key(Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=e), key)
+    vp.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](UInt32(vlen))
+    value.copy_to(vp.unsafe_offset(4))
+    return e
+
+
+@always_inline
+def _ks_new_g(key: GenericValue, value: GenericValue) -> Int:
+    var e = _ks_alloc(_ks_g_size(key.string_len()))
+    _ks_gv(e | KS_G).unsafe_write(value)
+    _ = _ks_put_key(_ks_key_region(e | KS_G), key)
+    return e | KS_G
+
+
+@always_inline
+def _ks_hash(e: Int) -> UInt64:
+    """The hash of entry `e`'s key: the hash its lookup key has."""
+    return UInt64(_ks_key_value(_ks_key_region(e)).__hash__())
+
+
+struct KeyShard(Movable):
+    """One of the keyspace's 8 tables (StripedHashMap): SlabHashMap's probe
+    over 8-byte slots that point to entries (see above). Only the keyspace
+    uses it; every other map, a hash's or a set's included, is a SlabHashMap."""
+    var metadata: Pointer[UInt8, MutUntrackedOrigin]
+    var entries: Pointer[Int, MutUntrackedOrigin]
+    var capacity: Int
+    var size: Int
+    var tombstones: Int
+    var graveyard: Pointer[List[GenericValue], MutUntrackedOrigin]
+    var rehashes: Int
+
+    comptime EMPTY = UInt8(0b10000000)
+    comptime DELETED = UInt8(0b11111111)
+
+    def __init__(out self, capacity: Int):
+        var real_cap = 16
+        while real_cap < capacity:
+            real_cap *= 2
+        self.capacity = real_cap
+        self.size = 0
+        self.tombstones = 0
+        self.graveyard = null_ptr[List[GenericValue], MutUntrackedOrigin]()
+        self.rehashes = 0
+        self.metadata = _table_alloc[UInt8](real_cap + 16 + 8)
+        unsafe_memset(self.metadata, UInt8(Self.EMPTY), real_cap + 16)
+        unsafe_memset(self.metadata.unsafe_offset(real_cap + 16), UInt8(0), 8)   # no access table
+        # Not written: a slot word is read only where the metadata says the
+        # slot is live, so the pages of an empty table are never touched.
+        self.entries = _table_alloc[Int](real_cap)
+
+    def __moveinit__(out self, deinit take: Self):
+        self.metadata = take.metadata
+        self.entries = take.entries
+        self.capacity = take.capacity
+        self.size = take.size
+        self.tombstones = take.tombstones
+        self.graveyard = take.graveyard
+        self.rehashes = take.rehashes
+
+    def __deinit__(deinit self):
+        if Int(self.metadata) != 0:
+            var t = self.access_table()
+            if Int(t) != 0:
+                _table_free(t, self.capacity + 1)
+        if Int(self.entries) != 0:
+            for i in range(self.capacity):
+                if self.metadata[unsafe_offset=i] >= 128:
+                    continue
+                var e = self.entries[unsafe_offset=i]
+                if (e & KS_G) != 0:
+                    _ks_gv(e)[].free_str_payload()
+                _ks_free(e)
+            _table_free(self.entries, self.capacity)
+        if Int(self.metadata) != 0:
+            _table_free(self.metadata, self.capacity + 16 + 8)
+
+    # ── The access table (SlabHashMap's: see there) ──────────────────────────
+    @always_inline
+    def access_table(self) -> Pointer[UInt32, MutUntrackedOrigin]:
+        var a = (self.metadata.unsafe_offset(self.capacity + 16)).unsafe_bitcast[Int]().unsafe_load[alignment=1]()
+        return Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=a)
+
+    @always_inline
+    def _set_access_table(mut self, t: Pointer[UInt32, MutUntrackedOrigin]):
+        (self.metadata.unsafe_offset(self.capacity + 16)).unsafe_bitcast[Int]().unsafe_store[alignment=1](Int(t))
+
+    def enable_access_table(mut self):
+        if Int(self.access_table()) != 0:
+            return
+        var t = _table_alloc[UInt32](self.capacity + 1)
+        if not _table_mapped[UInt32](self.capacity + 1):
+            unsafe_memset(t.unsafe_bitcast[UInt8](), UInt8(0), self.capacity * 4)
+        t[unsafe_offset=self.capacity] = 1
+        self._set_access_table(t)
+
+    def set_may_grow(mut self, yes: Bool):
+        var t = self.access_table()
+        if Int(t) != 0:
+            t[unsafe_offset=self.capacity] = 1 if yes else 0
+
+    def disable_access_table(mut self):
+        var t = self.access_table()
+        if Int(t) != 0:
+            _table_free(t, self.capacity + 1)
+            self._set_access_table(null_ptr[UInt32, MutUntrackedOrigin]())
+
+    def shrink_if_sparse(mut self):
+        if self.capacity > 4096 and self.size * 8 < self.capacity:
+            self._rehash()
+
+    @always_inline
+    def _past_fill(self) -> Bool:
+        """SlabHashMap._past_fill: past 7/8 of the slots, tombstones included."""
+        return (self.size + self.tombstones) * 8 > self.capacity * 7
+
+    # ── Reading the slots ────────────────────────────────────────────────────
+    @always_inline
+    def entry_at(self, slot: Int) -> Int:
+        return self.entries[unsafe_offset=slot]
+
+    @always_inline
+    def key_at(self, slot: Int) -> GenericValue:
+        """The key in live slot `slot`, as a lookup key: STRING_SSO up to 23
+        bytes, else a STRING borrowing the entry (valid until the key is
+        removed or its value is rewritten)."""
+        return _ks_key_value(_ks_key_region(self.entries[unsafe_offset=slot]))
+
+    @always_inline
+    def value_at(self, slot: Int) -> GenericValue:
+        """The value in live slot `slot`, as a lookup returns it."""
+        return ks_entry_value(self.entries[unsafe_offset=slot])
+
+    def set_value_at(mut self, slot: Int, var value: GenericValue):
+        """Store `value` in live slot `slot` as it is, without dropping the old
+        value (the caller moved it: blob compaction)."""
+        var e = self.entries[unsafe_offset=slot]
+        if (e & KS_G) != 0 and not _ks_wants_s(value):
+            _ks_gv(e)[] = value
+            return
+        var kv = _ks_key_value(_ks_key_region(e))
+        var ne = _ks_new_s_value(kv, value) if _ks_wants_s(value) else _ks_new_g(kv, value)
+        _ks_free(e)
+        self.entries[unsafe_offset=slot] = ne
+
+    @always_inline
+    def next_live(self, slot: Int, limit: Int) -> Int:
+        """SlabHashMap.next_live."""
+        var end = limit if limit < self.capacity else self.capacity
+        var s = slot
+        while s < end and (s & 15) != 0:
+            if self.metadata[unsafe_offset=s] < 128:
+                return s
+            s += 1
+        var high = SIMD[DType.uint8, 16](128)
+        while s + 16 <= end:
+            var chunk = (self.metadata.unsafe_offset(s)).unsafe_load[width=16]()
+            var live = _movemask16(chunk.lt(high))
+            if live != 0:
+                return s + count_trailing_zeros(live)
+            s += 16
+        while s < end:
+            if self.metadata[unsafe_offset=s] < 128:
+                return s
+            s += 1
+        return end
+
+    # ── The probe ────────────────────────────────────────────────────────────
+    @always_inline
+    def probe_sso(self, h: UInt64, d0: UInt64, d1: UInt64, d2: UInt64) -> Int:
+        """The slot holding the STRING_SSO key (d0, d1, d2) of hash `h`, or -1."""
+        var h2_vec = SIMD[DType.uint8, 16](UInt8(h & 0x7F))
+        var empty_vec = SIMD[DType.uint8, 16](Self.EMPTY)
+        var mask = self.capacity - 1
+        var idx = Int(h >> 7) & mask
+        var start_idx = idx
+        while True:
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=16]()
+            var mbits = _movemask16(meta_chunk.eq(h2_vec))
+            while mbits != 0:
+                var slot = (idx + count_trailing_zeros(mbits)) & mask
+                if _ks_key_eq_sso(_ks_key_region(self.entries[unsafe_offset=slot]), d0, d1, d2):
+                    return slot
+                mbits &= mbits - 1
+            if _movemask16(meta_chunk.eq(empty_vec)) != 0:
+                return -1
+            idx = (idx + 16) & mask
+            if idx == start_idx:
+                return -1
+
+    @always_inline
+    def _probe_bytes(self, h: UInt64, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Int:
+        var h2_vec = SIMD[DType.uint8, 16](UInt8(h & 0x7F))
+        var empty_vec = SIMD[DType.uint8, 16](Self.EMPTY)
+        var mask = self.capacity - 1
+        var idx = Int(h >> 7) & mask
+        var start_idx = idx
+        while True:
+            var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=16]()
+            var mbits = _movemask16(meta_chunk.eq(h2_vec))
+            while mbits != 0:
+                var slot = (idx + count_trailing_zeros(mbits)) & mask
+                if _ks_key_eq_bytes(_ks_key_region(self.entries[unsafe_offset=slot]), p, n):
+                    return slot
+                mbits &= mbits - 1
+            if _movemask16(meta_chunk.eq(empty_vec)) != 0:
+                return -1
+            idx = (idx + 16) & mask
+            if idx == start_idx:
+                return -1
+
+    @always_inline
+    def find_slot(self, key: GenericValue, h: UInt64) -> Int:
+        """The slot holding `key`, or -1."""
+        if key.type.value == ValueType.STRING_SSO:
+            return self.probe_sso(h, key._data0, key._data1, key._data2)
+        if key.type.value == ValueType.STRING:
+            return self._probe_bytes(h, key.as_string(), key.string_len())
+        return -1
+
+    # ── Lookups ──────────────────────────────────────────────────────────────
+    @always_inline
+    def get_with_hash(self, key: GenericValue, h: UInt64) -> GenericValue:
+        var slot = self.find_slot(key, h)
+        if slot < 0:
+            return GenericValue()
+        return ks_entry_value(self.entries[unsafe_offset=slot])
+
+    @always_inline
+    def get(self, key: GenericValue) -> GenericValue:
+        return self.get_with_hash(key, UInt64(key.__hash__()))
+
+    @always_inline
+    def get_with_sso(self, h: UInt64, d0: UInt64, d1: UInt64, d2: UInt64) -> GenericValue:
+        var slot = self.probe_sso(h, d0, d1, d2)
+        if slot < 0:
+            return GenericValue()
+        var e = self.entries[unsafe_offset=slot]
+        if (e & KS_G) != 0:
+            return _ks_gv(e)[]
+        return _ks_str_value(_ks_key_region(e), Int(d0 & 0xFF))
+
+    @always_inline
+    def get_value_ptr(mut self, key: GenericValue) -> Pointer[GenericValue, MutUntrackedOrigin]:
+        """The stored value, for a write in place (INCR), or null. An S entry
+        becomes a G entry first: its string is copied out of the entry."""
+        var slot = self.find_slot(key, UInt64(key.__hash__()))
+        if slot < 0:
+            return null_ptr[GenericValue, MutUntrackedOrigin]()
+        var e = self.entries[unsafe_offset=slot]
+        if (e & KS_G) == 0:
+            e = self._to_g(slot)
+        return _ks_gv(e)
+
+    @no_inline
+    def _to_g(mut self, slot: Int) -> Int:
+        var e = self.entries[unsafe_offset=slot]
+        var kr = _ks_key_region(e)
+        var klen = _ks_klen(kr)
+        var v = _ks_str_value(kr, klen)
+        var ne = _ks_new_g(_ks_key_value(kr), v.owned())
+        _ks_free(e)
+        self.entries[unsafe_offset=slot] = ne
+        return ne
+
+    # ── Writes ───────────────────────────────────────────────────────────────
+    @always_inline
+    def _retire(mut self, old: GenericValue):
+        """SlabHashMap._retire: free a heap STRING, park an aggregate."""
+        if old.type.value == ValueType.STRING:
+            old.free_str_payload()
+        elif Int(self.graveyard) != 0 and (old.is_container()
+                                           or old.type.value == ValueType.HLL
+                                           or old.type.value == ValueType.BITMAP):
+            self._park(old)
+
+    @no_inline
+    def _park(mut self, old: GenericValue):
+        self.graveyard[].append(old)
+
+    @no_inline
+    def _place(mut self, h: UInt64, e: Int):
+        """Put new entry `e` (its key known absent) in the first free slot on
+        its probe path: the first tombstone, else the first empty slot."""
+        if self._past_fill():
+            self._rehash()
+        var h2 = UInt8(h & 0x7F)
+        var empty_vec = SIMD[DType.uint8, 16](Self.EMPTY)
+        var deleted_vec = SIMD[DType.uint8, 16](Self.DELETED)
+        while True:   # re-entered only after the full-table backstop rehash
+            var mask = self.capacity - 1
+            var idx = Int(h >> 7) & mask
+            var start_idx = idx
+            var first_del = -1
+            while True:
+                var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=16]()
+                if first_del < 0:
+                    var dbits = _movemask16(meta_chunk.eq(deleted_vec))
+                    if dbits != 0:
+                        first_del = (idx + count_trailing_zeros(dbits)) & mask
+                var ebits = _movemask16(meta_chunk.eq(empty_vec))
+                if ebits != 0:
+                    var slot = (idx + count_trailing_zeros(ebits)) & mask
+                    if first_del >= 0:
+                        slot = first_del
+                        self.tombstones -= 1
+                    self._fill(slot, h2, e)
+                    return
+                idx = (idx + 16) & mask
+                if idx == start_idx:
+                    break
+            if first_del >= 0:
+                self.tombstones -= 1
+                self._fill(first_del, h2, e)
+                return
+            self._rehash()   # every slot occupied: unreachable while the load check holds
+
+    @always_inline
+    def _fill(mut self, slot: Int, h2: UInt8, e: Int):
+        self.metadata[unsafe_offset=slot] = h2
+        if slot < 16:
+            self.metadata[unsafe_offset=self.capacity + slot] = h2
+        self.entries[unsafe_offset=slot] = e
+        self.size += 1
+
+    @always_inline
+    def set_with_hash(mut self, key: GenericValue, var value: GenericValue, h: UInt64):
+        """Store `value` under `key`. A borrowed or SSO string is copied into
+        the entry; anything else is kept as it is (an owned heap STRING
+        included), in a G entry."""
+        var slot = self.find_slot(key, h)
+        if slot >= 0:
+            var e = self.entries[unsafe_offset=slot]
+            if (e & KS_G) != 0 and not _ks_wants_s(value):
+                var gp = _ks_gv(e)
+                # gh #123: free the old payload; not when it is the new one
+                if gp[]._data0 != value._data0:
+                    self._retire(gp[])
+                gp[] = value
+                return
+            self._replace(slot, value^)
+            return
+        var ne = _ks_new_s_value(key, value) if _ks_wants_s(value) else _ks_new_g(key, value)
+        self._place(h, ne)
+
+    @always_inline
+    def set(mut self, key: GenericValue, var value: GenericValue):
+        self.set_with_hash(key, value^, UInt64(key.__hash__()))
+
+    @no_inline
+    def _replace(mut self, slot: Int, var value: GenericValue):
+        """set_with_hash's other cases, an existing key: an S entry's value
+        rewritten in place when the entry's size does not change, else a new
+        entry. The new value is copied before the old entry is freed: it may
+        be a borrow of this very entry."""
+        var e = self.entries[unsafe_offset=slot]
+        var kr = _ks_key_region(e)
+        var klen = _ks_klen(kr)
+        if _ks_wants_s(value):
+            var vlen = value.string_len()
+            if (e & KS_G) == 0:
+                var vp = kr.unsafe_offset(_ks_key_hdr(klen) + klen)
+                var old = Int(vp.unsafe_bitcast[UInt32]().unsafe_load[alignment=1]())
+                if _ks_s_size(klen, old) == _ks_s_size(klen, vlen):
+                    if value.type.value == ValueType.STRING_SSO:
+                        value.copy_to(vp.unsafe_offset(4))
+                    else:
+                        _ = external_call["memmove", Pointer[NoneType, MutUntrackedOrigin]](
+                            vp.unsafe_offset(4).unsafe_bitcast[NoneType](),
+                            value.as_string().unsafe_bitcast[NoneType](), vlen)
+                    vp.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](UInt32(vlen))
+                    return
+            var ne = _ks_new_s_value(_ks_key_value(kr), value)
+            if (e & KS_G) != 0:
+                self._retire(_ks_gv(e)[])
+            _ks_free(e)
+            self.entries[unsafe_offset=slot] = ne
+            return
+        if (e & KS_G) != 0:
+            var gp = _ks_gv(e)
+            if gp[]._data0 != value._data0:
+                self._retire(gp[])
+            gp[] = value
+            return
+        var ne = _ks_new_g(_ks_key_value(kr), value)
+        _ks_free(e)
+        self.entries[unsafe_offset=slot] = ne
+
+    @always_inline
+    def set_str_with_hash(mut self, key: GenericValue, h: UInt64,
+                          vptr: Pointer[UInt8, MutUntrackedOrigin], vlen: Int):
+        """Store the `vlen` bytes at `vptr` (the recv buffer: never this map's)
+        under `key`. An existing S entry whose size does not change is
+        rewritten in place (gh #175: every overwrite in the pipeline profile is
+        one; it was a tcmalloc alloc and free each)."""
+        var slot = self.find_slot(key, h)
+        if slot >= 0:
+            var e = self.entries[unsafe_offset=slot]
+            if (e & KS_G) == 0:
+                var klen = key.string_len()
+                var vp = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=e).unsafe_offset(_ks_key_hdr(klen) + klen)
+                var old = Int(vp.unsafe_bitcast[UInt32]().unsafe_load[alignment=1]())
+                if _ks_s_size(klen, old) == _ks_s_size(klen, vlen):
+                    vp.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](UInt32(vlen))
+                    _ks_copy(vp.unsafe_offset(4), vptr, vlen)
+                    return
+            self._replace_str(slot, vptr, vlen)
+            return
+        self._place(h, _ks_new_s(key, vptr, vlen))
+
+    @no_inline
+    def _replace_str(mut self, slot: Int, vptr: Pointer[UInt8, MutUntrackedOrigin], vlen: Int):
+        var e = self.entries[unsafe_offset=slot]
+        var kr = _ks_key_region(e)
+        var ne = _ks_new_s(_ks_key_value(kr), vptr, vlen)
+        if (e & KS_G) != 0:
+            self._retire(_ks_gv(e)[])
+        _ks_free(e)
+        self.entries[unsafe_offset=slot] = ne
+
+    @always_inline
+    def set_str_reuse_with_hash(mut self, key: GenericValue, h: UInt64,
+                                val_ptr: Pointer[UInt8, MutUntrackedOrigin],
+                                val_len: Int):
+        self.set_str_with_hash(key, h, val_ptr, val_len)
+
+    @always_inline
+    def _drop_slot(mut self, slot: Int):
+        self.metadata[unsafe_offset=slot] = Self.DELETED
+        if slot < 16:
+            self.metadata[unsafe_offset=self.capacity + slot] = Self.DELETED
+        self.size -= 1
+        self.tombstones += 1
+
+    @always_inline
+    def remove_generic_with_hash(mut self, key: GenericValue, h: UInt64) -> Bool:
+        """Remove `key`. A G entry's heap STRING is freed; an aggregate is not
+        (its owner frees it: RENAME moved it, or remove_..._taking hands it
+        back). `key` may be this entry's own key: it is not read after."""
+        var slot = self.find_slot(key, h)
+        if slot < 0:
+            return False
+        var e = self.entries[unsafe_offset=slot]
+        self._drop_slot(slot)
+        if (e & KS_G) != 0:
+            _ks_gv(e)[].free_str_payload()
+        _ks_free(e)
+        return True
+
+    @always_inline
+    def remove_generic(mut self, key: GenericValue) -> Bool:
+        return self.remove_generic_with_hash(key, UInt64(key.__hash__()))
+
+    @always_inline
+    def remove_generic_with_hash_taking(mut self, key: GenericValue, h: UInt64, mut taken: GenericValue) -> Bool:
+        """remove_generic_with_hash, handing back an aggregate (list, hash,
+        set, zset, geo, stream, vset; HLL, bitmap) in `taken` (gh #369)."""
+        var slot = self.find_slot(key, h)
+        if slot < 0:
+            return False
+        var e = self.entries[unsafe_offset=slot]
+        self._drop_slot(slot)
+        if (e & KS_G) != 0:
+            var v = _ks_gv(e)[]
+            if v.is_container() or v.type.value == ValueType.HLL \
+                    or v.type.value == ValueType.BITMAP:
+                taken = v
+            v.free_str_payload()
+        _ks_free(e)
+        return True
+
+    def reset(mut self):
+        """Drop every key: FLUSHALL. Aggregates go to the graveyard."""
+        if self.size == 0 and self.tombstones == 0:
+            return
+        for i in range(self.capacity):
+            if self.metadata[unsafe_offset=i] >= 128:
+                continue
+            var e = self.entries[unsafe_offset=i]
+            if (e & KS_G) != 0:
+                self._retire(_ks_gv(e)[])
+            _ks_free(e)
+            self.entries[unsafe_offset=i] = 0
+        unsafe_memset(self.metadata, UInt8(Self.EMPTY), self.capacity + 16)
+        self.size = 0
+        self.tombstones = 0
+
+    def _rehash(mut self):
+        """SlabHashMap._rehash, over slot words: the entries stay where they
+        are. Every entry's key is hashed again."""
+        self.rehashes += 1                       # #50: every entry moves
+        var old_cap = self.capacity
+        var old_meta = self.metadata
+        var old_entries = self.entries
+        var old_table = self.access_table()
+        var new_cap = old_cap * 2
+        if self.size * 16 <= old_cap * 7:
+            new_cap = old_cap
+        elif Int(old_table) != 0 and self.size * 40 <= old_cap * 33 \
+                and (self.size * 8 <= old_cap * 5 or old_table[unsafe_offset=old_cap] == 0):
+            new_cap = old_cap
+        if Int(old_table) != 0 and self.size * 8 < old_cap:
+            new_cap = old_cap
+            while new_cap > 4096 and self.size * 4 < new_cap:
+                new_cap //= 2
+        self.capacity = new_cap
+        self.size = 0
+        self.tombstones = 0
+        self.metadata = _table_alloc[UInt8](self.capacity + 16 + 8)
+        unsafe_memset(self.metadata, UInt8(Self.EMPTY), self.capacity + 16)
+        unsafe_memset(self.metadata.unsafe_offset(self.capacity + 16), UInt8(0), 8)
+        var new_table = null_ptr[UInt32, MutUntrackedOrigin]()
+        if Int(old_table) != 0:
+            self.enable_access_table()
+            new_table = self.access_table()
+            new_table[unsafe_offset=self.capacity] = old_table[unsafe_offset=old_cap]
+        self.entries = _table_alloc[Int](self.capacity)     # not written (see __init__)
+        var mask = self.capacity - 1
+        var empty_vec = SIMD[DType.uint8, 16](Self.EMPTY)
+        for i in range(old_cap):
+            var m = old_meta[unsafe_offset=i]
+            if m == Self.EMPTY or m == Self.DELETED:
+                continue
+            var e = old_entries[unsafe_offset=i]
+            var h = _ks_hash(e)
+            var idx = Int(h >> 7) & mask
+            while True:
+                var meta_chunk = (self.metadata.unsafe_offset(idx)).unsafe_load[width=16]()
+                var ebits = _movemask16(meta_chunk.eq(empty_vec))
+                if ebits != 0:
+                    var slot = (idx + count_trailing_zeros(ebits)) & mask
+                    self._fill(slot, UInt8(h & 0x7F), e)
+                    if Int(new_table) != 0:
+                        new_table[unsafe_offset=slot] = old_table[unsafe_offset=i]
+                    break
+                idx = (idx + 16) & mask
+        _table_free(old_meta, old_cap + 16 + 8)
+        _table_free(old_entries, old_cap)
+        if Int(old_table) != 0:
+            _table_free(old_table, old_cap + 1)
+
+
 comptime VEC_KEY_SHARDS = 8
 
 # maxmemory-policy. 0 is what a worker has when it never heard of eviction.
@@ -1307,7 +2163,7 @@ struct StripedHashMap(Movable):
     """8-shard Swiss Table. Eliminates O(N) rehash pauses — each shard is 8x smaller.
     Each shard rehashes independently: worst-case pause = 1/8 of an equivalent single-map rehash.
     Shard selection uses bits 0-2 of the hash (same hash used for internal probing)."""
-    var shards: Pointer[SlabHashMap, MutUntrackedOrigin]
+    var shards: Pointer[KeyShard, MutUntrackedOrigin]
     # gh #394: aggregates the shards overwrote, freed by the engine after each
     # dispatch batch (container_free.free_graveyard). Shared by all 8 shards.
     var graveyard: Pointer[List[GenericValue], MutUntrackedOrigin]
@@ -1374,9 +2230,9 @@ struct StripedHashMap(Movable):
         self.graveyard.unsafe_write(List[GenericValue]())
         self.field_ttl_index = unsafe_alloc[SlabHashMap](1)
         self.field_ttl_index.unsafe_write(SlabHashMap(16))
-        self.shards = unsafe_alloc[SlabHashMap](8)
+        self.shards = unsafe_alloc[KeyShard](8)
         for i in range(8):
-            (self.shards.unsafe_offset(i)).unsafe_write(SlabHashMap(shard_cap))
+            (self.shards.unsafe_offset(i)).unsafe_write(KeyShard(shard_cap))
             self.shards[unsafe_offset=i].graveyard = self.graveyard
 
     def __moveinit__(out self, deinit take: Self):
@@ -1614,6 +2470,25 @@ struct StripedHashMap(Movable):
                 self.touch(key, h)            # a new key has its slot only now
             return
         self.shards[unsafe_offset=self._shard(h)].set_str_reuse_with_hash(key, h, val_ptr, val_len)
+
+    @always_inline
+    def set_str_with_hash(mut self, key: GenericValue, h: UInt64,
+                          vptr: Pointer[UInt8, MutUntrackedOrigin], vlen: Int):
+        """MSET's store: the value's bytes (the recv buffer) and the key's
+        hash, which it also needs for the WATCH slot. As set_with_hash: under
+        an LRU or LFU policy out of line, a TTL alone inline."""
+        if self.clock_ns != 0:
+            _ = self._expire_if_due(key, h)   # #45: as in set()
+            if self.track_access:
+                self._set_str_and_touch(key, h, vptr, vlen)
+                return
+        self.shards[unsafe_offset=self._shard(h)].set_str_with_hash(key, h, vptr, vlen)
+
+    @no_inline
+    def _set_str_and_touch(mut self, key: GenericValue, h: UInt64,
+                           vptr: Pointer[UInt8, MutUntrackedOrigin], vlen: Int):
+        self.shards[unsafe_offset=self._shard(h)].set_str_with_hash(key, h, vptr, vlen)
+        self.touch(key, h)
 
     @always_inline
     def set(mut self, key_str: String, var value: GenericValue):

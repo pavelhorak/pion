@@ -995,6 +995,12 @@ server = "-w 1"
 tier = "gate"
 
 [[test]]
+file = "tests/test_key_shard.mojo"
+server = "none"
+tier = "gate"
+timeout = 900
+
+[[test]]
 file = "tests/test_phase5.mojo"
 server = "none"
 tier = "gate"

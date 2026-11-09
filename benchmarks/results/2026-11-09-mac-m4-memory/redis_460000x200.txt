@@ -1,0 +1,65 @@
+===== redis: 460,000 keys x 200 B, load 0.4s
+RSS idle 6.5 MB  loaded 130.0 MB  delta 123.5 MB = 281 B/key
+  used_memory: idle 915536 loaded 125374832
+  used_memory_rss: idle 6848512 loaded 136298496
+  used_memory_dataset: idle 0 loaded 105501248
+  used_memory_overhead: idle 937216 loaded 19873584
+  mem_allocator: idle libc loaded libc
+--- vmmap idle
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K      16K      16K       0K       0K       0K       0K        1 
+MALLOC guard page                 3120K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                    784K     336K     336K       0K       0K       0K       0K        4 
+MALLOC_NANO metadata                32K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                      16.0M    1312K    1312K       0K       0K       0K       0K        4         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      64K      64K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+MALLOC_TINY                       4096K     144K     144K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+STACK GUARD                       56.1M       0K       0K       0K       0K       0K       0K        4 
+Stack                             20.1M      80K      80K       0K       0K       0K       0K        4 
+__AUTH                              35K      35K       0K       0K       0K       0K       0K       12 
+__AUTH_CONST                       225K     192K       0K       0K       0K       0K       0K       45 
+__DATA                             766K     717K     586K       0K       0K       0K       0K       38 
+__DATA_CONST                       634K     426K       0K       0K       0K       0K       0K       46 
+__DATA_DIRTY                       153K     153K     132K       0K       0K       0K       0K       35 
+__LINKEDIT                       573.8M    15.8M       0K       0K       0K       0K       0K        5 
+__OBJC_RO                         79.2M    47.4M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2199K      23K       0K       0K       0K       0K        1 
+__TEXT                            12.2M    8396K       0K       0K       0K       0K       0K       49 
+__TPRO_CONST                       128K      64K      48K       0K       0K       0K       0K        2 
+page table in kernel               272K     272K     272K       0K       0K       0K       0K        1 
+shared memory                       48K      48K      48K       0K       0K       0K       0K        2 
+unused but dirty shlib __DATA       74K      74K      74K       0K       0K       0K       0K       26 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                            842.1M    77.4M    3168K       0K       0K       0K       0K      289 
+--- vmmap loaded
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K      16K      16K       0K       0K       0K       0K        1 
+MALLOC guard page                 3120K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                   1296K     816K     816K       0K       0K       0K       0K        5 
+MALLOC_LARGE                      4096K    4096K    4096K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_NANO metadata                32K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     132.0M   118.2M   118.2M       0K       0K       0K       0K       33         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K    2080K    2080K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+MALLOC_TINY                       4096K     160K     160K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+STACK GUARD                       56.1M       0K       0K       0K       0K       0K       0K        4 
+Stack                             20.1M      80K      80K       0K       0K       0K       0K        4 
+__AUTH                              35K      35K       0K       0K       0K       0K       0K       12 
+__AUTH_CONST                       225K     192K       0K       0K       0K       0K       0K       45 
+__DATA                             766K     717K     586K       0K       0K       0K       0K       38 
+__DATA_CONST                       634K     426K       0K       0K       0K       0K       0K       46 
+__DATA_DIRTY                       153K     153K     132K       0K       0K       0K       0K       35 
+__LINKEDIT                       573.8M    15.8M       0K       0K       0K       0K       0K        5 
+__OBJC_RO                         79.2M    47.4M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2199K      23K       0K       0K       0K       0K        1 
+__TEXT                            12.2M    8428K       0K       0K       0K       0K       0K       49 
+__TPRO_CONST                       128K      64K      48K       0K       0K       0K       0K        2 
+page table in kernel               336K     336K     336K       0K       0K       0K       0K        1 
+shared memory                       48K      48K      48K       0K       0K       0K       0K        2 
+unused but dirty shlib __DATA       74K      74K      74K       0K       0K       0K       0K       26 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                            962.6M   200.8M   126.5M       0K       0K       0K       0K      320 
+

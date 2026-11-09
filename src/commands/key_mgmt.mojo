@@ -638,16 +638,16 @@ def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         for h in range(len(w_slots)):
             var sp = keyspace[].shards.unsafe_offset(w_shards[h])
             var slot = w_slots[h]
-            if keyspace[].expire_stored_if_due(sp[].keys[unsafe_offset=slot]):
+            if keyspace[].expire_stored_if_due(sp[].key_at(slot)):
                 continue              # #45: an expired key is removed, as Redis's SCAN does
-            var klen = _key_ns_match(sp[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
+            var klen = _key_ns_match(sp[].key_at(slot), ns_ptr, ns_len, kbuf)
             if klen < 0:
                 continue
             if not scan_all:
-                var kp1 = sp[].keys[unsafe_offset=slot].as_string_safe(smbuf)
+                var kp1 = sp[].key_at(slot).as_string_safe(smbuf)
                 if not _glob_match(so.pat_p, so.pat_l, 0, kp1.unsafe_offset(ns_len), klen - ns_len, 0):
                     continue
-            if so.has_type and not _type_is(sp[].values[unsafe_offset=slot], so.type_p, so.type_l):
+            if so.has_type and not _type_is(sp[].value_at(slot), so.type_p, so.type_l):
                 continue
             hit_shard.append(w_shards[h])
             hit_slot.append(slot)
@@ -656,9 +656,9 @@ def handle_scan(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         for h in range(len(hit_slot)):
             var sp = keyspace[].shards.unsafe_offset(hit_shard[h])
             if ns_len == 0:
-                writer.append_bulk_value_response(sp[].keys[unsafe_offset=hit_slot[h]])
+                writer.append_bulk_value_response(sp[].key_at(hit_slot[h]))
             else:
-                var kp = sp[].keys[unsafe_offset=hit_slot[h]].as_string_safe(kbuf)
+                var kp = sp[].key_at(hit_slot[h]).as_string_safe(kbuf)
                 writer.append_bulk_string_response(kp.unsafe_offset(ns_len), hit_len[h] - ns_len)
         kbuf.unsafe_free()
         smbuf.unsafe_free()
@@ -691,13 +691,13 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         for slot in range(sp2[].capacity):
             var m = sp2[].metadata[unsafe_offset=slot]
             if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
-                    and not keyspace[].is_expired(sp2[].keys[unsafe_offset=slot]):     # #45
-                var kl0 = _key_ns_match(sp2[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
+                    and not keyspace[].is_expired(sp2[].key_at(slot)):     # #45
+                var kl0 = _key_ns_match(sp2[].key_at(slot), ns_ptr, ns_len, kbuf)
                 if kl0 >= 0:
                     if match_all:
                         total_keys2 += 1
                     else:
-                        var kp0 = sp2[].keys[unsafe_offset=slot].as_string_safe(mbuf)
+                        var kp0 = sp2[].key_at(slot).as_string_safe(mbuf)
                         if _glob_match(pat_p, pat_l, 0, kp0.unsafe_offset(ns_len), kl0 - ns_len, 0):
                             total_keys2 += 1
     var keys_hdr = String("*") + String(total_keys2) + String("\r\n")
@@ -707,21 +707,21 @@ def handle_keys(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         for slot in range(sp2[].capacity):
             var m = sp2[].metadata[unsafe_offset=slot]
             if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
-                    and not keyspace[].is_expired(sp2[].keys[unsafe_offset=slot]):     # #45: as above
-                var klen = _key_ns_match(sp2[].keys[unsafe_offset=slot], ns_ptr, ns_len, kbuf)
+                    and not keyspace[].is_expired(sp2[].key_at(slot)):     # #45: as above
+                var klen = _key_ns_match(sp2[].key_at(slot), ns_ptr, ns_len, kbuf)
                 if klen < 0:
                     continue
                 if not match_all:
                     # MUST use the same predicate as the counting pass above —
                     # a mismatch here would emit a different number of elements
                     # than the array header declares and desync the connection.
-                    var kp1 = sp2[].keys[unsafe_offset=slot].as_string_safe(mbuf)
+                    var kp1 = sp2[].key_at(slot).as_string_safe(mbuf)
                     if not _glob_match(pat_p, pat_l, 0, kp1.unsafe_offset(ns_len), klen - ns_len, 0):
                         continue
                 if ns_len == 0:
-                    writer.append_bulk_value_response(sp2[].keys[unsafe_offset=slot])
+                    writer.append_bulk_value_response(sp2[].key_at(slot))
                 else:
-                    var kp = sp2[].keys[unsafe_offset=slot].as_string_safe(kbuf)
+                    var kp = sp2[].key_at(slot).as_string_safe(kbuf)
                     writer.append_bulk_string_response(kp.unsafe_offset(ns_len), klen - ns_len)
     kbuf.unsafe_free()
     mbuf.unsafe_free()
@@ -759,17 +759,17 @@ def handle_randomkey(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, nu
                 occupied = True
                 break
             slot = (slot + 1) % cap
-        if not occupied or keyspace[].expire_stored_if_due(sp[].keys[unsafe_offset=slot]):
+        if not occupied or keyspace[].expire_stored_if_due(sp[].key_at(slot)):
             continue                 # #45: removed, as Redis's RANDOMKEY does
-        writer.append_bulk_value_response(sp[].keys[unsafe_offset=slot])
+        writer.append_bulk_value_response(sp[].key_at(slot))
         return 0
     for shard_i in range(8):
         var sp3 = keyspace[].shards.unsafe_offset(shard_i)
         for slot in range(sp3[].capacity):
             var m = sp3[].metadata[unsafe_offset=slot]
             if m != SlabHashMap.EMPTY and m != SlabHashMap.DELETED \
-                    and not keyspace[].is_expired(sp3[].keys[unsafe_offset=slot]):
-                writer.append_bulk_value_response(sp3[].keys[unsafe_offset=slot])
+                    and not keyspace[].is_expired(sp3[].key_at(slot)):
+                writer.append_bulk_value_response(sp3[].key_at(slot))
                 return 0
     writer.append_null_response()
     return 0

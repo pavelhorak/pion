@@ -10,7 +10,7 @@ from std.ffi import external_call
 from src.network.server import TCPServer
 from src.network.response_writer import ResponseWriter
 from src.common.container_free import free_container, remove_and_free
-from src.common.hash_map import SlabHashMap, StripedHashMap, _movemask16
+from src.common.hash_map import SlabHashMap, StripedHashMap, _movemask16, ks_entry_value, ks_entry_key_eq_sso, ks_entry_key_ptr
 from std.bit import count_trailing_zeros
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
@@ -680,12 +680,11 @@ struct FastPathHandler(Movable):
                 it_pos = val_off + val_len + 2
             var key_val = GenericValue.borrow(buffer.unsafe_offset(key_off), key_len)
             var mset_key_ptr = buffer.unsafe_offset(key_off)   # gh #217: key bytes for the effect record
-            var val_val = GenericValue.borrow(buffer.unsafe_offset(val_off), val_len)
             var mset_val_ptr = buffer.unsafe_offset(val_off)
             # gh #230: hash the key ONCE and spend it twice —
             # the keyspace store and the WATCH version slot.
             var kh = UInt64(key_val.__hash__())
-            self.keyspace[].set_with_hash(key_val, val_val, kh)
+            self.keyspace[].set_str_with_hash(key_val, kh, mset_val_ptr, val_len)
             # gh #217: this arm logged nothing, so a fast-path MSET
             # was lost entirely on replay. The slow-path arm routes
             # through execute_set and was always durable, which is
@@ -740,6 +739,7 @@ struct FastPathHandler(Movable):
         var d1_a = Array[UInt64, GET_BURST_MAX](uninitialized=True)
         var d2_a = Array[UInt64, GET_BURST_MAX](uninitialized=True)
         var slot_a = Array[Int, GET_BURST_MAX](uninitialized=True)
+        var e_a = Array[Int, GET_BURST_MAX](uninitialized=True)
         var vals = Array[GenericValue, GET_BURST_MAX](uninitialized=True)
 
         # ── Parse: collect a run of complete `*2\r\n$3\r\nGET\r\n$…` frames ──
@@ -782,7 +782,7 @@ struct FastPathHandler(Movable):
             var idx = Int(h >> 7) & (shard[].capacity - 1)
             prefetch(shard[].metadata.unsafe_offset(idx))
 
-        # ── Stage B: resolve first candidate slot, prefetch key+value slots ──
+        # ── Stage B: resolve first candidate slot, prefetch its slot word ──
         comptime width = 16
         for i in range(k):
             var h = h_a[i]
@@ -795,13 +795,20 @@ struct FastPathHandler(Movable):
             if mbits != 0:
                 var slot = (idx + count_trailing_zeros(mbits)) & mask
                 slot_a[i] = slot
-                prefetch((shard[].keys.unsafe_offset(slot)).unsafe_bitcast[UInt8]())
-                prefetch((shard[].values.unsafe_offset(slot)).unsafe_bitcast[UInt8]())
+                prefetch((shard[].entries.unsafe_offset(slot)).unsafe_bitcast[UInt8]())
             elif _movemask16(
                     meta_chunk.eq(SIMD[DType.uint8, width](SlabHashMap.EMPTY))) != 0:
                 slot_a[i] = -1   # definite miss: no candidate, group has EMPTY
             else:
                 slot_a[i] = -2   # full group, no candidate: rare long probe
+
+        # ── Stage B2: read the slot word, prefetch the entry (key and value) ──
+        for i in range(k):
+            var slot = slot_a[i]
+            if slot >= 0:
+                var e = keyspace[].shards[unsafe_offset=Int(h_a[i] & 7)].entry_at(slot)
+                e_a[i] = e
+                prefetch(ks_entry_key_ptr(e))
 
         # ── Stage C: compare keys, fetch values, prefetch value payloads ──
         for i in range(k):
@@ -810,12 +817,9 @@ struct FastPathHandler(Movable):
             var slot = slot_a[i]
             var val = GenericValue()
             if slot >= 0:
-                var key_slot = shard[].keys[unsafe_offset=slot]
-                if key_slot.type.value == ValueType.STRING_SSO \
-                        and key_slot._data0 == d0_a[i] \
-                        and key_slot._data1 == d1_a[i] \
-                        and key_slot._data2 == d2_a[i]:
-                    val = shard[].values[unsafe_offset=slot]
+                var e = e_a[i]
+                if ks_entry_key_eq_sso(e, d0_a[i], d1_a[i], d2_a[i]):
+                    val = ks_entry_value(e)
                 else:
                     # h2 collision or later candidate — full probe (rare).
                     val = shard[].get_with_sso(h, d0_a[i], d1_a[i], d2_a[i])

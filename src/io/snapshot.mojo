@@ -452,8 +452,8 @@ struct SnapshotEngine(Movable):
                 var m = shard[].metadata[unsafe_offset=i]
                 if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
                     continue
-                if shard[].keys[unsafe_offset=i].is_string():
-                    kv_count += UInt64(Self._record_count(shard[].values[unsafe_offset=i]))
+                if shard[].key_at(i).is_string():
+                    kv_count += UInt64(Self._record_count(shard[].value_at(i)))
 
         # gh #174: TTL records are written after the keyspace, so they have to
         # be counted here too — the loader is bounded by this number, and a
@@ -516,8 +516,8 @@ struct SnapshotEngine(Movable):
                 var m = shard[].metadata[unsafe_offset=i]
                 if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
                     continue
-                var key = shard[].keys[unsafe_offset=i]
-                var val = shard[].values[unsafe_offset=i]
+                var key = shard[].key_at(i)
+                var val = shard[].value_at(i)
                 if not key.is_string():
                     continue
 
@@ -686,17 +686,17 @@ struct SnapshotEngine(Movable):
             if legacy_vec and wal_apply_legacy_vec(cmd_id, key_buf, kl, val_buf, vl, keyspace):
                 replayed += 1
             elif cmd_id == 1:   # SET
-                var key_gv = GenericValue.from_ptr(key_buf, kl)
-                var val_gv = GenericValue.from_ptr(val_buf, vl)
-                keyspace[].set(key_gv, val_gv)
+                # Both borrow this record's buffers, freed below: the
+                # keyspace copies what it keeps.
+                keyspace[].set(GenericValue.borrow(key_buf, kl), GenericValue.borrow(val_buf, vl))
                 replayed += 1
             elif cmd_id == 4 and vl == 24 and is_not_null(blobs):
                 # gh #163: pointer record into the blob arena (see WAL cmd 4).
                 var q = val_buf.unsafe_bitcast[UInt64]()
                 var bp = blobs[].ptr_at(Int(q[unsafe_offset=0]), Int(q[unsafe_offset=1]), Int(q[unsafe_offset=2]))
                 if is_not_null(bp):
-                    var key_gv = GenericValue.from_ptr(key_buf, kl)
-                    keyspace[].set(key_gv, GenericValue.from_blob_ptr(bp, Int(q[unsafe_offset=2])))
+                    keyspace[].set(GenericValue.borrow(key_buf, kl),
+                                   GenericValue.from_blob_ptr(bp, Int(q[unsafe_offset=2])))
                     replayed += 1
             elif cmd_id >= 35 and cmd_id <= 37:
                 # #36: the FUNCTION libraries (a 37 FLUSH, then one 35 per library)

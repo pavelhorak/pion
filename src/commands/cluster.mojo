@@ -451,7 +451,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                             break
                         var m = shard[].metadata[unsafe_offset=slot_idx]
                         if m != 0x80 and m != 0xFF:  # not EMPTY, not DELETED
-                            var key = shard[].keys[unsafe_offset=slot_idx]
+                            var key = shard[].key_at(slot_idx)
                             if not key.is_none():
                                 var sso_buf = unsafe_alloc[UInt8](24)
                                 var kp = key.as_string_safe(sso_buf)
@@ -478,7 +478,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                     for slot_idx in range(shard[].capacity):
                         var m = shard[].metadata[unsafe_offset=slot_idx]
                         if m != 0x80 and m != 0xFF:
-                            var key = shard[].keys[unsafe_offset=slot_idx]
+                            var key = shard[].key_at(slot_idx)
                             if not key.is_none():
                                 var sso_buf = unsafe_alloc[UInt8](24)
                                 var kp = key.as_string_safe(sso_buf)

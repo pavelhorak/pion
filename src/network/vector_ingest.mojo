@@ -194,11 +194,11 @@ def backfill_index(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
             var m = sp[].metadata[unsafe_offset=slot]
             if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
                 continue
-            if sp[].values[unsafe_offset=slot].type.value != ValueType.HASH:
+            if sp[].value_at(slot).type.value != ValueType.HASH:
                 continue
-            if keyspace[].is_expired(sp[].keys[unsafe_offset=slot]):
+            if keyspace[].is_expired(sp[].key_at(slot)):
                 continue
-            keys.append(sp[].keys[unsafe_offset=slot].clone())
+            keys.append(sp[].key_at(slot).clone())
     var kbuf = unsafe_alloc[UInt8](24)
     var n = 0
     for k in range(len(keys)):
@@ -395,12 +395,12 @@ def adopt_legacy_slot_keys(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
             var m = sp[].metadata[unsafe_offset=i]
             if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
                 continue
-            var k = sp[].keys[unsafe_offset=i]
+            var k = sp[].key_at(i)
             if not k.is_string():
                 continue
             var kp = k.as_string_safe(kbuf)
             var kl = k.string_len()
-            var v = sp[].values[unsafe_offset=i]
+            var v = sp[].value_at(i)
             var slot = legacy_hk_slot(kp, kl)
             if slot >= 0:
                 if v.is_string() and keyspace[].get(GenericValue.borrow(v.as_string_safe(vbuf), v.string_len())).type.value == ValueType.HASH:

@@ -1957,7 +1957,7 @@ struct WAL(Movable):
                 # gh #394: the key borrows the mapped log (set() copies it only
                 # if it inserts); a from_ptr copy leaked on every overwrite.
                 keyspace[].set(GenericValue.borrow(data.unsafe_offset(key_off), Int(kl)),
-                               GenericValue.from_ptr(data.unsafe_offset(val_off), Int(vl)))
+                               GenericValue.borrow(data.unsafe_offset(val_off), Int(vl)))
                 replayed += 1
             elif cmd_id == 2:  # DEL
                 _ = remove_and_free(keyspace, GenericValue.borrow(data.unsafe_offset(key_off), Int(kl)))
@@ -1980,8 +1980,8 @@ struct WAL(Movable):
                 var q = (data.unsafe_offset(val_off)).unsafe_bitcast[UInt64]()
                 var bp = blobs[].ptr_at(Int(q[unsafe_offset=0]), Int(q[unsafe_offset=1]), Int(q[unsafe_offset=2]))
                 if is_not_null(bp):
-                    var key_val = GenericValue.from_ptr(data.unsafe_offset(key_off), Int(kl))
-                    keyspace[].set(key_val, GenericValue.from_blob_ptr(bp, Int(q[unsafe_offset=2])))
+                    keyspace[].set(GenericValue.borrow(data.unsafe_offset(key_off), Int(kl)),
+                                   GenericValue.from_blob_ptr(bp, Int(q[unsafe_offset=2])))
                     replayed += 1
             elif cmd_id == 25 or cmd_id == 26:
                 # gh #174: TTL record — writes ttl_map, not the keyspace.
@@ -2200,12 +2200,12 @@ struct WAL(Movable):
                 var m = shard[].metadata[unsafe_offset=i]
                 if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
                     continue
-                var key = shard[].keys[unsafe_offset=i]
+                var key = shard[].key_at(i)
                 if not key.is_string():
                     continue
                 var kl = key.string_len()
                 var kp = key.as_string_safe(kbuf)
-                self.append_key_image(kp, kl, shard[].values[unsafe_offset=i])
+                self.append_key_image(kp, kl, shard[].value_at(i))
                 if is_not_null(ttl_map):
                     var dl = ttl_map[].get(key)
                     if not dl.is_none() and dl.type.value == ValueType.INT:

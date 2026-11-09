@@ -79,7 +79,7 @@ Equality for SSO values is a 3-word comparison (`_data0 == _data0 && _data1 == _
 
 Source: `src/common/hash_map.mojo`
 
-Used for the main keyspace (as the 8 shards of a `StripedHashMap`, 65,536 slots to start per worker), per-key hashes, and sets.
+Used for per-key hashes and sets, the TTL map and the vector index's slot maps. The keyspace uses the same probe over smaller slots: see [KeyShard](#keyshard--the-keyspaces-table) below.
 
 ### Structure
 
@@ -110,9 +110,31 @@ Arrays of 256 KiB or more (a key or value array from 8,192 slots up) are mapped 
 
 | Use case | Initial capacity |
 |---|---|
-| Main keyspace | 65,536 slots per worker (8 shards of 8,192), doubling on demand |
+| Main keyspace | 65,536 slots per worker (8 `KeyShard`s of 8,192), doubling on demand |
 | Per-key hash (HSET) | 16 slots (from `ObjectPool`) |
 | Per-key set (SADD) | 16 slots (from `ObjectPool`) |
+
+---
+
+## KeyShard — the keyspace's table
+
+Source: `src/common/hash_map.mojo`
+
+The keyspace is a `StripedHashMap` of 8 `KeyShard`s, picked by the hash's low 3 bits. A `KeyShard` has SlabHashMap's metadata array, probe and rehash rules, but a slot is one 8-byte word: the address of the key's **entry**, a single allocation holding the key and its value. Bit 0 of the word says which kind of entry it is:
+
+| Entry | Holds | Layout |
+|---|---|---|
+| S | a string value, its bytes inline | `[key length: 1][key][value length: 4][value]` |
+| G | any other value (a hash, list, counter, bitmap, …), an owned heap string, a blob-tier string | `[GenericValue: 32][key length: 1][key]` |
+
+A key of 255 bytes or more writes 255 in the length byte, then its length in 4 bytes. The length byte and a key of up to 23 bytes are laid out as a `STRING_SSO`'s three words, so such a key compares as up to three masked word compares. A lookup returns what a SlabHashMap would: a G entry's value as stored, or an S entry's value as `GenericValue.borrow()` of its bytes (a `STRING_SSO` up to 23 bytes, a `STRING` tagged `BORROW_TAG` above).
+
+A slot costs 9 bytes (the word and its metadata byte), against SlabHashMap's 65. With 200-byte values a key costs 241–249 bytes of RSS from 100,000 to 460,000 keys, against Redis 8.10's 281–292 (`benchmarks/reproducers/memory_per_key.py`).
+
+- An overwrite that leaves the entry's size unchanged (sizes step by 16 bytes) is written in place, the fast path's equal-length SET included. Otherwise a new entry is made, the value copied in, and then the old one freed, so a value that borrows its own entry is safe.
+- A rehash moves slot words only; entries stay where they are, and every key is hashed again from its entry.
+- `get_value_ptr` (INCR's in-place update) turns an S entry into a G entry first.
+- Walk the slots with `next_live`, `key_at(slot)` and `value_at(slot)`. `key_at` borrows a long key from the entry: it is valid until that key is removed or its value rewritten.
 
 ---
 
