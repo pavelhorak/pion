@@ -56,7 +56,6 @@ from .kernels import (
     l2_int8_sabd_udot,
     l2_int8_sabd_udot_batch8,
 )
-from std.random import random_float64
 from std.math import log, min
 from src.vector.fma_mad import fma_mad
 from std.collections import List, Array
@@ -68,6 +67,16 @@ from std.sys.info import CompilationTarget
 # 50K gate corpus; a bounded prefix past that, since the per-group pass is a
 # scalar Welford over count*dim values and a 5M build would spend ~20 s in it.
 comptime CALIBRATION_SAMPLE_MAX = 65536
+
+# A node's HNSW level is a fixed function of its position in the build
+# (`_level_of`): output i of a SplitMix64 stream from this seed. Levels used
+# to come from the process's one random stream (std.random), which nothing
+# reseeded, so every build advanced it and FT.OPTIMIZE built a different
+# graph from the same vectors depending on how many builds the server had
+# run before, the automatic ones included. On tight clusters that alone moved
+# recall@10 between 0.80 and 1.00 (tests/test_hnsw_build_history.py). Any
+# value works; this one was fixed before measuring and is not tuned.
+comptime HNSW_LEVEL_SEED = UInt64(0x50494F4E)
 
 
 @always_inline
@@ -549,8 +558,17 @@ struct HNSWGraph(Movable):
                 acc += Float32(Int(row[c])) * input[c]
             output[r] = acc * scale
 
-    def _random_level(self) -> Int:
-        var r = random_float64(0, 1).cast[DType.float32]()
+    @always_inline
+    def _level_of(self, i: Int) -> Int:
+        """The level of the build's node `i`: the same for the same `i` in
+        every build, so equal input builds an equal graph. SplitMix64's
+        output `i` (its state after i+1 steps, then its mix), whose top 53
+        bits make a uniform double in [0, 1)."""
+        var z = HNSW_LEVEL_SEED + UInt64(i + 1) * UInt64(0x9E3779B97F4A7C15)
+        z = (z ^ (z >> 30)) * UInt64(0xBF58476D1CE4E5B9)
+        z = (z ^ (z >> 27)) * UInt64(0x94D049BB133111EB)
+        z = z ^ (z >> 31)
+        var r = ((z >> 11).cast[DType.float64]() * (1.0 / 9007199254740992.0)).cast[DType.float32]()
         if r <= 0: r = 1e-7
         var level = Int(-log(r) * self.ml)
         if level > 6: level = 6
@@ -1866,7 +1884,7 @@ struct HNSWGraph(Movable):
         self.index_ready = True
 
     def _insert_to_graph(mut self, id: Int, vector: Pointer[Float32, MutUntrackedOrigin]) raises:
-        var level = self._random_level()
+        var level = self._level_of(self.num_nodes)   # the internal id this node gets
         var q_vector = self.quantize(vector)
 
         var internal_id = self.num_nodes
@@ -2570,7 +2588,7 @@ struct HNSWGraph(Movable):
         var bp_max_lvl = -1
         var bp_max_idx = 0
         for buf_idx in range(n):
-            var lvl = self._random_level()
+            var lvl = self._level_of(buf_idx)
             if lvl > bp_max_lvl:
                 bp_max_lvl = lvl
                 bp_max_idx = buf_idx

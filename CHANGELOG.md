@@ -43,6 +43,18 @@ enumerated — there were roughly 1,100 of them.
   calls that each built a heap String, and a 4 MB buffer the XDP loop allocated
   and never used.
 
+### Fixed
+
+- **A vector build no longer depends on the builds before it.** HNSW levels came
+  from the process's one random stream, which every build advanced, automatic
+  builds included, so FT.OPTIMIZE built a different graph from the same vectors
+  depending on what the server had built since it started. On one server, 22
+  builds of the same 1,500 vectors read recall@10 anywhere from 0.917 to 1.000.
+  A node's level is now a fixed function of its position in the build, and the
+  same 22 builds all read 0.967. A build of 4,096 vectors or more links on
+  several threads, and their interleaving can still make two builds differ.
+  `tests/test_hnsw_build_history.py` checks it.
+
 ## [1.0.9] — 2026-11-04
 
 Builds where the level-0 repair fires no longer lose recall.

@@ -245,36 +245,49 @@ def main() raises:
     # beside the region is unreachable; its closest reachable node r is a
     # member, so the pass links r -> u, and u's own links lead out. The region
     # now has one way out, through u, and an exit pass run AFTER it finds
-    # nothing closed. Members keep free slots here so that r is a member.
-    for variant in range(2):
+    # nothing closed. Members keep free slots here so that r is usually a
+    # member, but whether it is depends on the graph: the first center, from
+    # entry + n/3 on, where the reachability pass alone opens the region is
+    # the case. The build is deterministic (seeded vectors, levels fixed by
+    # position, one lane), so the second build is that same graph.
+    var c_off = -1
+    for k in range(32):
         var h = built(n, dim)
-        var c2 = (h.entry_point_id + n // 3) % n
+        var c2 = (h.entry_point_id + n // 3 + k) % n
         var m2 = close_region(h, c2, size, h.M)
         var u = strand_beside(h, c2, m2)
         var rf = reach_from_entry(h)
         var re = reach_entry(h)
-        if variant == 0:
-            # The canary: the reachability pass alone must open the region
-            # through u, or this case is not exercised.
-            var l = h._repair_l0_reachability()
-            var lo = links_out(h, m2)
-            print("region beside a stranded node: reachable", rf, "; reach the entry", re,
-                  "; reachability pass alone: links", l, ", reach the entry", reach_entry(h),
-                  ", members with a link out", lo)
-            if rf != n - 1 or re != n - size or l == 0 or reach_entry(h) != n or lo > 2:
-                print("FAIL: expected the reachability pass to open the region through one node")
-                fails += 1
-        else:
-            h._repair_l0()
-            var lo = links_out(h, m2)
-            print("after _repair_l0: reachable", reach_from_entry(h), "; reach the entry",
-                  reach_entry(h), "; members with a link out", lo, "of", size)
-            if reach_from_entry(h) != n or reach_entry(h) != n:
-                print("FAIL: _repair_l0 must leave level 0 strongly connected")
-                fails += 1
-            if lo < size * 3 // 4:
-                print("FAIL: the exit pass must run before the reachability pass can open a region")
-                fails += 1
+        var l = h._repair_l0_reachability()
+        var lo = links_out(h, m2)
+        _ = m2^
+        _ = u
+        if rf == n - 1 and re == n - size and l != 0 and reach_entry(h) == n and lo <= 2:
+            print("region beside a stranded node (center offset", k, "): reachable", rf,
+                  "; reach the entry", re, "; reachability pass alone: links", l,
+                  ", reach the entry", n, ", members with a link out", lo)
+            c_off = k
+            break
+    # The canary: the reachability pass alone must open the region through u
+    # somewhere, or this case is not exercised.
+    if c_off < 0:
+        print("FAIL: no region in 32 where the reachability pass opens it through one node")
+        fails += 1
+    else:
+        var h = built(n, dim)
+        var c2 = (h.entry_point_id + n // 3 + c_off) % n
+        var m2 = close_region(h, c2, size, h.M)
+        var u = strand_beside(h, c2, m2)
+        h._repair_l0()
+        var lo = links_out(h, m2)
+        print("after _repair_l0: reachable", reach_from_entry(h), "; reach the entry",
+              reach_entry(h), "; members with a link out", lo, "of", size)
+        if reach_from_entry(h) != n or reach_entry(h) != n:
+            print("FAIL: _repair_l0 must leave level 0 strongly connected")
+            fails += 1
+        if lo < size * 3 // 4:
+            print("FAIL: the exit pass must run before the reachability pass can open a region")
+            fails += 1
         _ = m2^
         _ = u
     if fails == 0:

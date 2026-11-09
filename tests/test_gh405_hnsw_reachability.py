@@ -155,8 +155,13 @@ def run(args, workdir):
           reach == g["n"], f"{g['n'] - reach} stranded")
     ent = g["entry"]
     upper = [int(g["pool"][ent, 8 * g["m"] + level]) for level in range(1, int(g["lv"][ent]) + 1)]
-    check(f"the entry point has upper-level links in the file (levels 1..{g['lv'][ent]})",
-          len(upper) > 0 and all(x > 0 for x in upper), upper)
+    # Links are owed only at levels some other node reaches: a node alone at
+    # its top levels has nothing to link to there (here 1 node at level 4,
+    # none at 3). At least one level must be shared, or this checks nothing.
+    shared = [int((g["lv"] >= level).sum()) > 1 for level in range(1, int(g["lv"][ent]) + 1)]
+    check(f"the entry point has upper-level links in the file at every level it shares "
+          f"(levels 1..{g['lv'][ent]}, shared {shared})",
+          any(shared) and all(x > 0 for x, sh in zip(upper, shared) if sh), upper)
 
     proc = serve(args.binary, args.port, 1, workdir, "server-warm.log")
     try:
