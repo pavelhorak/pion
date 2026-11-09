@@ -1,12 +1,12 @@
-# Pion — the memory engine for AI inference
+# Pion — a Redis-compatible key-value store in Mojo
 
-**Pion remembers what your model already read:** prefill a long prompt once,
-and every later request, from any process and even after a crash, starts at
-the first new token. It is a memory engine for AI inference — one small Mojo
-binary that holds the prompt's K/V cache, and the rest of a model's working
-memory, and serves it over the Redis wire.
+**Pion is a key-value store that speaks the Redis protocol:** one small Mojo
+binary that Redis clients such as redis-cli and redis-py talk to unmodified.
+Every write goes to a write-ahead log before it is acknowledged, `--maxmemory`
+with Redis's eviction policies makes it a cache, and the same server does vector
+search over the RediSearch `FT.*` commands and keeps a prompt cache for mlx-lm.
 
-On Apple Silicon it is four lines around `mlx_lm`:
+The prompt cache, on Apple Silicon, is four lines around `mlx_lm`:
 
 ```python
 from pion_vllm_mlx import PionPromptCache
@@ -44,13 +44,13 @@ only pays off when a long prefix is really reused.
 
 Three things, each covered by Pion's gate tier, the tests run before every merge:
 
-1. **A prompt cache for mlx-lm, and one endpoint for coding agents.**
+1. **A Redis-compatible KV store with a write-ahead log.** [Command
+   matrix](command_matrix.md) for every Redis-compatible command and its known
+   divergences, [Persistence](persistence.md), [Data types](data_types.md).
+2. **A prompt cache for mlx-lm, and one endpoint for coding agents.**
    [Shared KV cache](shared_kv_cache.md) (namespaces, Stage 1 vs Stage 2, the
    wire protocol, what is measured) and [Coding agents](coding_agents.md)
    (`pion-vllm-mlx serve` behind Claude Code, Codex and OpenAI clients).
-2. **A Redis-compatible KV store with a write-ahead log.** [Command
-   matrix](command_matrix.md) for every Redis-compatible command and its known
-   divergences, [Persistence](persistence.md), [Data types](data_types.md).
 3. **Vector search and the semantic cache.** [Vector engine](vector_engine.md),
    [Embeddings](embeddings.md), and `AI.SEMANTIC_CACHE` in the
    [AI gateway](ai_gateway.md) page.

@@ -76,7 +76,7 @@ website/
 
 - **No number on the site that does not divide out of a published row.** The
   landing takes its numbers from the README and the launch post; edit those.
-- **Name + category everywhere**: "Pion — memory engine for AI inference" in
+- **Name + category everywhere**: "Pion — redis-compatible key-value store in Mojo" in
   every title and OG tag.
 - **The honesty panel is a section, not fine print.** It is included verbatim
   from the launch post.

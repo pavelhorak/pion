@@ -52,7 +52,7 @@ html,body{{width:1280px;height:630px;margin:0;overflow:hidden}}
 .og p strong{{color:var(--ink)}}
 .og .fabric{{max-width:none;width:100%}}
 </style></head><body>{defs}
-<div class="og"><div><p class="eyebrow">Pion · memory engine for AI inference</p><h1>{h1}</h1><p>{first}</p></div>
+<div class="og"><div><p class="eyebrow">Pion · Redis-compatible key-value store</p><h1>{h1}</h1><p>{first}</p></div>
 {hero}</div></body></html>"""
     tmp = Path(tempfile.mkdtemp(prefix="pion_og_"))
     src = tmp / "og.html"

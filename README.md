@@ -4,7 +4,7 @@
   <img alt="Pion Logo" src="light-logo.png" width="400">
 </picture>
 
-# Pion — The Memory Engine for AI Inference
+# Pion — A Redis-compatible key-value store in Mojo
 
 [![Mojo](https://img.shields.io/badge/Mojo-1.2-orange.svg)](https://docs.modular.com/mojo/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -12,11 +12,11 @@
 📚 **Documentation:** [`doc/index.md`](doc/index.md) — full reference.
 
 <!-- --8<-- [start:pitch] -->
-**Pion remembers what your model already read:** prefill a long prompt once,
-and every later request, from any process and even after a crash, starts at
-the first new token. It is a memory engine for AI inference — one small Mojo
-binary that holds the prompt's K/V cache, and the rest of a model's working
-memory, and serves it over the Redis wire.
+**Pion is a key-value store that speaks the Redis protocol:** one small Mojo
+binary that Redis clients such as redis-cli and redis-py talk to unmodified.
+Every write goes to a write-ahead log before it is acknowledged, `--maxmemory`
+with Redis's eviction policies makes it a cache, and the same server does vector
+search over the RediSearch `FT.*` commands and keeps a prompt cache for mlx-lm.
 <!-- --8<-- [end:pitch] -->
 
 <!-- --8<-- [start:open-core] -->
@@ -37,7 +37,87 @@ Three things, each covered by Pion's gate tier, the tests run before every merge
 other feature in this repository is [experimental](#experimental): it is
 there, it may be tested at the wire level, and it is not something to rely on.
 
-### 1. A prompt cache for mlx-lm, and one endpoint for coding agents
+### 1. A Redis-compatible KV store with a write-ahead log
+
+355 command names (the generated command table), every one exercised by a
+dispatch sweep in five argument shapes, and a differential suite that compares
+replies against a real `redis-server`: strings, hashes, lists, sets, sorted
+sets, bitmaps, HyperLogLog, geo, streams and consumer groups, pub/sub,
+`MULTI`/`EXEC`/`WATCH`, TTLs, Lua. Every write goes to a write-ahead log
+before it is acknowledged; an acked write is still there after `SIGKILL`.
+`--maxmemory` with `--maxmemory-policy` makes it a cache, evicting by LRU, LFU, TTL
+or at random.
+`redis-cli` and redis-py, which the test suite uses, talk to it unmodified over
+RESP2 or RESP3. Reference:
+[`doc/command_matrix.md`](doc/command_matrix.md),
+[`doc/persistence.md`](doc/persistence.md).
+
+Against Redis 8.10.2, Pion wins some configurations and loses others. Every
+number below comes from one Linux server, an AMD EPYC 8124P (16 cores). Both
+engines were measured the same day with the same client settings: Redis 8.10.2
+built from source, Pion built as the release builds it. The one-keyspace numbers
+are from 2026-10-12 (Pion 0.9.9). The all-cores and vector numbers are from
+2026-10-06 (Pion 0.9.5). Raw output, scripts and method:
+[`2026-10-12`](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md),
+[`2026-10-06`](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
+
+**KV throughput** (memtier, 256-byte values, 1:10 SET:GET over 1M keys, 30 s a
+run, median of 3, ops/sec):
+
+| One keyspace, ops/sec | Redis, 1 thread | Redis, `io-threads 8` | Pion, 1 thread | **Pion, `--io-threads 8`** |
+|---|---:|---:|---:|---:|
+| P=1 | 110,044 | 386,278 | 114,909 | **515,267** |
+| P=10 | 640,985 | 1,661,596 | 895,149 | **2,972,713** |
+| P=50 | 979,984 | 1,368,935 | 1,703,363 | **3,909,190** |
+
+| All 16 cores, 16 independent keyspaces, ops/sec | 16 Redis processes | **Pion `-w 16`** |
+|---|---:|---:|
+| P=10 | **7,178,453** | 6,097,719 |
+| P=50 | **11,128,400** | 9,848,658 |
+
+**One keyspace, with I/O threads:** Pion's `--io-threads 8` leads Redis's
+`io-threads 8` at every pipeline depth.
+- **Ratios:** 1.33× at P=1, 1.79× at P=10 and 2.86× at P=50.
+- **Like for like:** both count threads the same way, one thread that runs
+  commands plus seven I/O threads, and the client runs on the same machine.
+- **P=50:** `--io-threads 4` is faster still, at 4,431,024. One thread executes
+  every command, and at that depth it is the limit.
+
+**Without I/O threads:** Pion's single thread trails Redis's I/O threads at P=1
+and P=10, and leads single-threaded Redis at every depth.
+
+**With durability on (P=10):** Redis's AOF (`everysec`) against Pion's WAL, both
+at 8 I/O threads. Pion leads, 2,724,529 to 1,297,102 (2.1×).
+
+**Where I/O threads pay:** on a server with cores to spare. On a Mac with the
+client on the same machine, they lower throughput, for Redis too
+([2026-10-10](benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)).
+
+**Across all cores:** sixteen Redis processes beat Pion's sixteen workers by
+13–18%, both sides as sixteen independent keyspaces.
+
+**Runs that are not a comparison:** the same day's 32-keyspace runs used every
+hardware thread on both sides, with the client on the same machine. In them,
+Pion's connections landed on about half of its 32 workers, while each Redis
+process got exactly its own client's connections. The GET hit rates show it, and
+the half-idle workers left the shared CPUs to the client. Those runs measure that
+asymmetry, not either server. Their raw output and the analysis are in the
+[2026-10-06 results](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
+
+**A withdrawn headline:** this README used to carry 14.0M ops/sec, 10.2× Redis.
+It had no surviving raw log, it set Pion's 32 independent keyspaces against a
+single Redis instance, and its configuration has the same asymmetry. It is
+withdrawn; the comparisons above are the like-for-like ones.
+
+> **Worker-count caveat.** Every number above `w > 1` is measured with
+> `--independent-workers`, and that flag changes the semantics: workers are
+> shared-nothing, so **`-w N` runs N independent keyspaces**, and a connection is
+> bound to whichever worker won `accept()`. A write acked on one connection is
+> not readable from another. Pion therefore defaults to `-w 1` (one coherent
+> keyspace, what a Redis client expects) and refuses to start with `-w N > 1`
+> unless you pass the flag. See [Scaling past one worker](#scaling-past-one-worker).
+
+### 2. A prompt cache for mlx-lm, and one endpoint for coding agents
 
 On Apple Silicon it is four lines around `mlx_lm`:
 
@@ -159,86 +239,6 @@ Design, wire protocol, the quantized tiers and the Stage 2 lanes:
 [`doc/shared_kv_cache.md`](doc/shared_kv_cache.md). Hybrid models (SSM and
 sliding-window layers) are stored by `PionPromptCache` and its `SSM.PREFIX.*`
 companion; `pion-vllm-mlx serve` does not store them yet.
-
-### 2. A Redis-compatible KV store with a write-ahead log
-
-355 command names (the generated command table), every one exercised by a
-dispatch sweep in five argument shapes, and a differential suite that compares
-replies against a real `redis-server`: strings, hashes, lists, sets, sorted
-sets, bitmaps, HyperLogLog, geo, streams and consumer groups, pub/sub,
-`MULTI`/`EXEC`/`WATCH`, TTLs, Lua. Every write goes to a write-ahead log
-before it is acknowledged; an acked write is still there after `SIGKILL`.
-`--maxmemory` with `--maxmemory-policy` makes it a cache, evicting by LRU, LFU, TTL
-or at random.
-`redis-cli` and redis-py, which the test suite uses, talk to it unmodified over
-RESP2 or RESP3. Reference:
-[`doc/command_matrix.md`](doc/command_matrix.md),
-[`doc/persistence.md`](doc/persistence.md).
-
-Against Redis 8.10.2, Pion wins some configurations and loses others. Every
-number below comes from one Linux server, an AMD EPYC 8124P (16 cores). Both
-engines were measured the same day with the same client settings: Redis 8.10.2
-built from source, Pion built as the release builds it. The one-keyspace numbers
-are from 2026-10-12 (Pion 0.9.9). The all-cores and vector numbers are from
-2026-10-06 (Pion 0.9.5). Raw output, scripts and method:
-[`2026-10-12`](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md),
-[`2026-10-06`](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
-
-**KV throughput** (memtier, 256-byte values, 1:10 SET:GET over 1M keys, 30 s a
-run, median of 3, ops/sec):
-
-| One keyspace, ops/sec | Redis, 1 thread | Redis, `io-threads 8` | Pion, 1 thread | **Pion, `--io-threads 8`** |
-|---|---:|---:|---:|---:|
-| P=1 | 110,044 | 386,278 | 114,909 | **515,267** |
-| P=10 | 640,985 | 1,661,596 | 895,149 | **2,972,713** |
-| P=50 | 979,984 | 1,368,935 | 1,703,363 | **3,909,190** |
-
-| All 16 cores, 16 independent keyspaces, ops/sec | 16 Redis processes | **Pion `-w 16`** |
-|---|---:|---:|
-| P=10 | **7,178,453** | 6,097,719 |
-| P=50 | **11,128,400** | 9,848,658 |
-
-**One keyspace, with I/O threads:** Pion's `--io-threads 8` leads Redis's
-`io-threads 8` at every pipeline depth.
-- **Ratios:** 1.33× at P=1, 1.79× at P=10 and 2.86× at P=50.
-- **Like for like:** both count threads the same way, one thread that runs
-  commands plus seven I/O threads, and the client runs on the same machine.
-- **P=50:** `--io-threads 4` is faster still, at 4,431,024. One thread executes
-  every command, and at that depth it is the limit.
-
-**Without I/O threads:** Pion's single thread trails Redis's I/O threads at P=1
-and P=10, and leads single-threaded Redis at every depth.
-
-**With durability on (P=10):** Redis's AOF (`everysec`) against Pion's WAL, both
-at 8 I/O threads. Pion leads, 2,724,529 to 1,297,102 (2.1×).
-
-**Where I/O threads pay:** on a server with cores to spare. On a Mac with the
-client on the same machine, they lower throughput, for Redis too
-([2026-10-10](benchmarks/results/2026-10-10-mac-m4-io-threads/README.md)).
-
-**Across all cores:** sixteen Redis processes beat Pion's sixteen workers by
-13–18%, both sides as sixteen independent keyspaces.
-
-**Runs that are not a comparison:** the same day's 32-keyspace runs used every
-hardware thread on both sides, with the client on the same machine. In them,
-Pion's connections landed on about half of its 32 workers, while each Redis
-process got exactly its own client's connections. The GET hit rates show it, and
-the half-idle workers left the shared CPUs to the client. Those runs measure that
-asymmetry, not either server. Their raw output and the analysis are in the
-[2026-10-06 results](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md).
-
-**A withdrawn headline:** this README used to carry 14.0M ops/sec, 10.2× Redis.
-It had no surviving raw log, it set Pion's 32 independent keyspaces against a
-single Redis instance, and its configuration has the same asymmetry. It is
-withdrawn; the comparisons above are the like-for-like ones.
-
-> **Worker-count caveat.** Every number above `w > 1` is measured with
-> `--independent-workers`, and that flag changes the semantics: workers are
-> shared-nothing, so **`-w N` runs N independent keyspaces**, and a connection is
-> bound to whichever worker won `accept()`. A write acked on one connection is
-> not readable from another. Pion therefore defaults to `-w 1` (one coherent
-> keyspace, what a Redis client expects) and refuses to start with `-w N > 1`
-> unless you pass the flag. See [Scaling past one worker](#scaling-past-one-worker).
 
 ### 3. Vector search and the semantic cache
 
@@ -636,7 +636,7 @@ removed, and each carries an **Experimental** banner on its own page.
 
 | | Pion |
 |---|---|
-| Category | **Memory engine for AI inference** |
+| Category | **Redis-compatible key-value store** |
 | Headline | **Shared KV Cache** — at a 2K prefix on Llama-3.2-1B-4bit, first token in 69.0 ms from a separate process over the wire and 46.2 ms in the same process, against 1,193 ms cold and 37.0 ms from mlx-lm's own prompt-cache file; BLEU 1.000 cross-instance |
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |
