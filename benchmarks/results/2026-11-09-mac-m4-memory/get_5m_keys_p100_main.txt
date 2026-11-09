@@ -1,0 +1,20 @@
+# pion-server-ps2 round 1: 5,000,000 keys loaded in 2 s
+pion-server-ps2    P=100    9,995,003 rps      653 instr/GET      288 cycles/GET
+pion-server-ps2    P=100    9,990,010 rps      652 instr/GET      287 cycles/GET
+pion-server-ps2    P=100    9,990,010 rps      653 instr/GET      288 cycles/GET
+# pion-server-seed2 round 1: 5,000,000 keys loaded in 1 s
+pion-server-seed2  P=100    9,995,003 rps      595 instr/GET      263 cycles/GET
+pion-server-seed2  P=100   11,415,525 rps      594 instr/GET      261 cycles/GET
+pion-server-seed2  P=100    9,995,003 rps      595 instr/GET      261 cycles/GET
+# pion-server-seed2 round 1: 5,000,000 keys loaded in 1 s
+pion-server-seed2  P=100    9,990,010 rps      595 instr/GET      264 cycles/GET
+pion-server-seed2  P=100    9,995,003 rps      596 instr/GET      266 cycles/GET
+pion-server-seed2  P=100    9,990,010 rps      597 instr/GET      263 cycles/GET
+# pion-server-ps2 round 1: 5,000,000 keys loaded in 2 s
+pion-server-ps2    P=100    9,990,010 rps      652 instr/GET      287 cycles/GET
+pion-server-ps2    P=100    9,995,003 rps      653 instr/GET      286 cycles/GET
+pion-server-ps2    P=100    9,990,010 rps      652 instr/GET      286 cycles/GET
+
+# medians
+pion-server-ps2    P=100 rps    9,990,010  instr     653  cycles     287  (n=6, rps 10.00M 9.99M 9.99M 9.99M 10.00M 9.99M)
+pion-server-seed2  P=100 rps    9,995,003  instr     595  cycles     263  (n=6, rps 10.00M 11.42M 10.00M 9.99M 10.00M 9.99M)

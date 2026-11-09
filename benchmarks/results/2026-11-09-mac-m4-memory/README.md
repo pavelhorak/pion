@@ -28,3 +28,22 @@ idle RSS (56.7 MB, Redis 6.6 MB) is the other half of what a `--maxmemory`
 limit sees, and this change does not address it. Pion's idle reads either 56.7
 or 60.7 MB from one start to the next, with the same data delta
 (`pion_pointer_slots_100000x200*`).
+
+## Instructions and cycles per command
+
+The server's retired instructions and cycles, read with `proc_pid_rusage`
+around a fixed number of requests from `redis-benchmark` (`-c 50`), less the
+idle rate over the same time; `-w 1 --no-wal`, keys `key:%012d` with 3-byte
+values. In these logs `pion-server-ps2` is this change, `pion-server-seed2`
+is main's keyspace code (built from #117's branch) and `pion-server.sh` is the
+1.0.9 release tarball.
+
+- `instructions_one_key.txt`: one loaded key, `-r 1`, 1M requests, median of
+  3. GET (a hit): 1.0.9 3,157, main 3,108, this change 3,170. SET 3,606 /
+  3,589 / 3,451; MSET 6,794 / 6,755 / 6,563.
+- `get_5m_keys_*.txt`: 5,000,000 keys, GET `-r 5000000`. At `-P 100` with 4
+  client threads (20M requests, 3 runs a start), cycles per GET: 1.0.9
+  264–266, main 261–266, this change 284–288. Requests a second read ~10.0M
+  for all three: the client's ceiling, not the server's. At `-P 10` and
+  `-P 50` (one client thread) cycles per GET are 1,316–1,342 and 359–367 on
+  main, 1,362–1,388 and 387–389 on this change.

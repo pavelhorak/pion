@@ -1,0 +1,16 @@
+# pion-server.sh round 1: 5,000,000 keys loaded in 1 s
+pion-server.sh     P=100    9,995,003 rps      636 instr/GET      264 cycles/GET
+pion-server.sh     P=100    9,995,003 rps      637 instr/GET      264 cycles/GET
+pion-server.sh     P=100    9,990,010 rps      636 instr/GET      264 cycles/GET
+# pion-server-ps2 round 1: 5,000,000 keys loaded in 2 s
+pion-server-ps2    P=100    9,995,003 rps      653 instr/GET      287 cycles/GET
+pion-server-ps2    P=100    9,985,022 rps      652 instr/GET      284 cycles/GET
+pion-server-ps2    P=100    9,990,010 rps      652 instr/GET      285 cycles/GET
+# pion-server.sh round 1: 5,000,000 keys loaded in 1 s
+pion-server.sh     P=100    9,985,022 rps      637 instr/GET      266 cycles/GET
+pion-server.sh     P=100   11,422,044 rps      634 instr/GET      264 cycles/GET
+pion-server.sh     P=100    9,990,010 rps      637 instr/GET      266 cycles/GET
+
+# medians
+pion-server-ps2    P=100 rps    9,990,010  instr     652  cycles     285  (n=3, rps 10.00M 9.99M 9.99M)
+pion-server.sh     P=100 rps    9,995,003  instr     637  cycles     264  (n=6, rps 10.00M 10.00M 9.99M 9.99M 11.42M 9.99M)

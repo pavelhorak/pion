@@ -31,9 +31,12 @@ enumerated — there were roughly 1,100 of them.
   where the table doubles. With 3-byte values, 200,000 keys take 6.4 MB (Redis
   14.2 MB). Idle RSS read 56.7 MB in 8 of 10 starts, against 60.7 MB for
   1.0.9, because an empty table's pages are never touched (the other two read
-  60.7 MB too). Against 1.0.9, SET takes 2.4–4.2% fewer instructions and MSET
-  2.9–3.4% fewer; GET takes 1.1% fewer on one key and 1.1% more over 225,000
-  keys. `benchmarks/reproducers/memory_per_key.py` measures it, and
+  60.7 MB too). Against 1.0.9, SET takes 2.4–4.3% fewer instructions and MSET
+  2.9–3.4% fewer; GET takes 0.4% more on one key and 1.1% more over 225,000
+  keys. Over 5,000,000 keys at a 100-deep pipeline, the server spends 8% more
+  cycles on a GET than 1.0.9 does (285 against 264); throughput read the same
+  on both, because the benchmark client topped out at 10 million GETs a second.
+  `benchmarks/reproducers/memory_per_key.py` measures it, and
   [`benchmarks/results/2026-11-09-mac-m4-memory/`](benchmarks/results/2026-11-09-mac-m4-memory/README.md)
   has the runs.
 - **Mojo 1.2.0.** The toolchain moved from 1.1.0, with the closed vector library
