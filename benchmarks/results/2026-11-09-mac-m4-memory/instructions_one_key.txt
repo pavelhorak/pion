@@ -1,0 +1,12 @@
+pion-server-ps2 nk=1 get       instr/op median   3169.6  all 3168.2 3169.6 3176.5
+pion-server-ps2 nk=1 set       instr/op median   3450.8  all 3450.0 3450.8 3453.5
+pion-server-ps2 nk=1 mset      instr/op median   6562.9  all 6556.4 6562.9 6593.4
+pion-server-ps2 nk=1 miss_get  instr/op median   3079.8  all 3077.2 3079.8 3086.1
+pion-server-seed2 nk=1 get       instr/op median   3108.2  all 3106.0 3108.2 3109.0
+pion-server-seed2 nk=1 set       instr/op median   3588.6  all 3587.8 3588.6 3603.0
+pion-server-seed2 nk=1 mset      instr/op median   6754.6  all 6744.0 6754.6 6761.2
+pion-server-seed2 nk=1 miss_get  instr/op median   3067.9  all 3058.9 3067.9 3080.9
+pion-server.sh nk=1 get       instr/op median   3157.2  all 3151.4 3157.2 3158.7
+pion-server.sh nk=1 set       instr/op median   3606.4  all 3599.1 3606.4 3610.7
+pion-server.sh nk=1 mset      instr/op median   6794.0  all 6792.3 6794.0 6802.1
+pion-server.sh nk=1 miss_get  instr/op median   3116.8  all 3105.3 3116.8 3123.2
