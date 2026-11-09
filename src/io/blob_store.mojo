@@ -318,7 +318,7 @@ struct BlobStore(Movable):
                 var m = shard[].metadata[unsafe_offset=i]
                 if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
                     continue
-                var val = shard[].values[unsafe_offset=i]
+                var val = shard[].value_at(i)
                 if val.is_blob_backed():
                     live += UInt64(_align_up(val.string_len(), BLOB_ALIGN))
                     out_records += 1
@@ -377,7 +377,7 @@ struct BlobStore(Movable):
                 var m = shard[].metadata[unsafe_offset=i]
                 if m == SlabHashMap.EMPTY or m == SlabHashMap.DELETED:
                     continue
-                var val = shard[].values[unsafe_offset=i]
+                var val = shard[].value_at(i)
                 if not val.is_blob_backed():
                     continue
                 var vlen = val.string_len()
@@ -396,7 +396,7 @@ struct BlobStore(Movable):
                     return False
                 var np = fresh.ptr_at(nseg, noff, vlen)
                 if is_not_null(np):
-                    shard[].values[unsafe_offset=i] = GenericValue.from_blob_ptr(np, vlen)
+                    shard[].set_value_at(i, GenericValue.from_blob_ptr(np, vlen))
                     moved += 1
 
         fresh.sync()

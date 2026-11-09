@@ -1,0 +1,69 @@
+===== pion : 100,000 keys x 200 B, load 0.1s
+RSS idle 60.7 MB  loaded 84.0 MB  delta 23.3 MB = 244 B/key
+  used_memory: idle 63913984 loaded 88064000
+  used_memory_rss: idle 63913984 loaded 88064000
+--- vmmap idle
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K      16K      16K       0K       0K       0K       0K        1 
+MALLOC guard page                 3952K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                    784K     272K     272K       0K       0K       0K       0K        4 
+MALLOC_NANO metadata                32K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                      16.0M     992K     992K       0K       0K       0K       0K        4         see MALLOC ZONE table below
+MALLOC_TINY                       4096K     112K     112K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+SBRK (reserved)                   4096K       0K       0K       0K       0K       0K       0K        1         reserved VM address space (unallocated)
+STACK GUARD                       56.1M       0K       0K       0K       0K       0K       0K        6 
+Stack                             56.1M     176K     176K       0K       0K       0K       0K        6 
+VM_ALLOCATE                      230.7M    50.1M    50.1M       0K       0K       0K       0K       28 
+VM_ALLOCATE (reserved)             1.3G       0K       0K       0K       0K       0K       0K        9         reserved VM address space (unallocated)
+__AUTH                            1423K     863K      22K       0K       0K       0K       0K      162 
+__AUTH_CONST                      20.3M    10.1M       0K       0K       0K       0K       0K      361 
+__CTF                               824      824       0K       0K       0K       0K       0K        1 
+__DATA                            8494K    4317K    1914K       0K       0K       0K       0K      321 
+__DATA_CONST                      16.6M    9043K      64K       0K       0K       0K       0K      363 
+__DATA_DIRTY                      1383K     969K     396K       0K       0K       0K       0K      299 
+__FONT_DATA                        2352     2352       0K       0K       0K       0K       0K        1 
+__LINKEDIT                       573.0M    19.6M       0K       0K       0K       0K       0K        5 
+__OBJC_RO                         79.2M    48.9M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2199K      39K       0K       0K       0K       0K        1 
+__TEXT                           369.8M   170.1M       0K       0K       0K       0K       0K      372 
+__TPRO_CONST                       128K     128K      48K       0K       0K       0K       0K        2 
+page table in kernel               417K     417K     417K       0K       0K       0K       0K        1 
+shared memory                       32K      32K      32K       0K       0K       0K       0K        1 
+unused but dirty shlib __DATA      124K     124K     124K       0K       0K       0K       0K       58 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                              2.8G   318.0M    54.6M       0K       0K       0K       0K     2015 
+--- vmmap loaded
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K      16K      16K       0K       0K       0K       0K        1 
+MALLOC guard page                 3952K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                    784K     272K     272K       0K       0K       0K       0K        4 
+MALLOC_NANO metadata                32K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                      16.0M     992K     992K       0K       0K       0K       0K        4         see MALLOC ZONE table below
+MALLOC_TINY                       4096K     112K     112K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+SBRK (reserved)                   4096K       0K       0K       0K       0K       0K       0K        1         reserved VM address space (unallocated)
+STACK GUARD                       56.1M       0K       0K       0K       0K       0K       0K        6 
+Stack                             56.1M     176K     176K       0K       0K       0K       0K        6 
+VM_ALLOCATE                      253.7M    73.0M    73.0M       0K       0K       0K       0K       51 
+VM_ALLOCATE (reserved)             1.3G       0K       0K       0K       0K       0K       0K        9         reserved VM address space (unallocated)
+__AUTH                            1423K     863K      22K       0K       0K       0K       0K      162 
+__AUTH_CONST                      20.3M    10.1M       0K       0K       0K       0K       0K      361 
+__CTF                               824      824       0K       0K       0K       0K       0K        1 
+__DATA                            8494K    4317K    1914K       0K       0K       0K       0K      321 
+__DATA_CONST                      16.6M    9043K      64K       0K       0K       0K       0K      363 
+__DATA_DIRTY                      1383K     969K     396K       0K       0K       0K       0K      299 
+__FONT_DATA                        2352     2352       0K       0K       0K       0K       0K        1 
+__LINKEDIT                       573.0M    19.6M       0K       0K       0K       0K       0K        5 
+__OBJC_RO                         79.2M    48.9M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2199K      39K       0K       0K       0K       0K        1 
+__TEXT                           369.8M   170.1M       0K       0K       0K       0K       0K      372 
+__TPRO_CONST                       128K     128K      48K       0K       0K       0K       0K        2 
+page table in kernel               417K     417K     417K       0K       0K       0K       0K        1 
+shared memory                       32K      32K      32K       0K       0K       0K       0K        1 
+unused but dirty shlib __DATA      124K     124K     124K       0K       0K       0K       0K       58 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                              2.8G   340.9M    77.5M       0K       0K       0K       0K     2038 
+

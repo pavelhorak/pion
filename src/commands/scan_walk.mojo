@@ -27,7 +27,7 @@ Empty slots are skipped 16 at a time (SIMD), so walking a sparse table to its
 end is cheap. A collection of at most SCAN_SMALL entries comes back whole.
 """
 from std.collections import List
-from src.common.hash_map import SlabHashMap, StripedHashMap
+from src.common.hash_map import SlabHashMap, StripedHashMap, KeyShard
 from src.common.utils import format_int_to_buf, int_string_len
 from src.network.response_writer import ResponseWriter
 
@@ -39,6 +39,22 @@ def scan_slots(m: Pointer[SlabHashMap, MutUntrackedOrigin], start: Int, want: In
     """Append to `out` the live slots of `m` from `start`, until `want` are
     found or the table ends. Returns the slot to resume from: `m[].capacity`
     once the table is done. Empty slots are skipped in SIMD strides."""
+    var cap = m[].capacity
+    var s = start
+    var found = 0
+    while s < cap and found < want:
+        var nxt = m[].next_live(s, cap)
+        if nxt >= cap:
+            return cap
+        out.append(nxt)
+        found += 1
+        s = nxt + 1
+    return s
+
+
+def scan_slots(m: Pointer[KeyShard, MutUntrackedOrigin], start: Int, want: Int,
+               mut out: List[Int]) -> Int:
+    """scan_slots over a keyspace shard."""
     var cap = m[].capacity
     var s = start
     var found = 0

@@ -208,7 +208,7 @@ def apply_wal_entries(
 
         if cmd_id == 1:  # SET — the key borrows the drain buffer; set() copies on insert
             keyspace[].set(GenericValue.borrow(key_ptr, key_len),
-                           GenericValue.from_ptr(buf.unsafe_offset(val_off), val_len))
+                           GenericValue.borrow(buf.unsafe_offset(val_off), val_len))
         elif cmd_id == 2:  # DEL
             _ = remove_and_free(keyspace, GenericValue.borrow(key_ptr, key_len))   # gh #394
         elif cmd_id == 250:  # FULLRESYNC: drop everything, the snapshot follows

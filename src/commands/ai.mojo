@@ -593,6 +593,7 @@ def handle_ai_memory(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, nu
                     var list_ptr = val.as_list().unsafe_bitcast[SlabList]()
                     var entry_v = GenericValue.from_string(entry)
                     list_ptr[].lpush(entry_v)
+                list_key_v.free_str_payload()    # the keyspace keeps a copy of a key
                 # 2) If embeddings enabled, add to semantic index (long-term),
                 # as this session's entry (#29).
                 if scache.enabled and scache.count < CACHE_MAX_ENTRIES:

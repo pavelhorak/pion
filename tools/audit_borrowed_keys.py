@@ -49,6 +49,7 @@ MAP_METHODS = {
     "get", "get_value_ptr", "get_with_hash", "remove_generic",
     "remove_generic_taking", "remove_generic_with_hash",
     "remove_generic_with_hash_taking", "set", "set_with_hash", "set_str_reuse",
+    "set_str_with_hash",              # KeyShard / StripedHashMap: MSET's store
     # gh #392 per-field TTL methods on SlabHashMap / StripedHashMap: map calls inside
     "field_deadline", "set_field_deadline", "clear_field_deadline", "expire_field",
     "note_field_ttl",

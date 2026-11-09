@@ -19,17 +19,23 @@ enumerated — there were roughly 1,100 of them.
 
 ### Changed
 
-- **A key costs less memory.** Hash tables (the keyspace, and every hash, set
-  and TTL table) now grow past 7/8 full instead of 70%, the usual Swiss-table
-  limit. A table's arrays of 256 KiB or more are mapped from the OS and unmapped
-  when the table grows or goes, instead of staying with the allocator. Measured
-  on macOS with 200-byte values, RSS for the data (loaded less idle): 200,000
-  keys 78.4 → 57.2 MB (Redis 8.10: 54.2 MB), 400,000 keys 147.5 → 113.8 MB
-  (108.3 MB). Just after a table doubles it is still up to a quarter over
-  Redis: 154.7 MB at 460,000 keys, against 123.5 MB. Idle RSS is 4 MB lower,
-  because an empty table's pages are never touched. At the fullest table, a
-  GET miss costs 2.1% more instructions and SET and MSET 1.3–1.5% more.
-  `benchmarks/reproducers/memory_per_key.py` measures it.
+- **A key costs less memory than in Redis.** A keyspace slot is 8 bytes, the
+  address of one allocation that holds the key and, for a string, its value; it
+  was a 32-byte key and a 32-byte value. Hash tables (the keyspace, and every
+  hash, set and TTL table) also grow past 7/8 full instead of 70%, and a table's
+  arrays of 256 KiB or more are mapped from the OS and unmapped when the table
+  grows or goes. Measured on macOS with 200-byte values, RSS for the data
+  (loaded less idle): 200,000 keys 76.4 MB on 1.0.9, 46.4 MB now, 54.2 MB on
+  Redis 8.10; 460,000 keys 155.0 → 109.2 MB (Redis 123.5 MB). From 100,000 to
+  460,000 keys a key costs 241–249 bytes, against Redis's 281–292, with no step
+  where the table doubles. With 3-byte values, 200,000 keys take 6.4 MB (Redis
+  14.2 MB). Idle RSS read 56.7 MB in 8 of 10 starts, against 60.7 MB for
+  1.0.9, because an empty table's pages are never touched (the other two read
+  60.7 MB too). Against 1.0.9, SET takes 2.4–4.2% fewer instructions and MSET
+  2.9–3.4% fewer; GET takes 1.1% fewer on one key and 1.1% more over 225,000
+  keys. `benchmarks/reproducers/memory_per_key.py` measures it, and
+  [`benchmarks/results/2026-11-09-mac-m4-memory/`](benchmarks/results/2026-11-09-mac-m4-memory/README.md)
+  has the runs.
 - **Mojo 1.2.0.** The toolchain moved from 1.1.0, with the closed vector library
   rebuilt on all three platforms. The engine needed one change: Mojo 1.2 refuses
   two signatures for one C function, and a Linux-only `write()` call declared a

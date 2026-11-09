@@ -1,22 +1,20 @@
 """MEMORY USAGE's estimate of what one key holds, which eviction also steers by."""
 from src.common.value import GenericValue, ValueType
-from src.common.hash_map import SlabHashMap
+from src.common.hash_map import SlabHashMap, ks_key_bytes
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
 from src.common.hll import HLL_REGISTERS
 
 
 def memory_usage(v: GenericValue, key_len: Int, samples: Int) -> Int64:
-    """MEMORY USAGE's estimate: the slot (metadata byte, 32-byte key and
-    value), the key's bytes when they do not fit in it, and the value's own
-    allocations: a string's bytes; a hash's, set's or sorted set's table plus
-    its elements' bytes, sampled as Redis samples them (`samples` elements, 0
-    all) and scaled to the whole; a list's elements."""
-    var total = Int64(65)
-    if key_len > 23:
-        total += Int64(key_len)
+    """MEMORY USAGE's estimate: the key's slot and entry (ks_key_bytes: a
+    string stored in the entry is counted there), and the value's own
+    allocations: a heap string's bytes; a hash's, set's or sorted set's table
+    plus its elements' bytes, sampled as Redis samples them (`samples`
+    elements, 0 all) and scaled to the whole; a list's elements."""
+    var total = Int64(ks_key_bytes(key_len, v))
     var t = v.type.value
-    if t == ValueType.STRING or t == ValueType.BITMAP:
+    if (t == ValueType.STRING and not v.is_borrowed()) or t == ValueType.BITMAP:
         total += Int64(v.string_len())
     elif t == ValueType.HLL:
         total += Int64(HLL_REGISTERS)

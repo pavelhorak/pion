@@ -44,7 +44,7 @@ from std.memory import alloc
 from src.common.ptr import is_null, is_not_null
 from src.common.value import GenericValue, ValueType
 from src.common.hash_map import (
-    SlabHashMap, StripedHashMap, EvictState, EvictPoolEntry, evict_tag,
+    SlabHashMap, StripedHashMap, KeyShard, EvictState, EvictPoolEntry, evict_tag,
     POLICY_NOEVICTION, POLICY_ALLKEYS_LRU, POLICY_VOLATILE_LRU, POLICY_ALLKEYS_LFU,
     POLICY_VOLATILE_LFU, POLICY_ALLKEYS_RANDOM, POLICY_VOLATILE_RANDOM, POLICY_VOLATILE_TTL,
     LRU_SHIFT, LRU_MASK, EVICT_TABLE_FILL, evict_policy_name,
@@ -63,8 +63,9 @@ comptime EVICT_POOL_SIZE = 16
 # What it leaves, the next tick does.
 comptime EVICT_MAX_PER_TICK = 16384
 comptime SIZE_SAMPLES_PER_TICK = 32
-# What a slot of a keyspace table costs: metadata, key, value, access entry.
-comptime SLOT_BYTES = 69
+# What a slot costs, its access stamp included.
+comptime SLOT_BYTES = 69          # a SlabHashMap slot (the TTL map's) and its access stamp
+comptime KEY_SLOT_BYTES = 13      # a keyspace slot (KeyShard), its metadata byte and stamp
 
 
 def evict_policy_from_name(ptr: Pointer[UInt8, MutUntrackedOrigin], length: Int) -> Int:
@@ -149,6 +150,22 @@ def _random_live(m: Pointer[SlabHashMap, MutUntrackedOrigin],
     return slot if slot < m[].capacity else -1
 
 
+def _random_live(m: Pointer[KeyShard, MutUntrackedOrigin],
+                 st: Pointer[EvictState, MutUntrackedOrigin]) -> Int:
+    """_random_live over a keyspace shard."""
+    if m[].size == 0:
+        return -1
+    for _ in range(4):
+        var start = Int(st[].next_rand() & UInt64(m[].capacity - 1))
+        var limit = start + 256
+        var bound = limit if limit < m[].capacity else m[].capacity
+        var slot = m[].next_live(start, limit)
+        if slot < bound:
+            return slot
+    var slot = m[].next_live(0, m[].capacity)
+    return slot if slot < m[].capacity else -1
+
+
 def _random_key_slot(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
                      st: Pointer[EvictState, MutUntrackedOrigin]) -> Int:
     """A random key: `shard << 48 | slot`, -1 when the keyspace is empty."""
@@ -185,7 +202,7 @@ def _remove(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
     var table = m[].access_table()
     if Int(table) != 0:
         table[unsafe_offset=slot] = 0
-    var key = m[].keys[unsafe_offset=slot]
+    var key = m[].key_at(slot)
     var h = UInt64(key.__hash__())
     versions[unsafe_offset=TransactionState.key_slot_from_hash(h)] += 1
     # `key` is the map's own: expire_key is done with it when the removal frees
@@ -199,11 +216,11 @@ def _remove(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
 def _score(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
            tm: Pointer[SlabHashMap, MutUntrackedOrigin],
            st: Pointer[EvictState, MutUntrackedOrigin],
-           m: Pointer[SlabHashMap, MutUntrackedOrigin],
+           m: Pointer[KeyShard, MutUntrackedOrigin],
            slot: Int, h: UInt64, now_ns: Int64) -> Int64:
     """How good a victim: higher is better."""
     if st[].policy == POLICY_VOLATILE_TTL:
-        var dv = tm[].get_with_hash(m[].keys[unsafe_offset=slot], h)
+        var dv = tm[].get_with_hash(m[].key_at(slot), h)
         if dv.type.value == ValueType.NONE:
             return Int64.MIN                 # its TTL went since it was sampled
         return Int64.MAX - Int64(dv.as_int())
@@ -261,7 +278,7 @@ def _evict_one(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
             var s = at >> 48
             var slot = at & 0xFFFFFFFFFFFF
             var m = ks[].shards.unsafe_offset(s)
-            var h = UInt64(m[].keys[unsafe_offset=slot].__hash__())
+            var h = UInt64(m[].key_at(slot).__hash__())
             _pool_add(st, s, slot, evict_tag(h), _score(ks, tm, st, m, slot, h, now_ns))
         # The best candidate that is still what it was.
         while st[].pool_n > 0:
@@ -276,7 +293,7 @@ def _evict_one(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
             var m = ks[].shards.unsafe_offset(c.shard)
             if c.slot >= m[].capacity or m[].metadata[unsafe_offset=c.slot] >= 128:
                 continue
-            var h = UInt64(m[].keys[unsafe_offset=c.slot].__hash__())
+            var h = UInt64(m[].key_at(c.slot).__hash__())
             if evict_tag(h) != c.tag:
                 continue
             # Read since it was sampled: a pool entry can be old, and the score
@@ -299,8 +316,8 @@ def _sample_sizes(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
             return
         var m = ks[].shards.unsafe_offset(at >> 48)
         var slot = at & 0xFFFFFFFFFFFF
-        var b = Float64(Int(memory_usage(m[].values[unsafe_offset=slot],
-                                         m[].keys[unsafe_offset=slot].string_len(), 5)))
+        var b = Float64(Int(memory_usage(m[].value_at(slot),
+                                         m[].key_at(slot).string_len(), 5)))
         if st[].avg_bytes == 0.0:
             st[].avg_bytes = b
         else:
@@ -404,7 +421,7 @@ def _steer(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
         return
     for i in range(8):
         var m = ks[].shards.unsafe_offset(i)
-        m[].set_may_grow(ctl + m[].capacity * SLOT_BYTES <= limit)
+        m[].set_may_grow(ctl + m[].capacity * KEY_SLOT_BYTES <= limit)
     if is_not_null(tm):
         tm[].set_may_grow(ctl + tm[].capacity * SLOT_BYTES <= limit)
     if hold:

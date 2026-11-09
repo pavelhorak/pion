@@ -8,6 +8,7 @@ that asserts it, or the source line that defines it).
 
 | Directory | What | Machine |
 |---|---|---|
+| [`2026-11-09-mac-m4-memory/`](2026-11-09-mac-m4-memory/README.md) | What a key costs in RSS: the keyspace's pointer slots against main and Redis, 100,000 to 460,000 keys | M4 Mac mini |
 | [`2026-10-19-mac-m4-drop-in/`](2026-10-19-mac-m4-drop-in/README.md) | Vector search without `FT.OPTIMIZE`: a stock client against today's path, the streaming case, INT8 score error | M4 Mac mini |
 | [`2026-10-18-linux-epyc-8124p/vector_field/`](2026-10-18-linux-epyc-8124p/vector_field/README.md) | Vector search: Pion against RediSearch (HNSW FP32, SVS 8-bit) and valkey-search (HNSW FP16, FP32), 50K and 500K, matched recall, time until searchable, streaming | AMD EPYC 8124P |
 | [`2026-10-12-linux-epyc-8124p/`](2026-10-12-linux-epyc-8124p/README.md) | One keyspace: Pion `--io-threads` against Redis `io-threads`, throughput and durable | AMD EPYC 8124P |
