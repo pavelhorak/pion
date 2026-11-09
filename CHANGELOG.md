@@ -4,7 +4,10 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.1.0] — 2026-11-09
+
+Keys can be evicted under `--maxmemory`, and on macOS a key now takes less memory
+than in Redis.
 
 ### Added
 
