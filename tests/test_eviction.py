@@ -294,10 +294,13 @@ def volatile():
         check(f"{policy}: keys were evicted", evicted(c) > 0, str(evicted(c)))
         alive = sum(1 for r in c.many([("EXISTS", f"keep:{i}") for i in range(20_000)]) if r == 1)
         check(f"{policy}: a key without a TTL is never evicted", alive == 20_000, f"{alive}/20000")
-        keys = int(c("DBSIZE"))
+        # Both counts from one INFO line. Eviction goes on for a moment after
+        # the writes stop (several hundred keys between two commands), so a
+        # DBSIZE and a later INFO could see different keyspaces.
+        db0 = info(c, "db0")
         ev = evicted(c)
-        expires = info(c, "db0")
-        n_exp = int(expires.split("expires=")[1].split(",")[0]) if expires else -1
+        keys = int(db0.split("keys=")[1].split(",")[0]) if db0 else -1
+        n_exp = int(db0.split("expires=")[1].split(",")[0]) if db0 else -1
         check(f"{policy}: evicting a key drops its TTL entry", n_exp == keys - 20_000,
               f"expires={n_exp} keys={keys} evicted={ev}")
         s.stop()
