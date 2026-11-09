@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Pion — redis-compatible key-value store in Mojo</title>
-<meta name="description" content="Pion keeps your model's prefill: the prompt's K/V tensors live in the engine, so the next request on the same prefix starts at the first new token — from another process, another model object, or after a restart. Redis-wire-compatible, one binary, written in Mojo.">
+<title>Pion — Redis-compatible key-value store in Mojo</title>
+<meta name="description" content="Pion is a key-value store that speaks the Redis protocol: one small Mojo binary that Redis clients talk to unmodified, with a write-ahead log, Redis's eviction policies, vector search over FT.*, and a prompt cache for mlx-lm.">
 <link rel="canonical" href="https://pion.pavelhorak.com/">
 <link rel="icon" href="assets/pion-icon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Pion — redis-compatible key-value store in Mojo">
-<meta property="og:description" content="Your model re-reads the same prompt on every request. Pion keeps the prefill — across processes, across restarts, on the Redis wire.">
+<meta property="og:title" content="Pion — Redis-compatible key-value store in Mojo">
+<meta property="og:description" content="Your Redis clients, on a durable store in one small binary: every write logged before it is acknowledged, Redis's eviction policies, vector search and a prompt cache in the same server.">
 <meta property="og:url" content="https://pion.pavelhorak.com/">
 <meta property="og:image" content="https://pion.pavelhorak.com/assets/og.png">
 <meta name="twitter:card" content="summary_large_image">

@@ -233,15 +233,16 @@ def main():
 
     # Until 2026-10-07 the README had a "## Why Pion" section after the four
     # lines and a "### Shared KV Cache" feature entry repeating them; the
-    # README now opens with "## What works" and its first item is the cache.
+    # README now opens with "## What works", and one of its items is the cache
+    # (item 1 until 2026-11-09, item 2 since the KV store became the headline).
     top_blocks = re.findall(r"```python\n(.*?)```", text.split("## Quick Start")[0], re.S)
     check("a Python snippet exists above ## Quick Start", bool(top_blocks))
-    feature = text.split("### 1. A prompt cache for mlx-lm")[1].split("\n### ")[0] \
-        if "### 1. A prompt cache for mlx-lm" in text else ""
-    check("the README's first supported item is the prompt cache", bool(feature))
+    m = re.search(r"^### \d+\. A prompt cache for mlx-lm.*?(?=^### |\Z)", text, re.S | re.M)
+    feature = m.group(0) if m else ""
+    check("the README's What works lists the prompt cache", bool(feature))
     copies = {
         "README.md (top)": top_blocks[0] if top_blocks else "",
-        "README.md (What works, item 1)": feature,
+        "README.md (What works, prompt cache item)": feature,
         "pion-vllm-mlx/pion_vllm_mlx/__init__.py": _read("pion-vllm-mlx/pion_vllm_mlx/__init__.py"),
         "pion-vllm-mlx/README.md": _read("pion-vllm-mlx/README.md"),
     }
