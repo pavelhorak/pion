@@ -395,6 +395,24 @@ ships no Python, so features that need an embedding model need a host install.
 Building the image yourself, bind mounts and io_uring:
 [`doc/operations.md`](doc/operations.md) §5.
 
+### pixi (Modular's community channel)
+
+macOS arm64, Linux x86-64 and Linux arm64, from Pion 1.1.0:
+
+```bash
+pixi init pion-demo -c conda-forge -c https://conda.modular.com/max \
+  -c https://prefix.dev/modular-community
+cd pion-demo
+pixi add pion
+pixi run pion-server           # port 1974
+```
+
+The channel carries no closed binaries, so this is the open build: `INFO`
+reports `pion_vector:reference (open)`, and vector search at 1536 dims is slower
+by the amounts given at the top of this README. The Mojo libraries
+(`pion-resp`, `pion-slab`, `pion-simd`) install the same way:
+[`packages/README.md`](packages/README.md).
+
 ### From source
 
 <!-- --8<-- [start:build-from-source] -->
