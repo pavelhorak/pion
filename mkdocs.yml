@@ -5,7 +5,7 @@
 # generated command table, the package READMEs, the root files). Nothing
 # generated is committed. Build: see website/README.md.
 site_name: Pion
-site_description: Pion — memory engine for AI inference. Documentation.
+site_description: Pion — Redis-compatible key-value store in Mojo. Documentation.
 site_url: https://pion.pavelhorak.com/docs/
 repo_url: https://github.com/pavelhorak/pion
 repo_name: pavelhorak/pion

@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Pion — memory engine for AI inference</title>
-<meta name="description" content="Pion keeps your model's prefill: the prompt's K/V tensors live in the engine, so the next request on the same prefix starts at the first new token — from another process, another model object, or after a restart. Redis-wire-compatible, one binary, written in Mojo.">
+<title>Pion — Redis-compatible key-value store in Mojo</title>
+<meta name="description" content="Pion is a key-value store that speaks the Redis protocol: one small Mojo binary that Redis clients talk to unmodified, with a write-ahead log, Redis's eviction policies, vector search over FT.*, and a prompt cache for mlx-lm.">
 <link rel="canonical" href="https://pion.pavelhorak.com/">
 <link rel="icon" href="assets/pion-icon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Pion — memory engine for AI inference">
-<meta property="og:description" content="Your model re-reads the same prompt on every request. Pion keeps the prefill — across processes, across restarts, on the Redis wire.">
+<meta property="og:title" content="Pion — Redis-compatible key-value store in Mojo">
+<meta property="og:description" content="Your Redis clients, on a durable store in one small binary: every write logged before it is acknowledged, Redis's eviction policies, vector search and a prompt cache in the same server.">
 <meta property="og:url" content="https://pion.pavelhorak.com/">
 <meta property="og:image" content="https://pion.pavelhorak.com/assets/og.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -175,7 +175,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
   <header class="topnav">
     <a class="brand" href="/" aria-label="Pion home">
       <svg viewBox="143.2 105.4 521.2 521.2" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="13" stroke-linecap="round" stroke-dasharray=".1 23"><path d="M345.6 310.4Q307.7 254.5 247.4 224"/><path d="M484.3 312.2Q526.2 253.2 591.9 223.3"/><path d="M315.6 366.1Q257.9 355.9 199.5 361"/><path d="M511.7 380Q560.9 375.2 608.3 389.6"/><path d="M352 435.3Q306.3 459.3 284.5 506"/><path d="M482.4 430.2Q511.5 467.9 552.7 491.6"/></g><g style="fill:var(--surface,#fff);stroke:var(--accent-bright,#05A1D8)" stroke-width="8.5"><circle cx="224.2" cy="203.6" r="17"/><circle cx="615.7" cy="203.6" r="17"/><circle cx="168.7" cy="359.6" r="17"/><circle cx="639" cy="392.6" r="17"/><circle cx="263.2" cy="528.4" r="17"/><circle cx="576" cy="511.9" r="17"/></g><use href="#pion-drum" transform="translate(331.5 302.7) scale(0.958)"/></svg>
-      <span class="word">Pion</span><span class="cat">memory engine for AI inference</span>
+      <span class="word">Pion</span><span class="cat">Redis-compatible key-value store</span>
     </a>
     <nav aria-label="Primary">
       <a href="/docs/">Docs</a><a href="/docs/guides/examples/">Examples</a><a href="#numbers">Numbers</a><a href="/docs/project/changelog/">Changelog</a><a href="https://github.com/pavelhorak/pion">GitHub</a>
@@ -186,7 +186,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
   <section class="hero">
     <div>
       <p class="eyebrow">{{version}} · macOS Apple Silicon + Linux</p>
-      <h1>Your model re-reads the same prompt on every request.</h1>
+      <h1>Your Redis clients, on a durable store in one small binary.</h1>
       <p class="lede">{{hero_lede}}</p>
       <div class="cta">
         <a class="btn btn-primary" href="#install">Get started</a>

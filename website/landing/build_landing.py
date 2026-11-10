@@ -78,8 +78,7 @@ def build(out_dir: Path) -> Path:
 
     # ── hero ──
     pitch = S.region(readme, "pitch").replace("\n", " ").strip()
-    # The hero H1 is the problem ("Your model re-reads the same prompt on every
-    # request."); the README pitch region is the answer under it.
+    # The hero H1 is the claim; the README pitch region says what is behind it.
     hero_lede = inline(pitch)
 
     # ── install tabs ──
