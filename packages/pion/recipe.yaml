@@ -1,13 +1,12 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/prefix-dev/recipe-format/main/schema.json
-# Draft recipe for the modular-community channel (recipes/pion there). Built from
-# source only: the channel carries no closed binaries. Not submitted. Set version,
-# commit and sha256 from the release tag.
+# Built from source only, with Pion's open reference vector kernels: this channel
+# carries no closed binaries.
 
 context:
   version: "1.1.0"
   # The commit the v${{ version }} tag points at, stamped into the binary as the
   # release binaries stamp it.
-  commit: "0000000"
+  commit: "8221878"
   mojo_version: "1.2.0"
 
 package:
@@ -16,7 +15,7 @@ package:
 
 source:
   url: https://github.com/pavelhorak/pion/archive/refs/tags/v${{ version }}.tar.gz
-  sha256: 0000000000000000000000000000000000000000000000000000000000000000
+  sha256: e71259ccb38f5370b6cdaae70c8cab017a4a3a6876e56fe63facb99d7bf83116
 
 build:
   number: 0
