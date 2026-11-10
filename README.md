@@ -659,10 +659,11 @@ removed, and each carries an **Experimental** banner on its own page.
 | | Pion |
 |---|---|
 | Category | **Redis-compatible key-value store** |
-| Headline | **Shared KV Cache** — at a 2K prefix on Llama-3.2-1B-4bit, first token in 69.0 ms from a separate process over the wire and 46.2 ms in the same process, against 1,193 ms cold and 37.0 ms from mlx-lm's own prompt-cache file; BLEU 1.000 cross-instance |
+| Headline | **Your Redis clients, on a durable store in one small binary** — every write goes to a write-ahead log before it is acknowledged, and `--maxmemory` with Redis's eviction policies makes it a cache |
 | Language | Mojo (SIMD-native, no GC) |
 | Protocol | RESP2 / RESP3 (Redis wire-compatible) |
 | KV throughput | **2.97M ops/sec** on one keyspace at P=10 with `--io-threads 8` (Redis 8.10.2 with `io-threads 8`: 1.66M) · across all 16 cores, 16 independent keyspaces each side, Redis leads: 7.18M to 6.10M at P=10 — [2026-10-12](benchmarks/results/2026-10-12-linux-epyc-8124p/README.md), [2026-10-06](benchmarks/results/2026-10-06-linux-epyc-8124p/README.md) |
+| Prompt cache (mlx-lm) | at a 2K prefix on Llama-3.2-1B-4bit, first token in 69.0 ms from a separate process over the wire and 46.2 ms in the same process, against 1,193 ms cold and 37.0 ms from mlx-lm's own prompt-cache file; BLEU 1.000 cross-instance |
 | Vector QPS | 7,339 at 10 clients on Linux at recall 0.960, 8,544 at 0.939 (Redis 8.10.2 vector sets: 8,039 at 0.920); 8,729 on an M4 Mac mini |
 | Recall@100 | 0.960 at that QPS (Redis vector sets: 0.920); INT8, ef=150 |
 | P99 latency | 1.4 ms on Linux, 0.6 ms on an M4 Mac mini (vector search, one client) |

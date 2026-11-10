@@ -29,7 +29,7 @@ note = "14 ms = 45.0 - 31.2 at 34 tokens"
 
 [[claim]]
 file = "README.md"
-where = "| Headline |"
+where = "| Prompt cache (mlx-lm) |"
 numbers = ["1,193 ms", "46.2 ms", "26×", "69.0 ms", "17×", "1.000", "37.0 ms"]
 kind = "result"
 evidence = ["benchmarks/reproducers/results/file_cache_ttft_llama_2049_2026_10_07.json", "benchmarks/reproducers/results/cross_process_ttft_2026_10_07.json", "benchmarks/results/2026-10-07-mac-m4/kv_prefix_cross_instance.txt"]
