@@ -114,6 +114,7 @@ pre code{background:transparent;padding:0;font-size:inherit}
 .install-note blockquote{margin:0;padding:0}
 
 .pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2rem}
+.pair>.code{align-self:start}
 table{border-collapse:collapse;width:100%}
 th,td{padding:.65rem .6rem;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top;font-size:15.5px}
 th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
@@ -122,10 +123,18 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
 .numbers td.num{text-align:right;font-family:var(--font-mono);white-space:nowrap}
 .numbers td.x{text-align:right;font-family:var(--font-display);font-weight:700;font-size:1.4rem;color:var(--accent-ink);white-space:nowrap}
 .numbers td.x small{display:block;font:400 12px var(--font-mono);color:var(--muted)}
+.kv-numbers{max-width:none}
+.kv-numbers p{max-width:70ch}
+.kv-numbers ul{max-width:70ch;margin:0 0 .9rem 1.1rem}
+.kv-numbers .scroll{margin:.6rem 0 1.2rem}
+.numbers.kv{min-width:520px}
+.numbers.kv td{font-family:var(--font-mono);white-space:nowrap}
+.numbers.kv td:first-child{font-family:inherit}
 .numbers-note{font-size:14.5px;color:var(--muted);margin-top:.9rem;max-width:70ch}
 
 .ledger{display:grid;grid-template-columns:230px minmax(0,1fr);gap:2rem;align-items:start}
 .ledger .big{font-family:var(--font-display);font-size:clamp(3.4rem,8vw,5.6rem);font-weight:700;line-height:.92;letter-spacing:-.035em;color:var(--ink)}
+.ledger .big.wide{font-size:clamp(2.6rem,5.5vw,3.9rem)}
 .ledger .big-cap{font-size:14.5px;color:var(--muted);margin-top:.6rem;max-width:26ch}
 .ledger ul{list-style:none;margin:0;padding:0}
 .ledger li{padding:.7rem 0;border-top:1px solid var(--rule);font-size:16px}
@@ -178,7 +187,7 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
       <span class="word">Pion</span><span class="cat">Redis-compatible key-value store</span>
     </a>
     <nav aria-label="Primary">
-      <a href="/docs/">Docs</a><a href="/docs/guides/examples/">Examples</a><a href="#numbers">Numbers</a><a href="/docs/project/changelog/">Changelog</a><a href="https://github.com/pavelhorak/pion">GitHub</a>
+      <a href="/docs/">Docs</a><a href="/docs/guides/examples/">Examples</a><a href="#numbers">Numbers</a><a href="#prompt-cache">Prompt cache</a><a href="/docs/project/changelog/">Changelog</a><a href="https://github.com/pavelhorak/pion">GitHub</a>
     </nav>
   </header>
 
@@ -194,10 +203,10 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
         <a class="btn btn-ghost" href="https://github.com/pavelhorak/pion">GitHub ↗</a>
       </div>
     </div>
-    <svg class="fabric" viewBox="0 0 560 385" role="img" aria-label="The Pion database at the centre, with dotted links to the processes and machines that share its cache">
+    <svg class="fabric" viewBox="0 0 560 385" role="img" aria-label="The Pion server at the centre, with dotted links to the Redis clients and tools that talk to it">
       <g><path class="link" d="M232 129.5Q195.7 78.8 139.4 52.1"/><path class="link" d="M337.3 136.4Q384.4 76.7 455.3 48.7"/><path class="link" d="M210.9 184.6Q147.8 176.2 84.6 184.5"/><path class="link" d="M365.4 188.6Q420.2 188 471 208.4"/><path class="link" d="M216.2 227.3Q170.8 260.3 154.6 314.1"/><path class="link" d="M358.6 269.4Q383.6 299.4 417.4 319.2"/></g>
       <g><circle class="halo" cx="112.4" cy="40.5" r="23"/><circle class="halo" cx="477.8" cy="40.5" r="23"/><circle class="halo" cx="60.6" cy="186.1" r="23"/><circle class="halo" cx="499.4" cy="216.8" r="23"/><circle class="halo" cx="148.8" cy="343.5" r="23"/><circle class="halo" cx="440.6" cy="328.1" r="23"/><circle class="node" cx="112.4" cy="40.5" r="12"/><circle class="node" cx="477.8" cy="40.5" r="12"/><circle class="node" cx="60.6" cy="186.1" r="12"/><circle class="node" cx="499.4" cy="216.8" r="12"/><circle class="node" cx="148.8" cy="343.5" r="12"/><circle class="node" cx="440.6" cy="328.1" r="12"/></g>
-      <text x="112.4" y="13.5" text-anchor="middle">mlx-lm · process A</text><text x="505.8" y="13.5" text-anchor="end">process B, after restart</text><text x="60.6" y="222.1" text-anchor="middle">redis-cli</text><text x="499.4" y="252.8" text-anchor="middle">LMCache / vLLM</text><text x="148.8" y="379.5" text-anchor="middle">agent session, tomorrow</text><text x="440.6" y="364.1" text-anchor="middle">another machine</text>
+      <text x="112.4" y="13.5" text-anchor="middle">redis-cli</text><text x="505.8" y="13.5" text-anchor="end">redis-py</text><text x="60.6" y="222.1" text-anchor="middle">your app</text><text x="499.4" y="252.8" text-anchor="middle">LMCache</text><text x="148.8" y="379.5" text-anchor="middle">a restart after SIGKILL</text><text x="440.6" y="364.1" text-anchor="middle">mlx-lm prompt cache</text>
       <use href="#pion-drum" class="drum" transform="translate(231.7 148.8) scale(0.6706)"/>
       <text class="core-t" x="289.4" y="265.5" text-anchor="middle">pion-server</text>
     </svg>
@@ -209,16 +218,12 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
       <div>
         <div class="tabs" role="tablist" aria-label="Install method">
           <button type="button" role="tab" aria-selected="true" aria-controls="tab-mac" id="t-mac">macOS · Apple Silicon</button>
-          <button type="button" role="tab" aria-selected="false" aria-controls="tab-pip" id="t-pip">Python (mlx-lm)</button>
           <button type="button" role="tab" aria-selected="false" aria-controls="tab-docker" id="t-docker">Docker</button>
           <button type="button" role="tab" aria-selected="false" aria-controls="tab-src" id="t-src">From source</button>
         </div>
         <div id="tab-mac" role="tabpanel" aria-labelledby="t-mac">
           <div class="code"><button type="button" class="copy">Copy</button><pre>{{install_mac_code}}</pre></div>
           <div class="install-note">{{install_mac_note}}</div>
-        </div>
-        <div id="tab-pip" role="tabpanel" aria-labelledby="t-pip" hidden>
-          <div class="install-note">{{install_pip_html}}<p>The client for the prompt-cache path. It needs Pion running with <code>--kvcache --metal-attention</code>: the Homebrew service does that; otherwise start the binary with those flags.</p></div>
         </div>
         <div id="tab-docker" role="tabpanel" aria-labelledby="t-docker" hidden>
           <div class="code"><button type="button" class="copy">Copy</button><pre>{{install_docker_code}}</pre></div>
@@ -235,13 +240,77 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
 
   <section class="section" id="use">
     <div class="section-grid">
-      <div class="label"><b>Use</b>the four Pion lines</div>
+      <div class="label"><b>Use</b>with the client you have</div>
+      <div class="pair">
+        <div>
+          <h2>Redis commands, Redis clients</h2>
+          <div class="prose">{{kv_store_html}}</div>
+        </div>
+        <div class="code"><button type="button" class="copy">Copy</button><pre>{{kv_code}}</pre></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="numbers">
+    <div class="section-grid">
+      <div class="label"><b>Numbers</b>against Redis 8.10.2</div>
+      <div class="prose kv-numbers">
+        <h2>Throughput on one Linux server, both engines measured the same day</h2>
+        {{kv_numbers_html}}
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="honesty">
+    <div class="section-grid">
+      <div class="label"><b>Where it does not help</b>read before installing</div>
+      <div class="ledger">
+        <div>
+          <div class="big{{not_help_big_class}}">{{not_help_big}}</div>
+          <p class="big-cap">{{not_help_cap}}</p>
+        </div>
+        <ul>
+{{not_help_items}}
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="underneath">
+    <div class="section-grid">
+      <div class="label"><b>Also in the server</b>same binary, same port</div>
+      <div class="tiles">
+        <div class="tile">
+          <h3>Durable by default</h3>
+          <p>Every write goes to an mmap write-ahead log before it is acknowledged, with segment rotation, snapshots, blob arenas for large values, crash breadcrumbs and a 1 Hz status file that survives an OOM kill.</p>
+          <p class="fig">{{tile_dur_fig}}</p>
+          <p class="caveat">Loopback by default. No TLS, and <code>--maxmemory</code> holds RSS, not allocator bytes — read the security model first.</p>
+        </div>
+        <div class="tile">
+          <h3>Vector search</h3>
+          <p>HNSW with SIMD INT8 kernels over the RediSearch <code>FT.CREATE</code>/<code>FT.SEARCH</code> commands, the Redis 8 VSET commands (one vector set per key), BM25 and hybrid retrieval, and built-in text embedding on macOS (Apple's NLEmbedding, on in the Homebrew service).</p>
+          <p class="fig">{{tile_vec_fig}}</p>
+          <p class="caveat">One index per server; L2 and COSINE, anything else refused at FT.CREATE.</p>
+        </div>
+        <div class="tile">
+          <h3>A prompt cache for mlx-lm</h3>
+          <p>On Apple Silicon, <code>PionPromptCache</code> goes where mlx-lm's own prompt cache does, and a separate process, a restarted one or another tool reads the same cache over the Redis wire. <a href="#prompt-cache">Below</a>: the four lines and the numbers.</p>
+          <p class="caveat">It caches prefill, not decode, and pays only on long, reused prefixes.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="prompt-cache">
+    <div class="section-grid">
+      <div class="label"><b>Prompt cache</b>for mlx-lm on Apple Silicon</div>
       <div class="pair">
         <div>
           <h2>A drop-in for <code>make_prompt_cache</code></h2>
           <div class="prose">
             <p>On Apple Silicon, <code>PionPromptCache</code> sits where mlx-lm's own prompt cache does. The first run warms it; every later run — this process or another — hits.</p>
             <div class="small">{{four_lines_explained}}</div>
+            <div class="small">{{install_pip_html}}<p>It needs Pion running with <code>--kvcache --metal-attention</code>: the Homebrew service does that; otherwise start the binary with those flags.</p></div>
           </div>
         </div>
         <div class="code"><button type="button" class="copy">Copy</button><pre>{{four_lines_code}}</pre></div>
@@ -249,9 +318,9 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
     </div>
   </section>
 
-  <section class="section" id="numbers">
+  <section class="section" id="ttft">
     <div class="section-grid">
-      <div class="label"><b>Numbers</b>with their denominators</div>
+      <div class="label"><b>Prompt cache numbers</b>with their denominators</div>
       <div>
         <h2>Time to first token, and what each row reads</h2>
         <div class="scroll"><table class="numbers">
@@ -265,24 +334,9 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
     </div>
   </section>
 
-  <section class="section" id="honesty">
-    <div class="section-grid">
-      <div class="label"><b>Where it does not help</b>read before installing</div>
-      <div class="ledger">
-        <div>
-          <div class="big">{{not_help_big}}</div>
-          <p class="big-cap">{{not_help_cap}}</p>
-        </div>
-        <ul>
-{{not_help_items}}
-        </ul>
-      </div>
-    </div>
-  </section>
-
   <section class="section" id="different">
     <div class="section-grid">
-      <div class="label"><b>What is different</b>two rows are ours</div>
+      <div class="label"><b>Prompt cache, compared</b>two rows are ours</div>
       <div class="prose different">
         {{different_html}}
         <h3>On oMLX specifically</h3>
@@ -291,43 +345,16 @@ th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:
     </div>
   </section>
 
-  <section class="section" id="underneath">
-    <div class="section-grid">
-      <div class="label"><b>Underneath</b>the on-ramp, not the pitch</div>
-      <div class="tiles">
-        <div class="tile">
-          <h3>The Redis wire, clients unchanged</h3>
-          <p>RESP2 and RESP3. redis-py, go-redis, ioredis, Valkey GLIDE, RedisVL, LangChain and LMCache's RedisConnector talk to Pion as they are.</p>
-          <p class="fig">{{tile_kv_fig}}</p>
-          <p class="caveat">Numbers above one worker use <code>--independent-workers</code>: N independent keyspaces. On one keyspace on a Linux server, Pion with I/O threads leads Redis 8.10.2 with I/O threads at every pipeline depth. The README has every configuration, including the ones where Redis leads.</p>
-        </div>
-        <div class="tile">
-          <h3>Vector search in the same process</h3>
-          <p>HNSW with SIMD INT8 kernels, <code>FT.CREATE</code>/<code>FT.SEARCH</code>, the Redis 8 VSET commands (one vector set per key), BM25 and hybrid retrieval, and built-in text embedding on macOS (Apple's NLEmbedding, on in the Homebrew service), so semantic search needs no separate model server.</p>
-          <p class="fig">{{tile_vec_fig}}</p>
-          <p class="caveat">One index per server; L2 and COSINE, anything else refused at FT.CREATE.</p>
-        </div>
-        <div class="tile">
-          <h3>One binary, durable by default</h3>
-          <p>Zero-allocation hot path, mmap WAL with segment rotation, snapshots, blob arenas for large values, crash breadcrumbs and a 1 Hz status file that survives an OOM kill.</p>
-          <p class="fig">{{tile_dur_fig}}</p>
-          <p class="caveat">Loopback by default. No TLS, and <code>--maxmemory</code> holds RSS, not allocator bytes — read the security model first.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
   <section class="section" id="ecosystem">
     <div class="section-grid">
-      <div class="label"><b>Use it from</b>what already speaks to it</div>
+      <div class="label"><b>Use it from</b>what the tests use</div>
       <div>
         <div class="chips">
-          <a class="chip" href="/docs/reference/python/pion-vllm-mlx/"><b>mlx-lm</b> · PionPromptCache</a>
+          <a class="chip" href="/docs/client_apis/"><b>redis-cli</b> · redis-py</a>
           <a class="chip" href="/docs/client_apis/#lmcache-wire-compatible"><b>LMCache</b> · resp://localhost:1974</a>
-          <a class="chip" href="/docs/client_apis/"><b>redis-py</b> · go-redis · ioredis · GLIDE</a>
-          <a class="chip" href="/docs/ai_gateway/"><b>RedisVL</b> · LangChain, unmodified</a>
+          <a class="chip" href="/docs/reference/python/pion-vllm-mlx/"><b>mlx-lm</b> · PionPromptCache</a>
         </div>
-        <p class="small" style="margin-top:1rem">Runnable examples ship in <a href="/docs/guides/examples/"><code>examples/</code></a>, each with its prerequisites stated — the prompt-cache demo, hybrid retrieval, 64K sparse NIAH (which currently misses its needle with mlx-lm 0.31), MoE expert paging, agent memory over MCP.</p>
+        <p class="small" style="margin-top:1rem">Pion's tests talk to it through redis-cli, redis-py and LMCache's RESP connector. Other Redis clients speak the same protocol; the <a href="/docs/client_apis/">client page</a> lists them, and they are not in the test suite. Runnable examples ship in <a href="/docs/guides/examples/"><code>examples/</code></a>, each with its prerequisites stated: the prompt-cache demo, hybrid retrieval, 64K sparse-mask NIAH, agent memory across a restart.</p>
       </div>
     </div>
   </section>

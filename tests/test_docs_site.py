@@ -14,9 +14,11 @@ build cannot see:
       here and fail on the public repo);
   [4] the generated CLI page lists every flag the help printer knows, and the
       command index counts what the command table counts;
-  [5] the landing page carries the four Pion lines, the two numbers with their
-      factors, the honesty figure and the install commands — and no unfilled
-      placeholder.
+  [5] the landing page leads with the KV store: its first command, both
+      throughput tables against Redis (the one where Redis leads included) and
+      the all-cores honesty figure; below that it carries the four Pion lines,
+      the TTFT numbers with their factors and the install commands — and no
+      unfilled placeholder.
 
 Usage:
     python3 tests/test_docs_site.py                # builds into a temp dir
@@ -67,7 +69,7 @@ def main():
     readme = S.read("README.md")
     used = set(re.findall(r"include-region:\s*README\.md\s*\|\s*([\w-]+)", "\n".join(
         p.read_text(encoding="utf-8") for p in (REPO / "website" / "pages").rglob("*.md"))))
-    used |= {"pitch", "four-lines", "four-lines-explained", "pip-install", "two-numbers",
+    used |= {"pitch", "kv-store", "kv-vs-redis", "four-lines", "four-lines-explained", "pip-install", "two-numbers",
              "security", "build-from-source", "first-five-minutes", "license-paragraph"}
     for name in sorted(used):
         try:
@@ -154,6 +156,12 @@ def main():
     print("\n[5] the landing page")
     landing = (built / "index.html").read_text(encoding="utf-8")
     check("no unfilled placeholder", not re.search(r"\{\{\w+\}\}", landing))
+    # Since 2026-11-10 the page body leads with the KV store, as the README does.
+    check("the KV store comes first", 0 < landing.find('id="use"') < landing.find('id="prompt-cache"')
+          and "redis-cli -p 1974 SET user:1" in landing)
+    check("both KV tables against Redis, the all-cores one included",
+          all(n in landing for n in ("2,972,713", "1,661,596", "7,178,453", "6,097,719", "Redis 8.10.2")))
+    check("the honesty figure: where Redis leads", '<div class="big wide">13–18%</div>' in landing)
     check("the four lines", "get_or_prefill" in landing and "PionPromptCache(model" in landing)
     # The second row was "9.26×" (846 → 91 ms) until 2026-09-23: a real run from a
     # different workload, shown beside a 2,048-token row it did not match. Both rows

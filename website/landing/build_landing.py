@@ -95,6 +95,15 @@ def build(out_dir: Path) -> Path:
     src_code = code(S.fences(src_region, "bash")[-1])
     src_note = md(src_region.split("```")[0])
 
+    # ── the KV store: what it is, a first command, the numbers against Redis ──
+    kv_store_html = md(S.region(readme, "kv-store"))
+    kv_code = code(S.fences(S.region(readme, "first-five-minutes"), "bash")[0])
+    # A list that follows its paragraph with no blank line is still a list on
+    # GitHub; Python-Markdown needs the blank line.
+    kv_numbers_html = md(re.sub(r"(\S)\n- ", r"\1\n\n- ", S.region(readme, "kv-vs-redis")))
+    kv_numbers_html = (kv_numbers_html.replace("<table>", '<div class="scroll"><table class="numbers kv">')
+                                      .replace("</table>", "</table></div>"))
+
     # ── the four lines ──
     four = S.region(readme, "four-lines")
     four_code = code(S.fences(four, "python")[0])
@@ -114,8 +123,9 @@ def build(out_dir: Path) -> Path:
     # ── where it does not help ──
     nohelp = S.section(post, "## Where this does not help")
     nohelp_lead = first_paragraph(nohelp)
-    big = re.search(r"\*\*([0-9.]+×)\*\*", nohelp_lead)
+    big = re.search(r"\*\*([0-9.,–%×]+)\*\*", nohelp_lead)
     not_help_big = big.group(1) if big else ""
+    not_help_big_class = " wide" if len(not_help_big) > 4 else ""
     not_help_cap = inline(nohelp_lead)
     items = "".join(f"<li>{inline(m.group(1).strip())}</li>\n"
                     for m in re.finditer(r"^- (.+?)(?=^- |\Z)", nohelp, re.S | re.M))
@@ -129,7 +139,6 @@ def build(out_dir: Path) -> Path:
     glance = {r[0]: r[1] for r in table_rows(S.section(readme, "## At a Glance")) if len(r) == 2}
     def g(key):
         return inline(glance.get(key, ""))
-    tile_kv = g('KV throughput')
     tile_vec = f"QPS {g('Vector QPS')} · Recall@100 {g('Recall@100')}"
     tile_dur = g("Persistence")
 
@@ -144,11 +153,12 @@ def build(out_dir: Path) -> Path:
         "install_pip_html": pip_html,
         "install_docker_code": docker_code, "install_docker_note": docker_note,
         "install_src_code": src_code, "install_src_note": src_note,
+        "kv_store_html": kv_store_html, "kv_code": kv_code, "kv_numbers_html": kv_numbers_html,
         "four_lines_code": four_code, "four_lines_explained": four_explained,
         "numbers_rows": numbers_rows, "numbers_note": numbers_note,
-        "not_help_big": not_help_big, "not_help_cap": not_help_cap, "not_help_items": items,
+        "not_help_big": not_help_big, "not_help_big_class": not_help_big_class, "not_help_cap": not_help_cap, "not_help_items": items,
         "different_html": different, "omlx_html": omlx,
-        "tile_kv_fig": tile_kv, "tile_vec_fig": tile_vec, "tile_dur_fig": tile_dur,
+        "tile_vec_fig": tile_vec, "tile_dur_fig": tile_dur,
         "license_html": license_html,
         "analytics": S.analytics_beacon(S.analytics_token()),
     }

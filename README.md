@@ -39,6 +39,7 @@ there, it may be tested at the wire level, and it is not something to rely on.
 
 ### 1. A Redis-compatible KV store with a write-ahead log
 
+<!-- --8<-- [start:kv-store] -->
 355 command names (the generated command table), every one exercised by a
 dispatch sweep in five argument shapes, and a differential suite that compares
 replies against a real `redis-server`: strings, hashes, lists, sets, sorted
@@ -51,7 +52,9 @@ or at random.
 RESP2 or RESP3. Reference:
 [`doc/command_matrix.md`](doc/command_matrix.md),
 [`doc/persistence.md`](doc/persistence.md).
+<!-- --8<-- [end:kv-store] -->
 
+<!-- --8<-- [start:kv-vs-redis] -->
 Against Redis 8.10.2, Pion wins some configurations and loses others. Every
 number below comes from one Linux server, an AMD EPYC 8124P (16 cores). Both
 engines were measured the same day with the same client settings: Redis 8.10.2
@@ -95,6 +98,7 @@ client on the same machine, they lower throughput, for Redis too
 
 **Across all cores:** sixteen Redis processes beat Pion's sixteen workers by
 13–18%, both sides as sixteen independent keyspaces.
+<!-- --8<-- [end:kv-vs-redis] -->
 
 **Runs that are not a comparison:** the same day's 32-keyspace runs used every
 hardware thread on both sides, with the client on the same machine. In them,
