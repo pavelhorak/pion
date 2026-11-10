@@ -6,6 +6,23 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Changed
+
+- **A GET over a large keyspace costs less server CPU again.** 1.1.0's
+  8-byte slots put a slot word between a key's metadata and its entry, a
+  third dependent memory load on every GET, and the batched GET path built
+  each string value into a `GenericValue` only to unpack it for the reply.
+  The path now fetches the slot word together with the metadata and writes
+  the reply from the value's stored bytes. Server cycles per GET over
+  5,000,000 keys, against the code before the slots: +3.7% at a 100-deep
+  pipeline (1.1.0: +8.6%), +2.3% at 50 (+6.0%), +1.0% at 10 (+2.3%);
+  instructions per GET on one key +0.6% (+1.9%). macOS, interleaved runs.
+
+## [1.1.0] — 2026-11-09
+
+Keys can be evicted under `--maxmemory`, and on macOS a key now takes less memory
+than in Redis.
+
 ### Added
 
 - **Eviction.** `--maxmemory-policy` (or `CONFIG SET maxmemory-policy`) evicts keys

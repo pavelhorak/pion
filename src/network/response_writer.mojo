@@ -1305,6 +1305,58 @@ struct ResponseWriter(Movable):
         self.offset += 2
 
     @always_inline
+    def append_bulk_short_response(mut self, data: Pointer[UInt8, MutUntrackedOrigin], length: Int):
+        """A bulk string of 0-23 bytes copied from where it is stored (the GET
+        burst reads a string value out of its keyspace entry). It writes
+        what the SSO arm of append_bulk_value_response writes, without packing
+        the bytes into a GenericValue first. Every load stays inside
+        [data, data + length), because the entry may end there, and every
+        store inside the reply (at most 30 bytes: `$23`, CRLF, 23 bytes, CRLF)."""
+        if self.offset + 32 > RESP_LIMIT:
+            if not self._fixed_cold(): return
+        var b = self.buffer
+        var o = self.offset
+        b[unsafe_offset=o] = 36 # '$'
+        if length < 10:
+            b[unsafe_offset=o + 1] = UInt8(48 + length)
+            o += 2
+        else: # 10-23
+            var tens = 1 if length < 20 else 2
+            b[unsafe_offset=o + 1] = UInt8(48 + tens)
+            b[unsafe_offset=o + 2] = UInt8(48 + length - 10 * tens)
+            o += 3
+        b[unsafe_offset=o] = 13 # '\r'
+        b[unsafe_offset=o + 1] = 10 # '\n'
+        o += 2
+        var d = b.unsafe_offset(o)
+        if length >= 8:
+            # Words at 0 and length-8, plus 8 when length > 16: they overlap
+            # and together cover every byte exactly once or twice.
+            var w0 = data.unsafe_bitcast[UInt64]().unsafe_load[alignment=1]()
+            var wl = data.unsafe_offset(length - 8).unsafe_bitcast[UInt64]().unsafe_load[alignment=1]()
+            if length > 16:
+                var w1 = data.unsafe_offset(8).unsafe_bitcast[UInt64]().unsafe_load[alignment=1]()
+                d.unsafe_offset(8).unsafe_bitcast[UInt64]().unsafe_store[alignment=1](w1)
+            d.unsafe_bitcast[UInt64]().unsafe_store[alignment=1](w0)
+            d.unsafe_offset(length - 8).unsafe_bitcast[UInt64]().unsafe_store[alignment=1](wl)
+        elif length >= 4:
+            var a = data.unsafe_bitcast[UInt32]().unsafe_load[alignment=1]()
+            var c = data.unsafe_offset(length - 4).unsafe_bitcast[UInt32]().unsafe_load[alignment=1]()
+            d.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](a)
+            d.unsafe_offset(length - 4).unsafe_bitcast[UInt32]().unsafe_store[alignment=1](c)
+        elif length > 0:
+            var x = data[unsafe_offset=0]
+            var y = data[unsafe_offset=length >> 1]
+            var z = data[unsafe_offset=length - 1]
+            d[unsafe_offset=0] = x
+            d[unsafe_offset=length >> 1] = y
+            d[unsafe_offset=length - 1] = z
+        o += length
+        b[unsafe_offset=o] = 13 # '\r'
+        b[unsafe_offset=o + 1] = 10 # '\n'
+        self.offset = o + 2
+
+    @always_inline
     def append_bulk_string_response[origin: Origin](mut self, data: Pointer[UInt8, origin], length: Int):
         # gh #82: bound the memcpy. Caller may pass arbitrary `length` (V.FETCH,
         # KV.PREFIX.*, stream payloads, etc.); without this guard a large value

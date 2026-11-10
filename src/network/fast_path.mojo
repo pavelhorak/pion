@@ -10,7 +10,7 @@ from std.ffi import external_call
 from src.network.server import TCPServer
 from src.network.response_writer import ResponseWriter
 from src.common.container_free import free_container, remove_and_free
-from src.common.hash_map import SlabHashMap, StripedHashMap, _movemask16, ks_entry_value, ks_entry_key_eq_sso, ks_entry_key_ptr
+from src.common.hash_map import SlabHashMap, StripedHashMap, _movemask16, ks_entry_value, ks_entry_key_eq_sso, ks_entry_key_ptr, ks_entry_str
 from std.bit import count_trailing_zeros
 from src.common.list import SlabList
 from src.common.skip_list import SlabSkipList
@@ -741,6 +741,11 @@ struct FastPathHandler(Movable):
         var slot_a = Array[Int, GET_BURST_MAX](uninitialized=True)
         var e_a = Array[Int, GET_BURST_MAX](uninitialized=True)
         var vals = Array[GenericValue, GET_BURST_MAX](uninitialized=True)
+        # A string value found in an S entry: its bytes' address (0 = look in
+        # vals[i] instead) and length. Stage D writes the reply from the
+        # entry, which nothing in the burst can free or move.
+        var vp_a = Array[Int, GET_BURST_MAX](uninitialized=True)
+        var vl_a = Array[Int, GET_BURST_MAX](uninitialized=True)
 
         # ── Parse: collect a run of complete `*2\r\n$3\r\nGET\r\n$…` frames ──
         var p = start_pos
@@ -781,8 +786,15 @@ struct FastPathHandler(Movable):
             var shard = keyspace[].shards.unsafe_offset(Int(h & 7))
             var idx = Int(h >> 7) & (shard[].capacity - 1)
             prefetch(shard[].metadata.unsafe_offset(idx))
+            # And the line of slot idx's word, which the hash alone locates:
+            # a key usually sits at idx or a slot or two past it. Fetched with
+            # the metadata instead of after it, the slot word stops being a
+            # third dependent miss before the entry. A prefetch past
+            # the array's end is a hint, never a load.
+            prefetch((shard[].entries.unsafe_offset(idx)).unsafe_bitcast[UInt8]())
 
-        # ── Stage B: resolve first candidate slot, prefetch its slot word ──
+        # ── Stage B: resolve first candidate slot, read its slot word (stage A
+        #    fetched it with the metadata), prefetch the entry (key and value) ──
         comptime width = 16
         for i in range(k):
             var h = h_a[i]
@@ -795,37 +807,47 @@ struct FastPathHandler(Movable):
             if mbits != 0:
                 var slot = (idx + count_trailing_zeros(mbits)) & mask
                 slot_a[i] = slot
-                prefetch((shard[].entries.unsafe_offset(slot)).unsafe_bitcast[UInt8]())
+                var e = shard[].entry_at(slot)
+                e_a[i] = e
+                prefetch(ks_entry_key_ptr(e))
             elif _movemask16(
                     meta_chunk.eq(SIMD[DType.uint8, width](SlabHashMap.EMPTY))) != 0:
                 slot_a[i] = -1   # definite miss: no candidate, group has EMPTY
             else:
                 slot_a[i] = -2   # full group, no candidate: rare long probe
 
-        # ── Stage B2: read the slot word, prefetch the entry (key and value) ──
-        for i in range(k):
-            var slot = slot_a[i]
-            if slot >= 0:
-                var e = keyspace[].shards[unsafe_offset=Int(h_a[i] & 7)].entry_at(slot)
-                e_a[i] = e
-                prefetch(ks_entry_key_ptr(e))
-
         # ── Stage C: compare keys, fetch values, prefetch value payloads ──
+        # A string in an S entry is read in place: its address and length go
+        # to vp_a/vl_a, and stage D copies its bytes into the reply. Building
+        # a GenericValue from them (SSO packing up to 23 bytes) and unpacking
+        # it again for the reply cost 20-30 instructions a GET.
         for i in range(k):
             var h = h_a[i]
             var shard = keyspace[].shards.unsafe_offset(Int(h & 7))
             var slot = slot_a[i]
             var val = GenericValue()
+            var in_place = False
             if slot >= 0:
                 var e = e_a[i]
                 if ks_entry_key_eq_sso(e, d0_a[i], d1_a[i], d2_a[i]):
-                    val = ks_entry_value(e)
+                    var vl = 0
+                    var vp = ks_entry_str(e, Int(key_len_a[i]), vl)
+                    if is_not_null(vp):
+                        in_place = True
+                        vp_a[i] = Int(vp)
+                        vl_a[i] = vl
+                        if vl > 23:
+                            val = GenericValue.borrow(vp, vl)   # for the prefetch below only
+                    else:
+                        val = ks_entry_value(e)
                 else:
                     # h2 collision or later candidate — full probe (rare).
                     val = shard[].get_with_sso(h, d0_a[i], d1_a[i], d2_a[i])
             elif slot == -2:
                 val = shard[].get_with_sso(h, d0_a[i], d1_a[i], d2_a[i])
-            vals[i] = val
+            if not in_place:
+                vp_a[i] = 0
+                vals[i] = val
             if val.type.value == ValueType.STRING:
                 # Overlap the payload fetch with the remaining lookups; the
                 # response memcpy in stage D then hits warm lines. Cap at 512B
@@ -845,7 +867,7 @@ struct FastPathHandler(Movable):
         var clock = keyspace[].clock_ns
         if clock != 0:
             for i in range(k):
-                if vals[i].type.value == ValueType.NONE:
+                if vp_a[i] == 0 and vals[i].type.value == ValueType.NONE:
                     continue
                 if keyspace[].track_access:
                     keyspace[].touch(GenericValue.borrow(buffer.unsafe_offset(Int(key_off[i])), Int(key_len_a[i])), h_a[i])
@@ -862,7 +884,14 @@ struct FastPathHandler(Movable):
 
         # ── Stage D: emit responses in order ──
         for i in range(k):
-            writer.append_large_value_response_writev(fd, vals[i])
+            if vp_a[i] == 0:
+                writer.append_large_value_response_writev(fd, vals[i])
+            elif vl_a[i] <= 23:
+                writer.append_bulk_short_response(
+                    Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=vp_a[i]), vl_a[i])
+            else:
+                writer.append_bulk_string_response(
+                    Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=vp_a[i]), vl_a[i])
         return p
 
     def process_data_plane(

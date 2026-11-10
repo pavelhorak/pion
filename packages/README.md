@@ -41,21 +41,59 @@ from pion_resp import RESP3Parser, RESP3Token
 
 A precompiled package is tied to the compiler that built it (Mojo 1.2.0 here).
 
-## Packaging for the modular-community channel
+## Install from the modular-community channel
 
-`packages/pion/` is the server itself, built from source only with the open
-reference vector kernels, because the channel carries no closed binaries. It has
-a recipe and no `package.toml`, so `build.py` leaves it alone.
+All four are on Modular's community channel for macOS arm64, Linux x86-64 and
+Linux arm64, from Pion 1.1.0:
 
-For the libraries, `packages/<name>/recipe.yaml` is a draft rattler-build recipe in the
-channel's format: the source is a Pion release tag, the build assembles the
-package with `build.py --assemble-only` and precompiles it into
-`$PREFIX/lib/mojo/<name>.mojoc`, and the test runs the package's tests against
-the installed `.mojoc` (`mojo run -I $PREFIX/lib/mojo …`). None has been
-submitted yet; a submission needs a Pion tag that contains `packages/`.
+```bash
+pixi init my-project -c conda-forge -c https://conda.modular.com/max \
+  -c https://prefix.dev/modular-community
+cd my-project
+pixi add pion-resp        # or pion-slab, pion-simd
+pixi add pion             # the server: pixi run pion-server
+```
 
-To check a recipe locally before a tag exists, copy it, replace its `source`
-with `- path: <your pion checkout>` plus `use_gitignore: true`, and run:
+A library brings the Mojo compiler it was built with (1.2.0) and installs as
+`$PREFIX/lib/mojo/<name>.mojoc`, where `pixi run mojo` finds it without an
+`-I`. The `pion` package is the server, built from source with the open
+reference vector kernels, because the channel carries no closed binaries:
+`pion-server --version` prints `vector: reference (open)` and `INFO` reports
+`pion_vector:reference (open)`. Vector search at 1536 dims is slower with those
+kernels than in a release tarball or the Homebrew formula, by the amounts the
+[top-level README](../README.md) gives; the rest of the server is the same code.
+
+Checked on 2026-11-09, in fresh pixi projects on macOS arm64: `pion` 1.1.0
+installed, reported `1.1.0+8221878` and answered SET and GET, and a program
+importing `pion_resp` ran under `pixi run mojo run` with no `-I`. On Linux the
+check is the channel's CI, which built and tested all four on x86-64 and arm64
+(and macOS arm64) before they were published.
+
+## The recipes
+
+`packages/<name>/recipe.yaml` (and `packages/pion/build.sh` and
+`test_server.sh`) are copies of what the channel builds, in
+[modular/modular-community](https://github.com/modular/modular-community/tree/main/recipes):
+recipes `pion`, `pion-resp`, `pion-simd` and `pion-slab`, added by
+modular/modular-community#450 and modular/modular-community#451. The copies
+there are the ones that build; these are kept identical so the next version
+starts from them.
+
+- **The libraries** take their source from a Pion release tag, assemble the
+  package with `build.py --assemble-only`, precompile it into
+  `$PREFIX/lib/mojo/<name>.mojoc`, and test it with the package's own tests
+  against the installed `.mojoc` (`mojo run -I $PREFIX/lib/mojo …`).
+- **The server** takes the release's tag archive (`commit` and `sha256` pinned
+  in the recipe) and builds `pion-server` with the open kernels.
+  `test_server.sh` checks that the version matches and that no closed library
+  is linked, starts the server, and runs the wire basics (`tests/test_raw.py`)
+  and a 1536-dim recall check (`tests/test_vector_recall_smoke.py`).
+
+To move them to a new release: set `version` in all four (and `commit` and
+`sha256` in `pion`), check them locally, and open one PR upstream with the
+four recipe changes. To check a recipe locally, copy it, point its `source` at
+your checkout (`- path: <your pion checkout>` with `use_gitignore: true`)
+if the tag does not exist yet, and run:
 
 ```bash
 pixi exec --spec "rattler-build>=0.30.0,<0.31" rattler-build build \
@@ -63,10 +101,7 @@ pixi exec --spec "rattler-build>=0.30.0,<0.31" rattler-build build \
   --recipe <copy>/recipe.yaml --output-dir out
 ```
 
-All three built and passed their tests that way on macOS arm64 (2026-10-08).
-On Linux x86-64 and arm64, the gate tier's `tests/test_mojo_packages.py` ran
-the same assemble, precompile and test steps green on GitHub's runners the same
-day; rattler-build itself was not run there.
+The channel's CI runs only after a maintainer labels the PR "OK to test".
 
 ## Licence
 
