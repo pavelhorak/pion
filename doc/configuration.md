@@ -161,7 +161,12 @@ redis-cli CONFIG SET maxmemory 4gb   # change it at runtime; 0 turns it off
 ```
 
 The limit applies to the process **RSS** — what the OS measures when it
-decides to kill a process, and what `INFO` reports as `used_memory`. Above it,
+decides to kill a process, and what `INFO` reports as `used_memory` — **less the
+write-ahead log's pages**. The log is a file mapping: its written pages are
+resident and count in RSS, but the OS can drop them, and a rotation unmaps them.
+So with the WAL on (the default), `used_memory` can sit above `maxmemory` by up to
+one segment (`--wal-size`, 256 MB) while nothing is refused. `INFO` reports the
+active segment's bytes as `wal_tail_offset`. Above the limit,
 commands that grow memory (Redis's `denyoom` set, plus Pion's substrate ingest
 commands) are refused with Redis's exact error:
 
@@ -174,7 +179,9 @@ That is the default policy, `noeviction`. Inside a transaction, `MULTI` refuses
 the command at queue time, and a limit crossed after queueing makes `EXEC` answer
 `EXECABORT` with nothing applied. A script runs, and only a memory-growing
 `redis.call` inside it errors. The binary lane on port+1 refuses its store opcodes
-the same way. Every crossing is logged with the measured RSS.
+the same way. Every crossing is logged with the measured RSS and the log's share
+of it. RSS is sampled every 100 ms, so one fast pipelined burst can pass the limit
+before it is refused.
 
 ### Eviction (`--maxmemory-policy`)
 
@@ -222,7 +229,8 @@ policy tracks.
 
 For a pure cache, run with `--no-wal`. With the WAL on, every write and eviction is
 logged, so the log grows at the write rate while the data stays the same size, until
-`--wal-max-segments` or the next `SAVE`. A policy also turns the blob tier off: an
+`--wal-max-segments` or the next `SAVE`. The log's pages do not count against the
+limit, so the cache holds as many keys either way. A policy also turns the blob tier off: an
 arena's bytes come back only at a restart, so evicting a value there would free
 nothing.
 

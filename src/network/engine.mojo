@@ -807,6 +807,11 @@ struct NetworkEngine:
                 # evicting a value there would free nothing.
                 self.fast_path.blob_threshold = BLOB_TIER_OFF
                 self.slow_path.dispatcher.blob_threshold = BLOB_TIER_OFF
+        # The limit leaves out the log's resident pages under every policy,
+        # noeviction included; an eviction tick reports them more often.
+        if is_not_null(self.fast_path.wal):
+            external_call["pion_wal_report", NoneType](
+                Int32(self.worker_id), UInt64(self.fast_path.wal[].tail_offset))
         var _oom = external_call["pion_maxmemory_check", Int32]() != 0
         self.over_maxmemory = _oom
         self.slow_path.over_maxmemory = _oom

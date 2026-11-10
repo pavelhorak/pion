@@ -1927,3 +1927,19 @@ kind = "result"
 evidence = ["benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/delta_steps.txt", "benchmarks/results/2026-10-20-linux-epyc-8124p/drop_in/blocks/D500_2_pion_a/builds.txt"]
 expect = ["RESULT delta 0: p50 1.616 ms", "RESULT delta 10000: p50 3.820 ms", "p50 189.590 ms", "p50 194.537 ms", "551000 vectors indexed in 84091 ms"]
 
+[[claim]]
+file = "doc/configuration.md"
+where = "The log is a file mapping"
+numbers = ["256 MB"]
+kind = "code"
+evidence = ["src/common/config.mojo"]
+expect = ["self.wal_size_mb = 256"]
+
+[[claim]]
+file = "doc/configuration.md"
+where = "RSS is sampled every 100 ms"
+numbers = ["100 ms"]
+kind = "code"
+evidence = ["src/ffi/crash_wrap.c"]
+expect = ["uint64_t every = policy != 0 ? 10 : 100;"]
+note = "noeviction samples every 100 ms; an eviction policy every 10 ms"

@@ -23,6 +23,17 @@ Every expectation below was read off a live redis-server 8.10 first:
   9. CLI: --maxmemory accepts Redis units and N%, refuses garbage (exit 1)
  10. the port+1 binary lane (PionPromptCache's K/V path) refuses its store
      opcodes too, and still answers PING
+ 11. with the WAL on (the default), the log's resident pages do not count:
+     overwrites that leave the data the same size are never refused, however
+     far the log grows, and new keys are still refused once the DATA outgrows
+     the headroom. Before, the log's pages counted under noeviction: every
+     write was refused once the log outgrew the headroom, and since refused
+     writes do not grow the log, the refusal never lifted. A SAVE gives the
+     log's pages back, so overwrites after it are not refused either.
+ 12. the same under an eviction policy: a SAVE used to leave the log's pages
+     resident while their count went to 0, so the controller took them for
+     data and evicted keys to pay for them: 50,000 keys fell to 33,400 and
+     stayed there, every new write evicting one.
 
 Usage: python3 tests/test_gh261_maxmemory.py [./pion-server]
 """
@@ -89,11 +100,11 @@ def is_oom(r):
     return isinstance(r, tuple) and r[1] == OOM
 
 
-def start(args, port=PORT):
+def start(args, port=PORT, wal=False):
     d = tempfile.mkdtemp(prefix="pion_gh261_")
     log = os.path.join(d, "out.log")
     p = subprocess.Popen([BINARY, "-p", str(port), "--no-auto-detect", "--no-auto-embed",
-                          "--no-wal", *args], cwd=d, stdout=open(log, "w"),
+                          *([] if wal else ["--no-wal"]), *args], cwd=d, stdout=open(log, "w"),
                          stderr=subprocess.STDOUT)
     # #27: ready means THIS process answers. A connect that succeeded used to
     # count, and right after the previous server was killed it could reach
@@ -315,6 +326,109 @@ def main():
         st, body = reply(b)
         check("ATTEND_CREATE accepted once the limit is lifted", st == 0, f"status={st} body={body!r}")
         b.close()
+    finally:
+        stop(p, d)
+
+
+    print("\n[11] WAL on: the log's pages do not count against the limit")
+    p, d, log = start([], wal=True)
+    try:
+        c = Conn(PORT)
+        val = "v" * 200
+        n, batch = 50_000, 1000
+
+        def write_all(prefix, start_at=0):
+            """SET n keys, pipelined; returns how many were refused."""
+            refused = 0
+            for i in range(0, n, batch):
+                c.send(*[("SET", f"{prefix}{start_at + j}", val) for j in range(i, i + batch)])
+                for _ in range(batch):
+                    r = c.read()
+                    if is_oom(r):
+                        refused += 1
+                    elif r != "OK":
+                        raise RuntimeError(f"SET -> {r!r}")
+            return refused
+
+        write_all("w")
+        time.sleep(0.3)
+        head = 8 * 1024 * 1024
+        rss0 = used_memory(c)
+        tail0 = int(info_field(c, "wal_tail_offset") or 0)
+        check("the log already holds more than the headroom", tail0 > head, f"wal_tail_offset={tail0}")
+        check("CONFIG SET maxmemory <rss + 8 MB>",
+              c("CONFIG", "SET", "maxmemory", str(rss0 + head)) == "OK")
+        refused = sum(write_all("w") for _ in range(4))
+        tail1 = int(info_field(c, "wal_tail_offset") or 0)
+        sealed = int(info_field(c, "wal_segments_sealed") or 0)
+        check("the overwrites grew the log well past the headroom",
+              tail1 - tail0 > 4 * head or sealed > 0, f"tail {tail0} -> {tail1}, sealed {sealed}")
+        check("no overwrite was refused (the data did not grow)", refused == 0,
+              f"{refused:,} of {4 * n:,} refused; rss {rss0 >> 20} -> {used_memory(c) >> 20} MB")
+        # A SAVE empties the log: its pages must leave RSS with it. Before, the
+        # offset went to 0 while the pages stayed mapped, so the limit counted
+        # them as data from then on.
+        check("SAVE", c("SAVE") == "OK")
+        time.sleep(0.3)
+        rss_saved = used_memory(c)
+        check("SAVE gives the log's pages back", rss_saved < rss0,
+              f"rss {rss0 >> 20} MB before the overwrites, {rss_saved >> 20} MB after SAVE")
+        refused = write_all("w")
+        check("overwrites after SAVE are not refused", refused == 0, f"{refused:,} of {n:,} refused")
+        # The limit is sampled every 100 ms, so one fast burst can overshoot it
+        # by megabytes before it is seen: write new keys in rounds until one is
+        # refused, up to 8 x 50K x 200 B, far past the 8 MB of headroom.
+        refused = rounds = 0
+        while refused == 0 and rounds < 8:
+            refused = write_all("new", rounds * n)
+            rounds += 1
+            time.sleep(0.2)
+        check("new keys are still refused once the data outgrows the headroom",
+              refused > 0, f"{rounds * n:,} new 200 B keys; rss {used_memory(c) >> 20} MB, wal_tail "
+              f"{int(info_field(c, 'wal_tail_offset') or 0) >> 20} MB, limit {(rss0 + head) >> 20} MB")
+        out = open(log).read()
+        check("the crossing names the log's share",
+              "wal_mb=" in out and "refusing memory-growing writes" in out, out[-400:])
+    finally:
+        stop(p, d)
+
+    print("\n[12] WAL on, eviction policy: a SAVE does not shrink the keyspace")
+    p, d, log = start([], wal=True)
+    try:
+        c = Conn(PORT)
+        val = "v" * 200
+        n, batch = 50_000, 1000
+
+        def write_all(prefix):
+            """SET n keys, pipelined; returns how many were refused."""
+            refused = 0
+            for i in range(0, n, batch):
+                c.send(*[("SET", f"{prefix}{j}", val) for j in range(i, i + batch)])
+                for _ in range(batch):
+                    r = c.read()
+                    if is_oom(r):
+                        refused += 1
+                    elif r != "OK":
+                        raise RuntimeError(f"SET -> {r!r}")
+            return refused
+
+        write_all("w")
+        time.sleep(0.3)
+        c("CONFIG", "SET", "maxmemory-policy", "allkeys-lru")
+        c("CONFIG", "SET", "maxmemory", str(used_memory(c) + 8 * 1024 * 1024))
+        for _ in range(4):
+            write_all("w")
+        time.sleep(0.3)
+        before = c("DBSIZE")
+        check("the overwrites evicted nothing", before == n, f"DBSIZE {before}")
+        check("SAVE", c("SAVE") == "OK")
+        time.sleep(0.5)
+        refused = write_all("w")
+        time.sleep(0.3)
+        after = c("DBSIZE")
+        check("no write refused after SAVE", refused == 0, f"{refused:,} of {n:,} refused")
+        check("the keyspace survives SAVE", after >= n * 9 // 10,
+              f"DBSIZE {before} -> {after}, evicted_keys {info_field(c, 'evicted_keys')}")
     finally:
         stop(p, d)
 

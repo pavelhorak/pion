@@ -6,6 +6,24 @@ enumerated — there were roughly 1,100 of them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--maxmemory` no longer refuses every write because of the log.** Under the
+  default policy, `noeviction`, the write-ahead log's resident pages counted
+  against the limit, while the eviction policies already left them out. With the
+  WAL on (the default), a server whose data held steady (overwrites only)
+  refused every write once the log outgrew the headroom. Refused writes do not
+  grow the log, so it never rotated and the refusal never lifted: 149,000 of
+  200,000 overwrites refused, against none with `--no-wal`. The limit now
+  leaves the log out under every policy, and the log line for a crossing names
+  the log's share (`wal_mb=`).
+- **A `SAVE` no longer shrinks a cache under an eviction policy.** `SAVE` empties
+  the log, but its pages stayed mapped and resident while the count of them went
+  to zero, so the controller took them for new data and evicted keys to pay for
+  them. In the test, 50,000 keys fell to 33,400 and stayed there, every new
+  write evicting one. `SAVE` now unmaps the log and maps it again, so its pages
+  leave RSS with it.
+
 ### Changed
 
 - **A GET over a large keyspace costs less server CPU again.** 1.1.0's
