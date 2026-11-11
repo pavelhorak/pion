@@ -5,6 +5,6 @@ git tags (see .github/workflows/release.yml).
 SHA is the short git commit hash at build time.
 """
 
-comptime PION_VERSION = "1.1.0"
-comptime PION_BUILD_SHA = "f938315"
-comptime PION_BUILD_DATE = "2026-11-09"
+comptime PION_VERSION = "1.1.1"
+comptime PION_BUILD_SHA = "a2dcbbb"
+comptime PION_BUILD_DATE = "2026-11-11"
