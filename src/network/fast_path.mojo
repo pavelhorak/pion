@@ -837,7 +837,12 @@ struct FastPathHandler(Movable):
                         vp_a[i] = Int(vp)
                         vl_a[i] = vl
                         if vl > 23:
-                            val = GenericValue.borrow(vp, vl)   # for the prefetch below only
+                            # Overlap the payload fetch with the remaining
+                            # lookups, as for a G value below.
+                            var off = 0
+                            while off < vl and off < 512:
+                                prefetch(vp.unsafe_offset(off))
+                                off += 64
                     else:
                         val = ks_entry_value(e)
                 else:
