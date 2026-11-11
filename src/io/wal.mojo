@@ -2037,6 +2037,20 @@ struct WAL(Movable):
         hdr[unsafe_offset=WAL_HDR_VEC_FROM] = 0
         _ = external_call["pion_wal_msync", Int32](
             self.map, WAL_HEADER_SIZE, MS_ASYNC)
+        # Unmap and map the file again, so the pages written before the snapshot
+        # leave RSS with the offset that counted them. --maxmemory subtracts
+        # tail_offset as the log's resident pages: resetting it while they stay
+        # mapped made a SAVE look like that many bytes of new data: under an
+        # eviction policy the next tick evicted keys to pay for them, and the
+        # keyspace stayed that much smaller. Not while replication holds a
+        # pointer into the mapping, as _rotate.
+        if not self.pinned:
+            _ = external_call["pion_wal_munmap", Int32](self.map, Int(self.file_size))
+            _ = external_call["close", Int32](self.fd)
+            self.map = null_ptr[UInt8, MutUntrackedOrigin]()
+            self.fd = Int32(-1)
+            if not self._reopen_active(0, 0):
+                print("WAL: could not map " + self.path + " again after SAVE; the log is off")
         self._repl_attach()
 
     def compact(mut self):
