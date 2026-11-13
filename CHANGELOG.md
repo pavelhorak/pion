@@ -4,6 +4,27 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+### Fixed
+
+- **An eviction policy holds the limit after memory pressure.** Below 90% of
+  `--maxmemory`, the controller gave half the gap back to its data target every
+  10 ms, with no bound. RSS falls when the OS compresses (macOS) or swaps
+  (Linux) the process's pages while the data stays the same, so a server under
+  pressure wound its target far past anything it held. Then, when the pages came
+  back, nothing was evicted until RSS passed the limit. Measured on macOS: 25 s
+  of `memory_pressure` against a 126 MB limit took the target to 49 GB, and the
+  writes that followed took RSS to 192 MB. The target now runs at most one step
+  ahead of the data held.
+
+### Added
+
+- **`DEBUG MAXMEMORY-HIDE-RSS <bytes>`**, with `--enable-debug-command`: takes
+  bytes off the RSS that `--maxmemory` reads, as compression or swap does. It is
+  Pion's own subcommand, there for tests, because real memory pressure reaches a
+  given process only some of the time.
+
 ## [1.1.1] — 2026-11-11
 
 `--maxmemory` works with the write-ahead log on, and a GET over a large keyspace

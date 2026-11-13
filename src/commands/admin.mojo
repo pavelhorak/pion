@@ -984,6 +984,9 @@ def handle_debug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
         lines.append("    default.")
         lines.append("SLEEP <seconds>")
         lines.append("    Stop the server for <seconds>. Decimals allowed.")
+        lines.append("MAXMEMORY-HIDE-RSS <bytes>")
+        lines.append("    Pion only: take <bytes> off the RSS --maxmemory reads, as the OS does")
+        lines.append("    when it compresses or swaps pages out. 0 restores it.")
         lines.append("HELP")
         lines.append("    Print this help.")
         writer.append_array_header(len(lines))
@@ -1003,6 +1006,14 @@ def handle_debug(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
         if secs > 0:
             _ = external_call["usleep", Int32](UInt32(Int64(secs * 1_000_000.0)))
         writer.append_ok_response()
+    elif argc == 3 and arg_eq(sub.ptr, sub.length, "maxmemory-hide-rss"):
+        var a = tokens[unsafe_offset=i + 2]
+        var n = parse_int64_strict(a.ptr, a.length)
+        if not n.ok or n.value < 0:
+            writer.append_error_response("ERR value is not an integer or out of range")
+        else:
+            external_call["pion_debug_hide_rss", NoneType](UInt64(n.value))
+            writer.append_ok_response()
     else:
         writer.append_error_response("ERR unknown subcommand or wrong number of arguments for '" + sub.text_value()
                                      + "'. Try DEBUG HELP.")
