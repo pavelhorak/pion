@@ -687,6 +687,17 @@ static int _evict_nothing_left(void) {
 
 uint64_t pion_get_maxmemory(void) { return g_maxmemory; }
 
+/* DEBUG MAXMEMORY-HIDE-RSS <bytes>: take bytes off the RSS the limit
+ * reads, as the OS does when it compresses or swaps the process's pages out.
+ * Only reachable with --enable-debug-command; 0, the default, changes nothing.
+ * A test needs it because real memory pressure lands on this process only
+ * sometimes. */
+static volatile uint64_t g_rss_hidden = 0;
+void pion_debug_hide_rss(uint64_t bytes) {
+    g_rss_hidden = bytes;
+    g_mm_last_ms = 0;        /* re-sample on the next check */
+}
+
 uint64_t pion_physical_ram_bytes(void) { return _total_ram(); }
 
 int pion_maxmemory_check(void) {
@@ -709,7 +720,8 @@ int pion_maxmemory_check(void) {
          * them under noeviction refused every write once the log outgrew the
          * headroom, and refused writes never grow the log, so the refusal
          * never lifted (an overwrite-only workload with constant data). */
-        uint64_t ctl = rss > wal ? rss - wal : 0;
+        uint64_t seen = rss > g_rss_hidden ? rss - g_rss_hidden : 0;
+        uint64_t ctl = seen > wal ? seen - wal : 0;
         if (policy != 0) {
             g_evict_ctl = ctl;
             g_over_maxmemory = ctl > lim;

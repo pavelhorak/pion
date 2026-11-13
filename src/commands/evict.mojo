@@ -22,7 +22,9 @@ runtime that exports no statistics.
   data less the share of the heap that is over. Above the limit, every byte RSS still grows (table
   growth, fragmentation, a list the sample missed) comes off the target, each
   byte once: only a new peak counts, because RSS wobbles. Below 90% of the limit, half the gap goes back on it, so memory the allocator did
-  return gets used again.
+  return gets used again, but never more than one step past the data: RSS
+  also falls when the OS compresses or swaps the process's pages, and the
+  data does not.
 
 The estimate is only as good as MEMORY USAGE's, and it undercounts streams and
 vector sets. That costs accuracy, not the limit: the outer loop answers for
@@ -456,4 +458,12 @@ def _steer(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
     else:
         st[].peak_ctl = limit
         if ctl * 10 < limit * 9:
-            st[].target += (limit * 9 // 10 - ctl) // (2 * num_workers)
+            # Never more than one step ahead of the data held. RSS can sit low
+            # for reasons the data does not share: macOS compresses an idle
+            # process's pages and resident_size drops, Linux swaps them out.
+            # Uncapped, every 10 ms added half the gap, a 126 MB limit wound
+            # the target up to 49 GB in 25 s of memory pressure, and the
+            # refill afterwards took RSS to 192 MB before anything was evicted.
+            var step = (limit * 9 // 10 - ctl) // (2 * num_workers)
+            var t = st[].target + step
+            st[].target = t if t < data + step else data + step

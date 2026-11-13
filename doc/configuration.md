@@ -211,6 +211,11 @@ seen. `lfu-log-factor` and `lfu-decay-time` work as in Redis. Redis 8.10's
   can sit somewhat over the limit with writes reusing that memory, and lowering
   the limit evicts keys without RSS following at once. `INFO` shows what the
   controller reads: `evict_target_bytes`, `evict_key_bytes` and `evict_rss_steered`.
+- **RSS falls under memory pressure while the data does not.** macOS compresses
+  the pages of an idle process, Linux swaps them out, and neither counts as
+  resident. When RSS drops, the controller lets the data grow back only one step
+  ahead of what it holds, so when the pages return RSS can pass the limit by
+  about that step, not without bound.
 - **Eviction runs between batches of requests, not before each command.** One
   pipelined burst can pass the limit before the next tick evicts for it.
 - **The hash table counts.** The keyspace's table is a real share of memory with

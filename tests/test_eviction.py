@@ -14,6 +14,7 @@ by a factor between macOS and Linux.
   3. the volatile policies: keys without a TTL are never evicted; -OOM when no
      candidate is left, while reads keep working; volatile-ttl goes by deadline
   4. a read-only load at the limit evicts nothing
+ 4b. RSS the OS takes away (compression, swap) does not wind the target up
   5. CONFIG SET: switching policy lifts -OOM; lowering the limit evicts now
   6. a crash and restart does not revive evicted keys, and keeps the others
   7. a replica applies its primary's evictions and does not evict by itself
@@ -364,6 +365,42 @@ def read_only():
     s.stop()
 
 
+def hidden_rss():
+    section("4b. RSS the OS takes away does not wind the target up")
+    # macOS compresses an idle process's pages and Linux swaps them; neither
+    # counts as resident, so RSS falls while the data does not. Real pressure
+    # lands on this process only sometimes, so DEBUG MAXMEMORY-HIDE-RSS stands
+    # in for it. Before the fix, every 10 ms below 90% of the limit added half
+    # the gap to the target with no cap: 25 s of memory_pressure wound a 126 MB
+    # limit's target up to 49 GB, and the refill after it took RSS to 192 MB.
+    s = Server("--maxmemory-policy", "allkeys-lru", "--enable-debug-command", "local")
+    c = s.conn()
+    limit = rss(c) + 30 * MB
+    c("CONFIG", "SET", "maxmemory", limit)
+    fill(c, "k", 400_000)
+    time.sleep(0.5)
+    t0 = int(info(c, "evict_target_bytes"))
+    check("over the limit, the controller holds a target", evicted(c) > 0 and 0 < t0 < limit,
+          f"target {t0 >> 20} MB, evicted {evicted(c)}")
+    check("DEBUG MAXMEMORY-HIDE-RSS", c("DEBUG", "MAXMEMORY-HIDE-RSS", limit // 2) == "OK")
+    time.sleep(2.0)                     # 200 steer steps below 90%
+    t1 = int(info(c, "evict_target_bytes"))
+    check("the target stays one step ahead of the data", t1 <= t0 + limit // 2,
+          f"{t0 >> 20} -> {t1 >> 20} MB, limit {limit >> 20} MB")
+    c("DEBUG", "MAXMEMORY-HIDE-RSS", 0)
+    peak = 0
+    bad = []
+    for i in range(0, 400_000, 20_000):
+        bad += fill(c, "r", 20_000, start=i)
+        peak = max(peak, rss(c))
+    check("no write failed", not bad, repr(bad[:2]))
+    check("when the pages come back, RSS holds near the limit", peak <= limit * 1.20,
+          f"peak {peak >> 20} MB, limit {limit >> 20} MB")
+    check("DEBUG MAXMEMORY-HIDE-RSS refuses a negative", isinstance(c("DEBUG", "MAXMEMORY-HIDE-RSS", -1), tuple))
+    check("server alive", s.alive())
+    s.stop()
+
+
 def live_config():
     section("5. CONFIG SET at runtime")
     s = Server()
@@ -649,6 +686,7 @@ def main():
         allkeys(p)
     volatile()
     read_only()
+    hidden_rss()
     live_config()
     durability()
     replica()
