@@ -22,6 +22,7 @@ Wire surface:
     SSM.PREFIX.FETCH <session_id> <layer_id>
     SSM.PREFIX.DROP  <session_id> [<layer_id>]    # layer_id omitted = drop all
 """
+from src.common.data_dir import data_path
 from std.memory.alloc import unsafe_alloc
 from src.common.utils import strict_atol
 
@@ -60,8 +61,8 @@ def ssm_durability_startup(worker_id: Int) -> None:
     """
     comptime if CompilationTarget.is_macos() or CompilationTarget.is_linux():
         _ = ssm_init()
-        var snap_path = "pion.ssm." + String(worker_id) + "\0"
-        var wal_path  = "pion.ssm.wal." + String(worker_id) + "\0"
+        var snap_path = data_path("pion.ssm." + String(worker_id)) + "\0"
+        var wal_path  = data_path("pion.ssm.wal." + String(worker_id)) + "\0"
         _ = external_call["pion_ssm_load_snapshot", Int32](
             UInt32(worker_id), snap_path.as_c_string_span())
         _ = external_call["pion_ssm_wal_replay", Int32](
@@ -79,7 +80,7 @@ def ssm_save_snapshot(worker_id: Int) -> Int32:
     or -1 on error.
     """
     comptime if CompilationTarget.is_macos() or CompilationTarget.is_linux():
-        var snap_path = "pion.ssm." + String(worker_id) + "\0"
+        var snap_path = data_path("pion.ssm." + String(worker_id)) + "\0"
         var rc = external_call["pion_ssm_save_snapshot", Int32](
             UInt32(worker_id), snap_path.as_c_string_span())
         if rc >= 0:

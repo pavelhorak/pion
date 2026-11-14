@@ -1,4 +1,5 @@
 from std.memory.alloc import unsafe_alloc
+from src.common.zalloc import zalloc
 from src.common.ptr import null_ptr, is_null, is_not_null
 from src.network.io_ring import ring_at, ring_push, is_sleeping, evfd_signal, IO_MSG_KICK
 from std.memory import alloc, unsafe_memcpy
@@ -155,13 +156,10 @@ struct WriterCtx(Movable):
         output state, which is how the paths that would write to a connection
         recognise it (`is_null(pending_offsets)`)."""
         if connections:
-            self.pending_offsets = unsafe_alloc[Int](65536)
-            self.pending_buffers = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
-            self.uring_inflight = unsafe_alloc[Int](65536)
-            for i in range(65536):
-                self.pending_offsets[unsafe_offset=i] = 0
-                self.pending_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
-                self.uring_inflight[unsafe_offset=i] = 0
+            # zero pages until written (idle RSS) (0 and null_ptr are both 0)
+            self.pending_offsets = zalloc[Int](65536)
+            self.pending_buffers = zalloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
+            self.uring_inflight = zalloc[Int](65536)
         else:
             self.pending_offsets = null_ptr[Int, MutUntrackedOrigin]()
             self.pending_buffers = null_ptr[Pointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]()
@@ -226,15 +224,11 @@ struct WriterCtx(Movable):
         self.cap_len += n
 
     def _ovf_init(mut self):
-        self.ovf_bufs = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
-        self.ovf_lens = unsafe_alloc[Int](65536)
-        self.ovf_heads = unsafe_alloc[Int](65536)
-        self.ovf_caps = unsafe_alloc[Int](65536)
-        for i in range(65536):
-            self.ovf_bufs[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
-            self.ovf_lens[unsafe_offset=i] = 0
-            self.ovf_heads[unsafe_offset=i] = 0
-            self.ovf_caps[unsafe_offset=i] = 0
+        # zero pages until written (idle RSS) (0 and null_ptr are both 0)
+        self.ovf_bufs = zalloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
+        self.ovf_lens = zalloc[Int](65536)
+        self.ovf_heads = zalloc[Int](65536)
+        self.ovf_caps = zalloc[Int](65536)
 
     @always_inline
     def out_overflowed(self, ci: Int) -> Bool:

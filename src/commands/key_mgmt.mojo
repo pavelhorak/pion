@@ -1,4 +1,5 @@
 """Key management commands: TYPE, RENAME, RENAMENX, COPY, OBJECT, SORT, SCAN, KEYS, RANDOMKEY, TOUCH, WAIT."""
+from src.common.zalloc import zalloc
 from std.memory.alloc import unsafe_alloc
 from src.common.container_free import deep_clone, free_container, remove_and_free, index_field_ttls
 from src.commands.scan_opts import parse_scan_opts
@@ -817,9 +818,7 @@ struct ParkedWaits(Movable):
 
     def __init__(out self):
         self.entries = List[ParkedWait]()
-        self.flags = unsafe_alloc[UInt8](65536)
-        for i in range(65536):
-            self.flags[unsafe_offset=i] = 0
+        self.flags = zalloc[UInt8](65536)          # zero pages until written (idle RSS)
         self.fd_parks = 0
 
     @always_inline

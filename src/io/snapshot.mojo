@@ -25,6 +25,7 @@ Recovery flow:
 from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.ffi import external_call
+from src.common.data_dir import data_path
 from std.memory import unsafe_memcpy, unsafe_memset, alloc
 
 from src.common.hash_map import StripedHashMap, SlabHashMap, VEC_KEY_SHARDS
@@ -478,7 +479,7 @@ struct SnapshotEngine(Movable):
         var ts = external_call["pion_get_unix_time", Int64]()
 
         # --- Open tmp file ---
-        var snap_path = "pion.snapshot." + String(worker_id)
+        var snap_path = data_path("pion.snapshot." + String(worker_id))
         var tmp_path  = snap_path + ".tmp"
         if path_override.byte_length() > 0:
             snap_path = path_override
@@ -618,7 +619,7 @@ struct SnapshotEngine(Movable):
                      ttl_map: Pointer[SlabHashMap, MutUntrackedOrigin] =
                          null_ptr[SlabHashMap, MutUntrackedOrigin]()) -> Int64:
         """Load snapshot into keyspace. Returns snapshot timestamp (-1 if no snapshot)."""
-        var snap_path = "pion.snapshot." + String(worker_id)
+        var snap_path = data_path("pion.snapshot." + String(worker_id))
         var cpath = snap_path
         var fd = external_call["pion_open_rdonly", Int32](cpath.as_c_string_span())
         if fd < 0:

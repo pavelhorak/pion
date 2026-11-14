@@ -4,6 +4,7 @@ Per-fd command queuing with WATCH optimistic locking.
 MULTI enters queuing mode, EXEC replays atomically.
 WATCH snapshots key versions; EXEC aborts if any watched key was modified.
 """
+from src.common.zalloc import zalloc
 from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.value import GenericValue
@@ -98,26 +99,16 @@ struct TransactionState(Movable):
     var client_names: Dict[Int, String]
 
     def __init__(out self):
-        self.in_multi = unsafe_alloc[UInt8](MAX_TX_FDS)
-        unsafe_memset(self.in_multi, 0, MAX_TX_FDS)
-        self.queues = unsafe_alloc[Pointer[QueuedCommand, MutUntrackedOrigin]](MAX_TX_FDS)
-        unsafe_memset(self.queues.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 8)
-        self.queue_counts = unsafe_alloc[Int32](MAX_TX_FDS)
-        unsafe_memset(self.queue_counts.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 4)
-        self.queue_caps = unsafe_alloc[Int32](MAX_TX_FDS)
-        unsafe_memset(self.queue_caps.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 4)
-        self.dirty = unsafe_alloc[UInt8](MAX_TX_FDS)
-        unsafe_memset(self.dirty, 0, MAX_TX_FDS)
-        self.key_versions = unsafe_alloc[UInt64](KEY_VERSION_SLOTS)
-        unsafe_memset(self.key_versions.unsafe_bitcast[UInt8](), 0, KEY_VERSION_SLOTS * 8)
-        self.watch_keys = unsafe_alloc[Pointer[WatchedKey, MutUntrackedOrigin]](MAX_TX_FDS)
-        unsafe_memset(self.watch_keys.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 8)
-        self.watch_counts = unsafe_alloc[Int32](MAX_TX_FDS)
-        unsafe_memset(self.watch_counts.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 4)
-        self.watch_caps = unsafe_alloc[Int32](MAX_TX_FDS)
-        unsafe_memset(self.watch_caps.unsafe_bitcast[UInt8](), 0, MAX_TX_FDS * 4)
-        self.authed = unsafe_alloc[UInt8](MAX_TX_FDS)
-        unsafe_memset(self.authed, 0, MAX_TX_FDS)
+        self.in_multi = zalloc[UInt8](MAX_TX_FDS)
+        self.queues = zalloc[Pointer[QueuedCommand, MutUntrackedOrigin]](MAX_TX_FDS)
+        self.queue_counts = zalloc[Int32](MAX_TX_FDS)
+        self.queue_caps = zalloc[Int32](MAX_TX_FDS)
+        self.dirty = zalloc[UInt8](MAX_TX_FDS)
+        self.key_versions = zalloc[UInt64](KEY_VERSION_SLOTS)
+        self.watch_keys = zalloc[Pointer[WatchedKey, MutUntrackedOrigin]](MAX_TX_FDS)
+        self.watch_counts = zalloc[Int32](MAX_TX_FDS)
+        self.watch_caps = zalloc[Int32](MAX_TX_FDS)
+        self.authed = zalloc[UInt8](MAX_TX_FDS)
         self.tenant_id = unsafe_alloc[Int16](MAX_TX_FDS)
         # 0xFF in every byte = Int16(-1) in every slot (unbound).
         unsafe_memset(self.tenant_id.unsafe_bitcast[UInt8](), 0xFF, MAX_TX_FDS * 2)

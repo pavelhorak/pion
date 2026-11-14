@@ -1,4 +1,5 @@
 """Vector search commands: FT.INFO, FT.DROPINDEX, FT.OPTIMIZE, FT.CREATE, FT.ADDTEXT, FT.SEARCHTEXT, FT.SEARCH + BM25."""
+from src.common.data_dir import data_path
 from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.collections import Array, List
@@ -2158,7 +2159,7 @@ def retire_index(
     # The index's file goes with it. It stayed, so a restart loaded the dropped
     # index back: FT.INFO knew it again and FT.SEARCH answered from it. Every
     # caller holds AUTO_HOLD, so no automatic build is writing the file.
-    var _ip = String("pion.hnsw.0")
+    var _ip = data_path("pion.hnsw.0")
     _ = external_call["unlink", Int32](_ip.as_c_string_span())
 
 
@@ -2408,7 +2409,7 @@ def handle_ft_optimize(
             # command ends ingest, after a restart too: clear the bit in place.
             # (No automatic build is running: this command holds AUTO_HOLD, so
             # the file is whole.)
-            var _ip = String("pion.hnsw.0") + "\0"
+            var _ip = data_path("pion.hnsw.0") + "\0"
             _ = external_call["pion_file_patch_u64", Int32](
                 _ip.unsafe_ptr(), Int64(25 * 8), ~UInt64(256), UInt64(0))
         writer.append_ok_response()
@@ -2517,9 +2518,9 @@ def handle_ft_optimize(
     # gh #211: persist the slot→key map with the graph — without it a warm
     # restart resolves every FT.SEARCH result to a raw slot number.
     if is_not_null(shared_hnsw):
-        hnsw.save_to_disk("pion.hnsw.0", shared_hnsw[].hk_keys_buf, shared_hnsw[].hk_max_elements)
+        hnsw.save_to_disk(data_path("pion.hnsw.0"), shared_hnsw[].hk_keys_buf, shared_hnsw[].hk_max_elements)
     else:
-        hnsw.save_to_disk("pion.hnsw.0")
+        hnsw.save_to_disk(data_path("pion.hnsw.0"))
     writer.append_ok_response()
     return ci
 

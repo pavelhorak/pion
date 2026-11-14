@@ -21,6 +21,7 @@ message to every other worker's inbox (src/ffi/fcntl_wrap.c), and each worker
 takes its inbox on its tick and delivers to its own subscribers. PUBLISH counts
 the subscribers of its own worker, as a Redis Cluster node counts its own.
 """
+from src.common.zalloc import zalloc
 from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from std.memory import alloc, unsafe_memcpy, unsafe_memset
@@ -76,10 +77,8 @@ struct PubSubRegistry(Movable):
         self.channels = List[Subscription]()
         self.patterns = List[Subscription]()
         self.shards = List[Subscription]()
-        self.counts = unsafe_alloc[Int32](MAX_FDS)
-        self.shard_counts = unsafe_alloc[Int32](MAX_FDS)
-        unsafe_memset(self.counts.unsafe_bitcast[UInt8](), 0, MAX_FDS * 4)
-        unsafe_memset(self.shard_counts.unsafe_bitcast[UInt8](), 0, MAX_FDS * 4)
+        self.counts = zalloc[Int32](MAX_FDS)          # zero pages until written (idle RSS)
+        self.shard_counts = zalloc[Int32](MAX_FDS)
         self.subscribed_fds = 0
 
     def __init__(out self, *, deinit move: Self):

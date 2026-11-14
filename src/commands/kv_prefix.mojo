@@ -21,6 +21,7 @@ Three commands:
     Global stats: registered prefix count, total tokens cached.
 """
 
+from src.common.data_dir import data_path
 from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.io.wal import WAL
@@ -742,7 +743,7 @@ def handle_kv_prefix_save(
         writer.append_error_response("ERR V-store not enabled (use --kvcache)")
         return 1
 
-    var path = String("pion.vstore.") + String(worker_id)
+    var path = data_path(String("pion.vstore.") + String(worker_id))
     if start + 1 < num_tokens:
         var path_tok = tokens[unsafe_offset=start + 1]
         if Int(path_tok.length) > 0:

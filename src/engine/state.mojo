@@ -25,6 +25,7 @@ from src.memory.object_pool import ObjectPool
 from src.common.topology import ClusterTopology
 from src.network.raft import RaftNode
 from src.common.config import PionConfig
+from src.common.data_dir import data_path
 from src.network.engine import NetworkEngine
 
 from src.common.lock_free import LockFreeRingBuffer, AITask
@@ -142,7 +143,7 @@ struct Pion:
 
         # === Phase 4: Heavy initialization (socket is already listening) ===
         # Per-worker WAL file: pion.wal.0, pion.wal.1, ... so each worker recovers its own data.
-        self.wal.unsafe_write(WAL("pion.wal." + String(worker_id), worker_id,
+        self.wal.unsafe_write(WAL(data_path("pion.wal." + String(worker_id)), worker_id,
                                        config.server.wal_size_mb * 1024 * 1024,
                                        config.server.wal_max_segments,
                                        not config.server.no_wal))
@@ -152,7 +153,7 @@ struct Pion:
         self.wal[].refuse_when_full = config.server.wal_refuse_when_full
         # gh #163: the blob arena must be mapped before WAL replay — cmd_id 4
         # entries resolve their pointers through it.
-        self.blobs.unsafe_write(BlobStore("pion.blob." + String(worker_id), worker_id,
+        self.blobs.unsafe_write(BlobStore(data_path("pion.blob." + String(worker_id)), worker_id,
                                                not config.server.no_blob_tier))
         self.engine.fast_path.blobs = self.blobs
         # Disabled = BLOB_TIER_OFF sentinel (not 0), so the fast-path routing
@@ -241,7 +242,7 @@ struct Pion:
         # loaded graph to the shared view — without the publish only the
         # loading worker can serve FT.SEARCH after a warm restart (ready_atomic
         # stays 0 and the other workers' borrow never fires).
-        var hnsw_path = "pion.hnsw." + String(worker_id)
+        var hnsw_path = data_path("pion.hnsw." + String(worker_id))
         var _hk_buf = null_ptr[UInt8, MutUntrackedOrigin]()
         var _hk_max = 0
         if is_not_null(self.shared_hnsw):

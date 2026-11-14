@@ -1,4 +1,5 @@
 from std.memory.alloc import unsafe_alloc
+from src.common.data_dir import data_path
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.vec_tomb import VecTomb
 from std.memory import alloc, unsafe_memcpy, unsafe_memset, stack_allocation
@@ -496,9 +497,9 @@ struct SlowPathHandler:
         # Explicit snapshot via KV.PREFIX.SAVE compacts: writes a fresh snapshot
         # then truncates the WAL. No auto-shutdown hook in Pion today.
         if config.server.kvcache_enabled:
-            var vs_path = "pion.vstore." + String(worker_id)
+            var vs_path = data_path("pion.vstore." + String(worker_id))
             _ = self.v_store.load_from_disk(vs_path)
-            var wal_path = "pion.vstore.wal." + String(worker_id)
+            var wal_path = data_path("pion.vstore.wal." + String(worker_id))
             _ = self.v_store.wal_replay(wal_path)
             self.v_store.wal_open(wal_path)
             # gh #94: SSM.PREFIX.* durability mirror — snapshot load + WAL

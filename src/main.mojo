@@ -12,6 +12,7 @@ from src.common.ptr import is_not_null
 from src.common.hash_map import evict_policy_name
 from src.commands.evict import evict_policy_from_string
 from src.common.config import PionConfig
+from src.common.data_dir import data_path
 from src.common.version import PION_VERSION, PION_BUILD_SHA, PION_BUILD_DATE
 from src.vector.vector_abi import vector_backend_line, vector_abi_ok, vector_lib_abi, VECTOR_ABI_VERSION
 from src.common.utils import set_thread_affinity, set_thread_qos_user_interactive, parse_memory_value
@@ -225,7 +226,7 @@ def _known_flags() -> List[String]:
         "--iouring", "--epoll", "--io-threads", "--ns-prefix", "--requirepass", "--requirepass-file", "--bind",
         "--tenant", "--dim", "--max-elements", "--crash-log",
         "--status-file", "--no-crash-log", "--rss-warn-pct", "--maxmemory", "--maxmemory-policy", "--maxmemory-samples",
-        "--lua-time-limit", "--lua-memory-limit", "--enable-debug-command",
+        "--lua-time-limit", "--lua-memory-limit", "--enable-debug-command", "--dir",
         "--help", "-h", "--version", "-v",
     ]
 
@@ -241,7 +242,7 @@ def _value_flags() -> List[String]:
         "--requirepass", "--requirepass-file", "--bind", "--tenant",
         "--dim", "--max-elements", "--crash-log", "--status-file",
         "--rss-warn-pct", "--maxmemory", "--maxmemory-policy", "--maxmemory-samples", "--lua-time-limit", "--lua-memory-limit",
-        "--enable-debug-command", "--io-threads",
+        "--enable-debug-command", "--io-threads", "--dir",
     ]
 
 
@@ -326,6 +327,9 @@ def _print_help():
     print("                            0.0.0.0 when a password is set). Applies to the")
     print("                            RESP port, port+1, replication and gossip.")
     print("      --no-wal              disable WAL append (benchmark only; SIGKILL loses writes)")
+    print("      --dir PATH            data directory for the WAL, snapshot, blob arena and index files")
+    print("                            (default: the working directory); locks PATH/pion.lock, so an")
+    print("                            embedded Pion or another server cannot open it at the same time")
     print("      --wal-size MB         WAL segment size (default 256); rotates instead of dropping")
     print("      --wal-max-segments N  sealed WAL segments to keep (default 32); 0 = never rotate")
     print("      --wal-full-policy P   refuse (default) | drop — what to do with keyspace")
@@ -436,6 +440,7 @@ def main():
         external_call["exit", NoneType](Int32(1))
 
     var config = PionConfig()
+    var data_dir = String("")            # --dir: where persistence files live
     var lua_time_limit_ms = 5000         # #36: --lua-time-limit
     var lua_memory_limit = 1 << 30       # #36: --lua-memory-limit
 
@@ -762,6 +767,9 @@ def main():
                 _refuse_arg(String(args[i + 1]), "invalid value for " + String(args[i]))   # gh #372
             i += 2
         # gh #138: crash/exit diagnostics.
+        elif args[i] == "--dir" and i + 1 < len(args):
+            data_dir = args[i + 1]
+            i += 2
         elif args[i] == "--crash-log" and i + 1 < len(args):
             config.server.crash_log = args[i + 1]
             i += 2
@@ -984,6 +992,28 @@ def main():
                   + String(_rp if config.cluster.is_replica and _rp + 10000 > 65535 else config.server.port)
                   + ": use a port up to 55535.")
             external_call["exit", NoneType](Int32(1))
+
+    # --dir: every persistence file is named under it (src/common/data_dir.mojo),
+    # and the directory is locked first, before any file is opened, so an
+    # embedded Pion or a second server cannot write the same log. Without
+    # --dir nothing changes: files in the working directory, no lock (two
+    # servers on different ports in one directory keep working).
+    if data_dir.byte_length() > 0:
+        var _dz = data_dir + "\0"
+        if external_call["access", Int32](_dz.unsafe_ptr(), Int32(2)) != 0:   # W_OK
+            print("FATAL: --dir '" + data_dir + "' does not exist or is not writable.")
+            external_call["exit", NoneType](Int32(1))
+        var _lz = data_dir + "/pion.lock\0"
+        var _lfd = external_call["pion_dir_lock", Int32](_lz.unsafe_ptr())
+        if _lfd == -2:
+            print("FATAL: --dir '" + data_dir + "' is in use (" + data_dir
+                  + "/pion.lock is held by an embedded Pion or another server).")
+            external_call["exit", NoneType](Int32(1))
+        if _lfd < 0:
+            print("FATAL: cannot open " + data_dir + "/pion.lock")
+            external_call["exit", NoneType](Int32(1))
+        _ = external_call["pion_set_data_dir", Int32](data_dir.unsafe_ptr(), Int64(data_dir.byte_length()))
+        print("Data directory: " + data_dir + " (locked)")
 
     # Ignore SIGPIPE (signal 13) so writes to closed sockets return EPIPE instead of killing the process
     _ = external_call["signal", Int32](13, 1)
@@ -1319,7 +1349,7 @@ def main():
     var warm_pending_buf = unsafe_alloc[UInt64](1 + n_workers)
     warm_pending_buf[unsafe_offset=0] = 0
     for _wl in range(n_workers):
-        var _wl_path = "pion.hnsw." + String(_wl) + "\0"
+        var _wl_path = data_path("pion.hnsw." + String(_wl)) + "\0"
         var _loads = external_call["access", Int32](_wl_path.unsafe_ptr(), Int32(4)) == 0   # R_OK
         warm_pending_buf[unsafe_offset=1 + _wl] = 1 if _loads else 0
         if _loads:
@@ -1970,5 +2000,5 @@ def pion_vector_auto_build(ctx: Pointer[Int64, MutUntrackedOrigin], lane_idx: In
     Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](sh[].auto_state, w | UInt64(2))       # BUILT
     while (Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](sh[].auto_state, UInt64(0)) & 0xFF) == 2:
         _ = external_call["usleep", Int32](Int32(1000))
-    g[].save_to_disk("pion.hnsw.0", sh[].hk_keys_buf, sh[].hk_max_elements)
+    g[].save_to_disk(data_path("pion.hnsw.0"), sh[].hk_keys_buf, sh[].hk_max_elements)
     Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](sh[].auto_state, w | UInt64(4))       # DONE
