@@ -34,7 +34,17 @@ jobs:
             3.11
             3.13
 
+      - name: Swap, for the compiler's peak
+        # At the default thread count the shared-library build's memory got
+        # the runner shut down ("received a shutdown signal") on both legs.
+        run: |
+          sudo fallocate -l 8G /swapfile2 && sudo chmod 600 /swapfile2
+          sudo mkswap /swapfile2 && sudo swapon /swapfile2
+          free -g
+
       - name: Build libpion.so
+        env:
+          PION_EMBED_JOBS: '2'
         run: bash embedded/build_linux.sh
 
       - name: Test dependencies

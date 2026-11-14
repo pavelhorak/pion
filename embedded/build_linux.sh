@@ -29,7 +29,9 @@ LINK=""
 for o in crash_wrap build_pool_wrap worker_spawn_wrap fcntl_wrap geo_math uring_wrap xdp_wrap ssm_state_wrap lua_wrap; do
     LINK="$LINK -Xlinker $OBJ/$o.o"
 done
-pixi run mojo build --emit shared-lib -O3 --target-cpu "$CPU" -I . src/lib/pion_embed.mojo \
+# PION_EMBED_JOBS caps the compiler's threads: the shared-library build's
+# peak memory got a 16 GB CI runner shut down at the default (all cores).
+pixi run mojo build --emit shared-lib -O3 --target-cpu "$CPU" -j "${PION_EMBED_JOBS:-0}" -I . src/lib/pion_embed.mojo \
     $LINK -Xlinker "$OBJ/liblua.a" -Xlinker -lm -Xlinker -lpthread -Xlinker -ldl -o libpion.so
 ls -la libpion.so
 echo "highest GLIBC version required: $(strings -a libpion.so | grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n | tail -1)"
