@@ -1,0 +1,93 @@
+name: Embedded Pion
+
+# The engine as an in-process library (embedded/README.md): build libpion on
+# both Linux runners, run the server's correctness suites through it, build
+# the cp311-abi3 wheel and check it installs and runs in a clean venv.
+on:
+  push:
+    branches: [embedded/phase0]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: ${{ matrix.leg }}
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [linux-x86_64, linux-arm64]
+    runs-on: ${{ matrix.leg == 'linux-arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
+          cache-key: pixi-${{ matrix.leg }}-${{ hashFiles('pixi.lock') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.11
+            3.13
+
+      - name: Build libpion.so
+        run: bash embedded/build_linux.sh
+
+      - name: Test dependencies
+        run: python3.13 -m pip install --quiet redis patchelf setuptools wheel
+
+      - name: Smoke test through the library (ctypes, from the tree)
+        env:
+          PYTHONPATH: embedded/python
+          PION_EMBED_LIB: ${{ github.workspace }}/libpion.so
+          PION_EMBED_CTYPES: '1'
+        run: python3.13 embedded/tests/test_smoke.py
+
+      - name: The server's suites, through the library
+        env:
+          PYTHONPATH: embedded/python
+          PION_EMBED_LIB: ${{ github.workspace }}/libpion.so
+          PION_EMBED_CTYPES: '1'
+        run: |
+          set -e
+          run_suite() {   # a fresh directory and proxy per suite
+            local port=$1; shift
+            local d; d=$(mktemp -d)
+            python3.13 -m pion_embedded.proxy --dir "$d" --port "$port" > "$d.log" 2>&1 &
+            local p=$!
+            for i in $(seq 1 100); do (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
+            if ! "$@"; then echo "::error::$* failed"; cat "$d.log" | tail -40; kill $p; return 1; fi
+            kill -0 $p || { echo "::error::the proxy died"; cat "$d.log" | tail -40; return 1; }
+            kill $p
+          }
+          run_suite 16700 python3.13 tests/test_raw.py --port 16700
+          run_suite 16701 python3.13 tests/test_parity.py --port 16701
+          run_suite 16702 python3.13 tests/test_dispatch_sweep.py --port 16702
+          run_suite 16703 python3.13 tests/test_tx_probe.py --port 16703
+
+      - name: Build the wheel
+        run: bash embedded/build_wheel.sh python3.13
+
+      - name: The wheel installs and runs in clean venvs (3.11, 3.13), toolchain hidden
+        run: |
+          set -e
+          W=$(ls embedded/dist/*.whl)
+          echo "wheel: $W"
+          mv .pixi/envs/default/lib .pixi/envs/default/lib.hidden
+          for v in 3.11 3.13; do
+            python$v -m venv /tmp/w$v
+            /tmp/w$v/bin/pip install --quiet "$W"
+            (cd /tmp && /tmp/w$v/bin/python -c "import pion_embedded as p, tempfile; r = p.Redis(dir=tempfile.mkdtemp()); r.ping(); print('$v binding', r.pion_engine.binding)")
+            (cd /tmp && /tmp/w$v/bin/python $GITHUB_WORKSPACE/embedded/tests/test_smoke.py)
+          done
+          mv .pixi/envs/default/lib.hidden .pixi/envs/default/lib
+
+      - name: Keep the wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: pion-embedded-wheel-${{ matrix.leg }}
+          path: embedded/dist/*.whl

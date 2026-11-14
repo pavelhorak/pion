@@ -1,3 +1,4 @@
+from src.common.zalloc import zalloc
 from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.common.container_free import free_graveyard
@@ -7,6 +8,7 @@ from src.network.vector_auto import vector_auto_tick
 from std.sys.info import CompilationTarget
 from std.memory import alloc, unsafe_memcpy, stack_allocation
 from std.ffi import external_call
+from src.common.data_dir import data_path
 from std.collections import List
 from src.common.skip_list import SlabSkipList
 from src.network.server import KEvent, TCPServer, EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLET, EPOLLEXCLUSIVE, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD
@@ -156,22 +158,18 @@ struct NetworkEngine:
         self.num_workers = num_workers
 
 
-        self.client_buffer_lens = unsafe_alloc[Int](65536)
-        self.client_buffers = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
-        for i in range(65536):
-            self.client_buffer_lens[unsafe_offset=i] = 0
-            self.client_buffers[unsafe_offset=i] = null_ptr[UInt8, MutUntrackedOrigin]()
+        # zero pages until written (idle RSS) (0 and null_ptr are both 0)
+        self.client_buffer_lens = zalloc[Int](65536)
+        self.client_buffers = zalloc[Pointer[UInt8, MutUntrackedOrigin]](65536)
 
         # P4: local_affinity[fd] = 1 when connection was accepted on this worker's secondary port.
-        self.local_affinity = unsafe_alloc[UInt8](65536)
-        unsafe_memset(self.local_affinity.unsafe_bitcast[UInt8](), 0, 65536)
+        self.local_affinity = zalloc[UInt8](65536)
         self.secondary_listen_fd = secondary_listen_fd
         self.binary_listen_fd = binary_listen_fd
         # io_uring: heap-allocated so ResponseWriter can hold a pointer to it.
         self.ring = unsafe_alloc[IOUring](1)
         self.ring[unsafe_offset=0] = IOUring()
-        self.uring_recv_armed = unsafe_alloc[UInt8](65536)
-        unsafe_memset(self.uring_recv_armed.unsafe_bitcast[UInt8](), 0, 65536)
+        self.uring_recv_armed = zalloc[UInt8](65536)
         self.multishot_bufs = null_ptr[UInt8, MutUntrackedOrigin]()
         self.multishot_active = False
 
@@ -728,7 +726,7 @@ struct NetworkEngine:
             return
         wal[].publish_header()
         var tail = wal[].tail_offset
-        var path = "pion.replsnap." + String(self.worker_id)
+        var path = data_path("pion.replsnap." + String(self.worker_id))
         _ = self.slow_path.snapshot_engine.take_snapshot(
             self.fast_path.keyspace, self.worker_id, UInt64(0),
             null_ptr[BlobStore, MutUntrackedOrigin](), self.fast_path.ttl_map, path)

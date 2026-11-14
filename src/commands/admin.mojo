@@ -163,54 +163,38 @@ def handle_hello(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
             elif not (nt.length == 1 and nt.ptr[unsafe_offset=0] == 50):  # != "2"
                 writer.append_error_response("NOPROTO unsupported protocol version")
                 return extra
-    # gh #100 (C2): scan for an inline `AUTH <username> <password>` clause.
-    if requirepass.byte_length() > 0:
-        var j = i + 1
-        var auth_failed = False
-        while j < num_tokens:
-            var t = tokens[unsafe_offset=j]
-            if t.length == 4 and (t.ptr[unsafe_offset=0]|0x20)==97 and (t.ptr[unsafe_offset=1]|0x20)==117 and (t.ptr[unsafe_offset=2]|0x20)==116 and (t.ptr[unsafe_offset=3]|0x20)==104:  # AUTH
-                if j + 2 < num_tokens:
-                    var user = tokens[unsafe_offset=j + 1]
-                    var pw = tokens[unsafe_offset=j + 2]  # AUTH <user> <pass>
-                    # gh #101: tenant credential first; -2 (name hit, wrong
-                    # password) must not fall through to the admin compare.
-                    var tm = -1
-                    if is_not_null(tenants) and tenants[].count > 0:
-                        tm = tenants[].match_credentials(user.ptr, user.length, pw.ptr, pw.length)
-                    var ok = False
-                    if tm >= 0:
-                        ok = True
-                        if is_not_null(authed):
-                            authed[unsafe_offset=Int(fd)] = 1
-                        if is_not_null(tenant_ids):
-                            tenant_ids[unsafe_offset=Int(fd)] = Int16(tm)
-                    elif tm == -1 and pw.length == requirepass.byte_length():
-                        var m = True
-                        for k in range(requirepass.byte_length()):
-                            if pw.ptr[unsafe_offset=k] != requirepass.unsafe_ptr()[unsafe_offset=k]:
-                                m = False; break
-                        if m and is_not_null(authed):
-                            ok = True
-                            authed[unsafe_offset=Int(fd)] = 1
-                            if is_not_null(tenant_ids):
-                                tenant_ids[unsafe_offset=Int(fd)] = -1  # admin
-                    if not ok:
-                        auth_failed = True
-                    j += 3
-                    continue
-            j += 1
-        # #24: a rejected AUTH clause is WRONGPASS, as AUTH itself answers and
-        # as Redis answers HELLO. It also wins over an earlier successful AUTH
-        # on this connection: the clause failed, so the banner is not sent.
-        # NOAUTH is for a HELLO that carried no credentials at all.
-        if auth_failed:
-            writer.append_error_response("WRONGPASS invalid username-password pair or user is disabled.")
-            return extra
-        # Still unauthenticated → refuse to emit the banner.
-        if is_null(authed) or authed[unsafe_offset=Int(fd)] == 0:
-            writer.append_error_response("NOAUTH HELLO must be called with the client already authenticated, otherwise the HELLO <proto> AUTH <user> <pass> option can be used to authenticate the client and select the RESP protocol version at the same time")
-            return extra
+    # gh #100 (C2): scan for an inline `AUTH <username> <password>` clause. It
+    # runs with no password configured too: Redis then accepts `default` with
+    # any password and refuses any other user name.
+    var j = i + 1
+    var auth_failed = False
+    while j < num_tokens:
+        var t = tokens[unsafe_offset=j]
+        if t.length == 4 and (t.ptr[unsafe_offset=0]|0x20)==97 and (t.ptr[unsafe_offset=1]|0x20)==117 and (t.ptr[unsafe_offset=2]|0x20)==116 and (t.ptr[unsafe_offset=3]|0x20)==104:  # AUTH
+            if j + 2 < num_tokens:
+                var who = check_user_credentials(tokens[unsafe_offset=j + 1], tokens[unsafe_offset=j + 2],
+                                                 requirepass, tenants)
+                if who == -2:
+                    auth_failed = True
+                else:
+                    if is_not_null(authed):
+                        authed[unsafe_offset=Int(fd)] = 1
+                    if is_not_null(tenant_ids):
+                        tenant_ids[unsafe_offset=Int(fd)] = Int16(who)
+                j += 3
+                continue
+        j += 1
+    # #24: a rejected AUTH clause is WRONGPASS, as AUTH itself answers and
+    # as Redis answers HELLO. It also wins over an earlier successful AUTH
+    # on this connection: the clause failed, so the banner is not sent.
+    # NOAUTH is for a HELLO that carried no credentials at all.
+    if auth_failed:
+        writer.append_error_response(_WRONGPASS)
+        return extra
+    # Still unauthenticated → refuse to emit the banner.
+    if requirepass.byte_length() > 0 and (is_null(authed) or authed[unsafe_offset=Int(fd)] == 0):
+        writer.append_error_response("NOAUTH HELLO must be called with the client already authenticated, otherwise the HELLO <proto> AUTH <user> <pass> option can be used to authenticate the client and select the RESP protocol version at the same time")
+        return extra
     # Negotiation succeeded — bind the fd and switch this writer immediately so
     # the reply below (and every later command in the same recv batch) is
     # already in the agreed protocol.
@@ -790,61 +774,95 @@ def handle_quit(mut writer: ResponseWriter) -> Int:
     return 0
 
 
+comptime _NOPASS_AUTH_ERR = "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
+comptime _WRONGPASS = "WRONGPASS invalid username-password pair or user is disabled."
+
+
+@always_inline
+def _is_default_user(t: RESP3Token) -> Bool:
+    """Redis usernames are case-sensitive: only `default` names the default user."""
+    return t.length == 7 and t.ptr[unsafe_offset=0] == 100 and t.ptr[unsafe_offset=1] == 101 \
+        and t.ptr[unsafe_offset=2] == 102 and t.ptr[unsafe_offset=3] == 97 and t.ptr[unsafe_offset=4] == 117 \
+        and t.ptr[unsafe_offset=5] == 108 and t.ptr[unsafe_offset=6] == 116
+
+
+@always_inline
+def _requirepass_eq(pw: RESP3Token, requirepass: String) -> Bool:
+    var rp_len = requirepass.byte_length()
+    if pw.length != rp_len:
+        return False
+    var rp_ptr = requirepass.unsafe_ptr()
+    for k in range(rp_len):
+        if pw.ptr[unsafe_offset=k] != rp_ptr[unsafe_offset=k]:
+            return False
+    return True
+
+
+@always_inline
+def check_user_credentials(user: RESP3Token, pw: RESP3Token, requirepass: String,
+                           tenants: Pointer[TenantTable, MutUntrackedOrigin]) -> Int:
+    """`AUTH <user> <password>` and HELLO's AUTH clause, by Redis's ACL rules for
+    the users Pion has: the default user and the --tenant users.
+
+    Returns a tenant index (>= 0), -1 for the default user (admin, unprefixed
+    keyspace), or -2 for WRONGPASS. A tenant name with the wrong password is
+    -2 and never falls through to the default user (gh #101). With no
+    requirepass the default user is `nopass` and takes any password, as in
+    Redis; any other user name does not exist and is WRONGPASS. redis-py's
+    credential providers send `AUTH default <anything>` on a server without a
+    password, and docket's suite found Pion answering ERR to it."""
+    if is_not_null(tenants) and tenants[].count > 0:
+        var m = tenants[].match_credentials(user.ptr, user.length, pw.ptr, pw.length)
+        if m >= 0:
+            return m
+        if m == -2:
+            return -2
+    if not _is_default_user(user):
+        return -2
+    if requirepass.byte_length() == 0 or _requirepass_eq(pw, requirepass):
+        return -1
+    return -2
+
+
 @always_inline
 def handle_auth(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tokens: Int, mut writer: ResponseWriter,
                 requirepass: String, authed: Pointer[UInt8, MutUntrackedOrigin], fd: Int32,
                 tenants: Pointer[TenantTable, MutUntrackedOrigin],
                 tenant_ids: Pointer[Int16, MutUntrackedOrigin]) -> Int:
-    """AUTH [username] password (gh #100 / C2, gh #101 tenants).
+    """AUTH [username] password (gh #100 / C2, gh #101 tenants), as Redis 8 answers.
 
-    - No password configured  → Redis-compatible error (never a silent +OK).
-    - `AUTH NAME PASSWORD` where NAME is a configured tenant → bind the fd to
-      that tenant's namespace (gh #101). A matching name with a wrong password
-      is -WRONGPASS — it never falls through to the admin credential, so a
-      tenant password colliding with requirepass can't escalate.
-    - Otherwise the last argument is compared to requirepass; on match the fd
-      authenticates as ADMIN (unprefixed keyspace) and any prior tenant
-      binding is cleared."""
+    - `AUTH <password>` with no password configured → Redis's error (never a
+      silent +OK); otherwise compared to requirepass.
+    - `AUTH <user> <password>` → `check_user_credentials`: a tenant binds the
+      fd to its namespace, `default` authenticates as ADMIN (any password when
+      none is configured, as Redis's nopass default user), any other name is
+      WRONGPASS. It used to compare only the password, so `AUTH anyone <pw>`
+      logged in as admin, and with no password every form was ERR.
+    - More than two arguments → syntax error."""
     var extra = num_tokens - i - 1
-    if requirepass.byte_length() == 0:
-        writer.append_error_response("ERR Client sent AUTH, but no password is set. Did you mean AUTH <username> <password>?")
-        return extra
     if extra < 1:
         writer.append_error_response("ERR wrong number of arguments for 'auth' command")
         return extra
-    # gh #101: tenant credential path.
-    if extra == 2 and is_not_null(tenants) and tenants[].count > 0:
-        var user = tokens[unsafe_offset=i + 1]
-        var tpw = tokens[unsafe_offset=i + 2]
-        var m = tenants[].match_credentials(user.ptr, user.length, tpw.ptr, tpw.length)
-        if m >= 0:
-            if is_not_null(authed):
-                authed[unsafe_offset=Int(fd)] = 1
-            if is_not_null(tenant_ids):
-                tenant_ids[unsafe_offset=Int(fd)] = Int16(m)
-            writer.append_ok_response()
+    if extra > 2:
+        writer.append_error_response("ERR syntax error")
+        return extra
+    var who = -2
+    if extra == 1:
+        if requirepass.byte_length() == 0:
+            writer.append_error_response(_NOPASS_AUTH_ERR)
             return extra
-        if m == -2:
-            writer.append_error_response("WRONGPASS invalid username-password pair or user is disabled.")
-            return extra
-        # m == -1: not a tenant name → fall through to the admin credential.
-    var pw = tokens[unsafe_offset=i + extra]  # last token = password
-    var rp_ptr = requirepass.unsafe_ptr()
-    var rp_len = requirepass.byte_length()
-    var matches = pw.length == rp_len
-    if matches:
-        for k in range(rp_len):
-            if pw.ptr[unsafe_offset=k] != rp_ptr[unsafe_offset=k]:
-                matches = False
-                break
-    if matches:
-        if is_not_null(authed):
-            authed[unsafe_offset=Int(fd)] = 1
-        if is_not_null(tenant_ids):
-            tenant_ids[unsafe_offset=Int(fd)] = -1  # admin: unprefixed keyspace
-        writer.append_ok_response()
+        if _requirepass_eq(tokens[unsafe_offset=i + 1], requirepass):
+            who = -1
     else:
-        writer.append_error_response("WRONGPASS invalid username-password pair or user is disabled.")
+        who = check_user_credentials(tokens[unsafe_offset=i + 1], tokens[unsafe_offset=i + 2], requirepass, tenants)
+    if who == -2:
+        writer.append_error_response(_WRONGPASS)
+        return extra
+    if is_not_null(authed):
+        authed[unsafe_offset=Int(fd)] = 1
+    if is_not_null(tenant_ids):
+        tenant_ids[unsafe_offset=Int(fd)] = Int16(who)  # -1 = admin: unprefixed keyspace
+    writer.append_ok_response()
     return extra
 
 

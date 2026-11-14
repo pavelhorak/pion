@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pion-embedded"          # working name; the PyPI name is undecided
+version = "0.1.0.dev0"
+description = "The Pion engine in your process, behind redis-py: Redis semantics with per-command durability and no server"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = ["redis>=5"]
+
+[tool.setuptools]
+packages = ["pion_embedded"]
+
+[tool.setuptools.package-data]
+pion_embedded = ["_lib/*.dylib", "_lib/*.so"]

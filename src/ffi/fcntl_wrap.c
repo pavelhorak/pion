@@ -775,3 +775,64 @@ int64_t pion_xf_realpath(const char *dir, const char *name, char *out, int64_t c
     memcpy(out, full, n + 1);
     return (int64_t)n;
 }
+
+/* ── The data directory (embedded Pion; later `pion-server --dir`) ─────────────
+ * Every persistence file (WAL, blob arena, snapshot) is named relative to
+ * this prefix. Empty, the default, keeps the names the server has always
+ * used: relative to the working directory. Set once, before any file opens;
+ * the prefix always ends in '/'. Returns 0, or -1 when it does not fit. */
+static char g_pion_data_dir[4096];
+static int64_t g_pion_data_dir_len = 0;
+
+int32_t pion_set_data_dir(const char *p, int64_t n) {
+    if (n <= 0) { g_pion_data_dir_len = 0; g_pion_data_dir[0] = 0; return 0; }
+    int slash = p[n - 1] != '/';
+    if (n + slash + 1 > (int64_t)sizeof(g_pion_data_dir)) return -1;
+    memcpy(g_pion_data_dir, p, (size_t)n);
+    if (slash) g_pion_data_dir[n++] = '/';
+    g_pion_data_dir[n] = 0;
+    g_pion_data_dir_len = n;
+    return 0;
+}
+
+int64_t pion_data_dir_len(void) { return g_pion_data_dir_len; }
+const char *pion_data_dir_ptr(void) { return g_pion_data_dir; }
+
+/* ── Embedded Pion: the data directory's lock ───────────────────────────────
+ * flock(LOCK_EX|LOCK_NB) on <dir>/pion.lock, held for as long as the engine
+ * has the directory open. Returns the lock's fd, -1 when the file cannot be
+ * opened, -2 when another process (or another open in this one) holds it. */
+#include <sys/file.h>
+int32_t pion_dir_lock(const char *path) {
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int e = errno;
+        close(fd);
+        return e == EWOULDBLOCK ? -2 : -1;
+    }
+    return fd;
+}
+
+void pion_dir_unlock(int32_t fd) {
+    if (fd >= 0) { flock(fd, LOCK_UN); close(fd); }
+}
+
+/* One engine per process (its C state is process-global): the first claim
+ * wins, every later one fails. */
+static int g_pion_embed_claimed = 0;
+int32_t pion_embed_claim(void) {
+    return __sync_bool_compare_and_swap(&g_pion_embed_claimed, 0, 1) ? 0 : -1;
+}
+
+/* The engine's lock, a pthread mutex the caller's threads take around every
+ * call (the GIL is released while they wait). */
+#include <pthread.h>
+#include <stdlib.h>
+void *pion_mutex_new(void) {
+    pthread_mutex_t *m = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
+    if (m) pthread_mutex_init(m, NULL);
+    return m;
+}
+void pion_mutex_lock(void *m) { pthread_mutex_lock((pthread_mutex_t *)m); }
+void pion_mutex_unlock(void *m) { pthread_mutex_unlock((pthread_mutex_t *)m); }

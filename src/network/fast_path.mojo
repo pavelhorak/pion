@@ -1,3 +1,4 @@
+from src.common.zalloc import zalloc
 from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
 from src.network.vector_ingest import ingest_hash_vector
@@ -312,8 +313,7 @@ struct FastPathHandler(Movable):
         self.key_versions = null_ptr[UInt64, MutUntrackedOrigin]()
         self.prng = Xoshiro256PlusPlus(UInt64(worker_id + 1) * 0x9E3779B97F4A7C15)
         # C1: ASKING flags — 65536 entries, one per fd
-        self.asking_flags = unsafe_alloc[UInt8](65536)
-        unsafe_memset(self.asking_flags, 0, 65536)
+        self.asking_flags = zalloc[UInt8](65536)
 
     @always_inline
     def sweep_expired_keys(mut self, max_scan: Int):

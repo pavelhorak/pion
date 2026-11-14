@@ -11,6 +11,10 @@ core
 pion-server-linux
 libpion_memory.dylib
 libpion_memory.so
+libpion.dylib
+libpion.so
+pion-server-main
+pion-server-branch
 
 # Persistence & Logs
 *.log
@@ -152,3 +156,4 @@ pion_gate2c.log
 _site/
 .venv-site/
 .cache/
+embedded/dist/

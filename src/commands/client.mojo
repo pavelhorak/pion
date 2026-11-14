@@ -21,6 +21,7 @@ Each worker has its own registry, as it has its own keyspace: with
 it runs on. IDs are unique across the workers.
 """
 
+from src.common.zalloc import zalloc
 from std.memory.alloc import unsafe_alloc
 from std.memory import alloc, unsafe_memset
 from std.collections import List, Dict
@@ -55,22 +56,14 @@ struct ClientRegistry(Movable):
     var ticks_per_ms: Float64
 
     def __init__(out self):
-        self.ids = unsafe_alloc[UInt64](CLIENT_MAX_FDS)
-        unsafe_memset(self.ids.unsafe_bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
-        self.ctime_ms = unsafe_alloc[Int64](CLIENT_MAX_FDS)
-        unsafe_memset(self.ctime_ms.unsafe_bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
-        self.atime = unsafe_alloc[UInt64](CLIENT_MAX_FDS)
-        unsafe_memset(self.atime.unsafe_bitcast[UInt8](), 0, CLIENT_MAX_FDS * 8)
-        self.reply = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
-        unsafe_memset(self.reply, 0, CLIENT_MAX_FDS)
-        self.no_touch = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
-        unsafe_memset(self.no_touch, 0, CLIENT_MAX_FDS)
-        self.no_evict = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
-        unsafe_memset(self.no_evict, 0, CLIENT_MAX_FDS)
-        self.postponed = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
-        unsafe_memset(self.postponed, 0, CLIENT_MAX_FDS)
-        self.close_after = unsafe_alloc[UInt8](CLIENT_MAX_FDS)
-        unsafe_memset(self.close_after, 0, CLIENT_MAX_FDS)
+        self.ids = zalloc[UInt64](CLIENT_MAX_FDS)
+        self.ctime_ms = zalloc[Int64](CLIENT_MAX_FDS)
+        self.atime = zalloc[UInt64](CLIENT_MAX_FDS)
+        self.reply = zalloc[UInt8](CLIENT_MAX_FDS)
+        self.no_touch = zalloc[UInt8](CLIENT_MAX_FDS)
+        self.no_evict = zalloc[UInt8](CLIENT_MAX_FDS)
+        self.postponed = zalloc[UInt8](CLIENT_MAX_FDS)
+        self.close_after = zalloc[UInt8](CLIENT_MAX_FDS)
         self.lib_name = Dict[Int, String]()
         self.lib_ver = Dict[Int, String]()
         self.reply_off_count = 0
