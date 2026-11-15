@@ -1015,8 +1015,8 @@ struct NetworkEngine:
             # Single-worker mode: create everything ourselves
             xdp_ok = xdp.setup(self.config.server.xdp_interface, self.worker_id, UInt16(self.config.server.port))
         if not xdp_ok:
-            print("XDP setup failed (requires Linux 5.4+, CAP_NET_ADMIN, AF_XDP-capable NIC)", file=log_out())
-            print("Falling back to io_uring...", file=log_out())
+            print("XDP setup failed (requires Linux 5.4+, CAP_NET_ADMIN, AF_XDP-capable NIC)")
+            print("Falling back to io_uring...")
             self.run_server_uring(hnsw, db_size)
             return
 
@@ -1034,7 +1034,7 @@ struct NetworkEngine:
         print("--- Pion XDP Engine Active --- worker=" + String(self.worker_id)
               + " tid=" + String(my_tid)
               + " iface=" + self.config.server.xdp_interface
-              + " tcp_fallback=" + String(Int(tcp_listen_fd)), file=log_out())
+              + " tcp_fallback=" + String(Int(tcp_listen_fd)))
 
         # Pre-allocate response buffer for XDP path (same as ResponseWriter's 4MB buffer)
 
@@ -1276,7 +1276,7 @@ struct NetworkEngine:
         var use_sqpoll = self.config.server.use_sqpoll
         var ring_ok = self.ring[].setup(UInt32(1024), sqpoll=use_sqpoll)
         if not ring_ok and use_sqpoll:
-            print("io_uring SQPOLL setup failed (it needs root or CAP_SYS_NICE); trying without SQPOLL", file=log_out())
+            print("io_uring SQPOLL setup failed (it needs root or CAP_SYS_NICE); trying without SQPOLL")
             ring_ok = self.ring[].setup(UInt32(1024), sqpoll=False)
         if not ring_ok:
             # #21: this fell back to run_server_kqueue, which returns at once on
@@ -1285,7 +1285,7 @@ struct NetworkEngine:
             # io_uring is missing under Docker's default seccomp profile, on old
             # kernels and in sandboxes; epoll is always there.
             print("io_uring unavailable (blocked by seccomp, or an old kernel): worker "
-                  + String(self.worker_id) + " uses epoll", file=log_out())
+                  + String(self.worker_id) + " uses epoll")
             self.run_server_epoll(hnsw, db_size)
             return
 
@@ -1318,14 +1318,14 @@ struct NetworkEngine:
         if pbuf_peek.found and pbuf_peek.cqe.res >= 0:
             self.multishot_active = True
             self.ring[].advance_cq()
-            print("Multishot recv: " + String(PBUF_RING_ENTRIES) + " × " + String(PBUF_SIZE) + "B provided buffers registered", file=log_out())
+            print("Multishot recv: " + String(PBUF_RING_ENTRIES) + " × " + String(PBUF_SIZE) + "B provided buffers registered")
         else:
             if pbuf_peek.found:
                 self.ring[].advance_cq()
             self.multishot_active = False
             self.multishot_bufs.unsafe_free()
             self.multishot_bufs = null_ptr[UInt8, MutUntrackedOrigin]()
-            print("Multishot recv: not available, using per-fd recv", file=log_out())
+            print("Multishot recv: not available, using per-fd recv")
 
         # Submit initial ACCEPT(s).
         self.ring[].submit_accept(self.server.fd)
@@ -1335,7 +1335,7 @@ struct NetworkEngine:
             self.ring[].submit_accept(self.binary_listen_fd)
 
         var my_tid = external_call["pthread_self", UInt64]()
-        print("--- Pion IO_URING Engine Active --- worker=" + String(self.worker_id) + " tid=" + String(my_tid), file=log_out())
+        print("--- Pion IO_URING Engine Active --- worker=" + String(self.worker_id) + " tid=" + String(my_tid))
 
         # #17: one 1 ms OP_TIMEOUT is ALWAYS in flight, so enter() returns at
         # least every millisecond and the loop ticks with no client traffic, as
@@ -1665,7 +1665,7 @@ struct NetworkEngine:
         # Create epoll instance
         var epfd = external_call["epoll_create1", Int32](Int32(0))
         if epfd < 0:
-            print("epoll_create1 failed", file=log_out())
+            print("epoll_create1 failed")
             return
 
         # Register listen fd for EPOLLIN + EPOLLEXCLUSIVE (level-triggered).
@@ -1691,7 +1691,7 @@ struct NetworkEngine:
         var kq = epfd
 
         var my_tid = external_call["pthread_self", UInt64]()
-        print("--- Pion EPOLL Engine Active --- worker=" + String(self.worker_id) + " tid=" + String(my_tid), file=log_out())
+        print("--- Pion EPOLL Engine Active --- worker=" + String(self.worker_id) + " tid=" + String(my_tid))
 
         while True:
             # Adaptive timeout: 0ms (non-blocking) when bus needs polling, else 1ms.
@@ -1942,10 +1942,10 @@ struct NetworkEngine:
         var rc = external_call["pion_spawn_detached", Int32](
             Int32(n_io), Pointer[Int64, MutUntrackedOrigin](unsafe_from_address=Int(hub)), IO_THREAD_BASE)
         if rc != 0:
-            print("FATAL: --io-threads: could not start the I/O threads", file=log_out())
+            print("FATAL: --io-threads: could not start the I/O threads")
             external_call["exit", NoneType](Int32(1))
         print("--- Pion IO-THREADS Engine Active --- worker=" + String(self.worker_id) +
-              " io_threads=" + String(n_io) + " (+1 executor)", file=log_out())
+              " io_threads=" + String(n_io) + " (+1 executor)")
         var kq = Int32(-3)       # not -1 (the XDP no-op flush): flushes go to _flush_kqueue's io_mode branch
         var need_wake = unsafe_alloc[UInt8](n_io)
         var idle = 0
@@ -2035,11 +2035,11 @@ struct NetworkEngine:
         if self.server.fd < 0 and not self.server.listen():
             return
 
-        print("Server socket FD: " + String(self.server.fd), file=log_out())
+        print("Server socket FD: " + String(self.server.fd))
         self.kq = self.server.kqueue()
         var kq = self.kq
         if kq < 0:
-            print("Failed to create kqueue", file=log_out())
+            print("Failed to create kqueue")
             return
 
         # V22: Level-triggered listen socket — re-fires on each kevent_batch until accept queue is empty.
@@ -2060,7 +2060,7 @@ struct NetworkEngine:
         timeout[unsafe_offset=1] = 1000000 # 1ms in nanoseconds
 
         var my_tid = external_call["pthread_self", UInt64]()
-        print("--- Pion KQUEUE Engine Active --- worker=" + String(self.worker_id) + " tid=" + String(my_tid), file=log_out())
+        print("--- Pion KQUEUE Engine Active --- worker=" + String(self.worker_id) + " tid=" + String(my_tid))
         # Bounded adaptive polling: consecutive zero-timeout polls since the
         # last event. See the timeout choice below.
         var kq_idle_polls = 0
