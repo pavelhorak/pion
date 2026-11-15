@@ -26,6 +26,7 @@ from std.ffi import external_call
 from std.sys.info import CompilationTarget
 from std.sys import is_defined
 from src.common.config import PionConfig
+from src.common.log import log_out
 
 
 # gh #83: CUDA support is opt-in at build time via `-D PION_CUDA`. A stock
@@ -68,7 +69,7 @@ struct CudaAttentionEngine(Movable):
                 var rc = external_call["pion_cuda_sdpa_init", Int32]()
                 self.available = rc == 0
                 if not self.available:
-                    print("[CudaAttn] init failed (rc=", rc, "); ATTEND.PREFIX.* will fall back")
+                    print("[CudaAttn] init failed (rc=", rc, "); ATTEND.PREFIX.* will fall back", file=log_out())
 
     def __moveinit__(out self, deinit take: Self):
         self.enabled = take.enabled

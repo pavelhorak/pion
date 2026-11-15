@@ -62,6 +62,7 @@ from src.common.value import GenericValue
 from std.memory import unsafe_memcpy
 from std.ffi import external_call
 from std.collections import Array
+from src.common.log import log_out
 
 
 comptime BLOB_MAGIC        = UInt64(0x31424C424E4F4950)   # "PIONBLB1" LE
@@ -133,7 +134,7 @@ struct BlobStore(Movable):
             self.seg_count += 1
         if self.seg_count > 0:
             print("Blob tier: mapped " + String(self.seg_count) + " segment(s), "
-                  + String(self.bytes_used // (1024 * 1024)) + " MB in use")
+                  + String(self.bytes_used // (1024 * 1024)) + " MB in use", file=log_out())
 
     def __moveinit__(out self, deinit take: Self):
         self.prefix = take.prefix^
@@ -242,7 +243,7 @@ struct BlobStore(Movable):
                 self.full_warned = True
                 print("Blob tier: FULL — " + String(BLOB_MAX_SEGMENTS)
                       + " segments in use; large values fall back to heap storage"
-                      + " (dead arena space is reclaimed only at startup; see doc/operations.md).")
+                      + " (dead arena space is reclaimed only at startup; see doc/operations.md).", file=log_out())
             return False
 
         # A payload bigger than the standard segment gets a segment of its own.
@@ -388,7 +389,7 @@ struct BlobStore(Movable):
                     # rather than leave half the keyspace pointing at a store we
                     # are about to unlink.
                     print("Blob tier: compaction aborted (fresh arena full) — "
-                          + "keeping the existing segments")
+                          + "keeping the existing segments", file=log_out())
                     fresh.close()
                     for n in range(BLOB_MAX_SEGMENTS):
                         var abandoned = tmp_prefix + "." + String(n)
@@ -434,7 +435,7 @@ struct BlobStore(Movable):
         self.full_warned = False
         print("Blob tier: compacted " + String(moved) + " value(s), reclaimed "
               + String(reclaimed // (1024 * 1024)) + " MB, now "
-              + String(self.seg_count) + " segment(s)")
+              + String(self.seg_count) + " segment(s)", file=log_out())
         return True
 
     def sync(mut self):

@@ -44,6 +44,7 @@ from src.io.wal import WAL, gv_bytes
 from src.io.blob_store import BlobStore, BLOB_TIER_OFF
 from src.network.raft import RaftNode, RaftLogEntry
 from src.common.prng import Xoshiro256PlusPlus
+from src.common.log import log_out
 
 struct CommandDispatcher:
     var keyspace: Pointer[StripedHashMap, MutUntrackedOrigin]
@@ -270,7 +271,7 @@ struct CommandDispatcher:
         # 2. Push the task to the background queue instead of calling dispatch_to_llm directly
         var task = AITask("openai", augmented, 0, "") # FD placeholder, empty session_id
         if not self.ai_queue[].push(task):
-            print("AI Task Queue Full! Dropping request.")
+            print("AI Task Queue Full! Dropping request.", file=log_out())
             return False
             
         return True

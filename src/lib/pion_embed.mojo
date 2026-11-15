@@ -235,6 +235,13 @@ def _open(cfg: String, err: Pointer[UInt8, MutUntrackedOrigin], err_cap: Int64) 
     if external_call["pion_set_data_dir", Int32](dir.unsafe_ptr(), Int64(dir.byte_length())) != 0:
         _write_err(err, err_cap, "the data directory path is too long")
         return 0
+    # The engine's log lines (WAL replay, snapshot load, warnings) go to a file
+    # in the data directory, never to the host's stdout.
+    var logfile = _cfg_get(cfg, "logfile")
+    if logfile.byte_length() == 0:
+        logfile = dir + "/pion.log"
+    var logz = logfile + "\0"
+    _ = external_call["pion_set_log_file", Int32](logz.unsafe_ptr())
 
     var config = PionConfig()
     config.apply_profile("kv")
@@ -575,6 +582,7 @@ def pion_embed_close(h: Int64) abi("C") -> Int64:
     if st[].lock_fd >= 0:
         external_call["pion_dir_unlock", NoneType](st[].lock_fd)
         st[].lock_fd = -1
+        _ = external_call["pion_set_log_file", Int32]("".ptr())
     external_call["pion_mutex_unlock", NoneType](st[].mutex)
     return 0
 
