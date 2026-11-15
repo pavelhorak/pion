@@ -29,7 +29,7 @@ struct SlabAllocator[T: AnyType](Movable):
         self.use_huge_pages = use_huge_pages
         
         var total_size = self.item_size * self.items_per_slab
-        var initial_slab = self._mmap_alloc(total_size)
+        var initial_slab = self._mmap_alloc_or_die(total_size)
         self.slabs.append(initial_slab)
         self.slab_sizes.append(total_size)
         self.current_slab = initial_slab
@@ -45,6 +45,7 @@ struct SlabAllocator[T: AnyType](Movable):
         self.use_huge_pages = move.use_huge_pages
 
     def _mmap_alloc(self, size: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+        """Map `size` anonymous bytes; a null pointer when the kernel refuses."""
         var alloc_size = size
         var ptr: Pointer[UInt8, MutUntrackedOrigin]
         comptime if CompilationTarget.is_linux():
@@ -69,11 +70,31 @@ struct SlabAllocator[T: AnyType](Movable):
             # macOS: MAP_ANON=0x1000, MAP_PRIVATE=0x0002
             var flags = 0x1002
             if self.use_huge_pages:
-                # VM_FLAGS_SUPERPAGE_SIZE_2MB = 0x10000
-                flags |= 0x10000
+                # VM_FLAGS_SUPERPAGE_SIZE_2MB = 0x10000. Apple Silicon has no
+                # superpages and refuses this mapping; fall back to normal
+                # pages, as Linux does without hugepages configured.
                 alloc_size = (size + 2097151) & ~2097151
-            ptr = external_call["mmap", Pointer[UInt8, MutUntrackedOrigin]](
-                null_ptr[UInt8, MutUntrackedOrigin](), alloc_size, 0x3, flags, -1, 0)
+                ptr = external_call["mmap", Pointer[UInt8, MutUntrackedOrigin]](
+                    null_ptr[UInt8, MutUntrackedOrigin](), alloc_size, 0x3, flags | 0x10000, -1, 0)
+                if Int(ptr) == -1:
+                    alloc_size = size
+                    ptr = external_call["mmap", Pointer[UInt8, MutUntrackedOrigin]](
+                        null_ptr[UInt8, MutUntrackedOrigin](), alloc_size, 0x3, flags, -1, 0)
+            else:
+                ptr = external_call["mmap", Pointer[UInt8, MutUntrackedOrigin]](
+                    null_ptr[UInt8, MutUntrackedOrigin](), alloc_size, 0x3, flags, -1, 0)
+        if Int(ptr) == -1:
+            # MAP_FAILED. Handing out -1 as a slab would crash the worker
+            # later, at the first write, in whatever code allocated; say why
+            # and stop here, as the hash table's mapping does.
+            return null_ptr[UInt8, MutUntrackedOrigin]()
+        return ptr
+
+    def _mmap_alloc_or_die(self, size: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+        var ptr = self._mmap_alloc(size)
+        if Int(ptr) == 0:
+            print("FATAL: out of memory mapping a", size, "byte slab")
+            external_call["exit", NoneType](Int32(1))
         return ptr
 
     def _mmap_free(self, ptr: Pointer[UInt8, MutUntrackedOrigin], size: Int):
@@ -129,7 +150,7 @@ struct SlabAllocator[T: AnyType](Movable):
             if self.items_per_slab < 10000000:
                 self.items_per_slab *= 2
             var total_size = self.item_size * self.items_per_slab
-            var new_slab = self._mmap_alloc(total_size)
+            var new_slab = self._mmap_alloc_or_die(total_size)
             self.slabs.append(new_slab)
             self.slab_sizes.append(total_size)
             self.current_slab = new_slab

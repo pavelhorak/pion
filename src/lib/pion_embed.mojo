@@ -240,9 +240,8 @@ def _open(cfg: String, err: Pointer[UInt8, MutUntrackedOrigin], err_cap: Int64) 
     config.apply_profile("kv")
     config.server.workers = 1
     config.server.port = 0
-    # The worker's own fallback (pion_worker_entry): macOS has no huge pages,
-    # and a SlabAllocator asked for a superpage mapping gets MAP_FAILED, which
-    # it does not check. A library has no business asking for them anyway.
+    # A library has no business asking for huge pages (the worker turns them
+    # off on macOS too, pion_worker_entry).
     config.server.use_huge_pages = False
     config.server.strict_affinity = False
     config.embedding.enabled = False
