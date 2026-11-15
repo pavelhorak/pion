@@ -4,10 +4,22 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
-## [Unreleased]
+## [1.1.2] — 2026-11-15
+
+`AUTH` checks the user name, `pion-server --dir` keeps a server's files in one
+locked directory, and an idle server holds 7.5 MB less.
 
 ### Fixed
 
+- **`AUTH` and `HELLO … AUTH` check the user name.** With `--requirepass` set,
+  Pion compared only the password, so `AUTH <any name> <password>` logged in as
+  the default user. Only `default`, or a `--tenant` name with its own password,
+  is accepted now; any other name is `WRONGPASS`, as in Redis. The password was
+  still required. With no password set, `AUTH default <anything>` is `OK`, as in
+  Redis, where Pion answered `ERR`; redis-py's credential providers send this
+  form. `AUTH <password>` with no password configured, and `AUTH` with more than
+  two arguments, now give Redis's errors. 14 probes, each with and without
+  `--requirepass`, match Redis 8.10.3.
 - **An eviction policy holds the limit after memory pressure.** Below 90% of
   `--maxmemory`, the controller gave half the gap back to its data target every
   10 ms, with no bound. RSS falls when the OS compresses (macOS) or swaps
@@ -20,10 +32,32 @@ enumerated — there were roughly 1,100 of them.
 
 ### Added
 
+- **`pion-server --dir PATH`.** The WAL, snapshot, blob arenas and vector index
+  files go under PATH instead of the working directory, and the server takes an
+  exclusive lock on `PATH/pion.lock` before it opens any of them. A second server
+  (or an embedded engine) given the same directory exits with
+  `FATAL: --dir '…' is in use` rather than writing the same log. Without
+  `--dir`, files stay in the working directory and no lock is taken. The crash
+  log and status file still follow `--crash-log` and `--status-file`.
+- **`embedded/`: the engine as an in-process library behind redis-py
+  (experimental).** `pion_embedded.Redis(dir=...)` runs the KV engine inside the
+  Python process, with no server and no socket, and writes the same WAL as the
+  server, so `pion-server --dir` can open the directory after the app closes it.
+  It is built from source (`embedded/README.md`) and not published; the package
+  name is not final.
 - **`DEBUG MAXMEMORY-HIDE-RSS <bytes>`**, with `--enable-debug-command`: takes
   bytes off the RSS that `--maxmemory` reads, as compression or swap does. It is
   Pion's own subcommand, there for tests, because real memory pressure reaches a
   given process only some of the time.
+
+### Changed
+
+- **An idle server holds 7.5 MB less.** 33 per-connection tables of 65,536
+  entries each were written with zeros at startup. They are now mapped from the
+  OS and stay untouched until a connection uses its entry. Measured on macOS,
+  one worker, median of 3 interleaved starts against the 1.1.1 release: idle RSS
+  56.8 → 49.3 MB (default profile) and 29.8 → 22.3 MB (`--profile kv`); after
+  100,000 keys of SET and GET, 98.9 → 94.0 MB and 71.9 → 66.9 MB.
 
 ## [1.1.1] — 2026-11-11
 
