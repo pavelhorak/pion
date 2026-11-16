@@ -10,10 +10,11 @@ acknowledged write survives the process being killed. One engine and one data
 directory per process; a second process opening the directory is refused (run
 `pion-server` on it to share it). KV only: no vector search.
 
-Working name: `pion_embedded`. The PyPI name is undecided.
+The wheel is `pion-embedded`, attached to each Pion release; it is not on PyPI.
 """
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import redis
@@ -28,7 +29,8 @@ __all__ = ["Redis", "from_url", "close", "PionError", "PionConnection"]
 _ENGINE_KEYS = ("appendonly", "wal_size_mb", "maxmemory", "maxmemory_policy")
 
 
-def engine_config(appendonly=True, wal_size_mb=None, maxmemory=None, maxmemory_policy=None) -> dict:
+def engine_config(appendonly: bool = True, wal_size_mb: int | None = None, maxmemory: int | None = None,
+                  maxmemory_policy: str | None = None) -> dict[str, str]:
     cfg = {"appendonly": "yes" if appendonly else "no"}
     if wal_size_mb is not None:
         cfg["wal-size"] = str(int(wal_size_mb))
@@ -39,7 +41,7 @@ def engine_config(appendonly=True, wal_size_mb=None, maxmemory=None, maxmemory_p
     return cfg
 
 
-def split_kwargs(kwargs: dict):
+def split_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
     eng = {k: kwargs.pop(k) for k in _ENGINE_KEYS if k in kwargs}
     return engine_config(**eng), kwargs
 
@@ -47,7 +49,7 @@ def split_kwargs(kwargs: dict):
 class PionConnection(AbstractConnection):
     """A redis-py connection to the engine in this process."""
 
-    def __init__(self, pion_engine: Engine, **kwargs):
+    def __init__(self, pion_engine: Engine, **kwargs: Any) -> None:
         for k in ("host", "port", "path", "socket_keepalive", "socket_keepalive_options",
                   "socket_type", "unix_socket_path"):
             kwargs.pop(k, None)
@@ -55,13 +57,13 @@ class PionConnection(AbstractConnection):
         self.pion_engine = pion_engine
         super().__init__(**kwargs)
 
-    def repr_pieces(self):
+    def repr_pieces(self) -> list[tuple[str, Any]]:
         return [("dir", self.pion_engine.dir), ("db", self.db)]
 
     def _connect(self):
         return EngineSocket(self.pion_engine, self.socket_timeout)
 
-    def _host_error(self):
+    def _host_error(self) -> str:
         return "pion:" + self.pion_engine.dir
 
 
@@ -71,7 +73,7 @@ _REDIS_ONLY = ("single_connection_client",)
 class Redis(redis.Redis):
     """redis.Redis on the engine in this process."""
 
-    def __init__(self, dir: str | None = None, **kwargs):
+    def __init__(self, dir: str | None = None, **kwargs: Any) -> None:
         cfg, kwargs = split_kwargs(kwargs)
         engine = get_engine(dir, cfg)
         top = {k: kwargs.pop(k) for k in _REDIS_ONLY if k in kwargs}
@@ -82,17 +84,17 @@ class Redis(redis.Redis):
         self.auto_close_connection_pool = given is None   # close() closes the pool it made
         self.pion_engine = engine
 
-    def pion_info(self) -> dict:
+    def pion_info(self) -> dict[str, Any]:
         e = self.pion_engine
         return {"version": e.version(), "dir": e.dir, "appendonly": e.config.get("appendonly")}
 
 
-def _parse_url(url: str):
+def _parse_url(url: str) -> tuple[str | None, dict[str, Any]]:
     u = urlparse(url)
     if u.scheme != "pion":
         raise ValueError("a pion:// URL: pion:///abs/path/to/data")
     q = {k: v[-1] for k, v in parse_qs(u.query).items()}
-    kw = {}
+    kw: dict[str, Any] = {}
     if "appendonly" in q:
         kw["appendonly"] = q.pop("appendonly") not in ("no", "0", "false")
     for k in ("wal_size_mb", "maxmemory"):
@@ -107,7 +109,7 @@ def _parse_url(url: str):
     return (u.netloc + u.path) or None, kw
 
 
-def from_url(url: str, **kwargs) -> Redis:
+def from_url(url: str, **kwargs: Any) -> Redis:
     d, kw = _parse_url(url)
     kw.update(kwargs)
     return Redis(dir=d, **kw)

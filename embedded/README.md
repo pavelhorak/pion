@@ -1,12 +1,13 @@
-# Embedded Pion (phase 0 prototype)
+# Embedded Pion
 
 The Pion engine inside your Python process, behind redis-py. No server.
 
 ```python
-import pion_embedded as pion           # working name; not on PyPI
+import pion_embedded as pion           # the pion-embedded wheel (GitHub releases; not on PyPI)
 r = pion.Redis(dir="./data")           # a redis.Redis: pipelines, Lock, pub/sub, scripts
 ar = pion.asyncio.Redis(dir="./data")  # a redis.asyncio.Redis
 r = pion.from_url("pion:///abs/path/to/data")
+pool = pion.asyncio.ConnectionPool.from_url("pion:///abs/path/to/data")  # for redis.asyncio.Redis(connection_pool=pool)
 ```
 
 - Every write goes to the server's write-ahead log in `dir` as the command
@@ -16,8 +17,11 @@ r = pion.from_url("pion:///abs/path/to/data")
   `pion-server` on it.
 - KV only (no vector search). Built and tested on macOS arm64, Linux x86-64
   and Linux arm64 by `.github/workflows/embedded.yml` (pull requests that touch
-  the library, and manual runs). Its wheels are workflow artifacts, not
-  published. The Linux library needs glibc 2.38 (it is built on ubuntu-24.04).
+  the library, and manual runs). Each release built from a `v*` tag carries
+  the three wheels (`pion_embedded-<version>-cp311-abi3-*.whl`, one per
+  platform, for CPython 3.11 and later); they are not on PyPI. The Linux wheels
+  are `manylinux_2_35` (glibc 2.35 or later, Ubuntu 22.04 for one), built on
+  Ubuntu 22.04; macOS needs 14 or later.
 - The engine's log lines (WAL replay and snapshot load at open, `Snapshot:
   saved` on SAVE, warnings) go to `dir/pion.log`, never to the host's stdout.
   `logfile PATH` in the engine's config moves them.
@@ -54,7 +58,7 @@ does; a timeout is answered by the engine's periodic tick.
 ```bash
 MACOSX_DEPLOYMENT_TARGET=14.0 pixi run build-embed   # -> libpion.dylib (~6 min)
 PYTHONPATH=embedded/python python3 embedded/tests/test_smoke.py
-bash embedded/build_wheel.sh python3      # -> embedded/dist/*-py3-none-macosx_14_0_arm64.whl
+bash embedded/build_wheel.sh python3      # -> embedded/dist/*-cp311-abi3-macosx_14_0_arm64.whl
 python3 embedded/tests/test_graduation.py ./pion-server   # app <-> pion-server --dir, one at a time
 # the server's test tier, through the library: a stand-in for pion-server
 # serves each test from libpion behind a loopback proxy. Tests that need a
