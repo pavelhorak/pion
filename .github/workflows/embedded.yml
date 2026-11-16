@@ -5,8 +5,10 @@ name: Embedded Pion
 # suites and then the server-facing test tier through it (tests/run_all.py
 # with embedded/tests/pion-server-embedded standing in for pion-server), build
 # the cp311-abi3 wheel and check it installs and runs in clean venvs with the
-# toolchain hidden. A fourth job probes whether an Ubuntu 22.04 build host
-# lowers the glibc floor; it reports and never fails the run.
+# toolchain hidden. The Linux legs build on Ubuntu 22.04, so the wheel is
+# manylinux_2_35: Modular's libAsyncRTRuntimeGlobals.so needs 2.35, and a
+# 24.04 build would raise libpion itself to 2.38. release.yml calls this
+# workflow with tier none and attaches the wheels to the release.
 on:
   pull_request:
     paths:
@@ -21,6 +23,12 @@ on:
         type: choice
         default: gate
         options: [none, gate, full]
+  workflow_call:
+    inputs:
+      tier:
+        description: run_all tier through the library (none skips it)
+        type: string
+        default: gate
 
 permissions:
   contents: read
@@ -35,7 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         leg: [linux-x86_64, linux-arm64]
-    runs-on: ${{ matrix.leg == 'linux-arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.leg == 'linux-arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +51,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.8.1
         with:
           cache: true
-          cache-key: pixi-${{ matrix.leg }}-${{ hashFiles('pixi.lock') }}
+          cache-key: pixi-${{ matrix.leg }}-2204-${{ hashFiles('pixi.lock') }}
 
       - uses: actions/setup-python@v5
         with:
@@ -109,6 +117,17 @@ jobs:
 
       - name: Build the wheel
         run: bash embedded/build_wheel.sh python3.13
+
+      - name: The wheel's glibc floor must stay 2.35
+        # build_wheel.sh tags the wheel from the highest GLIBC_2.* its files
+        # need. A newer runner image or a Modular runtime that needs more
+        # would raise the tag and drop Ubuntu 22.04 / Debian 12 silently.
+        run: |
+          W=$(ls embedded/dist/*.whl)
+          echo "wheel: $W"
+          case "$W" in *-abi3-manylinux_2_35_*.whl) exit 0 ;; esac
+          echo "::error::the wheel needs a newer glibc than 2.35: $W"
+          exit 1
 
       - name: The wheel installs and runs in clean venvs (3.11, 3.13), toolchain hidden
         run: |
@@ -224,47 +243,3 @@ jobs:
         with:
           name: pion-embedded-wheel-macos-arm64
           path: embedded/dist/*.whl
-
-  glibc-235-probe:
-    # Can a build on Ubuntu 22.04 (glibc 2.35) take the library's floor below
-    # ubuntu-24.04's 2.38? Informational: it reports the highest GLIBC_2.* each
-    # shipped file needs and whether the library runs, and never fails CI.
-    name: glibc probe (ubuntu-22.04)
-    runs-on: ubuntu-22.04
-    continue-on-error: true
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: prefix-dev/setup-pixi@v0.8.1
-        with:
-          cache: true
-          cache-key: pixi-linux-x86_64-2204-${{ hashFiles('pixi.lock') }}
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Swap, for the compiler's peak
-        run: |
-          sudo fallocate -l 8G /swapfile2 && sudo chmod 600 /swapfile2
-          sudo mkswap /swapfile2 && sudo swapon /swapfile2
-
-      - name: Build libpion.so
-        env:
-          PION_EMBED_JOBS: '2'
-        run: bash embedded/build_linux.sh
-
-      - name: What it needs, and whether it runs
-        env:
-          PYTHONPATH: embedded/python
-          PION_EMBED_LIB: ${{ github.workspace }}/libpion.so
-          PION_EMBED_CTYPES: '1'
-        run: |
-          ldd --version | head -1
-          for f in libpion.so .pixi/envs/default/lib/libKGENCompilerRTShared.so \
-                   .pixi/envs/default/lib/libAsyncRTRuntimeGlobals.so .pixi/envs/default/lib/libMSupportGlobals.so; do
-            echo "$f: $(strings -a "$f" | grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n | tail -1)"
-          done
-          python3.11 -m pip install --quiet redis
-          python3.11 embedded/tests/test_smoke.py
