@@ -5,6 +5,7 @@ Runs VectorDBBench against Redis (FT and VSET), zvec, and Pion.
 Results are reported in benchmark_results.md in the script directory.
 """
 
+import shutil
 import subprocess
 import time
 import os
@@ -132,6 +133,34 @@ def pion_server_log_path(run_timestamp):
     os.makedirs(SERVER_LOG_DIR, exist_ok=True)
     stamp = run_timestamp.replace(" ", "_").replace(":", "")
     return os.path.join(SERVER_LOG_DIR, f"pion-{stamp}.log")
+
+
+# The gate's recall floor (RECALL_MIN below). A run under it keeps its index.
+DIP_KEEP_BELOW = 0.940
+
+
+def keep_index_on_dip(res, log_path):
+    """Keep pion.hnsw.0 beside the server log when recall misses the floor.
+
+    A dip is a bad BUILD (gh #405), and clean_pion_state deletes the one file
+    that holds it: on 2026-11-16 a run read recall 0.748 on a binary that reads
+    0.9594-0.9600, and its graph was gone before anyone could look. A server
+    started in a directory holding the kept file serves that graph again (warm
+    restart), so the dip can be measured per worker and taken apart.
+    PION_BENCH_KEEP_INDEX=1 keeps it on every run."""
+    src = os.path.join(PROJECT_ROOT, "pion.hnsw.0")
+    if not log_path or not os.path.exists(src):
+        return None
+    try:
+        recall = float(res.get("recall")) if res else None
+    except (TypeError, ValueError):
+        recall = None
+    if not os.environ.get("PION_BENCH_KEEP_INDEX") and (recall is None or recall >= DIP_KEEP_BELOW):
+        return None
+    dst = log_path[:-len(".log")] + ".hnsw.0" if log_path.endswith(".log") else log_path + ".hnsw.0"
+    shutil.copy2(src, dst)
+    print(f"[Pion] Kept the index ({'recall ' + format(recall, '.4f') if recall is not None else 'recall unknown'}): {dst}")
+    return dst
 
 
 def print_build_lines(log_path, limit=40):
@@ -483,6 +512,8 @@ def main():
         # — e.g. /gate's Gate 4b runs pipelined_bench against this same Pion).
         if not os.environ.get("PION_BENCH_NO_CLEANUP"):
             stop_server(proc, "Pion", port=PION_PORT)
+            if res:
+                res["kept_index"] = keep_index_on_dip(res, pion_log)
             clean_pion_state()
         else:
             print(f"[Pion] Leaving server alive on port {PION_PORT} (PION_BENCH_NO_CLEANUP=1)")
@@ -588,6 +619,8 @@ def main():
                 print(f)
             if pion_res.get("server_log"):
                 print(f"  Server log: {pion_res['server_log']}")
+            if pion_res.get("kept_index"):
+                print(f"  Index kept: {pion_res['kept_index']}")
             print(f"{'='*60}")
             sys.exit(1)
         else:

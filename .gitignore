@@ -18,6 +18,8 @@ pion-server-branch
 
 # Persistence & Logs
 *.log
+# the vector harness keeps a dipped run's index there too (pion-<stamp>.hnsw.0)
+benchmarks/VectorDBBench/server_logs/
 *.wal
 *.snapshot
 pion.snapshot.*
