@@ -10,6 +10,7 @@ import atexit
 import ctypes
 import errno
 import os
+import select
 import socket
 import sys
 import threading
@@ -85,6 +86,8 @@ class Engine:
             lib.pion_embed_tick.argtypes = [I64]
             lib.pion_embed_close.restype = I64
             lib.pion_embed_close.argtypes = [I64]
+            lib.pion_embed_wake_fd.restype = I64
+            lib.pion_embed_wake_fd.argtypes = [I64, I64]
             lib.pion_embed_version.restype = I64
             lib.pion_embed_version.argtypes = [ctypes.c_char_p, I64]
             err = ctypes.create_string_buffer(1024)
@@ -97,6 +100,7 @@ class Engine:
             self.exec, self.poll = self._exec_ctypes, self._poll_ctypes
         self.config = cfg
         self.closed = False
+        self.on_shutdown = None        # called once if SHUTDOWN closes the engine
         self.pid = os.getpid()
         self._ticker = threading.Thread(target=self._tick_loop, name="pion-tick", daemon=True)
         self._ticker.start()
@@ -106,6 +110,8 @@ class Engine:
         tick = self._ext.tick if self.lib is None else self.lib.pion_embed_tick
         while not self.closed:
             if tick(self.h) < 0:
+                if not self.closed and self.on_shutdown is not None:
+                    self.on_shutdown()     # SHUTDOWN closed it from a command
                 return
             time.sleep(0.005)
 
@@ -121,6 +127,14 @@ class Engine:
         if c < 0:
             raise PionError(ERRORS.get(c, f"error {c}"))
         return c
+
+    def wake_fd(self, c: int) -> int:
+        """A descriptor readable while connection c has output waiting (a
+        parked command's reply, a pub/sub message): wait on it, then poll."""
+        fd = self._ext.wake_fd(self.h, c) if self.lib is None else self.lib.pion_embed_wake_fd(self.h, c)
+        if fd < 0:
+            raise PionError(ERRORS.get(fd, f"error {fd}"))
+        return fd
 
     def conn_free(self, c: int):
         if not self.closed and os.getpid() == self.pid:
@@ -175,6 +189,14 @@ def close(dir: str | None = None):
 _never_readable = os.pipe()[0]
 
 
+def _wait_readable(fd: int, timeout: float):
+    """poll(), not select(): select cannot take a descriptor numbered 1024 or
+    more (FD_SETSIZE), which a host with many open files reaches."""
+    p = select.poll()
+    p.register(fd, select.POLLIN)
+    p.poll(max(0, int(timeout * 1000)))
+
+
 def _status_error(st: int):
     raise ConnectionError(ERRORS.get(st, f"engine status {st}"))
 
@@ -189,6 +211,7 @@ class EngineSocket:
         self._buf = bytearray()
         self._timeout = timeout
         self._eof = False
+        self._wake = engine.wake_fd(self._c)
 
     # socket API redis-py uses
     def settimeout(self, t):
@@ -204,7 +227,7 @@ class EngineSocket:
         pass
 
     def fileno(self):
-        return _never_readable
+        return self._wake if self._c is not None else _never_readable
 
     def getpeername(self):
         return ("pion", 0)
@@ -235,7 +258,6 @@ class EngineSocket:
             return
         t = self._timeout
         deadline = None if t is None else time.monotonic() + t
-        delay = 0.0001
         while True:
             st, out = self._e.poll(self._c)
             if out:
@@ -248,10 +270,13 @@ class EngineSocket:
                 _status_error(st)
             if t == 0:
                 raise BlockingIOError(errno.EWOULDBLOCK, "no reply yet")
-            if deadline is not None and time.monotonic() >= deadline:
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
                 raise socket.timeout("timed out")
-            time.sleep(delay)
-            delay = min(delay * 2, 0.002)
+            # The wake fd turns readable when output is queued for this
+            # connection (the ticker answers parked commands every 5 ms). The
+            # cap only bounds the cost of a missed wake-up; none is expected.
+            _wait_readable(self._wake, 0.25 if left is None else min(left, 0.25))
 
     def recv(self, n):
         self._fill()
@@ -280,7 +305,8 @@ try:
             self._pc = c
 
         async def _wait_for_data(self, func_name):
-            delay = 0.0001
+            loop = asyncio.get_running_loop()
+            wake = self._e.wake_fd(self._pc)
             while not self._buffer and not self._eof:
                 st, out = self._e.poll(self._pc)
                 if out:
@@ -291,8 +317,16 @@ try:
                     return
                 if st < 0:
                     _status_error(st)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 0.002)
+                # Readable when output is queued for this connection; any
+                # event loop can wait on it, so the engine has no loop of its own.
+                ready = loop.create_future()
+                loop.add_reader(wake, lambda f=ready: f.done() or f.set_result(None))
+                try:
+                    await asyncio.wait_for(ready, 0.25)   # bounds a missed wake-up only
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    loop.remove_reader(wake)
 
     class EngineWriter:
         def __init__(self, engine: Engine, reader: EngineReader, c: int):

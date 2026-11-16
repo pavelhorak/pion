@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import os
 import shutil
 import socket
 import subprocess
@@ -328,6 +329,12 @@ def main():
             [exe, "--port", str(args.redis_port), "--save", "", "--appendonly", "no",
              # Pion has one database; so does this oracle.
              "--databases", "1"],
+            # Redis calls setlocale(LC_COLLATE, ""), and Lua's string compare
+            # is strcoll, so under en_US.UTF-8 (the macOS runner, most
+            # desktops) table.sort orders the sandbox's mixed-case names
+            # case-insensitively. Pion never sets a locale. The C locale is
+            # byte order on both sides, wherever the test runs.
+            env={**os.environ, "LC_ALL": "C"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
 

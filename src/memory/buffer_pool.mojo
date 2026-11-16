@@ -3,6 +3,7 @@ from .slab_allocator import SlabAllocator
 from std.memory import alloc
 from std.sys import size_of
 from std.math import min, max
+from src.common.log import log_out
 
 @fieldwise_init
 struct PageMetadata(Copyable, Movable, ImplicitlyCopyable):
@@ -102,7 +103,7 @@ struct BufferPool:
         try:
             var meta_ptr = self.page_table[page_id]
             if meta_ptr[].is_dirty:
-                print("BufferPool ARC: Flushing dirty page " + String(page_id) + " to SSD...")
+                print("BufferPool ARC: Flushing dirty page " + String(page_id) + " to SSD...", file=log_out())
             meta_ptr[].buffer.unsafe_free()
             meta_ptr.unsafe_deinit_pointee()
             self.meta_allocator.deallocate(meta_ptr)
@@ -154,7 +155,7 @@ struct BufferPool:
         for entry in self.page_table.items():
             try:
                 if entry.value[].is_dirty:
-                    print("BufferPool: Shutdown flush of page " + String(entry.key))
+                    print("BufferPool: Shutdown flush of page " + String(entry.key), file=log_out())
                 entry.value[].buffer.unsafe_free()
                 entry.value[].unsafe_deinit_pointee()
             except:

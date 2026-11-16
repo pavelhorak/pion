@@ -32,6 +32,7 @@ from src.common.lock_free import LockFreeRingBuffer, AITask
 from src.network.cluster import ClusterState, REPL_PORT_OFFSET
 from std.ffi import external_call
 from std.atomic import Atomic, Ordering
+from src.common.log import log_out
 
 struct Pion:
     var nodes: List[String]
@@ -228,7 +229,7 @@ struct Pion:
                 self.last_save_time = comp_ts
             else:
                 print("Blob tier: compaction re-index FAILED (snapshot error) — "
-                      + "the WAL still names pre-compaction offsets")
+                      + "the WAL still names pre-compaction offsets", file=log_out())
 
         # #45: from here on, a key removed as expired is logged as a DEL ahead
         # of the next record (replay above ran with lazy expiry off).
@@ -269,11 +270,11 @@ struct Pion:
                 _ = external_call["usleep", Int32](Int32(1000))
                 _waited_ms += 1
                 if _waited_ms == 2000:
-                    print("Worker " + String(worker_id) + ": waiting for the persisted vector index to load")
+                    print("Worker " + String(worker_id) + ": waiting for the persisted vector index to load", file=log_out())
                 if _waited_ms >= 600_000:
                     # A loader that died never decrements; serving without
                     # the index beats never serving.
-                    print("Worker " + String(worker_id) + ": gave up waiting for the vector index load after 600 s")
+                    print("Worker " + String(worker_id) + ": gave up waiting for the vector index load after 600 s", file=log_out())
                     break
         # #46: the index has loaded (or there is none): apply this worker's
         # recorded tombstones for its build and relink the hashes to their slots
@@ -300,7 +301,7 @@ struct Pion:
                 cluster[].gossip_handle = self.gossip.handle
                 var gossip_ok = self.gossip.start()
                 if gossip_ok:
-                    print("Gossip: health monitoring started for " + String(cluster[].peer_count) + " peer(s)")
+                    print("Gossip: health monitoring started for " + String(cluster[].peer_count) + " peer(s)", file=log_out())
             # Replication
             if cluster[].is_replica and config.cluster.primary_host != "":
                 # Replica mode: connect to primary's replication port
@@ -312,19 +313,19 @@ struct Pion:
                     # The receiver THREAD started; it connects (and retries)
                     # on its own. Saying "connected" here claimed a link that
                     # did not exist when the primary had no listener.
-                    print("Replication: replica receiver started, connecting to " + config.cluster.primary_host + ":" + String(repl_port))
+                    print("Replication: replica receiver started, connecting to " + config.cluster.primary_host + ":" + String(repl_port), file=log_out())
                 else:
-                    print("Replication: replica setup failed — check primary_host/port")
+                    print("Replication: replica setup failed — check primary_host/port", file=log_out())
             elif not cluster[].is_replica:
                 # Primary mode: listen for replica connections on port + 10000
                 var listen_port = config.server.port + REPL_PORT_OFFSET
                 var repl_ok = self.replication.setup(self.wal, listen_port)
                 if repl_ok:
                     cluster[].repl_primary_handle = self.replication.handle
-                    print("Replication: primary listener on port " + String(listen_port))
+                    print("Replication: primary listener on port " + String(listen_port), file=log_out())
                 else:
                     print("Replication: primary listener on port " + String(listen_port)
-                          + " FAILED to start — replicas will receive nothing")
+                          + " FAILED to start — replicas will receive nothing", file=log_out())
             # gh #149 / gh #163: N3 hands the raw WAL mapping to a C streaming
             # thread and stores it in cluster[].wal_ptr for failover promotion,
             # and the replica side (apply_wal_entries) cannot follow a rotation.
@@ -339,7 +340,7 @@ struct Pion:
                 self.engine.fast_path.blob_threshold = BLOB_TIER_OFF
                 self.engine.slow_path.dispatcher.blob_threshold = BLOB_TIER_OFF
                 print("Blob tier: disabled under replication "
-                      + "(the replication stream carries payloads, not blob pointers)")
+                      + "(the replication stream carries payloads, not blob pointers)", file=log_out())
             # N3: store WAL pointer and port for failover promotion
             cluster[].wal_ptr = Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(self.wal[].map))
             cluster[].server_port = config.server.port

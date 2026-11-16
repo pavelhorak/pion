@@ -56,6 +56,7 @@ from src.vector.hnsw_types import hk_put, hk_claim
 from src.io.wal import WAL, VEC_KEY_REC, VEC_DEAD_REC, VEC_CLEAR_REC, VEC_CLEAR_DEAD, VEC_CLEAR_KEYS, legacy_hk_slot, is_legacy_hk_dead
 from src.common.container_free import remove_and_free
 from src.network.dispatcher import CommandDispatcher
+from src.common.log import log_out
 
 
 def _field_hash(field: Pointer[UInt8, MutUntrackedOrigin], flen: Int) -> UInt64:
@@ -461,7 +462,7 @@ def adopt_legacy_slot_keys(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
         kbuf.unsafe_free()
         vbuf.unsafe_free()
         return 0
-    print("Vector index: " + String(n) + " slot-map key(s) an older server wrote moved out of the keyspace")
+    print("Vector index: " + String(n) + " slot-map key(s) an older server wrote moved out of the keyspace", file=log_out())
     var buf = unsafe_alloc[UInt8](48)            # heap: it goes to the WAL appender (gh #349)
     if len(names) > 0:
         keyspace[].clear_vec_keys()

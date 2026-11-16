@@ -47,7 +47,11 @@ pion.close()
 print("closed", flush=True)
 """], cwd=CWD, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 check("embedded app wrote", holder.stdout.readline().strip() == "ready")
-p = start_server(); out, _ = p.communicate(timeout=60)
+p = start_server()
+try:
+    out, _ = p.communicate(timeout=60)
+except subprocess.TimeoutExpired:      # it served instead of refusing: never leave it running
+    p.kill(); out, _ = p.communicate()
 check("pion-server --dir refused while the app holds it", p.returncode == 1 and "in use" in out, out[-300:])
 holder.stdin.write("\n"); holder.stdin.flush()
 check("embedded app closed", holder.stdout.readline().strip() == "closed"); holder.wait(timeout=30)
@@ -69,10 +73,15 @@ try: r.shutdown()
 except redis.ConnectionError: pass
 p.wait(timeout=30)
 e = embedded(f"r = pion.Redis(dir={D!r}, decode_responses=True); print(r.get('from-server'), r.get('k:0'), r.get('k:999'))")
-# (the engine still prints its log lines to stdout, e.g. "Snapshot: loaded":
-# a known gap, embedded/README.md; read the last line)
-check("the app reads the server's writes", e.stdout.strip().splitlines()[-1].split() == ["hello", "1", "999"],
+check("the app reads the server's writes", e.stdout.strip().split() == ["hello", "1", "999"],
       e.stdout + e.stderr[-300:])
+# The engine's log lines went to its log file, not to the app's stdout.
+check("the app's stdout holds only what the app printed", e.stdout == "hello 1 999\n", repr(e.stdout[:300]))
+log = open(os.path.join(D, "pion.log")).read() if os.path.exists(os.path.join(D, "pion.log")) else ""
+check("the engine logged its open to dir/pion.log", "Snapshot: loaded" in log or "WAL" in log, repr(log[:300]))
+e = embedded(f"r = pion.Redis(dir={D!r}); r.save(); print('saved')")
+check("SAVE logs to the file, not to stdout", e.stdout == "saved\n" and "Snapshot: saved" in open(os.path.join(D, "pion.log")).read(),
+      repr(e.stdout[:300]))
 # 5. files went to --dir, not to either working directory
 check("no files in the working directory", os.listdir(CWD) == [], os.listdir(CWD))
 check("WAL in the data directory", "pion.wal.0" in os.listdir(D), os.listdir(D))

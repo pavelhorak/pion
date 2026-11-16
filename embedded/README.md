@@ -1,12 +1,13 @@
-# Embedded Pion (phase 0 prototype)
+# Embedded Pion
 
 The Pion engine inside your Python process, behind redis-py. No server.
 
 ```python
-import pion_embedded as pion           # working name; not on PyPI
+import pion_embedded as pion           # the pion-embedded wheel (GitHub releases; not on PyPI)
 r = pion.Redis(dir="./data")           # a redis.Redis: pipelines, Lock, pub/sub, scripts
 ar = pion.asyncio.Redis(dir="./data")  # a redis.asyncio.Redis
 r = pion.from_url("pion:///abs/path/to/data")
+pool = pion.asyncio.ConnectionPool.from_url("pion:///abs/path/to/data")  # for redis.asyncio.Redis(connection_pool=pool)
 ```
 
 - Every write goes to the server's write-ahead log in `dir` as the command
@@ -14,29 +15,57 @@ r = pion.from_url("pion:///abs/path/to/data")
 - One engine and one data directory per process. A second process opening the
   directory is refused (`dir/pion.lock`): to share data between processes, run
   `pion-server` on it.
-- KV only (no vector search). macOS arm64 is the only platform built and run;
-  the Linux targets compile.
+- KV only (no vector search). Built and tested on macOS arm64, Linux x86-64
+  and Linux arm64 by `.github/workflows/embedded.yml` (pull requests that touch
+  the library, and manual runs). Each release built from a `v*` tag carries
+  the three wheels (`pion_embedded-<version>-cp311-abi3-*.whl`, one per
+  platform, for CPython 3.11 and later); they are not on PyPI. The Linux wheels
+  are `manylinux_2_35` (glibc 2.35 or later, Ubuntu 22.04 for one), built on
+  Ubuntu 22.04; macOS needs 14 or later.
+- The engine's log lines (WAL replay and snapshot load at open, `Snapshot:
+  saved` on SAVE, warnings) go to `dir/pion.log`, never to the host's stdout.
+  `logfile PATH` in the engine's config moves them.
 
 ## Known gaps
 
-- **The engine prints its log lines to the host's stdout** (WAL replay and
-  snapshot load at open, `Snapshot: saved` on SAVE, warnings). The plan's §5.6
-  wants a silent library; that needs the engine's prints routed through one
-  switch.
 - One engine per process; `memory://`-style isolated instances per URL are
   not possible.
-- No Linux wheel yet (the targets compile; linking and running them needs CI).
 - `pion-server` takes `pion.lock` only with `--dir`. A server started without
   it, in the directory an app has open, is not stopped.
+
+## Engine options
+
+`pion.Redis(dir=..., appendonly=..., wal_size_mb=..., maxmemory=...,
+maxmemory_policy=...)`. The C ABI's config (`pion_embed_open`, one `key value`
+per line) also takes `wal-max-segments`, `wal-full-policy`, `blob-threshold`,
+`no-blob-tier`, `requirepass`, `enable-debug-command`, `maxmemory-samples`,
+`lua-time-limit`, `lua-memory-limit` and `logfile`, with the values
+`pion-server`'s flags of the same names take (`maxmemory` and
+`lua-memory-limit` in Redis units). A bad value fails the open with the reason.
+
+## Waiting for output
+
+`pion_embed_wake_fd(h, conn)` returns a descriptor that is readable while the
+connection has output the caller has not collected: a parked command's reply
+(BLPOP, XREADGROUP BLOCK, WAIT), a pub/sub message another connection
+published. The sync adapter waits on it with `select`, the asyncio adapter
+with `loop.add_reader`, so neither polls. A push answers a blocked client on
+another connection before the pushing call returns, as the server's loop
+does; a timeout is answered by the engine's periodic tick.
 
 ## Build and test
 
 ```bash
 MACOSX_DEPLOYMENT_TARGET=14.0 pixi run build-embed   # -> libpion.dylib (~6 min)
 PYTHONPATH=embedded/python python3 embedded/tests/test_smoke.py
-bash embedded/build_wheel.sh python3      # -> embedded/dist/*-py3-none-macosx_14_0_arm64.whl
+bash embedded/build_wheel.sh python3      # -> embedded/dist/*-cp311-abi3-macosx_14_0_arm64.whl
 python3 embedded/tests/test_graduation.py ./pion-server   # app <-> pion-server --dir, one at a time
-# the server's own suites, through the library:
+# the server's test tier, through the library: a stand-in for pion-server
+# serves each test from libpion behind a loopback proxy. Tests that need a
+# flag the library has no equivalent for (--kvcache, --cluster, -w N, ...)
+# are reported as skipped, with the flag named.
+python3 tests/run_all.py --server-tests-only --binary embedded/tests/pion-server-embedded
+# or one suite by hand:
 PYTHONPATH=embedded/python python3 -m pion_embedded.proxy --dir /tmp/d --port 16700 &
 python3 tests/test_raw.py --port 16700 && python3 tests/test_parity.py --port 16700
 ```

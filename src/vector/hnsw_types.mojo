@@ -7,6 +7,7 @@ from std.ffi import external_call
 from src.common.lock_free import ShardQueryBus
 # gh #87.1: ivf_pq module deleted.
 from std.collections import Array
+from src.common.log import log_out
 
 # FT.CREATE ... PREFIX <n> <p>...: how many key prefixes an index keeps, and
 # the bytes each takes ([length][up to 63 bytes]). More, or a longer one, is
@@ -784,7 +785,7 @@ struct SharedHNSWView(Movable):
             if not self.ingest_capacity_warned:
                 print("WARN: HSET vector ingest dropped — buffer full at "
                       + String(self.hk_max_elements)
-                      + " vectors. Restart with --max-elements <N> to raise the cap.")
+                      + " vectors. Restart with --max-elements <N> to raise the cap.", file=log_out())
                 self.ingest_capacity_warned = True
             return -1
         var off = slot * dim

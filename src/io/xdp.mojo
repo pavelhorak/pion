@@ -22,6 +22,7 @@ from src.common.ptr import is_not_null, is_null, null_ptr
 from std.memory import alloc
 from std.ffi import external_call
 from std.memory import unsafe_memset, unsafe_memcpy
+from src.common.log import log_out
 
 
 # TCP flags
@@ -159,7 +160,7 @@ struct XDPEngine:
         self.rx_lens = unsafe_alloc[UInt32](XDP_BATCH_SIZE)
 
         self.active = True
-        print("XDP engine active: " + interface + " queue=" + String(queue_id) + " port=" + String(Int(port)))
+        print("XDP engine active: " + interface + " queue=" + String(queue_id) + " port=" + String(Int(port)), file=log_out())
         return True
 
     def setup_worker(mut self, interface: String, queue_id: Int, port: UInt16,
@@ -195,7 +196,7 @@ struct XDPEngine:
         self.rx_lens = unsafe_alloc[UInt32](XDP_BATCH_SIZE)
 
         self.active = True
-        print("XDP worker active: " + interface + " queue=" + String(queue_id) + " port=" + String(Int(port)))
+        print("XDP worker active: " + interface + " queue=" + String(queue_id) + " port=" + String(Int(port)), file=log_out())
         return True
 
     @always_inline

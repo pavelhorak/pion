@@ -1,6 +1,7 @@
 from std.collections import Dict
 from .vnode import VNode
 from src.common.rendezvous_hash import RendezvousHash
+from src.common.log import log_out
 
 struct ShardManager:
     var shards: List[String]
@@ -28,12 +29,12 @@ struct ShardManager:
             self.vnode_loads[vnode_id] = ops
 
     def rebalance(mut self, threshold: Int):
-        print("ShardManager: Evaluating cluster balance...")
+        print("ShardManager: Evaluating cluster balance...", file=log_out())
         for entry in self.vnode_loads.items():
             var vnode_id = entry.key
             var load = entry.value
             if load > threshold:
-                print("ShardManager: Hotspot detected on vNode " + String(vnode_id) + " (Load: " + String(load) + "). Triggering migration.")
+                print("ShardManager: Hotspot detected on vNode " + String(vnode_id) + " (Load: " + String(load) + "). Triggering migration.", file=log_out())
                 # In a real system, this would calculate the least loaded node
                 # and trigger the VNode state machine (ACTIVE -> DRAINING -> TRANSFER)
                 self.vnode_loads[vnode_id] = load // 2 # Simulate shedding load

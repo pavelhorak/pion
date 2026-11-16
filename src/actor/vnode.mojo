@@ -5,6 +5,7 @@ from src.memory.slab_allocator import SlabAllocator
 from src.common.hash_map import SlabHashMap
 from src.common.list import SlabList
 from std.memory import alloc
+from src.common.log import log_out
 
 @fieldwise_init
 struct VNodeState(Copyable, Movable):
@@ -170,23 +171,23 @@ struct VNode(Copyable, Movable):
 
     def start_migration(mut self):
         self.state = VNodeState(VNodeState.DRAINING)
-        print("VNode " + String(self.id) + ": Starting migration (DRAINING)")
+        print("VNode " + String(self.id) + ": Starting migration (DRAINING)", file=log_out())
 
     def finish_migration(mut self) raises:
         self.state = VNodeState(VNodeState.TRANSFER)
-        print("VNode " + String(self.id) + ": Transferring ownership")
+        print("VNode " + String(self.id) + ": Transferring ownership", file=log_out())
         
         # Replay handoff queue
-        print("VNode " + String(self.id) + ": Replaying " + String(len(self.handoff_queue)) + " buffered ops")
+        print("VNode " + String(self.id) + ": Replaying " + String(len(self.handoff_queue)) + " buffered ops", file=log_out())
         for i in range(len(self.handoff_queue)):
             var op = self.handoff_queue[i]
             # Simple replay logic for prototype
             # In real system, this would parse the command and apply it
-            print("VNode " + String(self.id) + ": Replayed " + op)
+            print("VNode " + String(self.id) + ": Replayed " + op, file=log_out())
         
         self.handoff_queue = List[String]()
         self.state = VNodeState(VNodeState.ACTIVE)
-        print("VNode " + String(self.id) + ": Migration complete (ACTIVE)")
+        print("VNode " + String(self.id) + ": Migration complete (ACTIVE)", file=log_out())
 
     def serialize(self) -> String:
         # Simplified serialization for prototype
