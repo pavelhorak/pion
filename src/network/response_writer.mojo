@@ -721,7 +721,7 @@ struct ResponseWriter(Movable):
             external_call["pion_spin_lock", NoneType](lk)
             if self.out_owed(ci) + length > OUT_DELIVER_LIMIT:
                 external_call["pion_spin_unlock", NoneType](lk)
-                _ = external_call["shutdown", Int32](fd, Int32(2))
+                _ = external_call["pion_kill_fd", Int32](fd)   # shutdown; a library's virtual id is recorded
                 return
             self.out_append(ci, data, length)
             external_call["pion_spin_unlock", NoneType](lk)
@@ -744,7 +744,7 @@ struct ResponseWriter(Movable):
             if left == length and err != _EAGAIN():
                 return                  # a dead connection: its close is the engine's
         if self.out_owed(ci) + left > OUT_DELIVER_LIMIT:
-            _ = external_call["shutdown", Int32](fd, Int32(2))   # SHUT_RDWR: the engine sees EOF
+            _ = external_call["pion_kill_fd", Int32](fd)   # SHUT_RDWR: the engine sees EOF
             return
         self.out_append(ci, p, left)
         if self.ctx[].use_uring:

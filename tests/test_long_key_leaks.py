@@ -172,12 +172,17 @@ def ft_search_leak(d):
         if not (isinstance(r, list) and r and r[0] == 10 and len(r[1]) == 25):
             return f"FT.SEARCH: probe did not return 10 results on 25-byte keys: {r!r:.120}"
         run(c, [q] * 2000)
-        base = rss_kb(proc.pid)
-        run(c, [q] * 10000)
-        grown = rss_kb(proc.pid) - base
+        # The sweep's rule (SETTLE): a leak grows in every window, a process
+        # still settling does not. The pre-fix leak was ~2,144 KB a window.
+        for settled in range(SETTLE + 1):
+            base = rss_kb(proc.pid)
+            run(c, [q] * 10000)
+            grown = rss_kb(proc.pid) - base
+            if grown < BOUND_KB:
+                break
         print(f"  {'PASS' if grown < BOUND_KB else 'FAIL'}  FT.SEARCH x 10,000 (10 results, 25-byte keys)"
-              f"  grew {grown} KB")
-        return None if grown < BOUND_KB else f"FT.SEARCH: grew {grown} KB over 10,000 searches"
+              f"  grew {grown} KB" + (f"  (window {settled + 1})" if settled else ""))
+        return None if grown < BOUND_KB else f"FT.SEARCH: grew {grown} KB over 10,000 searches, in each of {SETTLE + 1} windows"
     finally:
         proc.kill()
         proc.wait()

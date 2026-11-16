@@ -50,6 +50,7 @@ pion.hnsw.*
 pion.wal.*
 # gh #163 blob arena segments (sparse, up to 1 GiB each)
 pion.blob.*
+pion.lock
 pion-export/
 # V-store WAL/snapshot (e.g. pion.vstore.wal.0)
 pion.vstore.*

@@ -18,6 +18,7 @@ typedef int64_t (*exec_fn)(int64_t, int64_t, const char *, int64_t, const char *
 typedef int64_t (*poll_fn)(int64_t, int64_t, const char **, int64_t *);
 typedef int64_t (*h_fn)(int64_t);
 typedef int64_t (*version_fn)(char *, int64_t);
+typedef int64_t (*wake_fn)(int64_t, int64_t);
 
 static open_fn f_open;
 static conn_new_fn f_conn_new;
@@ -26,6 +27,7 @@ static exec_fn f_exec;
 static poll_fn f_poll;
 static h_fn f_tick, f_close;
 static version_fn f_version;
+static wake_fn f_wake_fd;
 
 static PyObject *load(PyObject *self, PyObject *args) {
     const char *path;
@@ -42,6 +44,7 @@ static PyObject *load(PyObject *self, PyObject *args) {
     SYM(f_tick, h_fn, "pion_embed_tick")
     SYM(f_close, h_fn, "pion_embed_close")
     SYM(f_version, version_fn, "pion_embed_version")
+    SYM(f_wake_fd, wake_fn, "pion_embed_wake_fd")
 #undef SYM
     Py_RETURN_NONE;
 }
@@ -107,6 +110,15 @@ static PyObject *py_poll(PyObject *self, PyObject *args) {
     return reply(st, out, n);
 }
 
+static PyObject *py_wake_fd(PyObject *self, PyObject *args) {
+    long long h, c; if (!PyArg_ParseTuple(args, "LL", &h, &c)) return NULL;
+    int64_t fd;
+    Py_BEGIN_ALLOW_THREADS
+    fd = f_wake_fd((int64_t)h, (int64_t)c);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromLongLong((long long)fd);
+}
+
 static PyObject *py_tick(PyObject *self, PyObject *args) {
     long long h; if (!PyArg_ParseTuple(args, "L", &h)) return NULL;
     int64_t r;
@@ -139,6 +151,7 @@ static PyMethodDef methods[] = {
     {"exec", py_exec, METH_VARARGS, "exec(h, conn, request) -> (status, reply)"},
     {"poll", py_poll, METH_VARARGS, "poll(h, conn) -> (status, reply)"},
     {"tick", py_tick, METH_VARARGS, NULL},
+    {"wake_fd", py_wake_fd, METH_VARARGS, "wake_fd(h, conn) -> fd readable while output waits"},
     {"close", py_close, METH_VARARGS, NULL},
     {"version", py_version, METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL},

@@ -44,8 +44,16 @@ else
     PAT='*-abi3-linux_*.whl'
 fi
 export MACOSX_DEPLOYMENT_TARGET=14.0    # the extension's minos, as libpion's
+if [ "$(uname -s)" = "Darwin" ]; then
+    # A python.org framework Python (what setup-python installs on the macOS
+    # runners) is universal2: it compiles the extension for both arches and
+    # tags the wheel universal2. Everything in _lib/ is arm64 only, so build
+    # and tag arm64.
+    export ARCHFLAGS="-arch arm64" _PYTHON_HOST_PLATFORM="macosx-14.0-arm64"
+fi
 OUT="$ROOT/embedded/dist"
 mkdir -p "$OUT"
 (cd "$STAGE" && "$PY" -m pip wheel --no-deps --no-build-isolation -w "$STAGE/wheel" . >/dev/null)
+compgen -G "$STAGE/wheel/$PAT" >/dev/null || { echo "no $PAT; built: $(ls "$STAGE/wheel")" >&2; exit 1; }
 cp "$STAGE"/wheel/$PAT "$OUT/"
 ls -la "$OUT"

@@ -21,22 +21,23 @@ TRACE = os.environ.get("PION_PROXY_TRACE") == "1"
 
 def serve_conn(engine, s: socket.socket):
     c = engine.conn_new()
+    wake = engine.wake_fd(c)          # readable while output waits for this connection
     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    idle = 0
+    poller = select.poll()             # not select(): descriptors past 1024 (FD_SETSIZE)
+    poller.register(s.fileno(), select.POLLIN)
+    poller.register(wake, select.POLLIN)
     try:
         while True:
-            r, _, _ = select.select([s], [], [], 0.001 if idle < 50 else 0.005)
-            if r:
+            ready = {fd for fd, _ in poller.poll(250)}
+            if s.fileno() in ready:
                 data = s.recv(1 << 20)
                 if not data:
                     return
                 if TRACE:
                     os.write(2, b"REQ " + data[:300].replace(b"\r\n", b" ") + b"\n")
                 st, out = engine.exec(c, data)
-                idle = 0
             else:
                 st, out = engine.poll(c)      # a parked reply, a pub/sub message
-                idle = 0 if out else idle + 1
             if out:
                 s.sendall(out)
             if st == CLOSED:
@@ -69,12 +70,21 @@ def main():
         cfg["maxmemory"] = a.maxmemory
     if a.maxmemory_policy:
         cfg["maxmemory-policy"] = a.maxmemory_policy
-    engine = get_engine(a.dir, cfg)
+    serve(get_engine(a.dir, cfg), a.port)
+
+
+def serve(engine, port: int):
+    """Accept on 127.0.0.1:port forever, one thread per connection."""
     ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    ls.bind(("127.0.0.1", a.port))
-    ls.listen(1024)
-    print(f"pion_embedded proxy: {engine.version()} dir={engine.dir} port={a.port}", flush=True)
+    try:
+        ls.bind(("127.0.0.1", port))
+    except OSError as e:
+        print(f"FATAL: cannot bind port {port}: {e}", flush=True)
+        engine.close()
+        raise SystemExit(1)
+    ls.listen(65535)   # as pion-server: a connection burst queues, never resets
+    print(f"pion_embedded proxy: {engine.version()} dir={engine.dir} port={port}", flush=True)
     while True:
         s, _ = ls.accept()
         threading.Thread(target=serve_conn, args=(engine, s), daemon=True).start()

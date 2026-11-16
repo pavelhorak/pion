@@ -17,6 +17,54 @@ int set_nonblock_c(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/* Embedded Pion's virtual connections are numbered from a floor up to
+ * 65535 and are NOT descriptors: a syscall on one would reach whatever the
+ * host process has open under that number. The socket helpers below check
+ * the floor first. A kill on a virtual id is recorded for the library, which
+ * then closes that connection as the server's loop closes a shut socket.
+ * Unset (the server): INT32_MAX, so nothing changes. */
+static int32_t g_virtual_floor = 0x7fffffff;
+static uint8_t g_virtual_killed[65536];
+
+void pion_set_virtual_floor(int32_t floor) { g_virtual_floor = floor; }
+
+static int is_virtual(int fd) { return fd >= g_virtual_floor && fd < 65536; }
+
+/* 1 if CLIENT KILL (or a limit) killed virtual connection `id`. */
+int pion_virtual_killed(int id) { return is_virtual(id) ? g_virtual_killed[id] : 0; }
+void pion_virtual_reset(int id) { if (is_virtual(id)) g_virtual_killed[id] = 0; }
+
+/* Embedded Pion's wake fds (src/lib/pion_embed.mojo): a pipe per virtual
+ * connection that is readable while output waits for the caller, so a host
+ * can block in select/poll or an event loop instead of polling the engine.
+ * fds[0] reads, fds[1] writes; both non-blocking and close-on-exec. */
+int pion_wake_pipe(int32_t *fds) {
+    int p[2];
+    if (pipe(p) != 0) return -1;
+    for (int i = 0; i < 2; i++) {
+        set_nonblock_c(p[i]);
+        fcntl(p[i], F_SETFD, FD_CLOEXEC);
+        fds[i] = p[i];
+    }
+    return 0;
+}
+
+void pion_wake_signal(int fd) {
+    char b = 1;
+    ssize_t r = write(fd, &b, 1);      /* EAGAIN: the pipe is already readable */
+    (void)r;
+}
+
+void pion_wake_drain(int fd) {
+    char b[64];
+    while (read(fd, b, sizeof b) > 0) {}
+}
+
+void pion_wake_close(int rfd, int wfd) {
+    close(rfd);
+    close(wfd);
+}
+
 /* C1: Connect to a remote host:port with timeout (ms). Returns fd or -1. */
 int pion_tcp_connect(const char *host, int port, int timeout_ms) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -299,6 +347,7 @@ int64_t pion_fmt_fixed(double v, int decimals, char* out, int64_t cap) {
 /* #45: true when the peer is this machine (loopback, or a Unix socket), as
    Redis's islocalClient decides for enable-debug-command "local". */
 int pion_peer_is_local(int fd) {
+    if (is_virtual(fd)) return 1;              /* the caller is in this process */
     struct sockaddr_storage sa;
     socklen_t salen = sizeof(sa);
     if (getpeername(fd, (struct sockaddr *)&sa, &salen) != 0) return 0;
@@ -318,6 +367,8 @@ int pion_peer_is_local(int fd) {
 }
 
 int64_t pion_peer_id(int fd, char *buf, int64_t cap) {
+    if (is_virtual(fd))                        /* in-process: no socket, as Redis's "path:0" */
+        return snprintf(buf, (size_t)cap, "embedded:%d", fd);
     struct sockaddr_storage sa;
     socklen_t salen = sizeof(sa);
     if (getpeername(fd, (struct sockaddr *)&sa, &salen) != 0) return 0;
@@ -342,6 +393,7 @@ int64_t pion_peer_id(int fd, char *buf, int64_t cap) {
 
 /* #47: this end of the connection ("ip:port"), CLIENT LIST's laddr. */
 int64_t pion_local_id(int fd, char *buf, int64_t cap) {
+    if (is_virtual(fd)) return snprintf(buf, (size_t)cap, "embedded:0");
     struct sockaddr_storage sa;
     socklen_t salen = sizeof(sa);
     if (getsockname(fd, (struct sockaddr *)&sa, &salen) != 0) return 0;
@@ -380,6 +432,7 @@ unsigned long long pion_next_client_id(void) {
    A client that kills itself is shut down only once its reply is out (the
    engine's close_after). */
 int pion_kill_fd(int fd) {
+    if (is_virtual(fd)) { g_virtual_killed[fd] = 1; return 0; }
     return shutdown(fd, SHUT_RDWR);
 }
 
@@ -788,7 +841,13 @@ __attribute__((visibility("default"))) int32_t pion_log_fd = 1;
 int32_t pion_set_log_file(const char *path) {
     if (pion_log_fd > 2) close(pion_log_fd);
     if (path == NULL || path[0] == 0) { pion_log_fd = 1; return 1; }
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    /* The process's own stdout/stderr: share its descriptor. On Linux,
+     * open("/dev/stdout") makes a NEW file description with its own offset,
+     * so when stdout is a file the host's writes (at its offset) overwrite
+     * the log's (appended at the end). macOS dups, which is this. */
+    int std = strcmp(path, "/dev/stdout") == 0 ? 1 : strcmp(path, "/dev/stderr") == 0 ? 2 : -1;
+    int fd = std >= 0 ? fcntl(std, F_DUPFD_CLOEXEC, 3)
+                      : open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     pion_log_fd = fd;   /* -1: a write to it fails, and print ignores that */
     return fd;
 }

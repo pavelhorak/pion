@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 OBJ="$(mktemp -d)"
 trap 'rm -rf "$OBJ"' EXIT
-CF="-O3 -fPIC"
+CF="-O3 -fPIC -D_GNU_SOURCE"   # RTLD_DEFAULT: glibc 2.35 declares it only under _GNU_SOURCE
 for c in crash_wrap fcntl_wrap geo_math uring_wrap xdp_wrap ssm_state_wrap build_pool_wrap worker_spawn_wrap; do
     gcc $CF -c "src/ffi/$c.c" -o "$OBJ/$c.o"
 done
@@ -19,7 +19,7 @@ for f in src/ffi/lua/l*.c src/ffi/lua/strbuf.c src/ffi/lua/fpconv.c src/ffi/lua/
     gcc -O2 -fPIC -DLUA_USE_POSIX -Isrc/ffi/lua -c "$f" -o "$OBJ/lua/$(basename "${f%.c}").o"
 done
 ar rcs "$OBJ/liblua.a" "$OBJ"/lua/*.o
-gcc -O2 -fPIC -c src/ffi/lua_wrap.c -Isrc/ffi/lua -Isrc/ffi -o "$OBJ/lua_wrap.o"
+gcc -O2 -fPIC -D_GNU_SOURCE -c src/ffi/lua_wrap.c -Isrc/ffi/lua -Isrc/ffi -o "$OBJ/lua_wrap.o"
 case "$(uname -m)" in
     x86_64) CPU=x86-64-v2 ;;     # the release's portable target
     aarch64|arm64) CPU=neoverse-n1 ;;
