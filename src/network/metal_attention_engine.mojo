@@ -23,6 +23,7 @@ Shape coverage (caller falls back to MLX bridge for everything outside):
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
 from src.common.config import PionConfig
+from src.common.log import log_out
 
 
 @always_inline
@@ -61,7 +62,7 @@ struct MetalAttentionEngine(Movable):
                 if self.available and fp16:
                     external_call["pion_metal_sdpa_set_kv_half", NoneType](Int32(1))
                 if not self.available:
-                    print("[MetalAttn] init failed (rc=", rc, "); ATTEND.PREFIX.* will fall back to MLX bridge")
+                    print("[MetalAttn] init failed (rc=", rc, "); ATTEND.PREFIX.* will fall back to MLX bridge", file=log_out())
 
     def __moveinit__(out self, deinit take: Self):
         self.enabled = take.enabled

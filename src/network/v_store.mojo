@@ -37,6 +37,7 @@ from src.vector.kernels import (
     dequantize_mlx4_g32_to_fp32,
     mlx4g32_bytes_per_token,
 )
+from src.common.log import log_out
 
 # Quantization format tags. Stable on-disk values — DO NOT renumber existing
 # entries; only append new ones.
@@ -1480,7 +1481,7 @@ struct VStoreIndex(Movable):
         var tmp_path = path + ".tmp"
         var fd = external_call["pion_creat", Int32](tmp_path.as_c_string_span())
         if fd < 0:
-            print("V-store save: cannot open " + tmp_path)
+            print("V-store save: cannot open " + tmp_path, file=log_out())
             return False
         var wok = True
 
@@ -1601,15 +1602,15 @@ struct VStoreIndex(Movable):
         _ = external_call["close", Int32](fd)
         if not wok:
             _ = external_call["unlink", Int32](tmp_path.as_c_string_span())
-            print("V-store save FAILED (write or flush error, disk full?) — previous snapshot and WAL kept")
+            print("V-store save FAILED (write or flush error, disk full?) — previous snapshot and WAL kept", file=log_out())
             return False
         var dst_path = path
         if external_call["rename", Int32](tmp_path.as_c_string_span(), dst_path.as_c_string_span()) != 0:
             _ = external_call["unlink", Int32](tmp_path.as_c_string_span())
-            print("V-store save FAILED: cannot rename " + tmp_path + " → " + path)
+            print("V-store save FAILED: cannot rename " + tmp_path + " → " + path, file=log_out())
             return False
         print("V-store saved: " + String(saved_sessions) + " sessions, " + String(saved_layers) +
-              " layer-blobs, " + String(saved_bytes) + " bytes → " + path)
+              " layer-blobs, " + String(saved_bytes) + " bytes → " + path, file=log_out())
         return True
 
     def load_from_disk(mut self, path: String) -> Bool:
@@ -1627,7 +1628,7 @@ struct VStoreIndex(Movable):
         if not self._vs_read_all(fd, hdr, 40):
             hdr.unsafe_free()
             _ = external_call["close", Int32](fd)
-            print("V-store load: short header read")
+            print("V-store load: short header read", file=log_out())
             return False
 
         # Magic
@@ -1635,14 +1636,14 @@ struct VStoreIndex(Movable):
            or hdr[unsafe_offset=4] != UInt8(86) or hdr[unsafe_offset=5] != UInt8(83) or hdr[unsafe_offset=6] != UInt8(48) or hdr[unsafe_offset=7] != UInt8(49):
             hdr.unsafe_free()
             _ = external_call["close", Int32](fd)
-            print("V-store load: bad magic")
+            print("V-store load: bad magic", file=log_out())
             return False
 
         var version = (hdr.unsafe_offset(8)).unsafe_bitcast[UInt32]()[unsafe_offset=0]
         if version != UInt32(1) and version != UInt32(2) and version != UInt32(3) and version != UInt32(4):
             hdr.unsafe_free()
             _ = external_call["close", Int32](fd)
-            print("V-store load: unsupported version " + String(Int(version)))
+            print("V-store load: unsupported version " + String(Int(version)), file=log_out())
             return False
 
         var saved_active   = Int((hdr.unsafe_offset(12)).unsafe_bitcast[UInt32]()[unsafe_offset=0])
@@ -1653,7 +1654,7 @@ struct VStoreIndex(Movable):
 
         if saved_active <= 0 or saved_active > MAX_VS_SESSIONS:
             _ = external_call["close", Int32](fd)
-            print("V-store load: invalid active count " + String(saved_active))
+            print("V-store load: invalid active count " + String(saved_active), file=log_out())
             return False
 
         var loaded_sessions = 0
@@ -1670,7 +1671,7 @@ struct VStoreIndex(Movable):
             sid_len_buf.unsafe_free()
             if sid_len <= 0 or sid_len > 4096:
                 _ = external_call["close", Int32](fd)
-                print("V-store load: bad sid_len " + String(sid_len))
+                print("V-store load: bad sid_len " + String(sid_len), file=log_out())
                 return False
 
             var sid_ptr_raw = unsafe_alloc[UInt8](sid_len)
@@ -1697,7 +1698,7 @@ struct VStoreIndex(Movable):
             if slot < 0:
                 sid_ptr_raw.unsafe_free()
                 _ = external_call["close", Int32](fd)
-                print("V-store load: create_session failed mid-load")
+                print("V-store load: create_session failed mid-load", file=log_out())
                 return False
             self.sessions[unsafe_offset=slot].last_access_ts = last_ts
             self.sessions[unsafe_offset=slot].num_layers = num_layers
@@ -1827,7 +1828,7 @@ struct VStoreIndex(Movable):
         self.total_evictions = saved_evict
         self.total_tokens = saved_total
         print("V-store loaded: " + String(loaded_sessions) + " sessions, " +
-              String(loaded_layers) + " layer-blobs from " + path)
+              String(loaded_layers) + " layer-blobs from " + path, file=log_out())
         return True
 
     # ── WAL (write-ahead log for V-store mutations) ─────────────────────────
@@ -1881,7 +1882,7 @@ struct VStoreIndex(Movable):
         var fd = external_call["pion_open_append", Int32](cpath.as_c_string_span())
         self.wal_fd = fd
         if fd < 0:
-            print("V-store WAL: cannot open " + path)
+            print("V-store WAL: cannot open " + path, file=log_out())
 
     def wal_close(mut self):
         if self.wal_fd >= 0:
@@ -2203,7 +2204,7 @@ struct VStoreIndex(Movable):
             var op = hdr_ext[unsafe_offset=4]
             if payload_len <= 0 or payload_len > 1 << 30:
                 # Sanity: refuse to allocate >1GB or zero-len records.
-                print("V-store WAL replay: bad payload_len " + String(payload_len) + " at op " + String(Int(op)))
+                print("V-store WAL replay: bad payload_len " + String(payload_len) + " at op " + String(Int(op)), file=log_out())
                 break
             var pb = unsafe_alloc[UInt8](payload_len)
             var p_ext = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=Int(pb))
@@ -2376,7 +2377,7 @@ struct VStoreIndex(Movable):
                     n_skip += 1
             else:
                 # Unknown op — stop, don't blindly skip.
-                print("V-store WAL replay: unknown op " + String(Int(op)) + ", stopping at offset before this record")
+                print("V-store WAL replay: unknown op " + String(Int(op)) + ", stopping at offset before this record", file=log_out())
                 pb.unsafe_free()
                 break
             pb.unsafe_free()
@@ -2387,5 +2388,5 @@ struct VStoreIndex(Movable):
         if total > 0 or n_skip > 0:
             print("V-store WAL replayed: " + String(n_create) + " create, " +
                   String(n_store) + " store, " + String(n_drop) + " drop, " +
-                  String(n_skip) + " skipped")
+                  String(n_skip) + " skipped", file=log_out())
         return total

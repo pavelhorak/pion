@@ -14,18 +14,17 @@ r = pion.from_url("pion:///abs/path/to/data")
 - One engine and one data directory per process. A second process opening the
   directory is refused (`dir/pion.lock`): to share data between processes, run
   `pion-server` on it.
-- KV only (no vector search). macOS arm64 is the only platform built and run;
-  the Linux targets compile.
+- KV only (no vector search). Built and tested on macOS arm64 here, and on
+  Linux x86-64 and arm64 by `.github/workflows/embedded.yml` (manual runs; its
+  wheels are workflow artifacts, not published).
+- The engine's log lines (WAL replay and snapshot load at open, `Snapshot:
+  saved` on SAVE, warnings) go to `dir/pion.log`, never to the host's stdout.
+  `logfile PATH` in the engine's config moves them.
 
 ## Known gaps
 
-- **The engine prints its log lines to the host's stdout** (WAL replay and
-  snapshot load at open, `Snapshot: saved` on SAVE, warnings). The plan's §5.6
-  wants a silent library; that needs the engine's prints routed through one
-  switch.
 - One engine per process; `memory://`-style isolated instances per URL are
   not possible.
-- No Linux wheel yet (the targets compile; linking and running them needs CI).
 - `pion-server` takes `pion.lock` only with `--dir`. A server started without
   it, in the directory an app has open, is not stopped.
 

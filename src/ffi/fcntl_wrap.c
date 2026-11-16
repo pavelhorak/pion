@@ -776,6 +776,23 @@ int64_t pion_xf_realpath(const char *dir, const char *name, char *out, int64_t c
     return (int64_t)n;
 }
 
+/* ── Where the engine's log lines go (src/common/log.mojo) ────────────────────
+ * Every Mojo print in the engine writes to this fd, which log_out() finds with
+ * dlsym. The server leaves it at 1; the library points it at a file in its data
+ * directory, because a library must not write to its host's stdout. */
+__attribute__((visibility("default"))) int32_t pion_log_fd = 1;
+
+/* Open `path` for appending and log there; NULL or "" logs to stdout again.
+ * Returns the fd now in use, or -1 when the file cannot be opened (the log
+ * then goes nowhere, never to the host's stdout). */
+int32_t pion_set_log_file(const char *path) {
+    if (pion_log_fd > 2) close(pion_log_fd);
+    if (path == NULL || path[0] == 0) { pion_log_fd = 1; return 1; }
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    pion_log_fd = fd;   /* -1: a write to it fails, and print ignores that */
+    return fd;
+}
+
 /* ── The data directory (embedded Pion; later `pion-server --dir`) ─────────────
  * Every persistence file (WAL, blob arena, snapshot) is named relative to
  * this prefix. Empty, the default, keeps the names the server has always

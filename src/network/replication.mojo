@@ -18,6 +18,7 @@ from src.io.wal import (WAL, WAL_HEADER_SIZE, wal_apply_mset, wal_is_aggregate,
                         wal_apply_aggregate, wal_apply_ttl)
 from src.common.hash_map import StripedHashMap, SlabHashMap
 from src.common.value import GenericValue
+from src.common.log import log_out
 
 
 struct PrimaryReplicator(Movable):
@@ -183,7 +184,7 @@ def apply_wal_entries(
             # Not a record boundary: the stream is corrupt. Carrying it would
             # stall the replica for good, so drop the rest and say so.
             print("Replication: corrupt record length " + String(entry_len)
-                  + " in the stream — dropping " + String(buf_len - off) + " bytes")
+                  + " in the stream — dropping " + String(buf_len - off) + " bytes", file=log_out())
             return buf_len
         if off + entry_len > buf_len:
             break       # split across drains: the caller carries it
@@ -230,7 +231,7 @@ def apply_wal_entries(
             # after running standalone. Say so: silently skipping is how a
             # replica ends up quietly missing keys the primary has.
             print("Replication: skipped a blob-pointer WAL entry (cmd 4) — the "
-                  + "arena bytes are not in the stream; this key is NOT replicated")
+                  + "arena bytes are not in the stream; this key is NOT replicated", file=log_out())
 
         off += entry_len
     return off

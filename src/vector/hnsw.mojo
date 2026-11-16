@@ -62,6 +62,7 @@ from std.collections import List, Array
 from std.sys.intrinsics import prefetch
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
+from src.common.log import log_out
 
 # gh #376: vectors the HSET-ingest build calibrates on. All of them for the
 # 50K gate corpus; a bounded prefix past that, since the per-group pass is a
@@ -607,7 +608,7 @@ struct HNSWGraph(Movable):
         self.global_max = cal[1]
         self.grouped_calibrated = False
         print("[HNSW] calibrated [" + String(cal[0]) + ", " + String(cal[1])
-              + "] from " + String(count) + " vectors")
+              + "] from " + String(count) + " vectors", file=log_out())
         return cal
 
     def quantize(mut self, vector: Pointer[Float32, MutUntrackedOrigin]) -> Pointer[Int8, MutUntrackedOrigin]:
@@ -1200,7 +1201,7 @@ struct HNSWGraph(Movable):
         var path_bytes = cpath.as_c_string_span()
         var fd = external_call["pion_creat", Int32](path_bytes)
         if fd < 0:
-            print("HNSW save: cannot open " + path)
+            print("HNSW save: cannot open " + path, file=log_out())
             return
         self._save_body(fd, hk_keys, hk_max)
         _ = external_call["close", Int32](fd)
@@ -1457,7 +1458,7 @@ struct HNSWGraph(Movable):
                     written += 1
             lw.unsafe_free()
 
-        print("HNSW saved: " + String(self.num_nodes) + " nodes → pion.hnsw.0")
+        print("HNSW saved: " + String(self.num_nodes) + " nodes → pion.hnsw.0", file=log_out())
 
     def load_from_disk(mut self, path: String,
                        hk_keys: Pointer[UInt8, MutUntrackedOrigin] = null_ptr[UInt8, MutUntrackedOrigin](),
@@ -1475,10 +1476,10 @@ struct HNSWGraph(Movable):
         var ok = self._load_body(fd, hk_keys, hk_max)
         _ = external_call["close", Int32](fd)
         if ok:
-            print("HNSW loaded from disk: " + String(self.num_nodes) + " nodes (" + path + ")")
+            print("HNSW loaded from disk: " + String(self.num_nodes) + " nodes (" + path + ")", file=log_out())
             self.index_ready = True
         else:
-            print("HNSW load failed — starting fresh")
+            print("HNSW load failed — starting fresh", file=log_out())
         return ok
 
     def _load_body(mut self, fd: Int32,
@@ -1495,7 +1496,7 @@ struct HNSWGraph(Movable):
             # v1 files were tail-corrupt; v2 files lack the slot→key map, so a
             # warm restart serves recall ≈ 0.002 silently (gh #211) — refuse
             # both loudly rather than load an index that returns wrong keys.
-            print("HNSW snapshot version " + String(hdr[unsafe_offset=1]) + " unsupported (want 3 to 5) — cold rebuild (re-ingest + FT.OPTIMIZE)")
+            print("HNSW snapshot version " + String(hdr[unsafe_offset=1]) + " unsupported (want 3 to 5) — cold rebuild (re-ingest + FT.OPTIMIZE)", file=log_out())
             hdr.unsafe_free(); return False
         var saved_stride = Int(hdr[unsafe_offset=20])
         var saved_slot_hdr = Int(hdr[unsafe_offset=21])
@@ -1506,7 +1507,7 @@ struct HNSWGraph(Movable):
         if self.nanoquant:  _cur_fmt |= 4
         if self.use_int4:   _cur_fmt |= 1
         if saved_fmt != _cur_fmt:
-            print("HNSW snapshot quant format mismatch (file=" + String(saved_fmt) + " server=" + String(_cur_fmt) + ") — cold rebuild")
+            print("HNSW snapshot quant format mismatch (file=" + String(saved_fmt) + " server=" + String(_cur_fmt) + ") — cold rebuild", file=log_out())
             hdr.unsafe_free(); return False
         if saved_stride <= 0:
             hdr.unsafe_free(); return False
@@ -1527,7 +1528,7 @@ struct HNSWGraph(Movable):
 
         # Sanity checks: must match this worker's config
         if saved_dim != self.dim or saved_M != self.M or saved_max_elem != self.max_elements:
-            print("HNSW load: config mismatch (saved dim=" + String(saved_dim) + " M=" + String(saved_M) + ")")
+            print("HNSW load: config mismatch (saved dim=" + String(saved_dim) + " M=" + String(saved_M) + ")", file=log_out())
             hdr.unsafe_free(); return False
         if saved_num_nodes > self.max_elements or saved_num_nodes <= 0:
             hdr.unsafe_free(); return False
@@ -1615,7 +1616,7 @@ struct HNSWGraph(Movable):
             var nb_block   = self.neighbor_pool.unsafe_offset(i * saved_pool_per)
             var vslot      = Int(slot_buf[unsafe_offset=i])
             if vslot < 0 or vslot >= saved_num_nodes:
-                print("HNSW load: slot index out of range (node " + String(i) + " slot " + String(vslot) + ") — cold rebuild")
+                print("HNSW load: slot index out of range (node " + String(i) + " slot " + String(vslot) + ") — cold rebuild", file=log_out())
                 slot_buf.unsafe_free(); id_buf.unsafe_free(); return False
             var vec_ptr    = self.compact_buffer.unsafe_offset(vslot * bpv_total).unsafe_offset(slot_hdr)
             # gh #405: the per-level neighbor COUNTS live in this block (after
@@ -1667,7 +1668,7 @@ struct HNSWGraph(Movable):
         # degrades warm-restart recall).
         if saved_groups > 0:
             if saved_groups != self.num_groups:
-                print("HNSW load: calibration group count mismatch (file=" + String(saved_groups) + " server=" + String(self.num_groups) + ") — cold rebuild")
+                print("HNSW load: calibration group count mismatch (file=" + String(saved_groups) + " server=" + String(self.num_groups) + ") — cold rebuild", file=log_out())
                 return False
             if not self._pion_read_all(fd, self.group_qmins.unsafe_bitcast[UInt8](), saved_groups * 4):
                 return False
@@ -1817,7 +1818,7 @@ struct HNSWGraph(Movable):
                 self.fp32_count += 1
                 if self.fp32_count >= 1000:
                     var cal = self._calibrate(self.fp32_buffer, 1000)
-                    print("Streaming calibration from first 1000 vectors: [" + String(cal[0]) + ", " + String(cal[1]) + "]")
+                    print("Streaming calibration from first 1000 vectors: [" + String(cal[0]) + ", " + String(cal[1]) + "]", file=log_out())
                     # Insert all buffered vectors with calibrated range
                     for bi in range(1000):
                         self._insert_to_graph(Int(self.fp32_ids[unsafe_offset=bi]), self.fp32_buffer.unsafe_offset(bi * self.dim))
@@ -2365,10 +2366,10 @@ struct HNSWGraph(Movable):
             if e == 0 and l == 0: break
         if links > 0:
             print("[HNSW] level-0 reachability: " + String(links)
-                  + " unreachable node(s) linked into the graph")
+                  + " unreachable node(s) linked into the graph", file=log_out())
         if exits > 0:
             print("[HNSW] level-0 exits: " + String(exits)
-                  + " node(s) that could not reach the entry re-linked")
+                  + " node(s) that could not reach the entry re-linked", file=log_out())
 
     def _repair_l0_exits(mut self) raises -> Int:
         """Re-link every level-0 node that cannot get back to the entry point.
@@ -2431,7 +2432,7 @@ struct HNSWGraph(Movable):
                 relinked += 1
         if gave_up > 0:
             print("[HNSW] level-0 exits: " + String(gave_up)
-                  + " node(s) left without a level-0 link (nothing to link to)")
+                  + " node(s) left without a level-0 link (nothing to link to)", file=log_out())
         return relinked
 
     def _repair_l0_reachability(mut self) raises -> Int:
@@ -2622,7 +2623,7 @@ struct HNSWGraph(Movable):
             if bp_rc != 0:
                 # -1: some lanes ran serially on the caller (still complete);
                 # -2: dlsym miss — build produced an UNLINKED graph, fail loud.
-                print("[HNSW] parallel build rc=", bp_rc)
+                print("[HNSW] parallel build rc=", bp_rc, file=log_out())
             bctx.unsafe_free()
             # gh #212: post-join repair — single-threaded and deterministic
             # (pthread_join above orders every lane's stores). Nodes that left
@@ -2641,7 +2642,7 @@ struct HNSWGraph(Movable):
             if _drops > 0 or _repaired > 0:
                 print("[HNSW] parallel link: " + String(_drops)
                       + " contended link drops, " + String(_repaired)
-                      + " under-linked nodes repaired")
+                      + " under-linked nodes repaired", file=log_out())
             self._repair_l0()   # gh #405 + every node can get back out
         # §7v2 / M6: Borrow shared FP32 data for the GPU rerank buffer and for
         # every block quantizer. gh #350: TurboQuant and NanoQuant were missing
@@ -2926,7 +2927,7 @@ struct HNSWGraph(Movable):
 
         if is_not_null(eid_to_fp32): eid_to_fp32.unsafe_free()
         if build_fp32_rerank:
-            print("[GPU] Built FP32 re-rank buffer: " + String(self.num_nodes) + " vectors (" + String(self.num_nodes * self.dim * 4 // 1048576) + " MB)")
+            print("[GPU] Built FP32 re-rank buffer: " + String(self.num_nodes) + " vectors (" + String(self.num_nodes * self.dim * 4 // 1048576) + " MB)", file=log_out())
 
         # Null out deleted nodes' vector pointers before reclaiming slab memory.
         # Deleted nodes were skipped by BFS + safety loop, so their .vector still
@@ -2988,14 +2989,14 @@ struct HNSWGraph(Movable):
                         self.compact_buffer, UInt32(self.num_nodes),
                         UInt32(self.compact_stride))
                     if rc == 0:
-                        print("[GPU] Registered " + String(self.num_nodes) + " vectors with Metal")
+                        print("[GPU] Registered " + String(self.num_nodes) + " vectors with Metal", file=log_out())
             # §7v2: Register with native Mojo GPU context (zero ObjC overhead path)
             try:
                 self.gpu_ctx.register_vectors(self.compact_buffer.unsafe_bitcast[Int8](), self.num_nodes,
                                               self.compact_stride)
-                print("[GPU] Native Mojo GPU context registered " + String(self.num_nodes) + " vectors")
+                print("[GPU] Native Mojo GPU context registered " + String(self.num_nodes) + " vectors", file=log_out())
             except:
-                print("[GPU] Native Mojo GPU context init failed — Metal FFI fallback active")
+                print("[GPU] Native Mojo GPU context init failed — Metal FFI fallback active", file=log_out())
 
         # FP32 rerank buffer (BFS-ordered) → Metal gather-rerank pipeline.
         # Pointer changes on every compact, so unregister-then-register here.
@@ -3091,7 +3092,7 @@ struct HNSWGraph(Movable):
             else:
                 unsafe_memset((self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](), 0, self.dim * 4)
         var rerank_mb = self.num_nodes * self.dim * 4 // 1048576
-        print("[PolarQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB")
+        print("[PolarQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB", file=log_out())
 
         eid_to_fp32.unsafe_free()
         for di in range(self.num_nodes):
@@ -3131,7 +3132,7 @@ struct HNSWGraph(Movable):
         self.node_prefix_norms = null_ptr[Float32, MutUntrackedOrigin]()
 
         var compact_mb = self.num_nodes * bpv // 1048576
-        print("[PolarQuant] Block-INT4 compact buffer: " + String(self.num_nodes) + " vectors × " + String(bpv) + "B = " + String(compact_mb) + " MB (target: ~43MB)")
+        print("[PolarQuant] Block-INT4 compact buffer: " + String(self.num_nodes) + " vectors × " + String(bpv) + "B = " + String(compact_mb) + " MB (target: ~43MB)", file=log_out())
         self._register_metal_rerank_buffer()
 
     def _compact_vectors_turbo3bit(mut self):
@@ -3307,7 +3308,7 @@ struct HNSWGraph(Movable):
                 else:
                     unsafe_memset((self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](), 0, self.dim * 4)
             var rerank_mb = self.num_nodes * self.dim * 4 // 1048576
-            print("[TurboQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB")
+            print("[TurboQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB", file=log_out())
 
         eid_to_fp32.unsafe_free()
         for di in range(self.num_nodes):
@@ -3352,9 +3353,9 @@ struct HNSWGraph(Movable):
         var rerank_mb2 = 0
         if not self.streaming_mode:
             rerank_mb2 = self.num_nodes * self.dim * 4 // 1048576
-        print("[TurboQuant] Block-INT3 compact buffer: " + String(self.num_nodes) + " vectors × " + String(bpv) + "B = " + String(compact_mb) + " MB")
-        print("[TurboQuant] QJL sign buffer: " + String(qjl_mb) + " MB (" + String(QJL_BYTES_1536) + "B/vec)")
-        print("[TurboQuant] Total working set: " + String(compact_mb + qjl_mb + rerank_mb2) + " MB")
+        print("[TurboQuant] Block-INT3 compact buffer: " + String(self.num_nodes) + " vectors × " + String(bpv) + "B = " + String(compact_mb) + " MB", file=log_out())
+        print("[TurboQuant] QJL sign buffer: " + String(qjl_mb) + " MB (" + String(QJL_BYTES_1536) + "B/vec)", file=log_out())
+        print("[TurboQuant] Total working set: " + String(compact_mb + qjl_mb + rerank_mb2) + " MB", file=log_out())
         self._register_metal_rerank_buffer()
 
     def _compact_vectors_nano2bit(mut self):
@@ -3474,7 +3475,7 @@ struct HNSWGraph(Movable):
                 else:
                     unsafe_memset((self.gpu_rerank_fp32.unsafe_offset(nidx * self.dim)).unsafe_bitcast[UInt8](), 0, self.dim * 4)
             var rerank_mb = self.num_nodes * self.dim * 4 // 1048576
-            print("[NanoQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB")
+            print("[NanoQuant] FP32 re-rank buffer: " + String(rerank_mb) + " MB", file=log_out())
 
         eid_to_fp32.unsafe_free()
         for di in range(self.num_nodes):
@@ -3519,8 +3520,8 @@ struct HNSWGraph(Movable):
         var rerank_mb2 = 0
         if not self.streaming_mode:
             rerank_mb2 = self.num_nodes * self.dim * 4 // 1048576
-        print("[NanoQuant] Block-INT2 compact buffer: " + String(self.num_nodes) + " vectors × " + String(bpv) + "B = " + String(compact_mb) + " MB")
-        print("[NanoQuant] Total working set: " + String(compact_mb + rerank_mb2) + " MB (no QJL)")
+        print("[NanoQuant] Block-INT2 compact buffer: " + String(self.num_nodes) + " vectors × " + String(bpv) + "B = " + String(compact_mb) + " MB", file=log_out())
+        print("[NanoQuant] Total working set: " + String(compact_mb + rerank_mb2) + " MB (no QJL)", file=log_out())
         self._register_metal_rerank_buffer()
 
     def _prune_l0_mrng(mut self):
