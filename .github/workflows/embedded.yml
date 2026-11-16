@@ -174,8 +174,8 @@ jobs:
         run: python3.13 embedded/tests/test_smoke.py
 
       - name: Redis 8.10.2, the differential tests' oracle
-        # Built, as on Linux: brew's redis is whatever is current, and the
-        # differentials pin 8.10 (its Lua sandbox globals differ, for one).
+        # Built, as on Linux, so both legs ask the same oracle: brew's redis
+        # is whatever is current.
         if: env.TIER != 'none'
         run: |
           git clone -q --depth 1 --branch 8.10.2 https://github.com/redis/redis.git "$RUNNER_TEMP/redis"
