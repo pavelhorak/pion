@@ -1,12 +1,13 @@
-# Embedded Pion (phase 0 prototype)
+# Embedded Pion
 
 The Pion engine inside your Python process, behind redis-py. No server.
 
 ```python
-import pion_embedded as pion           # working name; not on PyPI
+import pion_embedded as pion           # the pion-embedded wheel (GitHub releases; not on PyPI)
 r = pion.Redis(dir="./data")           # a redis.Redis: pipelines, Lock, pub/sub, scripts
 ar = pion.asyncio.Redis(dir="./data")  # a redis.asyncio.Redis
 r = pion.from_url("pion:///abs/path/to/data")
+pool = pion.asyncio.ConnectionPool.from_url("pion:///abs/path/to/data")  # for redis.asyncio.Redis(connection_pool=pool)
 ```
 
 - Every write goes to the server's write-ahead log in `dir` as the command

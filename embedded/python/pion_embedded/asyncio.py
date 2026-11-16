@@ -32,6 +32,30 @@ class PionAsyncConnection(AbstractConnection):
         return "pion:" + self.pion_engine.dir
 
 
+class ConnectionPool(redis.asyncio.ConnectionPool):
+    """redis.asyncio.ConnectionPool on the engine in this process, for code that
+    builds its own pool and hands it to redis.asyncio.Redis (docket does).
+
+        pool = pion_embedded.asyncio.ConnectionPool.from_url("pion:///abs/path/to/data")
+        r = redis.asyncio.Redis(connection_pool=pool)
+
+    Closing the pool closes its connections, not the engine."""
+
+    def __init__(self, dir: str | None = None, **kwargs):
+        from . import split_kwargs
+        cfg, kwargs = split_kwargs(kwargs)
+        kwargs.pop("connection_class", None)
+        super().__init__(connection_class=PionAsyncConnection,
+                         pion_engine=get_engine(dir, cfg), **kwargs)
+
+    @classmethod
+    def from_url(cls, url: str, **kwargs) -> "ConnectionPool":
+        from . import _parse_url
+        d, kw = _parse_url(url)
+        kw.update(kwargs)
+        return cls(dir=d, **kw)
+
+
 class Redis(redis.asyncio.Redis):
     def __init__(self, dir: str | None = None, **kwargs):
         from . import split_kwargs
