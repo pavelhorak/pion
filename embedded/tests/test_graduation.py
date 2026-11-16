@@ -47,7 +47,11 @@ pion.close()
 print("closed", flush=True)
 """], cwd=CWD, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 check("embedded app wrote", holder.stdout.readline().strip() == "ready")
-p = start_server(); out, _ = p.communicate(timeout=60)
+p = start_server()
+try:
+    out, _ = p.communicate(timeout=60)
+except subprocess.TimeoutExpired:      # it served instead of refusing: never leave it running
+    p.kill(); out, _ = p.communicate()
 check("pion-server --dir refused while the app holds it", p.returncode == 1 and "in use" in out, out[-300:])
 holder.stdin.write("\n"); holder.stdin.flush()
 check("embedded app closed", holder.stdout.readline().strip() == "closed"); holder.wait(timeout=30)

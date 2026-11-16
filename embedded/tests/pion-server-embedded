@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""A stand-in for `pion-server` that serves through the library.
+
+The server's test tiers start `$PION_BIN` (tests/run_all.py --binary). Pointed
+at this script, they run against libpion inside a Python process, behind
+pion_embedded.proxy: the engine, the WAL, parked commands and pub/sub all go
+through library mode. The socket is only there so the tests can reach it.
+
+Flags the library has no equivalent for (other front ends, more workers,
+cluster, the AI planes, the crash breadcrumbs) are refused with exit status
+64 and a line starting LIBRARY-MODE-UNSUPPORTED, which run_all.py reports as
+a skip with the flag named, never as a pass.
+
+    PION_BIN=embedded/tests/pion-server-embedded python3 tests/test_raw.py
+    python3 tests/run_all.py --binary embedded/tests/pion-server-embedded
+"""
+from __future__ import annotations
+
+import os
+import signal
+import sys
+
+import types
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
+# Only the engine binding and the proxy are needed, and they need no redis-py.
+# The package's __init__ imports redis-py 5+, while a test tier may pin
+# another redis-py (the Linux tier pins 4.6), so the package is entered
+# without running its __init__.
+_pkg = types.ModuleType("pion_embedded")
+_pkg.__path__ = [os.path.join(REPO, "embedded", "python", "pion_embedded")]
+sys.modules["pion_embedded"] = _pkg
+
+UNSUPPORTED = 64
+
+# flag -> library config key; the value is passed through
+VALUED = {
+    "--dir": "dir",
+    "--dim": "dim",
+    "--wal-size": "wal-size",
+    "--wal-max-segments": "wal-max-segments",
+    "--wal-full-policy": "wal-full-policy",
+    "--blob-threshold": "blob-threshold",
+    "--maxmemory": "maxmemory",
+    "--maxmemory-policy": "maxmemory-policy",
+    "--maxmemory-samples": "maxmemory-samples",
+    "--requirepass": "requirepass",
+    "--enable-debug-command": "enable-debug-command",
+    "--lua-time-limit": "lua-time-limit",
+    "--lua-memory-limit": "lua-memory-limit",
+}
+SWITCHES = {"--no-wal": ("appendonly", "no"), "--no-blob-tier": ("no-blob-tier", "yes")}
+# accepted and meaningless here: the library has no crash breadcrumbs, no
+# auto-detection, no huge pages and no CPU pinning
+IGNORED = {"--no-crash-log", "--no-auto-detect", "--no-auto-embed", "--no-huge-pages",
+           "--no-affinity", "--independent-workers"}
+
+
+def refuse(flag: str, why: str = "library mode has no equivalent"):
+    line = f"LIBRARY-MODE-UNSUPPORTED {flag}: {why}"
+    print(line, flush=True)
+    log = os.environ.get("PION_EMBED_REFUSALS")     # set by tests/run_all.py
+    if log:
+        with open(log, "a") as f:
+            f.write(f"{flag} ({why})\n")
+    sys.exit(UNSUPPORTED)
+
+
+def print_version():
+    """As pion-server's --version: the build, then which vector routines run
+    (read from the engine's own INFO, on a throwaway directory)."""
+    import tempfile
+    from pion_embedded._engine import get_engine
+    e = get_engine(tempfile.mkdtemp(prefix="pion-version-"), {"profile": "vector", "logfile": "/dev/null"})
+    c = e.conn_new()
+    _, out = e.exec(c, b"*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n")
+    vec = next((l.split(":", 1)[1] for l in out.decode(errors="replace").splitlines()
+                if l.startswith("pion_vector:")), "unknown")
+    print(f"pion-server {e.version()} (library mode)")
+    print(f"vector: {vec}")
+    e.close()
+
+
+def parse(argv: list[str]):
+    port, cfg = 1974, {}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if "=" in a and a.startswith("--"):
+            a, v = a.split("=", 1)
+            argv[i:i + 1] = [a, v]
+        nxt = argv[i + 1] if i + 1 < len(argv) else None
+        if a in ("--version", "-v"):
+            print_version()
+            sys.exit(0)
+        if a in ("-p", "--port") and nxt is not None:
+            port = int(nxt)
+            i += 2
+        elif a in ("-w", "--workers") and nxt is not None:
+            if nxt != "1":
+                refuse(f"{a} {nxt}", "one engine per process, one worker")
+            i += 2
+        elif a == "--profile" and nxt is not None:
+            if nxt not in ("kv", "vector"):
+                refuse(f"--profile {nxt}", "the library has the kv and vector profiles")
+            cfg["profile"] = nxt
+            i += 2
+        elif a == "--bind" and nxt is not None:
+            if nxt not in ("127.0.0.1", "localhost"):
+                refuse(f"--bind {nxt}", "the test front end listens on loopback only")
+            i += 2
+        elif a in VALUED and nxt is not None:
+            cfg[VALUED[a]] = nxt
+            i += 2
+        elif a in SWITCHES:
+            k, v = SWITCHES[a]
+            cfg[k] = v
+            i += 1
+        elif a in IGNORED:
+            i += 1
+        else:
+            refuse(a)
+    return port, cfg
+
+
+def main():
+    port, cfg = parse(list(sys.argv[1:]))
+    if "PION_REQUIREPASS" in os.environ and "requirepass" not in cfg:
+        cfg["requirepass"] = os.environ["PION_REQUIREPASS"]
+    cfg.setdefault("profile", "vector")   # pion-server's default profile has the HNSW index
+    cfg["port"] = str(port)                # reported by CONFIG GET port / INFO
+    d = cfg.pop("dir", os.getcwd())
+    # pion-server logs to its stdout, and the tests read that log (the runner
+    # scans it for faults); the library's default is dir/pion.log.
+    cfg.setdefault("logfile", "/dev/stdout")
+    from pion_embedded import proxy
+    from pion_embedded._engine import get_engine
+    engine = get_engine(d, cfg)
+
+    def stop(*_):
+        engine.close()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    engine.on_shutdown = stop          # SHUTDOWN ends the process, as it ends pion-server
+    proxy.serve(engine, port)
+
+
+if __name__ == "__main__":
+    main()
