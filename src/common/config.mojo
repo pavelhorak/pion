@@ -2,6 +2,7 @@ from src.common.env import Environment
 from std.sys import CompilationTarget
 from std.ffi import external_call
 from src.common.ptr import is_not_null
+from src.common.log import log_out
 
 @fieldwise_init
 struct VectorConfig(Copyable, Movable, ImplicitlyCopyable):
@@ -394,56 +395,56 @@ struct PionConfig(Copyable, Movable, ImplicitlyCopyable):
             self.vector.use_int4 = False  # V13 INT4 ABANDONED: recall=0.74 (16-level quant too coarse for 1536-dim cosine)
             
     def dump(self):
-        print("--- Pion Configuration ---")
-        print("Profile:    " + self.server.profile)
-        print("Port:       " + String(self.server.port))
+        print("--- Pion Configuration ---", file=log_out())
+        print("Profile:    " + self.server.profile, file=log_out())
+        print("Port:       " + String(self.server.port), file=log_out())
         print("Workers:    " + String(self.server.workers) +
-              (" (INDEPENDENT KEYSPACES)" if self.server.workers > 1 else ""))
-        print("Huge Pages: " + String(self.server.use_huge_pages))
-        print("Affinity:   " + String(self.server.strict_affinity))
-        print("Vector Dim: " + String(self.vector.dimensions))
-        print("INT4:       " + String(self.vector.use_int4))
-        print("PolarQuant: " + String(self.vector.polarquant))
-        print("TurboQuant: " + String(self.vector.turboquant))
+              (" (INDEPENDENT KEYSPACES)" if self.server.workers > 1 else ""), file=log_out())
+        print("Huge Pages: " + String(self.server.use_huge_pages), file=log_out())
+        print("Affinity:   " + String(self.server.strict_affinity), file=log_out())
+        print("Vector Dim: " + String(self.vector.dimensions), file=log_out())
+        print("INT4:       " + String(self.vector.use_int4), file=log_out())
+        print("PolarQuant: " + String(self.vector.polarquant), file=log_out())
+        print("TurboQuant: " + String(self.vector.turboquant), file=log_out())
         if self.vector.nanoquant:
-            print("NanoQuant:  True (EXPERIMENTAL: recall@100 ~0.46 on the gate dataset)")
+            print("NanoQuant:  True (EXPERIMENTAL: recall@100 ~0.46 on the gate dataset)", file=log_out())
         else:
-            print("NanoQuant:  False")
-        print("BQ:         " + String(self.vector.use_bq))
-        print("GPU:        " + String(self.vector.has_gpu))
-        print("AI Gateway: " + String(self.ai.enable_gateway))
-        print("MAX Engine: " + String(self.ai.enable_max_engine))
+            print("NanoQuant:  False", file=log_out())
+        print("BQ:         " + String(self.vector.use_bq), file=log_out())
+        print("GPU:        " + String(self.vector.has_gpu), file=log_out())
+        print("AI Gateway: " + String(self.ai.enable_gateway), file=log_out())
+        print("MAX Engine: " + String(self.ai.enable_max_engine), file=log_out())
         if self.embedding.enabled:
             if self.embedding.nle:
-                print("Embedding:  Apple NLEmbedding (model=" + self.embedding.model + ", dim=" + String(self.embedding.dimensions) + ", in-process)")
+                print("Embedding:  Apple NLEmbedding (model=" + self.embedding.model + ", dim=" + String(self.embedding.dimensions) + ", in-process)", file=log_out())
             else:
-                print("Embedding:  " + self.embedding.host + ":" + String(self.embedding.port) + " model=" + self.embedding.model)
+                print("Embedding:  " + self.embedding.host + ":" + String(self.embedding.port) + " model=" + self.embedding.model, file=log_out())
         else:
-            print("Embedding:  disabled")
+            print("Embedding:  disabled", file=log_out())
         if self.llm.enabled:
-            print("LLM:        " + self.llm.host + ":" + String(self.llm.port) + " model=" + self.llm.model)
+            print("LLM:        " + self.llm.host + ":" + String(self.llm.port) + " model=" + self.llm.model, file=log_out())
         else:
-            print("LLM:        disabled")
+            print("LLM:        disabled", file=log_out())
         if self.server.no_wal:
-            print("WAL:        disabled (--no-wal benchmark mode)")
+            print("WAL:        disabled (--no-wal benchmark mode)", file=log_out())
         if self.server.use_epoll:
-            print("EPOLL:      forced (--epoll)")
+            print("EPOLL:      forced (--epoll)", file=log_out())
         if self.server.io_threads > 1:
             print("IO_THREADS: " + String(self.server.io_threads) + " (1 executor + " +
-                  String(self.server.io_threads - 1) + " I/O threads, one keyspace)")
+                  String(self.server.io_threads - 1) + " I/O threads, one keyspace)", file=log_out())
         elif self.server.use_iouring:
-            print("IO_URING:   forced (--iouring)")
+            print("IO_URING:   forced (--iouring)", file=log_out())
         if self.server.use_sqpoll:
-            print("SQPOLL:     enabled (kernel-side SQ polling)")
+            print("SQPOLL:     enabled (kernel-side SQ polling)", file=log_out())
         if self.server.use_xdp:
-            print("XDP:        enabled (AF_XDP on " + self.server.xdp_interface + ")")
+            print("XDP:        enabled (AF_XDP on " + self.server.xdp_interface + ")", file=log_out())
         if self.inference.enabled:
-            print("Inference:  enabled (socket=" + self.inference.socket_path + ")")
-            print("  Emb Model: " + self.inference.default_embedding_model)
+            print("Inference:  enabled (socket=" + self.inference.socket_path + ")", file=log_out())
+            print("  Emb Model: " + self.inference.default_embedding_model, file=log_out())
             if self.inference.default_llm_model:
-                print("  LLM Model: " + self.inference.default_llm_model)
+                print("  LLM Model: " + self.inference.default_llm_model, file=log_out())
         else:
-            print("Inference:  disabled")
+            print("Inference:  disabled", file=log_out())
         if self.metal_attention.enabled:
             # gh #281: this line used to say "enabled", printed straight from the
             # flag, ~20 lines before the engine actually tried to load its shader
@@ -454,17 +455,17 @@ struct PionConfig(Copyable, Movable, ImplicitlyCopyable):
             # not yet obtained.
             var prec = "fp16" if self.metal_attention.fp16 else "fp32"
             if self.metal_attention.fa_window > 0:
-                print("Metal Attn: requested (" + prec + ", fa-window=" + String(self.metal_attention.fa_window) + ")")
+                print("Metal Attn: requested (" + prec + ", fa-window=" + String(self.metal_attention.fa_window) + ")", file=log_out())
             else:
-                print("Metal Attn: requested (" + prec + ")")
+                print("Metal Attn: requested (" + prec + ")", file=log_out())
         if self.cuda_attention.enabled:
             if self.cuda_attention.fa_window > 0:
-                print("CUDA Attn:  enabled (fa-window=" + String(self.cuda_attention.fa_window) + ")")
+                print("CUDA Attn:  enabled (fa-window=" + String(self.cuda_attention.fa_window) + ")", file=log_out())
             else:
-                print("CUDA Attn:  enabled")
-        print("KV Cache:   " + String(self.server.kvcache_enabled) + " (--kvcache enables KV.PREFIX.*/ATTEND.*/V.*)")
-        print("Cluster:    " + String(self.cluster.enabled))
+                print("CUDA Attn:  enabled", file=log_out())
+        print("KV Cache:   " + String(self.server.kvcache_enabled) + " (--kvcache enables KV.PREFIX.*/ATTEND.*/V.*)", file=log_out())
+        print("Cluster:    " + String(self.cluster.enabled), file=log_out())
         if self.cluster.enabled:
-            print("  Host:     " + self.cluster.my_host)
-            print("  Nodes:    " + self.cluster.peer_nodes)
-        print("--------------------------")
+            print("  Host:     " + self.cluster.my_host, file=log_out())
+            print("  Nodes:    " + self.cluster.peer_nodes, file=log_out())
+        print("--------------------------", file=log_out())

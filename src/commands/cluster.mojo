@@ -16,6 +16,7 @@ from src.vector.hnsw_types import SharedHNSWView
 from src.io.wal import WAL
 from src.common.utils import strict_atol, bytes_to_string, format_int_to_buf, arg_eq
 from std.ffi import external_call
+from src.common.log import log_out
 
 
 @always_inline
@@ -400,7 +401,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                     cluster[].is_replica = False
                     cluster[].primary_peer_idx = -1
                     cluster[].cluster_epoch += 1
-                    print("N3 FAILOVER: promoted to primary (epoch=" + String(cluster[].cluster_epoch) + ")")
+                    print("N3 FAILOVER: promoted to primary (epoch=" + String(cluster[].cluster_epoch) + ")", file=log_out())
 
                     # Start primary replicator (listen for future replicas)
                     if is_not_null(cluster[].wal_ptr) and is_null(cluster[].repl_primary_handle):
@@ -415,7 +416,7 @@ def handle_cluster(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                             var _rc = external_call["pion_repl_primary_start", Int32](_blk)
                             if _rc == 0:
                                 cluster[].repl_primary_handle = _blk
-                                print("N3 FAILOVER: primary replicator started on port " + String(repl_port))
+                                print("N3 FAILOVER: primary replicator started on port " + String(repl_port), file=log_out())
 
                     # Save topology
                     cluster[].save_topology("pion-nodes.conf")

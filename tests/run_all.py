@@ -58,7 +58,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join(REPO, "tests", "manifest.toml")
 PORT = 1974          # many tests hardcode it; the runner owns it for their duration
 FAULT_MARKERS = ("SIGSEGV", "SIGBUS", "SIGABRT", "SIGILL", "SIGFPE", "ABORT:")
-STATE_GLOBS = ("pion.wal.*", "pion.hnsw.*", "pion.snapshot.*", "pion.blob.*",
+STATE_GLOBS = ("pion.lock", "pion.wal.*", "pion.hnsw.*", "pion.snapshot.*", "pion.blob.*",
                "pion.vstore.wal.*", "pion.ssm.wal.*", "pion-1974.status", "pion-1974.crash.log")
 
 
@@ -147,11 +147,19 @@ def _redisearch_module():
 
 # ── server lifecycle ────────────────────────────────────────────────────────
 def pion_pids():
+    """pion-server* by executable name, plus the library-mode stand-in
+    (embedded/tests/pion-server-embedded), which runs as a Python process."""
     out = subprocess.run(["ps", "-Ao", "pid=,comm="], capture_output=True, text=True).stdout
     pids = []
     for line in out.splitlines():
         parts = line.split(None, 1)
         if len(parts) == 2 and os.path.basename(parts[1].strip()).startswith("pion-server"):
+            pids.append(int(parts[0]))
+    out = subprocess.run(["ps", "-Ao", "pid=,command="], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 3 and "python" in os.path.basename(parts[1]) \
+                and parts[2].endswith("/pion-server-embedded"):
             pids.append(int(parts[0]))
     return pids
 
@@ -297,6 +305,9 @@ def run_one(t, binary, logdir, require_all):
             if require_all:
                 return "FAIL", f"requirement unmet under --require-all: {why}", 0.0
             return "SKIP", why, 0.0
+    if t.get("embedded_skip") and os.path.basename(binary) == "pion-server-embedded":
+        # A property library mode does not have, by design (embedded/README.md).
+        return "SKIP", "library mode: " + t["embedded_skip"], 0.0
     kill_all_servers()
     mode = t.get("server", "default")
     log_path = os.path.join(logdir, logname + ".server.log")
@@ -306,6 +317,10 @@ def run_one(t, binary, logdir, require_all):
         proc, err = start_server(binary, flags, log_path)
         if err:
             proc.kill()
+            refused = [l for l in open(log_path, errors="replace").read().splitlines()
+                       if l.startswith("LIBRARY-MODE-UNSUPPORTED")]
+            if refused:
+                return "SKIP", "library mode: " + refused[0].split(" ", 1)[1], 0.0
             return "FAIL", err, 0.0
     shell = False
     if t.get("cmd"):
@@ -328,7 +343,10 @@ def run_one(t, binary, logdir, require_all):
     os.makedirs(test_tmp, exist_ok=True)
     tmp_before = set(glob.glob("/tmp/pion*"))
     redis_before = set(redis_pids())
-    env = dict(os.environ, PION_BIN=binary, PYTHONUNBUFFERED="1", TMPDIR=test_tmp)
+    refusals = os.path.join(logdir, logname + ".library-mode-refused")
+    _rm(refusals)
+    env = dict(os.environ, PION_BIN=binary, PYTHONUNBUFFERED="1", TMPDIR=test_tmp,
+               PION_EMBED_REFUSALS=refusals)
     t0 = time.time()
     try:
         cp = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True, shell=shell,
@@ -383,6 +401,11 @@ def run_one(t, binary, logdir, require_all):
         verdict, why = "FAIL", f"left redis-server running (pids {leaked_redis})"
     else:
         verdict, why = "PASS", ""
+    if verdict == "FAIL" and os.path.exists(refusals):
+        # The library-mode stand-in refused a server flag this test needs:
+        # the test cannot run in library mode, which is not a pass.
+        lines = sorted(set(open(refusals).read().split("\n")) - {""})
+        verdict, why = "SKIP", "library mode: " + "; ".join(lines)[:300]
     if t.get("xfail"):
         if verdict == "FAIL":
             return "XFAIL", f"{t['xfail']}: {why.splitlines()[0] if why else ''}", dt
@@ -427,6 +450,10 @@ def main() -> int:
     ap.add_argument("--require-all", action="store_true")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--report")
+    ap.add_argument("--server-tests-only", action="store_true",
+                    help="leave out tests that never start a server (server = \"none\", .mojo unit "
+                         "tests): for another front end such as embedded/tests/pion-server-embedded, "
+                         "where they would repeat the same work")
     args = ap.parse_args()
     binary = os.path.abspath(args.binary)
 
@@ -439,6 +466,10 @@ def main() -> int:
     tiers = {"gate": ["gate"], "full": ["gate", "full"]}[args.tier]
     selected = [t for t in tests if t.get("tier", "full") in tiers
                 and (not args.only or any(o in t["file"] for o in args.only))]
+    if args.server_tests_only:
+        left_out = [t for t in selected if t.get("server") == "none" or t["file"].endswith(".mojo")]
+        selected = [t for t in selected if t not in left_out]
+        print(f"run_all: --server-tests-only leaves out {len(left_out)} tests that start no server")
 
     if args.list:
         for t in tests:

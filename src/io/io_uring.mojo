@@ -4,6 +4,7 @@ from std.memory import alloc
 from std.ffi import external_call
 from std.memory import unsafe_memset
 from std.atomic import Atomic, Ordering
+from src.common.log import log_out
 
 # Linux io_uring syscall numbers (ARM64 and x86_64)
 comptime SYS_IO_URING_SETUP  = 425
@@ -351,7 +352,7 @@ struct IOUring(Movable):
         unsafe_memset(self.fd_closing, 0, URING_MAX_FDS)
 
         if sqpoll:
-            print("io_uring SQPOLL active — kernel SQ polling thread spawned (idle_timeout=1000ms)")
+            print("io_uring SQPOLL active — kernel SQ polling thread spawned (idle_timeout=1000ms)", file=log_out())
 
         return True
 

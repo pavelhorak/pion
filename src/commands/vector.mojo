@@ -27,6 +27,7 @@ from src.network.semantic_cache import SemanticCache, CACHE_MAX_ENTRIES, bytes_n
 from src.network.rerank_client import RerankClient
 from src.memory.object_pool import ObjectPool
 from src.common.heap import HeapNode
+from src.common.log import log_out
 
 # IVF-PQ disabled: recall@100 = 0.59 for 50K 1536-dim vectors (a measured dead end).
 # gh #87.1: ENABLE_IVF_PQ removed (was permanently False).
@@ -1800,7 +1801,7 @@ def build_bm25(
     for _oi2 in range(_own_len): _own_str += chr(Int(hnsw.bm25_index_name[_oi2]))
     if _own_len == 0: _own_str = String("<unnamed>")
     print("BM25 [" + _own_str + "]: " + String(vocab_count) + " terms, "
-          + String(n_docs) + " docs, " + String(total_tokens) + " tokens")
+          + String(n_docs) + " docs, " + String(total_tokens) + " tokens", file=log_out())
 
 
 def search_bm25(
@@ -2438,7 +2439,7 @@ def handle_ft_optimize(
                 Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
                     shared_hnsw[].shard_ready.unsafe_offset(worker_id * 8), UInt64(1)
                 )
-                print("FT.OPTIMIZE: worker " + String(worker_id) + " shard built (" + String(hnsw.num_nodes) + " nodes). Waiting for other shards...")
+                print("FT.OPTIMIZE: worker " + String(worker_id) + " shard built (" + String(hnsw.num_nodes) + " nodes). Waiting for other shards...", file=log_out())
                 # Signal all other workers to build their shards.
                 # optimize_trigger is a separately allocated UInt64 pointer —
                 # pointer VALUE preserved in SharedHNSWView copies.
@@ -2465,8 +2466,8 @@ def handle_ft_optimize(
                         var dc = shared_hnsw[].dbg_counters
                         for wi in range(n_shards):
                             var base = wi * 8
-                            print("  DBG worker=" + String(wi) + " poll=" + String(dc[unsafe_offset=base]) + " saw_trig=" + String(dc[unsafe_offset=base+1]) + " build_done=" + String(dc[unsafe_offset=base+2]) + " build_fail=" + String(dc[unsafe_offset=base+3]) + " ready=" + String(Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].shard_ready.unsafe_offset(wi * 8), UInt64(0))))
-                print("FT.OPTIMIZE: all " + String(n_shards) + " shards ready after " + String(wait_iter * 5) + "ms. Search live.")
+                            print("  DBG worker=" + String(wi) + " poll=" + String(dc[unsafe_offset=base]) + " saw_trig=" + String(dc[unsafe_offset=base+1]) + " build_done=" + String(dc[unsafe_offset=base+2]) + " build_fail=" + String(dc[unsafe_offset=base+3]) + " ready=" + String(Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE](shared_hnsw[].shard_ready.unsafe_offset(wi * 8), UInt64(0))), file=log_out())
+                print("FT.OPTIMIZE: all " + String(n_shards) + " shards ready after " + String(wait_iter * 5) + "ms. Search live.", file=log_out())
                 # Reset ingest_count and trigger; keep shard_ready=1 so
                 # workers remain in "serve queries" mode.
                 Atomic[Scalar[DType.uint64]].store[ordering=Ordering.RELEASE](
@@ -2477,13 +2478,13 @@ def handle_ft_optimize(
                 hnsw.build_index_from_shared(shared_hnsw)
                 populate_hnsw_metadata(hnsw, shared_hnsw, keyspace)
                 hnsw.index_ready = True
-                print("FT.OPTIMIZE: " + String(hnsw.num_nodes) + " nodes built")
+                print("FT.OPTIMIZE: " + String(hnsw.num_nodes) + " nodes built", file=log_out())
                 # Surface the FT.SEARCH auto-scale plan once at build time so logs
                 # show the effective ef that will be applied at query time when
                 # num_nodes > 50K (formula: ef = max(ef, 150 * (N/50K)^0.25)).
                 if hnsw.num_nodes > 50000:
                     var _scaled_ef = Int(150.0 * sqrt(sqrt(Float64(hnsw.num_nodes) / 50000.0)))
-                    print("FT.SEARCH ef auto-scale active: num_nodes=" + String(hnsw.num_nodes) + " effective_ef=" + String(_scaled_ef) + " (baseline 150)")
+                    print("FT.SEARCH ef auto-scale active: num_nodes=" + String(hnsw.num_nodes) + " effective_ef=" + String(_scaled_ef) + " (baseline 150)", file=log_out())
                 # ingest_count is reset inside build_index_from_shared (shard_id=-1 path).
                 # P5: Build IVF-PQ index alongside HNSW (single-worker path only).
                 # gh #87.1: IVF-PQ build removed. Recall@100 was stuck at 0.59 at
@@ -2849,6 +2850,14 @@ def handle_ft_create(
     # a byte of index state is written: a refusal must leave the server as it
     # found it, and the loop below overwrites the index name, the vector field
     # and the shared schema as it goes (gh #232's rule, gh #271's pre-scan).
+    # The kv profile sizes the graph for ONE vector (config.apply_profile),
+    # so an index there kept one document and silently dropped the rest while
+    # FT.SEARCH answered from it (recall@10 0.002). Refuse instead: with no
+    # index, every FT command reports that, and no hash is indexed.
+    if config.server.profile == "kv":
+        writer.append_error_response(
+            "ERR vector search is off in the kv profile: run pion-server with the default or vector profile")
+        return num_tokens - 1
     var spec = FtCreateSpec()
     var perr = _parse_ft_create(tokens, ci, num_tokens, config.vector.dimensions, spec)
     if perr.byte_length() > 0:

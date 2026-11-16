@@ -69,6 +69,7 @@ from src.network.dispatcher import CommandDispatcher
 from src.io.wal import WAL
 from src.network.vector_ingest import record_all_dead, backfill_index
 from src.commands.vector import populate_hnsw_metadata, adopt_index_config, wait_for_readers, _close_ingest
+from src.common.log import log_out
 
 comptime AUTO_IDLE = 0
 comptime AUTO_BUILDING = 1
@@ -228,7 +229,7 @@ def _backfill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
     if n > 0:
         print("[vector] FT.CREATE: indexed " + String(n) + " existing hashes from worker "
               + String(worker_id) + "'s keyspace in "
-              + String(Int((UInt64(perf_counter_ns()) - t0) // 1_000_000)) + " ms")
+              + String(Int((UInt64(perf_counter_ns()) - t0) // 1_000_000)) + " ms", file=log_out())
 
 
 def _start(mut hnsw: HNSWGraph,
@@ -268,7 +269,7 @@ def _start(mut hnsw: HNSWGraph,
     var job = external_call["pion_bg_start_sym", Pointer[NoneType, MutUntrackedOrigin]](
         sym.unsafe_ptr(), ctx)
     if is_null(job):
-        print("[vector] auto-build could not start a thread; FT.SEARCH stays exact (FT.OPTIMIZE builds)")
+        print("[vector] auto-build could not start a thread; FT.SEARCH stays exact (FT.OPTIMIZE builds)", file=log_out())
         ctx.unsafe_free()
         st.failed_at = rows
         _set(shared, worker_id, AUTO_IDLE)
@@ -278,7 +279,7 @@ def _start(mut hnsw: HNSWGraph,
     st.snapshot = rows
     st.t0_ns = UInt64(perf_counter_ns())
     print("[vector] auto-build: indexing " + String(rows)
-          + " vectors in the background; FT.SEARCH answers exactly until it is done")
+          + " vectors in the background; FT.SEARCH answers exactly until it is done", file=log_out())
 
 
 def _publish(mut hnsw: HNSWGraph,
@@ -297,7 +298,7 @@ def _publish(mut hnsw: HNSWGraph,
         _ = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.RELAXED](shared[].vec_stats.unsafe_offset(1), UInt64(1))
     var ms = (UInt64(perf_counter_ns()) - st.t0_ns) // 1_000_000
     print("[vector] auto-build: " + String(hnsw.num_nodes) + " vectors indexed in "
-          + String(Int(ms)) + " ms; FT.SEARCH uses the graph now")
+          + String(Int(ms)) + " ms; FT.SEARCH uses the graph now", file=log_out())
     _set(shared, worker_id, AUTO_SAVING)
 
 
@@ -324,7 +325,7 @@ def _advance(mut hnsw: HNSWGraph,
             st.ctx = null_ptr[Int64, MutUntrackedOrigin]()
             if ph == AUTO_FAILED:
                 print("[vector] auto-build of " + String(st.snapshot)
-                      + " vectors failed; FT.SEARCH stays exact (FT.OPTIMIZE builds)")
+                      + " vectors failed; FT.SEARCH stays exact (FT.OPTIMIZE builds)", file=log_out())
                 st.failed_at = st.snapshot
                 hnsw.reset_graph()
             _set(shared, worker_id, AUTO_IDLE)
@@ -437,13 +438,13 @@ def reopen_after_load(hnsw: HNSWGraph,
         external_call["pion_full_fence", NoneType]()
         shared[].pre_index_ready = True
         print("[vector] index '" + name + "' loaded (" + String(hnsw.num_nodes)
-              + " vectors, built automatically): it keeps indexing; refilling its rows from the hashes")
+              + " vectors, built automatically): it keeps indexing; refilling its rows from the hashes", file=log_out())
         return
     shared[].pre_index_ready = True
     print("[vector] index '" + name + "' loaded (" + String(hnsw.num_nodes)
           + " vectors) with ingest closed (FT.OPTIMIZE built it, or its file predates 1.0.2):"
           + " a vector written from now on is stored, not indexed, and counted in INFO"
-          + " vector_unindexed_writes. FT.DROPINDEX then FT.CREATE indexes every hash.")
+          + " vector_unindexed_writes. FT.DROPINDEX then FT.CREATE indexes every hash.", file=log_out())
 
 
 def vector_restart_refill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
@@ -468,7 +469,7 @@ def vector_restart_refill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
     if added > 0:
         print("[vector] restart: worker " + String(worker_id) + " indexed " + String(added)
               + " vectors the graph does not hold, in "
-              + String(Int((UInt64(perf_counter_ns()) - t0) // 1_000_000)) + " ms")
+              + String(Int((UInt64(perf_counter_ns()) - t0) // 1_000_000)) + " ms", file=log_out())
     var before = Atomic[Scalar[DType.uint64]].fetch_add[ordering=Ordering.ACQUIRE_RELEASE](rr, UInt64.MAX)
     if before == 1:
         _finish_refill(shared, worker_id)
@@ -480,7 +481,7 @@ def vector_restart_refill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin],
         waited_ms += 1
         if waited_ms >= 600_000:
             # A worker that died never arrives; serving beats never serving.
-            print("Worker " + String(worker_id) + ": gave up waiting for the vector index refill after 600 s")
+            print("Worker " + String(worker_id) + ": gave up waiting for the vector index refill after 600 s", file=log_out())
             break
 
 
@@ -500,7 +501,7 @@ def _finish_refill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin], worker_i
         _close_ingest(shared, worker_id)
         print("[vector] restart: none of the index's " + String(n) + " documents is in the keyspace;"
               + " it serves as loaded with ingest closed: a vector written from now on is stored, not"
-              + " indexed, and counted in INFO vector_unindexed_writes")
+              + " indexed, and counted in INFO vector_unindexed_writes", file=log_out())
         return
     var gone = 0
     for s in range(n):
@@ -512,4 +513,4 @@ def _finish_refill(shared: Pointer[SharedHNSWView, MutUntrackedOrigin], worker_i
         gone += 1
     print("[vector] restart: " + String(refilled) + " of the graph's rows refilled"
           + (", " + String(gone) + " documents gone" if gone > 0 else String(""))
-          + "; " + String(shared[].ingested() - n) + " vectors are the delta; the index keeps indexing")
+          + "; " + String(shared[].ingested() - n) + " vectors are the delta; the index keeps indexing", file=log_out())

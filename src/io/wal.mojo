@@ -157,6 +157,7 @@ from src.common.stream_data import (StreamData, apply_stream_group_record, encod
                                     encode_consumer_rec, encode_nack_rec)
 from src.io.blob_store import BlobStore
 from src.common.vector_set import VectorSet, free_vset
+from src.common.log import log_out
 
 
 comptime WAL_FILE_SIZE    = 256 * 1024 * 1024   # 256 MB — ~2-3M entries at avg 90 B
@@ -1077,13 +1078,13 @@ struct WAL(Movable):
         self.fd = fd
 
         if fd < 0:
-            print("WAL: failed to open " + self.path)
+            print("WAL: failed to open " + self.path, file=log_out())
             return
 
         # extend to file_size (idempotent)
         var tr = external_call["pion_wal_ftruncate", Int32](fd, Int(self.file_size))
         if tr != 0:
-            print("WAL: ftruncate failed for " + path)
+            print("WAL: ftruncate failed for " + path, file=log_out())
             _ = external_call["close", Int32](fd)
             self.fd = -1
             return
@@ -1094,7 +1095,7 @@ struct WAL(Movable):
 
         # MAP_FAILED = (void*)-1; null pointer means success check failed
         if is_null(mp):
-            print("WAL: mmap returned null for " + path)
+            print("WAL: mmap returned null for " + path, file=log_out())
             _ = external_call["close", Int32](fd)
             self.fd = -1
             return
@@ -1679,7 +1680,7 @@ struct WAL(Movable):
             return False
         self._repl_attach()
         print("WAL: sealed " + sealed_path + " (" + String(self.sealed)
-              + "/" + String(self.max_segments) + " segments)")
+              + "/" + String(self.max_segments) + " segments)", file=log_out())
         return True
 
     def _reopen_active(mut self, tail: Int, seq: UInt64) -> Bool:
@@ -1741,7 +1742,7 @@ struct WAL(Movable):
                   + String(self.sealed) + "/" + String(self.max_segments)
                   + " sealed segments; writes are NO LONGER DURABLE."
                   + " Run SAVE/BGSAVE to checkpoint, raise --wal-max-segments,"
-                  + " or route large values through the blob tier.")
+                  + " or route large values through the blob tier.", file=log_out())
 
     @always_inline
     def _commit(mut self, entry_size: Int):
@@ -1884,7 +1885,7 @@ struct WAL(Movable):
             if self.sealed > 0:
                 seg_note = " (" + String(self.sealed) + " sealed segment(s) + active)"
             print("WAL: recovered " + String(replayed) + " entries from "
-                  + self.path + seg_note)
+                  + self.path + seg_note, file=log_out())
         return replayed
 
     def _replay_segment(mut self,
@@ -2050,7 +2051,7 @@ struct WAL(Movable):
             self.map = null_ptr[UInt8, MutUntrackedOrigin]()
             self.fd = Int32(-1)
             if not self._reopen_active(0, 0):
-                print("WAL: could not map " + self.path + " again after SAVE; the log is off")
+                print("WAL: could not map " + self.path + " again after SAVE; the log is off", file=log_out())
         self._repl_attach()
 
     def compact(mut self):
