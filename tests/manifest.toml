@@ -629,6 +629,11 @@ server = "-w 1"
 tier = "gate"
 
 [[test]]
+file = "tests/test_kv_profile_ft.py"
+server = "self"
+tier = "gate"
+
+[[test]]
 file = "tests/test_gh257_config.py"
 server = "-w 1"
 tier = "gate"

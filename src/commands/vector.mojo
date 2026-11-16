@@ -2850,6 +2850,14 @@ def handle_ft_create(
     # a byte of index state is written: a refusal must leave the server as it
     # found it, and the loop below overwrites the index name, the vector field
     # and the shared schema as it goes (gh #232's rule, gh #271's pre-scan).
+    # The kv profile sizes the graph for ONE vector (config.apply_profile),
+    # so an index there kept one document and silently dropped the rest while
+    # FT.SEARCH answered from it (recall@10 0.002). Refuse instead: with no
+    # index, every FT command reports that, and no hash is indexed.
+    if config.server.profile == "kv":
+        writer.append_error_response(
+            "ERR vector search is off in the kv profile: run pion-server with the default or vector profile")
+        return num_tokens - 1
     var spec = FtCreateSpec()
     var perr = _parse_ft_create(tokens, ci, num_tokens, config.vector.dimensions, spec)
     if perr.byte_length() > 0:
