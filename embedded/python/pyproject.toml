@@ -14,4 +14,4 @@ dependencies = ["redis>=5"]
 packages = ["pion_embedded"]
 
 [tool.setuptools.package-data]
-pion_embedded = ["_lib/*.dylib", "_lib/*.so"]
+pion_embedded = ["_lib/*.dylib", "_lib/*.so", "py.typed"]
