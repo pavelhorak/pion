@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 OBJ="$(mktemp -d)"
 trap 'rm -rf "$OBJ"' EXIT
-CF="-O3 -fPIC"
+CF="-O3 -fPIC -D_GNU_SOURCE"   # RTLD_DEFAULT: glibc 2.35 declares it only under _GNU_SOURCE
 for c in crash_wrap fcntl_wrap geo_math uring_wrap xdp_wrap ssm_state_wrap build_pool_wrap worker_spawn_wrap; do
     gcc $CF -c "src/ffi/$c.c" -o "$OBJ/$c.o"
 done
