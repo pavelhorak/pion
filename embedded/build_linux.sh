@@ -19,7 +19,7 @@ for f in src/ffi/lua/l*.c src/ffi/lua/strbuf.c src/ffi/lua/fpconv.c src/ffi/lua/
     gcc -O2 -fPIC -DLUA_USE_POSIX -Isrc/ffi/lua -c "$f" -o "$OBJ/lua/$(basename "${f%.c}").o"
 done
 ar rcs "$OBJ/liblua.a" "$OBJ"/lua/*.o
-gcc -O2 -fPIC -c src/ffi/lua_wrap.c -Isrc/ffi/lua -Isrc/ffi -o "$OBJ/lua_wrap.o"
+gcc -O2 -fPIC -D_GNU_SOURCE -c src/ffi/lua_wrap.c -Isrc/ffi/lua -Isrc/ffi -o "$OBJ/lua_wrap.o"
 case "$(uname -m)" in
     x86_64) CPU=x86-64-v2 ;;     # the release's portable target
     aarch64|arm64) CPU=neoverse-n1 ;;

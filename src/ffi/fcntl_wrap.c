@@ -841,7 +841,13 @@ __attribute__((visibility("default"))) int32_t pion_log_fd = 1;
 int32_t pion_set_log_file(const char *path) {
     if (pion_log_fd > 2) close(pion_log_fd);
     if (path == NULL || path[0] == 0) { pion_log_fd = 1; return 1; }
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    /* The process's own stdout/stderr: share its descriptor. On Linux,
+     * open("/dev/stdout") makes a NEW file description with its own offset,
+     * so when stdout is a file the host's writes (at its offset) overwrite
+     * the log's (appended at the end). macOS dups, which is this. */
+    int std = strcmp(path, "/dev/stdout") == 0 ? 1 : strcmp(path, "/dev/stderr") == 0 ? 2 : -1;
+    int fd = std >= 0 ? fcntl(std, F_DUPFD_CLOEXEC, 3)
+                      : open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     pion_log_fd = fd;   /* -1: a write to it fails, and print ignores that */
     return fd;
 }

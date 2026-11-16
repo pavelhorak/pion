@@ -507,7 +507,7 @@ def phase_multi(binary, port, workdir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=os.path.join(REPO, "pion-server"))
+    ap.add_argument("--binary", default=os.environ.get("PION_BIN", os.path.join(REPO, "pion-server")))
     ap.add_argument("--port", type=int, default=7471)
     ap.add_argument("--keep", action="store_true", help="keep the scratch directory")
     a = ap.parse_args()

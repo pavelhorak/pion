@@ -173,9 +173,15 @@ jobs:
           PION_EMBED_CTYPES: '1'
         run: python3.13 embedded/tests/test_smoke.py
 
-      - name: Redis, the differential tests' oracle
+      - name: Redis 8.10.2, the differential tests' oracle
+        # Built, as on Linux: brew's redis is whatever is current, and the
+        # differentials pin 8.10 (its Lua sandbox globals differ, for one).
         if: env.TIER != 'none'
-        run: brew install redis && redis-server --version
+        run: |
+          git clone -q --depth 1 --branch 8.10.2 https://github.com/redis/redis.git "$RUNNER_TEMP/redis"
+          make -C "$RUNNER_TEMP/redis" -j"$(sysctl -n hw.ncpu)" BUILD_TLS=no > /dev/null
+          echo "$RUNNER_TEMP/redis/src" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/redis/src/redis-server" --version
 
       - name: Test tier through the library
         if: env.TIER != 'none'

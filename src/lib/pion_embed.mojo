@@ -460,6 +460,25 @@ def _collect(st: _St, ci: Int) -> Int:
     return total
 
 
+def _drop_owed(st: _St, ci: Int):
+    """Connection ci was killed (CLIENT KILL, or owed past the 32 MB pub/sub
+    limit): what it was owed is dropped, never handed over, as the server
+    frees a closed fd's queue. Handing it over made the host push up to
+    32 MB to a client that had stopped reading."""
+    ref ctx = st[].db[].engine.writer.ctx[]
+    ctx.pending_offsets[unsafe_offset=ci] = 0
+    st[].db[].engine.writer.out_free(ci)
+
+
+def _handover(st: _St, ci: Int) -> Int:
+    """What exec and poll hand back for connection ci: its output, or
+    nothing once the connection was killed."""
+    if external_call["pion_virtual_killed", Int32](Int32(ci)) != 0:
+        _drop_owed(st, ci)
+        return 0
+    return _collect(st, ci)
+
+
 def _wake_drain(st: _St, ci: Int):
     """Connection ci's output was just handed over: its pipe goes quiet."""
     if st[].wake_set[unsafe_offset=ci] != 0:
@@ -525,14 +544,35 @@ def _tick(st: _St) raises:
     unparked (with I/O threads, their thread hands their bytes back)."""
     ref db = st[].db[]
     ref e = db.engine
-    st[].last_tick_ns = _now_ns()
+    # The server ticks about once a millisecond while idle (its kqueue and
+    # epoll waits time out after 1 ms) and at most every 100 us while busy.
+    # The host calls this every few ms, and later on a loaded machine, so the
+    # counter moves by the server ticks that elapsed (at least one): the TTL
+    # sweep (every 100) and housekeeping (every 64, which starts automatic
+    # vector builds) keep the server's wall-clock cadence. One step per call
+    # ran them 5x and more slower, past tests' 1 s windows on CI.
+    var now = _now_ns()
+    var steps = 1
+    if st[].last_tick_ns > 0:
+        steps = (now - st[].last_tick_ns) // 1_000_000
+        if steps < 1:
+            steps = 1
+        if steps > 100:
+            steps = 100
+    st[].last_tick_ns = now
+    var sweep = False
+    var housekeep = False
+    for _ in range(steps):
+        e.ttl_sweep_counter += 1
+        if e.ttl_sweep_counter >= 100:
+            e.ttl_sweep_counter = 0
+            sweep = True
+        if e.ttl_sweep_counter & 0x3F == 0:
+            housekeep = True
     if e.evict_on:
         e._evict_tick()
-    e.ttl_sweep_counter += 1
-    if e.ttl_sweep_counter >= 100:
-        e.ttl_sweep_counter = 0
-        if e.slow_path.clients.pause_until_ms == 0:
-            e.fast_path.sweep_expired_keys(20)
+    if sweep and e.slow_path.clients.pause_until_ms == 0:
+        e.fast_path.sweep_expired_keys(20)
     var had_parked = e.slow_path.parked_waits.count() > 0
     if e.slow_path.blocked_readers._count() > 0:
         e._service_blocked_readers(KQ_IO, db.hnsw, db.db_size)
@@ -543,7 +583,7 @@ def _tick(st: _St) raises:
     if e.slow_path.clients.pause_until_ms != 0 or e.slow_path.clients.pause_changed \
        or len(e.slow_path.clients.released) > 0:
         e._service_pause(KQ_IO, db.hnsw, db.db_size)
-    if e.ttl_sweep_counter & 0x3F == 0:
+    if housekeep:
         e._housekeeping_64tick(db.hnsw)
         if e.shutting_down:
             st[].closed = True            # SHUTDOWN: the WAL is synced; the engine takes no more
@@ -659,7 +699,7 @@ def pion_embed_exec(h: Int64, conn: Int64, req: Pointer[UInt8, MutUntrackedOrigi
             e._service_blocked_readers(KQ_IO, st[].db[].hnsw, st[].db[].db_size)
     except:
         status = ST_ERR
-    var n = _collect(st, ci)
+    var n = _handover(st, ci)
     _wake_drain(st, ci)
     _wake_others(st)
     reply_out[unsafe_offset=0] = st[].out_bufs[unsafe_offset=ci]
@@ -688,7 +728,7 @@ def pion_embed_poll(h: Int64, conn: Int64,
         status = _run(st, ci)
     except:
         status = ST_ERR
-    var n = _collect(st, ci)
+    var n = _handover(st, ci)
     _wake_drain(st, ci)
     _wake_others(st)
     reply_out[unsafe_offset=0] = st[].out_bufs[unsafe_offset=ci]
