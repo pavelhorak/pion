@@ -18,6 +18,7 @@ guards. Same pattern as MetalAttentionEngine.
 
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
+from src.common.log import log_out
 
 
 struct NLEmbeddingEngine(Movable):
@@ -40,7 +41,7 @@ struct NLEmbeddingEngine(Movable):
                     self.available = True
                     self.dimension = external_call["pion_nle_dimension", UInt32]()
                 else:
-                    print("[NLE] init failed (rc=", rc, "); auto-embed will fall back to PyTorch sidecar")
+                    print("[NLE] init failed (rc=", rc, "); auto-embed will fall back to PyTorch sidecar", file=log_out())
 
     def __moveinit__(out self, deinit take: Self):
         self.enabled = take.enabled

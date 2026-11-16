@@ -41,6 +41,7 @@ from src.io.xdp import XDPEngine, XDPFrameInfo, TCP_SYN, TCP_ACK, TCP_FIN, TCP_R
 from src.network.cluster import ClusterState, REPL_PORT_OFFSET
 from src.commands.stream import write_xread_reply
 from src.commands.blocking import blocked_client_ready, UNBLOCK_ERROR, UNBLOCKED_ERROR
+from src.common.log import log_out
 
 # Client receive buffer size. Supports LMCache KV cache blobs (typical 2-4 MB
 # per chunk, up to ~16 MB for 70B+ models) and shared-KV-cache tensor frames
@@ -732,7 +733,7 @@ struct NetworkEngine:
             null_ptr[BlobStore, MutUntrackedOrigin](), self.fast_path.ttl_map, path)
         var fd = external_call["pion_open_rdonly", Int32](path.as_c_string_span())
         if fd < 0:
-            print("Replication: FULLRESYNC snapshot could not be read back from " + path)
+            print("Replication: FULLRESYNC snapshot could not be read back from " + path, file=log_out())
             return
         var size = Int(external_call["pion_file_size", Int64](fd))
         var data = unsafe_alloc[UInt8](max(size, 1))
@@ -748,7 +749,7 @@ struct NetworkEngine:
             external_call["pion_repl_primary_provide_snapshot", NoneType](
                 h, data.unsafe_offset(SNAP_HDR_LEN), UInt64(size - SNAP_HDR_LEN), tail)
             print("Replication: FULLRESYNC snapshot " + String(size - SNAP_HDR_LEN)
-                  + " bytes at WAL offset " + String(tail))
+                  + " bytes at WAL offset " + String(tail), file=log_out())
         data.unsafe_free()
 
     def _housekeeping_64tick(mut self, mut hnsw: HNSWGraph) raises:
@@ -888,7 +889,7 @@ struct NetworkEngine:
                         quorum_ok = True
 
                     if quorum_ok:
-                        print("N3 AUTO-FAILOVER: primary unreachable for " + String(self.failover_ticks) + " ticks, promoting to primary")
+                        print("N3 AUTO-FAILOVER: primary unreachable for " + String(self.failover_ticks) + " ticks, promoting to primary", file=log_out())
                         if is_not_null(_cl2[].repl_replica_handle):
                             external_call["pion_repl_replica_stop", NoneType](_cl2[].repl_replica_handle)
                             _cl2[].repl_replica_handle = null_ptr[NoneType, MutUntrackedOrigin]()
@@ -937,7 +938,7 @@ struct NetworkEngine:
                     )
                     _ = external_call["pion_repl_primary_start", Int32](_blk)
                     _cl3[].repl_primary_handle = _blk
-                    print("C1.2: Primary replicator auto-started on port " + String(_rport))
+                    print("C1.2: Primary replicator auto-started on port " + String(_rport), file=log_out())
 
         # gh #5 / #87.2: sharded-build + shard-query-bus serve. Dormant —
         # `num_shards` is pinned at 1; the whole block is comptime-absent unless

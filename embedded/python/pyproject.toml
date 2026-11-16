@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pion-embedded"          # working name; the PyPI name is undecided
-version = "0.1.0.dev0"
+name = "pion-embedded"
+version = "0.0.0"               # build_wheel.sh stamps the engine's VERSION
 description = "The Pion engine in your process, behind redis-py: Redis semantics with per-command durability and no server"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -14,4 +14,4 @@ dependencies = ["redis>=5"]
 packages = ["pion_embedded"]
 
 [tool.setuptools.package-data]
-pion_embedded = ["_lib/*.dylib", "_lib/*.so"]
+pion_embedded = ["_lib/*.dylib", "_lib/*.so", "py.typed"]

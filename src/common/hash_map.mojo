@@ -12,6 +12,7 @@ from src.common.value import GenericValue, ValueType, BLOB_TAG, BORROW_TAG
 from src.common.prng import Xoshiro256PlusPlus
 from src.common.vec_tomb import VecTomb
 from src.common.utils import format_int_to_buf
+from src.common.log import log_out
 
 # Per-lane weights (1 << lane) for packing a 16-lane bool compare into a
 # movemask-style bitmask. Computed once at compile time.
@@ -73,7 +74,7 @@ def _table_map(nbytes: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
         null_ptr[UInt8, MutUntrackedOrigin](), nbytes, 0x3, flags, -1, 0)
     if Int(p) == -1:
         # The allocator would have failed too: it maps its memory the same way.
-        print("FATAL: out of memory mapping a", nbytes, "byte hash table")
+        print("FATAL: out of memory mapping a", nbytes, "byte hash table", file=log_out())
         external_call["exit", NoneType](Int32(1))
     return p
 

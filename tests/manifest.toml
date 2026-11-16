@@ -243,6 +243,7 @@ requires = ["py:mlx_lm", "hf:mlx-community/gemma-4-e2b-it-4bit"]
 file = "tests/test_cloud_profile_int4.py"
 server = "self"
 tier = "gate"
+embedded_skip = "checks the profile the server picks from the core count; a library is given its profile"
 
 [[test]]
 file = "tests/test_cluster_full.py"
@@ -629,6 +630,11 @@ server = "-w 1"
 tier = "gate"
 
 [[test]]
+file = "tests/test_kv_profile_ft.py"
+server = "self"
+tier = "gate"
+
+[[test]]
 file = "tests/test_gh257_config.py"
 server = "-w 1"
 tier = "gate"
@@ -642,6 +648,7 @@ tier = "gate"
 file = "tests/test_gh259_graceful_shutdown.py"
 server = "self"
 tier = "gate"
+embedded_skip = "checks the crash breadcrumbs, which library mode never writes (a library installs no signal handlers)"
 
 [[test]]
 file = "tests/test_metallib_discovery.py"

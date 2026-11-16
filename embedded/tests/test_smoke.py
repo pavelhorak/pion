@@ -15,5 +15,13 @@ async def a():
     m = await ps.get_message(timeout=2, ignore_subscribe_messages=True)
     assert m and m["data"] == "hi", m
     await ps.aclose(); await ar.aclose()
+    import redis.asyncio
+    for proto in (2, 3):   # a pool built from a URL, as docket builds its own
+        pool = pion.asyncio.ConnectionPool.from_url("pion://" + d, protocol=proto, decode_responses=True)
+        pr = redis.asyncio.Redis(connection_pool=pool)
+        assert await pr.get("a") == "b" and await pr.hset("h", "f", "v") in (0, 1)
+        assert await pr.hgetall("h") == {"f": "v"}, await pr.hgetall("h")
+        await pr.aclose(); await pool.aclose()
 asyncio.run(a())
+assert r.get("a") == "b"   # closing a pool leaves the engine open
 print(sys.version.split()[0], "smoke ok", r.pion_info()["version"])

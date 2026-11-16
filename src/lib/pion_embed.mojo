@@ -52,6 +52,7 @@ from src.common.lock_free import ShardQueryBus
 from src.network.cluster import ClusterState
 from src.network.slow_path import SlowPathHandler
 from src.commands.evict import evict_policy_from_string
+from src.common.utils import parse_memory_value
 from src.common.version import PION_VERSION, PION_BUILD_SHA
 from src.network.fast_path import _get_now_ns
 
@@ -87,6 +88,12 @@ struct EmbedState(Movable):
     var next_id: Int
     var live: List[Int]               # ids in use, for the tick's resume pass
     var last_tick_ns: Int
+    # wake fds (pion_embed_wake_fd), stored as fd + 1 so a zero page means
+    # none; wake_set: a byte is in the pipe and not yet drained
+    var wake_r: Pointer[Int32, MutUntrackedOrigin]
+    var wake_w: Pointer[Int32, MutUntrackedOrigin]
+    var wake_set: Pointer[UInt8, MutUntrackedOrigin]
+    var wake_ids: List[Int]
 
     def __init__(out self):
         self.db = null_ptr[Pion, MutUntrackedOrigin]()
@@ -101,6 +108,10 @@ struct EmbedState(Movable):
         self.next_id = EMBED_TOP_ID
         self.live = List[Int]()
         self.last_tick_ns = 0
+        self.wake_r = zalloc[Int32](EMBED_TOP_ID + 1)
+        self.wake_w = zalloc[Int32](EMBED_TOP_ID + 1)
+        self.wake_set = zalloc[UInt8](EMBED_TOP_ID + 1)
+        self.wake_ids = List[Int]()
 
 
 comptime _St = Pointer[EmbedState, MutUntrackedOrigin]
@@ -211,6 +222,20 @@ def _make_shared_hnsw(config: PionConfig) -> Pointer[SharedHNSWView, MutUntracke
     return sh
 
 
+def _memory_value(v: String) -> Int:
+    """`--maxmemory`'s parser: bytes, k/kb/m/mb/g/gb, or N% of physical RAM.
+    -1 when the value is not one of those. Parsed from a heap copy, as
+    main.mojo does: a short String's bytes live inline, and a pointer to them
+    handed out of line as MutUntrackedOrigin is miscompiled at -O3."""
+    var n = v.byte_length()
+    var h = unsafe_alloc[UInt8](n + 1)
+    for k in range(n):
+        h[unsafe_offset=k] = v.as_bytes()[k]
+    var r = parse_memory_value(h, n, Int64(external_call["pion_physical_ram_bytes", UInt64]()))
+    h.unsafe_free()
+    return Int(r.value) if r.ok else -1
+
+
 def _open(cfg: String, err: Pointer[UInt8, MutUntrackedOrigin], err_cap: Int64) raises -> Int64:
     var dir = _cfg_get(cfg, "dir")
     if dir.byte_length() == 0:
@@ -235,11 +260,33 @@ def _open(cfg: String, err: Pointer[UInt8, MutUntrackedOrigin], err_cap: Int64) 
     if external_call["pion_set_data_dir", Int32](dir.unsafe_ptr(), Int64(dir.byte_length())) != 0:
         _write_err(err, err_cap, "the data directory path is too long")
         return 0
+    # The engine's log lines (WAL replay, snapshot load, warnings) go to a file
+    # in the data directory, never to the host's stdout.
+    var logfile = _cfg_get(cfg, "logfile")
+    if logfile.byte_length() == 0:
+        logfile = dir + "/pion.log"
+    var logz = logfile + "\0"
+    _ = external_call["pion_set_log_file", Int32](logz.unsafe_ptr())
 
     var config = PionConfig()
-    config.apply_profile("kv")
+    # KV by default. "vector" adds the HNSW index the server's default
+    # profile has (open reference kernels: the closed vector library is not
+    # linked into libpion). The kv profile refuses FT.CREATE.
+    var profile = _cfg_get(cfg, "profile")
+    if profile.byte_length() == 0:
+        profile = "kv"
+    if profile != "kv" and profile != "vector":
+        _write_err(err, err_cap, "unknown profile (kv or vector): " + profile)
+        return 0
+    config.apply_profile(profile)
+    var dim = _cfg_get(cfg, "dim")
+    if dim.byte_length() > 0:
+        config.vector.dimensions = atol(dim)
+    # What CONFIG GET port and INFO report. The library listens on nothing;
+    # a front end that serves the engine on a port (the test proxy) says so.
+    var port = _cfg_get(cfg, "port")
     config.server.workers = 1
-    config.server.port = 0
+    config.server.port = atol(port) if port.byte_length() > 0 else 0
     # The worker's own fallback (pion_worker_entry): macOS has no huge pages,
     # and a SlabAllocator asked for a superpage mapping gets MAP_FAILED, which
     # it does not check. A library has no business asking for them anyway.
@@ -254,6 +301,55 @@ def _open(cfg: String, err: Pointer[UInt8, MutUntrackedOrigin], err_cap: Int64) 
     var ws = _cfg_get(cfg, "wal-size")
     if ws.byte_length() > 0:
         config.server.wal_size_mb = atol(ws)
+    # The rest of the server's options that mean the same thing in a library,
+    # named as pion-server's flags without the dashes. A bad value is refused
+    # with the server's reason, never ignored.
+    var wms = _cfg_get(cfg, "wal-max-segments")
+    if wms.byte_length() > 0:
+        config.server.wal_max_segments = atol(wms)
+    var wfp = _cfg_get(cfg, "wal-full-policy")
+    if wfp == "drop":
+        config.server.wal_refuse_when_full = False
+    elif wfp.byte_length() > 0 and wfp != "refuse":
+        _write_err(err, err_cap, "invalid wal-full-policy (expected refuse|drop): " + wfp)
+        return 0
+    var bt = _cfg_get(cfg, "blob-threshold")
+    if bt.byte_length() > 0:
+        config.server.blob_threshold = atol(bt)
+    if _cfg_get(cfg, "no-blob-tier") == "yes":
+        config.server.no_blob_tier = True
+    var rp = _cfg_get(cfg, "requirepass")
+    if rp.byte_length() > 0:
+        config.server.requirepass = rp
+    var edc = _cfg_get(cfg, "enable-debug-command").lower()
+    if edc == "yes":
+        config.server.enable_debug_command = 1
+    elif edc == "local":
+        config.server.enable_debug_command = 2
+    elif edc.byte_length() > 0 and edc != "no":
+        _write_err(err, err_cap, "invalid enable-debug-command (no, yes or local): " + edc)
+        return 0
+    var mss = _cfg_get(cfg, "maxmemory-samples")
+    if mss.byte_length() > 0:
+        var n = atol(mss)
+        if n < 1 or n > 64:
+            _write_err(err, err_cap, "invalid maxmemory-samples (1-64): " + mss)
+            return 0
+        config.server.maxmemory_samples = n
+    var lua_time_ms = 5000
+    var ltl = _cfg_get(cfg, "lua-time-limit")
+    if ltl.byte_length() > 0:
+        lua_time_ms = atol(ltl)
+        if lua_time_ms < 0:
+            _write_err(err, err_cap, "invalid lua-time-limit (milliseconds, 0 = never): " + ltl)
+            return 0
+    var lua_mem = 1 << 30
+    var lml = _cfg_get(cfg, "lua-memory-limit")
+    if lml.byte_length() > 0:
+        lua_mem = _memory_value(lml)
+        if lua_mem < 0:
+            _write_err(err, err_cap, "invalid lua-memory-limit (bytes, or with k/kb/m/mb/g/gb, or 1-100%): " + lml)
+            return 0
     var mm = _cfg_get(cfg, "maxmemory")
     var pol = _cfg_get(cfg, "maxmemory-policy")
     if pol.byte_length() > 0:
@@ -265,10 +361,13 @@ def _open(cfg: String, err: Pointer[UInt8, MutUntrackedOrigin], err_cap: Int64) 
     external_call["pion_set_maxmemory_policy", NoneType](Int32(config.server.maxmemory_policy))
     external_call["pion_set_maxmemory_samples", NoneType](Int32(config.server.maxmemory_samples))
     if mm.byte_length() > 0:
-        config.server.maxmemory = atol(mm)
+        config.server.maxmemory = _memory_value(mm)     # Redis units, as --maxmemory
+        if config.server.maxmemory < 0:
+            _write_err(err, err_cap, "invalid maxmemory (bytes, or with k/kb/m/mb/g/gb, or 1-100%): " + mm)
+            return 0
         if config.server.maxmemory > 0:
             external_call["pion_set_maxmemory", NoneType](UInt64(config.server.maxmemory))
-    external_call["pion_lua_set_defaults", NoneType](Int64(1 << 30), Int64(5000))
+    external_call["pion_lua_set_defaults", NoneType](Int64(lua_mem), Int64(lua_time_ms))
 
     var shared = _make_shared_hnsw(config)
     var cluster = unsafe_alloc[ClusterState](1)
@@ -299,6 +398,9 @@ def _open(cfg: String, err: Pointer[UInt8, MutUntrackedOrigin], err_cap: Int64) 
     e.writer.ctx[].io_owner = owners
     e.writer.ctx[].io_mode = True
     st[].last_tick_ns = _now_ns()
+    # Virtual ids are not descriptors: the socket helpers must never pass one
+    # to the kernel (fcntl_wrap.c, pion_set_virtual_floor).
+    external_call["pion_set_virtual_floor", NoneType](Int32(EMBED_TOP_ID - EMBED_MAX_CONNS + 1))
     return Int64(Int(st))
 
 
@@ -358,10 +460,67 @@ def _collect(st: _St, ci: Int) -> Int:
     return total
 
 
+def _drop_owed(st: _St, ci: Int):
+    """Connection ci was killed (CLIENT KILL, or owed past the 32 MB pub/sub
+    limit): what it was owed is dropped, never handed over, as the server
+    frees a closed fd's queue. Handing it over made the host push up to
+    32 MB to a client that had stopped reading."""
+    ref ctx = st[].db[].engine.writer.ctx[]
+    ctx.pending_offsets[unsafe_offset=ci] = 0
+    st[].db[].engine.writer.out_free(ci)
+
+
+def _handover(st: _St, ci: Int) -> Int:
+    """What exec and poll hand back for connection ci: its output, or
+    nothing once the connection was killed."""
+    if external_call["pion_virtual_killed", Int32](Int32(ci)) != 0:
+        _drop_owed(st, ci)
+        return 0
+    return _collect(st, ci)
+
+
+def _wake_drain(st: _St, ci: Int):
+    """Connection ci's output was just handed over: its pipe goes quiet."""
+    if st[].wake_set[unsafe_offset=ci] != 0:
+        external_call["pion_wake_drain", NoneType](st[].wake_r[unsafe_offset=ci] - 1)
+        st[].wake_set[unsafe_offset=ci] = 0
+
+
+def _wake_others(st: _St):
+    """Make every wake fd readable whose connection has output waiting: a
+    pub/sub message another connection published, a parked command a tick
+    answered. Only connections that asked for a wake fd are looked at."""
+    if len(st[].wake_ids) == 0:
+        return
+    ref ctx = st[].db[].engine.writer.ctx[]
+    for k in range(len(st[].wake_ids)):
+        var ci = st[].wake_ids[k]
+        if st[].wake_set[unsafe_offset=ci] == 0 and (ctx.pending_offsets[unsafe_offset=ci] > 0
+                or st[].db[].engine.slow_path.clients.close_after[unsafe_offset=ci] != 0
+                or external_call["pion_virtual_killed", Int32](Int32(ci)) != 0):
+            external_call["pion_wake_signal", NoneType](st[].wake_w[unsafe_offset=ci] - 1)
+            st[].wake_set[unsafe_offset=ci] = 1
+
+
+def _wake_close(st: _St, ci: Int):
+    if st[].wake_r[unsafe_offset=ci] != 0:
+        external_call["pion_wake_close", NoneType](st[].wake_r[unsafe_offset=ci] - 1,
+                                                   st[].wake_w[unsafe_offset=ci] - 1)
+        st[].wake_r[unsafe_offset=ci] = 0
+        st[].wake_w[unsafe_offset=ci] = 0
+        st[].wake_set[unsafe_offset=ci] = 0
+        for k in range(len(st[].wake_ids)):
+            if st[].wake_ids[k] == ci:
+                _ = st[].wake_ids.pop(k)
+                break
+
+
 def _run(st: _St, ci: Int) raises -> Int64:
     """Dispatch what connection ci has buffered. Its status."""
     ref db = st[].db[]
     ref e = db.engine
+    if external_call["pion_virtual_killed", Int32](Int32(ci)) != 0:
+        return ST_CLOSED              # CLIENT KILL, or past the 32 MB output limit
     var n = e.client_buffer_lens[unsafe_offset=ci]
     if n > 0 and not (e.slow_path.parked_waits.any() and e.slow_path.parked_waits.is_parked(ci)):
         var consumed = e._dispatch_io_batch(Int32(ci), n, KQ_IO, db.hnsw, db.db_size)
@@ -385,14 +544,35 @@ def _tick(st: _St) raises:
     unparked (with I/O threads, their thread hands their bytes back)."""
     ref db = st[].db[]
     ref e = db.engine
-    st[].last_tick_ns = _now_ns()
+    # The server ticks about once a millisecond while idle (its kqueue and
+    # epoll waits time out after 1 ms) and at most every 100 us while busy.
+    # The host calls this every few ms, and later on a loaded machine, so the
+    # counter moves by the server ticks that elapsed (at least one): the TTL
+    # sweep (every 100) and housekeeping (every 64, which starts automatic
+    # vector builds) keep the server's wall-clock cadence. One step per call
+    # ran them 5x and more slower, past tests' 1 s windows on CI.
+    var now = _now_ns()
+    var steps = 1
+    if st[].last_tick_ns > 0:
+        steps = (now - st[].last_tick_ns) // 1_000_000
+        if steps < 1:
+            steps = 1
+        if steps > 100:
+            steps = 100
+    st[].last_tick_ns = now
+    var sweep = False
+    var housekeep = False
+    for _ in range(steps):
+        e.ttl_sweep_counter += 1
+        if e.ttl_sweep_counter >= 100:
+            e.ttl_sweep_counter = 0
+            sweep = True
+        if e.ttl_sweep_counter & 0x3F == 0:
+            housekeep = True
     if e.evict_on:
         e._evict_tick()
-    e.ttl_sweep_counter += 1
-    if e.ttl_sweep_counter >= 100:
-        e.ttl_sweep_counter = 0
-        if e.slow_path.clients.pause_until_ms == 0:
-            e.fast_path.sweep_expired_keys(20)
+    if sweep and e.slow_path.clients.pause_until_ms == 0:
+        e.fast_path.sweep_expired_keys(20)
     var had_parked = e.slow_path.parked_waits.count() > 0
     if e.slow_path.blocked_readers._count() > 0:
         e._service_blocked_readers(KQ_IO, db.hnsw, db.db_size)
@@ -403,7 +583,7 @@ def _tick(st: _St) raises:
     if e.slow_path.clients.pause_until_ms != 0 or e.slow_path.clients.pause_changed \
        or len(e.slow_path.clients.released) > 0:
         e._service_pause(KQ_IO, db.hnsw, db.db_size)
-    if e.ttl_sweep_counter & 0x3F == 0:
+    if housekeep:
         e._housekeeping_64tick(db.hnsw)
         if e.shutting_down:
             st[].closed = True            # SHUTDOWN: the WAL is synced; the engine takes no more
@@ -436,6 +616,7 @@ def pion_embed_conn_new(h: Int64) abi("C") -> Int64:
         _leave(st)
         return ST_BAD_CONN
     ref e = st[].db[].engine
+    external_call["pion_virtual_reset", NoneType](Int32(ci))   # a reused id starts alive
     e._io_accept(Int32(ci))
     e.slow_path.tx_state.resp_proto[unsafe_offset=ci] = 2
     if is_null(e.client_buffers[unsafe_offset=ci]):
@@ -473,6 +654,7 @@ def pion_embed_conn_free(h: Int64, conn: Int64) abi("C"):
         e.writer.ctx[].pending_buffers[unsafe_offset=ci] = null_ptr[UInt8, MutUntrackedOrigin]()
     e.writer.ctx[].pending_offsets[unsafe_offset=ci] = 0
     e.writer.out_free(ci)
+    _wake_close(st, ci)
     st[].used[unsafe_offset=ci] = 0
     for k in range(len(st[].live)):
         if st[].live[k] == ci:
@@ -507,9 +689,19 @@ def pion_embed_exec(h: Int64, conn: Int64, req: Pointer[UInt8, MutUntrackedOrigi
     try:
         _maybe_tick(st)
         status = _run(st, ci)
+        # As the server's loop does after every batch: a push may have
+        # answered a blocked BLPOP/XREAD on another connection. Without this
+        # the waiter heard only at the next tick (~5 ms).
+        ref sp = e.slow_path
+        if sp.blocked_clients._count() > 0:
+            e._service_blocked_clients(KQ_IO, st[].db[].hnsw, st[].db[].db_size)
+        if sp.blocked_readers._count() > 0:
+            e._service_blocked_readers(KQ_IO, st[].db[].hnsw, st[].db[].db_size)
     except:
         status = ST_ERR
-    var n = _collect(st, ci)
+    var n = _handover(st, ci)
+    _wake_drain(st, ci)
+    _wake_others(st)
     reply_out[unsafe_offset=0] = st[].out_bufs[unsafe_offset=ci]
     out_len[unsafe_offset=0] = Int64(n)
     _leave(st)
@@ -536,11 +728,43 @@ def pion_embed_poll(h: Int64, conn: Int64,
         status = _run(st, ci)
     except:
         status = ST_ERR
-    var n = _collect(st, ci)
+    var n = _handover(st, ci)
+    _wake_drain(st, ci)
+    _wake_others(st)
     reply_out[unsafe_offset=0] = st[].out_bufs[unsafe_offset=ci]
     out_len[unsafe_offset=0] = Int64(n)
     _leave(st)
     return status
+
+
+@export
+def pion_embed_wake_fd(h: Int64, conn: Int64) abi("C") -> Int64:
+    """A descriptor that is readable while connection `conn` has output the
+    caller has not collected (a parked command's reply, a pub/sub message).
+    Wait on it in select/poll or an event loop, then call pion_embed_poll.
+    It belongs to the connection: closed by pion_embed_conn_free."""
+    var st = _st(h)
+    var rc = _enter(st)
+    if rc != 0:
+        return rc
+    var ci = Int(conn)
+    if ci < 0 or ci > EMBED_TOP_ID or st[].used[unsafe_offset=ci] == 0:
+        _leave(st)
+        return ST_BAD_CONN
+    if st[].wake_r[unsafe_offset=ci] == 0:
+        var fds = unsafe_alloc[Int32](2)
+        if external_call["pion_wake_pipe", Int32](fds) != 0:
+            fds.unsafe_free()
+            _leave(st)
+            return ST_ERR
+        st[].wake_r[unsafe_offset=ci] = fds[unsafe_offset=0] + 1
+        st[].wake_w[unsafe_offset=ci] = fds[unsafe_offset=1] + 1
+        fds.unsafe_free()
+        st[].wake_ids.append(ci)
+        _wake_others(st)                 # output already waiting counts too
+    var fd = Int64(st[].wake_r[unsafe_offset=ci] - 1)
+    _leave(st)
+    return fd
 
 
 @export
@@ -553,6 +777,7 @@ def pion_embed_tick(h: Int64) abi("C") -> Int64:
         _tick(st)
     except:
         rc = ST_ERR
+    _wake_others(st)
     _leave(st)
     return rc
 
@@ -575,6 +800,7 @@ def pion_embed_close(h: Int64) abi("C") -> Int64:
     if st[].lock_fd >= 0:
         external_call["pion_dir_unlock", NoneType](st[].lock_fd)
         st[].lock_fd = -1
+        _ = external_call["pion_set_log_file", Int32]("".ptr())
     external_call["pion_mutex_unlock", NoneType](st[].mutex)
     return 0
 

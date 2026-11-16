@@ -4,6 +4,7 @@ from std.ffi import external_call
 from std.sys import CompilationTarget
 from std.memory import alloc
 from std.memory import unsafe_memset, unsafe_memcpy, stack_allocation
+from src.common.log import log_out
 
 
 @always_inline
@@ -26,7 +27,7 @@ def create_listen_socket(port: Int) -> Int32:
     """Create a single shared listen socket. No SO_REUSEPORT — one socket, all workers compete to accept()."""
     var socket_fd = external_call["socket", Int32](Int32(2), Int32(1), Int32(0))  # AF_INET=2, SOCK_STREAM=1
     if socket_fd < 0:
-        print("Failed to create shared listen socket")
+        print("Failed to create shared listen socket", file=log_out())
         return -1
 
     var opt_ptr = unsafe_alloc[Int32](1)
@@ -72,25 +73,25 @@ def create_listen_socket(port: Int) -> Int32:
     while res < 0 and tries < 30 and _last_errno() == _EADDRINUSE():
         if tries == 0:
             print("Port " + String(port) + " is still held (a server that just stopped "
-                  + "can keep it briefly); retrying for up to 3 s")
+                  + "can keep it briefly); retrying for up to 3 s", file=log_out())
         _ = external_call["usleep", Int32](Int32(100000))
         res = external_call["bind", Int32](socket_fd, addr, Int32(16))
         tries += 1
     if res < 0:
-        print("Failed to bind shared listen socket to port " + String(port))
+        print("Failed to bind shared listen socket to port " + String(port), file=log_out())
         addr.unsafe_free()
         _ = external_call["close", Int32](socket_fd)
         return -1
 
     res = external_call["listen", Int32](socket_fd, Int32(65535))
     if res < 0:
-        print("Failed to listen on shared socket")
+        print("Failed to listen on shared socket", file=log_out())
         addr.unsafe_free()
         _ = external_call["close", Int32](socket_fd)
         return -1
 
     addr.unsafe_free()
-    print("Shared listen socket: port=" + String(port) + " fd=" + String(socket_fd))
+    print("Shared listen socket: port=" + String(port) + " fd=" + String(socket_fd), file=log_out())
     return socket_fd
 
 comptime EV_CLEAR = 0x0020
@@ -190,7 +191,7 @@ struct TCPServer(Copyable, Movable):
     def listen(mut self) -> Bool:
         var socket_fd = external_call["socket", Int32](Int32(2), Int32(1), Int32(0)) # AF_INET=2, SOCK_STREAM=1
         if socket_fd < 0:
-            print("Failed to create socket")
+            print("Failed to create socket", file=log_out())
             return False
 
         var opt_ptr = unsafe_alloc[Int32](1)
@@ -231,19 +232,19 @@ struct TCPServer(Copyable, Movable):
 
         var res = external_call["bind", Int32](socket_fd, addr, Int32(16))
         if res < 0:
-            print("Failed to bind to port " + String(self.port))
+            print("Failed to bind to port " + String(self.port), file=log_out())
             addr.unsafe_free()
             return False
 
         res = external_call["listen", Int32](socket_fd, Int32(65535))
         if res < 0:
-            print("Failed to listen")
+            print("Failed to listen", file=log_out())
             addr.unsafe_free()
             return False
             
         self.fd = socket_fd
         addr.unsafe_free()
-        print("Listening on port " + String(self.port))
+        print("Listening on port " + String(self.port), file=log_out())
         return True
 
     def set_nonblocking(self, fd: Int32):

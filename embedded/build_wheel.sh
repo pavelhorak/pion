@@ -23,6 +23,11 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -R "$ROOT/embedded/python/." "$STAGE/"
 find "$STAGE" -name __pycache__ -prune -exec rm -rf {} +
+# The wheel carries the engine, so it carries the engine's version: the wheel
+# attached to release v1.1.3 is pion-embedded 1.1.3.
+VER="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+sed -i.bak "s/^version = \"0.0.0\".*/version = \"$VER\"/" "$STAGE/pyproject.toml" && rm "$STAGE/pyproject.toml.bak"
+grep -q "^version = \"$VER\"" "$STAGE/pyproject.toml" || { echo "could not stamp version $VER" >&2; exit 1; }
 mkdir -p "$STAGE/pion_embedded/_lib"
 cp "$LIB" "$STAGE/pion_embedded/_lib/"
 bash "$ROOT/scripts/collect_runtime_libs.sh" "$LIB" "$ROOT/.pixi/envs/default/lib" "$STAGE/pion_embedded/_lib"
@@ -41,11 +46,38 @@ else
         chmod u+w "$f"
         patchelf --set-rpath '$ORIGIN' "$f"
     done
-    PAT='*-abi3-linux_*.whl'
+    PAT='*-abi3-manylinux_2_*.whl'
 fi
 export MACOSX_DEPLOYMENT_TARGET=14.0    # the extension's minos, as libpion's
+if [ "$(uname -s)" = "Darwin" ]; then
+    # A python.org framework Python (what setup-python installs on the macOS
+    # runners) is universal2: it compiles the extension for both arches and
+    # tags the wheel universal2. Everything in _lib/ is arm64 only, so build
+    # and tag arm64.
+    export ARCHFLAGS="-arch arm64" _PYTHON_HOST_PLATFORM="macosx-14.0-arm64"
+fi
 OUT="$ROOT/embedded/dist"
 mkdir -p "$OUT"
 (cd "$STAGE" && "$PY" -m pip wheel --no-deps --no-build-isolation -w "$STAGE/wheel" . >/dev/null)
+if [ "$(uname -s)" != "Darwin" ]; then
+    # setuptools tags a Linux wheel linux_<arch>, which PyPI refuses. Tag it
+    # manylinux_2_<N>, N being the highest GLIBC_2.* any shipped file needs
+    # (the extension included), so the tag states the floor rather than
+    # claiming one. Built on Ubuntu 22.04 that is 2.35, set by Modular's
+    # libAsyncRTRuntimeGlobals.so; on 24.04 libpion itself needs 2.38.
+    W=$(ls "$STAGE"/wheel/*-abi3-linux_*.whl)
+    SCAN="$(mktemp -d)"
+    (cd "$SCAN" && "$PY" -m zipfile -e "$W" .)
+    N=0
+    for f in $(find "$SCAN" -name '*.so*' -type f); do
+        n=$( (strings -a "$f" | grep -o 'GLIBC_2\.[0-9]*' || true) | sed 's/GLIBC_2\.//' | sort -n | tail -1)
+        echo "$(basename "$f"): GLIBC_2.${n:-none}"
+        if [ -n "$n" ] && [ "$n" -gt "$N" ]; then N=$n; fi
+    done
+    rm -rf "$SCAN"
+    [ "$N" -gt 0 ] || { echo "no GLIBC_2.* version found in the wheel" >&2; exit 1; }
+    "$PY" -m wheel tags --remove --platform-tag "manylinux_2_${N}_$(uname -m)" "$W" >/dev/null
+fi
+compgen -G "$STAGE/wheel/$PAT" >/dev/null || { echo "no $PAT; built: $(ls "$STAGE/wheel")" >&2; exit 1; }
 cp "$STAGE"/wheel/$PAT "$OUT/"
 ls -la "$OUT"

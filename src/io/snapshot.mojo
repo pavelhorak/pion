@@ -38,6 +38,7 @@ from src.io.wal import wal_apply_aggregate, wal_apply_ttl, wal_is_aggregate, gv_
     VEC_KEY_REC, VEC_DEAD_REC, VEC_CLEAR_REC, VEC_CLEAR_DEAD, VEC_CLEAR_KEYS
 from src.common.vector_set import VectorSet
 from src.common.stream_data import StreamData, encode_meta_rec, encode_group_rec, encode_consumer_rec, encode_nack_rec
+from src.common.log import log_out
 
 
 comptime SNAP_MAGIC   = UInt64(0x31504E4150534E50)
@@ -487,7 +488,7 @@ struct SnapshotEngine(Movable):
         var ctmp = tmp_path
         var fd = external_call["pion_creat", Int32](ctmp.as_c_string_span())
         if fd < 0:
-            print("Snapshot: failed to open " + tmp_path)
+            print("Snapshot: failed to open " + tmp_path, file=log_out())
             return -1
 
         # --- Write header ---
@@ -608,7 +609,7 @@ struct SnapshotEngine(Movable):
             _ = external_call["pion_snapshot_rename", Int32](
                 ctmp.as_c_string_span(), csnap.as_c_string_span())
 
-        print("Snapshot: saved " + String(kv_count) + " entries → " + snap_path)
+        print("Snapshot: saved " + String(kv_count) + " entries → " + snap_path, file=log_out())
         return ts
 
     def load_snapshot(mut self,
@@ -634,7 +635,7 @@ struct SnapshotEngine(Movable):
 
         var magic = _snap_read_u64(hdr, 0)
         if magic != SNAP_MAGIC:
-            print("Snapshot: bad magic in " + snap_path + " — skipping")
+            print("Snapshot: bad magic in " + snap_path + " — skipping", file=log_out())
             hdr.unsafe_free()
             _ = external_call["close", Int32](fd)
             return -1
@@ -721,5 +722,5 @@ struct SnapshotEngine(Movable):
         ehdr.unsafe_free()
         _ = external_call["close", Int32](fd)
 
-        print("Snapshot: loaded " + String(replayed) + " entries from " + snap_path)
+        print("Snapshot: loaded " + String(replayed) + " entries from " + snap_path, file=log_out())
         return ts

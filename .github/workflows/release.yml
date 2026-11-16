@@ -224,6 +224,43 @@ jobs:
           gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
             --title "Pion ${TAG#v}" --generate-notes
 
+  # Embedded Pion's wheels (embedded/README.md): embedded.yml itself, without
+  # the test tier, so a release's wheels come from the same steps every PR's
+  # CI runs, each installed in clean venvs with the toolchain hidden before it
+  # is kept. They go on the GitHub release only; nothing goes to PyPI.
+  embedded:
+    name: embedded wheels
+    needs: preflight
+    uses: ./.github/workflows/embedded.yml
+    with:
+      tier: none
+
+  embedded-assets:
+    # Its own job, after the release exists, so a wheel failure leaves the
+    # server release alone; the wheels' sums join SHA256SUMS.
+    name: wheels on the release
+    needs: [publish, embedded]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pion-embedded-wheel-*
+          path: wheels
+          merge-multiple: true
+
+      - name: Attach the wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          cd wheels
+          ls -la
+          [ "$(ls *.whl | wc -l)" = 3 ] || { echo "::error::expected 3 wheels"; exit 1; }
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p SHA256SUMS
+          shasum -a 256 *.whl >> SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" *.whl SHA256SUMS --clobber
+
   # gh #417 (I-8): build each arch on its NATIVE runner and stitch the two into
   # one multi-arch tag. The old job ran `buildx --platform amd64,arm64` on an
   # amd64 runner, so the arm64 half did the full -O3 Mojo build under QEMU user
