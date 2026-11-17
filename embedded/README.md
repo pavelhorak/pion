@@ -3,7 +3,7 @@
 The Pion engine inside your Python process, behind redis-py. No server.
 
 ```python
-import pion_embedded as pion           # the pion-embedded wheel (GitHub releases; not on PyPI)
+import pionlite as pion                # the pionlite wheel (GitHub releases; not on PyPI)
 r = pion.Redis(dir="./data")           # a redis.Redis: pipelines, Lock, pub/sub, scripts
 ar = pion.asyncio.Redis(dir="./data")  # a redis.asyncio.Redis
 r = pion.from_url("pion:///abs/path/to/data")
@@ -18,7 +18,7 @@ pool = pion.asyncio.ConnectionPool.from_url("pion:///abs/path/to/data")  # for r
 - KV only (no vector search). Built and tested on macOS arm64, Linux x86-64
   and Linux arm64 by `.github/workflows/embedded.yml` (pull requests that touch
   the library, and manual runs). Each release built from a `v*` tag carries
-  the three wheels (`pion_embedded-<version>-cp311-abi3-*.whl`, one per
+  the three wheels (`pionlite-<version>-cp311-abi3-*.whl`, one per
   platform, for CPython 3.11 and later); they are not on PyPI. The Linux wheels
   are `manylinux_2_35` (glibc 2.35 or later, Ubuntu 22.04 for one), built on
   Ubuntu 22.04; macOS needs 14 or later.
@@ -66,7 +66,7 @@ python3 embedded/tests/test_graduation.py ./pion-server   # app <-> pion-server 
 # are reported as skipped, with the flag named.
 python3 tests/run_all.py --server-tests-only --binary embedded/tests/pion-server-embedded
 # or one suite by hand:
-PYTHONPATH=embedded/python python3 -m pion_embedded.proxy --dir /tmp/d --port 16700 &
+PYTHONPATH=embedded/python python3 -m pionlite.proxy --dir /tmp/d --port 16700 &
 python3 tests/test_raw.py --port 16700 && python3 tests/test_parity.py --port 16700
 ```
 

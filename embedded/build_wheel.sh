@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the pion-embedded wheel for this platform: one cp311-abi3 wheel (the
+# Build the pionlite wheel for this platform: one cp311-abi3 wheel (the
 # _pion extension) for every CPython >= 3.11.
 #   macOS: MACOSX_DEPLOYMENT_TARGET=14.0 pixi run build-embed && bash embedded/build_wheel.sh <python>
 #   Linux: bash embedded/build_linux.sh && bash embedded/build_wheel.sh <python>   (needs patchelf)
@@ -24,15 +24,15 @@ trap 'rm -rf "$STAGE"' EXIT
 cp -R "$ROOT/embedded/python/." "$STAGE/"
 find "$STAGE" -name __pycache__ -prune -exec rm -rf {} +
 # The wheel carries the engine, so it carries the engine's version: the wheel
-# attached to release v1.1.3 is pion-embedded 1.1.3.
+# attached to release v1.1.3 is pionlite 1.1.3.
 VER="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 sed -i.bak "s/^version = \"0.0.0\".*/version = \"$VER\"/" "$STAGE/pyproject.toml" && rm "$STAGE/pyproject.toml.bak"
 grep -q "^version = \"$VER\"" "$STAGE/pyproject.toml" || { echo "could not stamp version $VER" >&2; exit 1; }
-mkdir -p "$STAGE/pion_embedded/_lib"
-cp "$LIB" "$STAGE/pion_embedded/_lib/"
-bash "$ROOT/scripts/collect_runtime_libs.sh" "$LIB" "$ROOT/.pixi/envs/default/lib" "$STAGE/pion_embedded/_lib"
+mkdir -p "$STAGE/pionlite/_lib"
+cp "$LIB" "$STAGE/pionlite/_lib/"
+bash "$ROOT/scripts/collect_runtime_libs.sh" "$LIB" "$ROOT/.pixi/envs/default/lib" "$STAGE/pionlite/_lib"
 if [ "$(uname -s)" = "Darwin" ]; then
-    for f in "$STAGE"/pion_embedded/_lib/*.dylib; do
+    for f in "$STAGE"/pionlite/_lib/*.dylib; do
         chmod u+w "$f"
         for rp in $(otool -l "$f" | awk '/LC_RPATH/{getline; getline; print $2}'); do
             install_name_tool -delete_rpath "$rp" "$f"
@@ -42,7 +42,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     done
     PAT='*-abi3-macosx_14_0_arm64.whl'
 else
-    for f in "$STAGE"/pion_embedded/_lib/*.so; do
+    for f in "$STAGE"/pionlite/_lib/*.so; do
         chmod u+w "$f"
         patchelf --set-rpath '$ORIGIN' "$f"
     done

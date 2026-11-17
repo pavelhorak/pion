@@ -1,4 +1,4 @@
-"""pion_embedded.asyncio.Redis: redis.asyncio.Redis on the engine in this process.
+"""pionlite.asyncio.Redis: redis.asyncio.Redis on the engine in this process.
 
 Unlike a client bound to its event loop, the engine holds no loop state, so
 clients on different loops (threads) share one engine."""
@@ -38,7 +38,7 @@ class ConnectionPool(redis.asyncio.ConnectionPool):
     """redis.asyncio.ConnectionPool on the engine in this process, for code that
     builds its own pool and hands it to redis.asyncio.Redis (docket does).
 
-        pool = pion_embedded.asyncio.ConnectionPool.from_url("pion:///abs/path/to/data")
+        pool = pionlite.asyncio.ConnectionPool.from_url("pion:///abs/path/to/data")
         r = redis.asyncio.Redis(connection_pool=pool)
 
     Closing the pool closes its connections, not the engine."""
