@@ -4,6 +4,25 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [1.1.4] — 2026-11-17
+
+The `pionlite` wheels carry a package page, their licence files and project
+links. The server is unchanged from 1.1.3.
+
+### Changed
+
+- **`pionlite` wheels (experimental):** each carries `embedded/README.md` as
+  its long description, `LICENSE` and `NOTICE` (which names the Modular runtime
+  libraries the wheel redistributes, under the Modular Community License), and
+  Homepage, Source, Changelog and Issues links. CI runs `twine check --strict`
+  on every wheel it builds. They are still not on PyPI.
+- **CI keeps evidence when a library-mode server faults.** The embedded
+  workflow's Linux tier writes core dumps, prints a `gdb` backtrace of every
+  thread for each core, and runs with Python's fault handler on. A library-mode
+  server died with SIGSEGV before answering its first PING in 2 of the tier's
+  CI runs on Linux x86-64, and 8 more runs plus 10,000 isolated starts did not
+  reproduce it; the next occurrence names its frame.
+
 ## [1.1.3] — 2026-11-17
 
 An eviction policy no longer empties the keyspace after a burst of writes,
