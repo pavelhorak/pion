@@ -118,6 +118,13 @@ jobs:
       - name: Build the wheel
         run: bash embedded/build_wheel.sh python3.13
 
+      - name: The wheel's metadata passes twine check --strict
+        # What PyPI would refuse or render bare: a missing package page,
+        # licence files the metadata names but the wheel lacks.
+        run: |
+          python3.13 -m pip install --quiet twine
+          python3.13 -m twine check --strict embedded/dist/*.whl
+
       - name: The wheel's glibc floor must stay 2.35
         # build_wheel.sh tags the wheel from the highest GLIBC_2.* its files
         # need. A newer runner image or a Modular runtime that needs more
@@ -223,6 +230,13 @@ jobs:
 
       - name: Build the wheel
         run: bash embedded/build_wheel.sh python3.13
+
+      - name: The wheel's metadata passes twine check --strict
+        # What PyPI would refuse or render bare: a missing package page,
+        # licence files the metadata names but the wheel lacks.
+        run: |
+          python3.13 -m pip install --quiet twine
+          python3.13 -m twine check --strict embedded/dist/*.whl
 
       - name: The wheel installs and runs in clean venvs (3.11, 3.13), toolchain hidden
         run: |
