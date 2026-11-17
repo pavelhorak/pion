@@ -21,10 +21,12 @@ runtime that exports no statistics.
 - The outer loop moves the target by RSS. At the first crossing the target is the
   data less the share of the heap that is over. Above the limit, every byte RSS still grows (table
   growth, fragmentation, a list the sample missed) comes off the target, each
-  byte once: only a new peak counts, because RSS wobbles. Below 90% of the limit, half the gap goes back on it, so memory the allocator did
-  return gets used again, but never more than one step past the data: RSS
+  byte once: only a new peak counts, because RSS wobbles. Below the limit, half the gap goes back on it, so memory the allocator
+  holds gets used again, but never more than one step past the data: RSS
   also falls when the OS compresses or swaps the process's pages, and the
-  data does not.
+  data does not. All the way up to the limit, not to a band under it: freed
+  memory stays resident, so after a deep cut RSS can sit just under the limit
+  with an empty keyspace, and a target that rises only under 90% stays at 0.
 
 The estimate is only as good as MEMORY USAGE's, and it undercounts streams and
 vector sets. That costs accuracy, not the limit: the outer loop answers for
@@ -457,13 +459,17 @@ def _steer(ks: Pointer[StripedHashMap, MutUntrackedOrigin],
             st[].peak_ctl = ctl
     else:
         st[].peak_ctl = limit
-        if ctl * 10 < limit * 9:
+        # Up to the limit itself. With a band under it, a target cut to 0 by
+        # a burst stayed there: the evicted keys' memory stays resident, RSS
+        # sat at 93% of the limit with no keys, and every write was evicted
+        # (test_eviction section 9, about 1 run in 4 on macOS).
+        if ctl < limit:
             # Never more than one step ahead of the data held. RSS can sit low
             # for reasons the data does not share: macOS compresses an idle
             # process's pages and resident_size drops, Linux swaps them out.
             # Uncapped, every 10 ms added half the gap, a 126 MB limit wound
             # the target up to 49 GB in 25 s of memory pressure, and the
             # refill afterwards took RSS to 192 MB before anything was evicted.
-            var step = (limit * 9 // 10 - ctl) // (2 * num_workers)
+            var step = (limit - ctl) // (2 * num_workers)
             var t = st[].target + step
             st[].target = t if t < data + step else data + step
