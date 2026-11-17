@@ -4,6 +4,58 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [1.1.3] — 2026-11-17
+
+An eviction policy no longer empties the keyspace after a burst of writes,
+`FT.CREATE` refuses under `--profile kv` instead of serving a one-vector index,
+and each release carries wheels of the embedded engine.
+
+### Fixed
+
+- **An eviction policy no longer empties the keyspace after a burst.** A burst
+  of writes could cut the controller's data target to 0. Evicted keys' memory
+  stays resident, so RSS then sat between 90% and 100% of `--maxmemory` with no
+  keys, and the target rose again only below 90%: every new write was evicted at
+  once. The target now rises whenever RSS is under the limit, still at most one
+  step ahead of the data held. On macOS, a write mix of every value type
+  against a limit 25 MB over idle emptied the keyspace in 2 of 26 runs before
+  and 0 of 80 after, with the same peak overshoot (1.44× and 1.43× of the
+  limit). Hit rates in `benchmarks/reproducers/eviction_hit_rate.py` are
+  unchanged.
+- **`FT.CREATE` refuses under `--profile kv`.** That profile sizes the vector
+  graph for one vector, and `FT.CREATE` succeeded anyway: ingest kept one
+  document and dropped the rest without an error, and `FT.SEARCH` answered from
+  it (recall@10 0.002). It now answers an error naming the profile, so there is
+  never an index to answer from, and hashes are stored as hashes.
+- **A failed slab mapping exits with a message.** When the kernel refused a
+  mapping, the slab allocator handed out `MAP_FAILED` as memory and the worker
+  crashed at the first write into it. It now exits with
+  `FATAL: out of memory mapping a N byte slab`, as the hash table's mapping
+  already did. A huge-page request falls back to normal pages on macOS, which
+  has none.
+
+### Added
+
+- **Wheels of the embedded engine on each release (experimental).**
+  `pionlite` 1.1.3 for Linux x86-64 and arm64 (`manylinux_2_35`, so glibc
+  2.35: Ubuntu 22.04, Debian 12 and later) and macOS 14+ arm64, Python 3.11+
+  (abi3). Each is installed and run in clean venvs before it is attached, and
+  its sum is in `SHA256SUMS`. They are not on PyPI. The package, `pion_embedded`
+  until this release, is now `pionlite` (`import pionlite`). It ships
+  `py.typed`, and `pionlite.asyncio.ConnectionPool.from_url("pion:///dir")`
+  gives a `redis.asyncio.ConnectionPool` on the engine.
+
+### Changed
+
+- **Embedded engine (experimental):** it logs to `dir/pion.log`, never to the
+  host application's stdout; connections wait on a wake fd instead of polling
+  (a blocked `BLPOP` answers a push in 0.34 ms, was 5.6 ms); `CLIENT KILL`,
+  `CLIENT LIST`, `MONITOR` and the pub/sub output limit no longer pass a
+  virtual connection id to the kernel, where it could name one of the host's
+  own descriptors; the adapters wait with `poll()`, so descriptors past 1,024
+  work. The server's test tier runs through the library in CI on all three
+  platforms.
+
 ## [1.1.2] — 2026-11-15
 
 `AUTH` checks the user name, `pion-server --dir` keeps a server's files in one
