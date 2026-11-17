@@ -3,7 +3,7 @@
 The Pion engine inside your Python process, behind redis-py. No server.
 
 ```python
-import pionlite as pion                # the pionlite wheel (GitHub releases; not on PyPI)
+import pionlite as pion                # the pionlite wheel, attached to each GitHub release
 r = pion.Redis(dir="./data")           # a redis.Redis: pipelines, Lock, pub/sub, scripts
 ar = pion.asyncio.Redis(dir="./data")  # a redis.asyncio.Redis
 r = pion.from_url("pion:///abs/path/to/data")
@@ -19,7 +19,7 @@ pool = pion.asyncio.ConnectionPool.from_url("pion:///abs/path/to/data")  # for r
   and Linux arm64 by `.github/workflows/embedded.yml` (pull requests that touch
   the library, and manual runs). Each release built from a `v*` tag carries
   the three wheels (`pionlite-<version>-cp311-abi3-*.whl`, one per
-  platform, for CPython 3.11 and later); they are not on PyPI. The Linux wheels
+  platform, for CPython 3.11 and later). The Linux wheels
   are `manylinux_2_35` (glibc 2.35 or later, Ubuntu 22.04 for one), built on
   Ubuntu 22.04; macOS needs 14 or later.
 - The engine's log lines (WAL replay and snapshot load at open, `Snapshot:
