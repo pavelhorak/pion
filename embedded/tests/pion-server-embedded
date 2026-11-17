@@ -3,7 +3,7 @@
 
 The server's test tiers start `$PION_BIN` (tests/run_all.py --binary). Pointed
 at this script, they run against libpion inside a Python process, behind
-pion_embedded.proxy: the engine, the WAL, parked commands and pub/sub all go
+pionlite.proxy: the engine, the WAL, parked commands and pub/sub all go
 through library mode. The socket is only there so the tests can reach it.
 
 Flags the library has no equivalent for (other front ends, more workers,
@@ -28,9 +28,9 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 # The package's __init__ imports redis-py 5+, while a test tier may pin
 # another redis-py (the Linux tier pins 4.6), so the package is entered
 # without running its __init__.
-_pkg = types.ModuleType("pion_embedded")
-_pkg.__path__ = [os.path.join(REPO, "embedded", "python", "pion_embedded")]
-sys.modules["pion_embedded"] = _pkg
+_pkg = types.ModuleType("pionlite")
+_pkg.__path__ = [os.path.join(REPO, "embedded", "python", "pionlite")]
+sys.modules["pionlite"] = _pkg
 
 UNSUPPORTED = 64
 
@@ -71,7 +71,7 @@ def print_version():
     """As pion-server's --version: the build, then which vector routines run
     (read from the engine's own INFO, on a throwaway directory)."""
     import tempfile
-    from pion_embedded._engine import get_engine
+    from pionlite._engine import get_engine
     e = get_engine(tempfile.mkdtemp(prefix="pion-version-"), {"profile": "vector", "logfile": "/dev/null"})
     c = e.conn_new()
     _, out = e.exec(c, b"*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n")
@@ -134,8 +134,8 @@ def main():
     # pion-server logs to its stdout, and the tests read that log (the runner
     # scans it for faults); the library's default is dir/pion.log.
     cfg.setdefault("logfile", "/dev/stdout")
-    from pion_embedded import proxy
-    from pion_embedded._engine import get_engine
+    from pionlite import proxy
+    from pionlite._engine import get_engine
     engine = get_engine(d, cfg)
 
     def stop(*_):

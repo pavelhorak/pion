@@ -1,5 +1,5 @@
 import sys, tempfile, asyncio
-import pion_embedded as pion
+import pionlite as pion
 d = tempfile.mkdtemp()
 r = pion.Redis(dir=d, decode_responses=True)
 assert r.set("a", "b") and r.get("a") == "b"

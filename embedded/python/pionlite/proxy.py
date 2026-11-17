@@ -4,7 +4,7 @@ PION_IO_THREADS runs them through the I/O threads. The socket defeats the
 point for performance; it exercises the outboxes, parked commands, pub/sub
 and the tick.
 
-    python -m pion_embedded.proxy --dir /tmp/data --port 1974
+    python -m pionlite.proxy --dir /tmp/data --port 1974
 """
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def serve(engine, port: int):
         engine.close()
         raise SystemExit(1)
     ls.listen(65535)   # as pion-server: a connection burst queues, never resets
-    print(f"pion_embedded proxy: {engine.version()} dir={engine.dir} port={port}", flush=True)
+    print(f"pionlite proxy: {engine.version()} dir={engine.dir} port={port}", flush=True)
     while True:
         s, _ = ls.accept()
         threading.Thread(target=serve_conn, args=(engine, s), daemon=True).start()

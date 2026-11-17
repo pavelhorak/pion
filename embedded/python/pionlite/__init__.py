@@ -1,6 +1,6 @@
 """Pion without the server: the engine in this process, behind redis-py.
 
-    import pion_embedded as pion
+    import pionlite as pion
     r = pion.Redis(dir="./data")          # a redis.Redis: every redis-py method works
     ar = pion.asyncio.Redis(dir="./data") # a redis.asyncio.Redis
     r = pion.from_url("pion:///abs/path/to/data")
@@ -10,7 +10,7 @@ acknowledged write survives the process being killed. One engine and one data
 directory per process; a second process opening the directory is refused (run
 `pion-server` on it to share it). KV only: no vector search.
 
-The wheel is `pion-embedded`, attached to each Pion release; it is not on PyPI.
+The wheel is `pionlite`, attached to each Pion release; it is not on PyPI.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from redis._parsers import _RESP2Parser
 from redis.connection import AbstractConnection
 
 from ._engine import Engine, PionError, close, get_engine, EngineSocket
-from . import asyncio  # noqa: F401  (pion_embedded.asyncio.Redis)
+from . import asyncio  # noqa: F401  (pionlite.asyncio.Redis)
 
 __all__ = ["Redis", "from_url", "close", "PionError", "PionConnection"]
 

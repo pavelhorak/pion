@@ -18,7 +18,7 @@ def check(name, ok, detail=""):
     if not ok: fails.append(name)
 
 def embedded(code):
-    return subprocess.run([PY, "-c", "import pion_embedded as pion\n" + code], cwd=CWD,
+    return subprocess.run([PY, "-c", "import pionlite as pion\n" + code], cwd=CWD,
                           capture_output=True, text=True, timeout=120)
 
 def start_server():
@@ -37,7 +37,7 @@ def wait_ping():
 
 # 1. the app writes, and holds the directory
 holder = subprocess.Popen([PY, "-c", f"""
-import pion_embedded as pion, sys, time
+import pionlite as pion, sys, time
 r = pion.Redis(dir={D!r}, decode_responses=True)
 for i in range(1000): r.set(f"k:{{i}}", i)
 r.rpush("l", *range(100)); r.hset("h", mapping={{"a": 1, "b": 2}}); r.zadd("z", {{"m": 3.5}})
