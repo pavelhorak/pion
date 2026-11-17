@@ -1,0 +1,125 @@
+name: Repro embedded startup SIGSEGV
+
+# Diagnostic only, on a throwaway branch: starts the library-mode stand-in
+# (embedded/tests/pion-server-embedded) many times on the released v1.1.3
+# Linux x86-64 wheel, and keeps Python's fault traceback and a gdb backtrace
+# of every core for any start that dies before answering PING. Two library
+# starts in the embedded tier died that way (SIGSEGV, before PING).
+on:
+  push:
+    branches: ['repro/embed-startup-segv']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: ${{ matrix.binding }}-${{ matrix.load }}
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: [ctypes, abi3]
+        load: [idle, loaded]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tools, cores
+        run: |
+          sudo apt-get install -y -qq gdb stress-ng > /dev/null
+          sudo mkdir -p /tmp/cores && sudo chmod 1777 /tmp/cores
+          sudo sysctl -w kernel.core_pattern=/tmp/cores/core.%e.%p
+      - name: The v1.1.3 wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v1.1.3 -R ${{ github.repository }} -p 'pionlite-*manylinux_2_35_x86_64.whl' -D wheel
+          python -m venv /tmp/v && /tmp/v/bin/pip install --quiet wheel/*.whl
+          ls /tmp/v/lib/python3.12/site-packages/pionlite/_lib/
+      - name: Start the stand-in 2000 times
+        env:
+          PION_EMBED_LIB: /tmp/v/lib/python3.12/site-packages/pionlite/_lib/libpion.so
+          PION_EMBED_CTYPES: ${{ matrix.binding == 'ctypes' && '1' || '0' }}
+          PYTHONFAULTHANDLER: '1'
+          LOAD: ${{ matrix.load }}
+        run: |
+          ulimit -c unlimited
+          if [ "$LOAD" = loaded ]; then stress-ng --cpu 4 --vm 1 --vm-bytes 512M --quiet & fi
+          # The abi3 binding is the installed wheel's own extension: put the
+          # installed package first so pionlite._pion is importable.
+          if [ "$PION_EMBED_CTYPES" = 0 ]; then
+            sed -i 's#_pkg.__path__ = \[.*\]#_pkg.__path__ = ["/tmp/v/lib/python3.12/site-packages/pionlite"]#' embedded/tests/pion-server-embedded
+          fi
+          python3 - <<'PY'
+          import os, socket, subprocess, sys, tempfile, time
+          N, bad = 2000, []
+          stand_in = os.path.abspath("embedded/tests/pion-server-embedded")
+          shapes = [["-w", "1", "--no-wal", "--no-crash-log", "--no-auto-detect", "--no-auto-embed"],
+                    ["-w", "1", "--no-crash-log", "--no-auto-detect", "--no-auto-embed"]]
+          def ping(port):
+              try:
+                  with socket.create_connection(("127.0.0.1", port), timeout=0.5) as s:
+                      s.settimeout(2)
+                      s.sendall(b"*1\r\n$4\r\nPING\r\n")
+                      return s.recv(64).startswith(b"+PONG")
+              except OSError:
+                  return False
+          t0 = time.time()
+          for i in range(N):
+              port = 20000 + i
+              d = tempfile.mkdtemp(prefix="emb_")
+              log = open(os.path.join(d, "log"), "w")
+              t = time.monotonic()
+              p = subprocess.Popen([sys.executable, stand_in, "-p", str(port)] + shapes[i % 2],
+                                   cwd=d, stdout=log, stderr=subprocess.STDOUT)
+              ok = False
+              while time.monotonic() - t < 30:
+                  if p.poll() is not None:
+                      break
+                  if ping(port):
+                      ok = True
+                      break
+                  time.sleep(0.02)
+              if not ok:
+                  p.kill() if p.poll() is None else None
+                  p.wait()
+                  log.close()
+                  dt = time.monotonic() - t
+                  print(f"::warning::start {i} died rc={p.returncode} after {dt:.2f}s (pid {p.pid}, shape {i % 2})")
+                  print(open(os.path.join(d, "log"), errors="replace").read()[-6000:])
+                  bad.append((i, p.returncode, p.pid))
+                  continue
+              p.terminate()
+              try:
+                  p.wait(10)
+              except subprocess.TimeoutExpired:
+                  p.kill(); p.wait()
+              log.close()
+              if p.returncode not in (0, -15):
+                  print(f"::warning::start {i} exited rc={p.returncode} at STOP (pid {p.pid})")
+                  print(open(os.path.join(d, "log"), errors="replace").read()[-6000:])
+                  bad.append((i, p.returncode, p.pid))
+          print(f"{N} starts in {time.time() - t0:.0f}s, {len(bad)} bad: {bad}")
+          PY
+          pkill stress-ng || true
+      - name: Backtraces of every core
+        if: always()
+        run: |
+          ls -la /tmp/cores
+          for c in /tmp/cores/core.*; do
+            [ -f "$c" ] || continue
+            echo "=== $c"
+            gdb -batch -q -ex 'info sharedlibrary' -ex 'thread apply all bt 40' "$(command -v python3)" "$c" 2>&1 | grep -v '^warning:' | head -400
+          done
+      - name: Keep the cores
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cores-${{ matrix.binding }}-${{ matrix.load }}
+          path: /tmp/cores/
+          retention-days: 7
+          if-no-files-found: ignore
