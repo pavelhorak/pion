@@ -23,6 +23,8 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -R "$ROOT/embedded/python/." "$STAGE/"
 find "$STAGE" -name __pycache__ -prune -exec rm -rf {} +
+# The package page (readme) and the licence files the metadata names.
+cp "$ROOT/embedded/README.md" "$ROOT/LICENSE" "$ROOT/NOTICE" "$STAGE/"
 # The wheel carries the engine, so it carries the engine's version: the wheel
 # attached to release v1.1.3 is pionlite 1.1.3.
 VER="$(tr -d '[:space:]' < "$ROOT/VERSION")"

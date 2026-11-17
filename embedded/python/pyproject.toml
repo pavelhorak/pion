@@ -1,14 +1,24 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]   # license-files (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pionlite"
 version = "0.0.0"               # build_wheel.sh stamps the engine's VERSION
 description = "The Pion engine in your process, behind redis-py: Redis semantics with per-command durability and no server"
+readme = "README.md"            # build_wheel.sh copies embedded/README.md here
 requires-python = ">=3.11"
 license = "Apache-2.0"
+# NOTICE names what the wheel redistributes: the Modular runtime libraries
+# in pionlite/_lib, under the Modular Community License.
+license-files = ["LICENSE", "NOTICE"]
 dependencies = ["redis>=5"]
+
+[project.urls]
+Homepage = "https://github.com/pavelhorak/pion"
+Source = "https://github.com/pavelhorak/pion/tree/main/embedded"
+Changelog = "https://github.com/pavelhorak/pion/blob/main/CHANGELOG.md"
+Issues = "https://github.com/pavelhorak/pion/issues"
 
 [tool.setuptools]
 packages = ["pionlite"]
