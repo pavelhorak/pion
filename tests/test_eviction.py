@@ -140,6 +140,18 @@ def evicted(c):
     return int(info(c, "evicted_keys"))
 
 
+def evicted_and_keys(c):
+    """evicted_keys, keys and expires from ONE INFO reply. A server over its
+    limit goes on evicting for a moment after the writes stop (~1,900 keys on
+    a CI runner, 0.5 s later), so two commands can see different keyspaces."""
+    raw = c("INFO")
+    text = raw.decode() if isinstance(raw, bytes) else str(raw)
+    f = dict(line.split(":", 1) for line in text.split("\r\n") if ":" in line)
+    db0 = f.get("db0", "keys=0,expires=0")
+    kv = dict(x.split("=", 1) for x in db0.split(","))
+    return int(f["evicted_keys"]), int(kv["keys"]), int(kv["expires"])
+
+
 def payload(key, size=200):
     """Derived from the key, so a survivor's value can be checked: a count alone
     cannot see a wrong value."""
@@ -239,11 +251,10 @@ def allkeys(policy):
         if i > n // 2:
             peak_after_settle = max(peak_after_settle, rss(c)) if i % (batch * 20) == 0 else peak_after_settle
     check("no write failed", not bad, repr(bad[:2]))
-    ev = evicted(c)
+    ev, keys, _ = evicted_and_keys(c)
     check("keys were evicted", ev > n // 4, str(ev))
     check("RSS holds near the limit", peak_after_settle <= limit * 1.20,
           f"peak {peak_after_settle >> 20} MB, limit {limit >> 20} MB, idle {base >> 20} MB")
-    keys = c("DBSIZE")
     check("the keyspace is not emptied", keys > 20_000, str(keys))
     check("keys + evicted = keys written", keys + ev == n + len(hot), f"{keys} + {ev} != {n + len(hot)}")
 
@@ -270,8 +281,13 @@ def allkeys(policy):
     wrong = [k for k, v in zip(ks, vals) if v is not None and v != payload(k)]
     check("survivors hold their own values", not wrong, repr(wrong[:3]))
     check("server alive", s.alive())
-    r = c("CONFIG", "RESETSTAT")
-    check("CONFIG RESETSTAT clears evicted_keys", r == "OK" and evicted(c) == 0 or evicted(c) < 100)
+    # The reset and the key count in one transaction, the count after from
+    # one INFO: whatever was evicted since the reset is exactly the keys gone.
+    r = c.many([("MULTI",), ("DBSIZE",), ("CONFIG", "RESETSTAT"), ("EXEC",)])[-1]
+    ev_after, keys_after, _ = evicted_and_keys(c)
+    check("CONFIG RESETSTAT clears evicted_keys",
+          isinstance(r, list) and r[1] == "OK" and ev_after == r[0] - keys_after,
+          f"EXEC {r!r}, then evicted {ev_after}, keys {keys_after}")
     s.stop()
 
 
@@ -295,13 +311,8 @@ def volatile():
         check(f"{policy}: keys were evicted", evicted(c) > 0, str(evicted(c)))
         alive = sum(1 for r in c.many([("EXISTS", f"keep:{i}") for i in range(20_000)]) if r == 1)
         check(f"{policy}: a key without a TTL is never evicted", alive == 20_000, f"{alive}/20000")
-        # Both counts from one INFO line. Eviction goes on for a moment after
-        # the writes stop (several hundred keys between two commands), so a
-        # DBSIZE and a later INFO could see different keyspaces.
-        db0 = info(c, "db0")
-        ev = evicted(c)
-        keys = int(db0.split("keys=")[1].split(",")[0]) if db0 else -1
-        n_exp = int(db0.split("expires=")[1].split(",")[0]) if db0 else -1
+        # Every count from one INFO reply (evicted_and_keys).
+        ev, keys, n_exp = evicted_and_keys(c)
         check(f"{policy}: evicting a key drops its TTL entry", n_exp == keys - 20_000,
               f"expires={n_exp} keys={keys} evicted={ev}")
         s.stop()
@@ -349,14 +360,14 @@ def read_only():
     c("CONFIG", "SET", "maxmemory", limit)
     fill(c, "k", 400_000)
     time.sleep(0.5)
-    before_ev, before_keys = evicted(c), c("DBSIZE")
+    before_ev, before_keys, _ = evicted_and_keys(c)
     check("over the limit, keys were evicted", before_ev > 0, str(before_ev))
     t0 = time.time()
     i = 0
     while time.time() - t0 < 2.0:
         c.many([("GET", f"k:{(i + j) * 7 % 400_000}") for j in range(500)])
         i += 500
-    after_ev, after_keys = evicted(c), c("DBSIZE")
+    after_ev, after_keys, _ = evicted_and_keys(c)
     # Freed memory stays with the allocator, so RSS may sit over the limit with
     # nothing being written. Evicting on that alone would empty the keyspace.
     check("reads evict (almost) nothing", after_ev - before_ev <= before_keys // 50,
