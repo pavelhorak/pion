@@ -287,9 +287,8 @@ def _open(cfg: String, err: Pointer[UInt8, MutUntrackedOrigin], err_cap: Int64) 
     var port = _cfg_get(cfg, "port")
     config.server.workers = 1
     config.server.port = atol(port) if port.byte_length() > 0 else 0
-    # The worker's own fallback (pion_worker_entry): macOS has no huge pages,
-    # and a SlabAllocator asked for a superpage mapping gets MAP_FAILED, which
-    # it does not check. A library has no business asking for them anyway.
+    # A library has no business asking for huge pages (the worker turns them
+    # off on macOS too, pion_worker_entry).
     config.server.use_huge_pages = False
     config.server.strict_affinity = False
     config.embedding.enabled = False
