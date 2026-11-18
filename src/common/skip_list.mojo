@@ -79,7 +79,10 @@ struct SlabSkipList(Movable):
         self.level = 1
         self.length = 0
         self.allocator = SlabAllocator[SkipListNode](capacity)
-        self.prng = Xoshiro256PlusPlus(UInt64(capacity) ^ 0xDEADBEEF)
+        # Seeded as when every caller passed 16, so node levels (and so
+        # anything that walks them) are what they were before the first slab
+        # shrank to 4 nodes (2026-11-18).
+        self.prng = Xoshiro256PlusPlus(UInt64(16) ^ 0xDEADBEEF)
         self.members = SlabHashMap(16)
 
         # Head node with MAX_LEVEL

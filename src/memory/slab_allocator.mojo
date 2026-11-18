@@ -1,9 +1,13 @@
 from src.common.ptr import null_ptr
 from std.memory import alloc
-from std.memory import unsafe_memcpy
+from std.memory import unsafe_memcpy, unsafe_memset
+from std.memory.alloc import unsafe_alloc
 from std.sys import size_of, CompilationTarget
 from std.collections import List
 from std.ffi import external_call
+
+# Slabs smaller than this come from the heap, larger ones are mapped.
+comptime SMALL_SLAB_BYTES = 65536
 
 struct SlabAllocator[T: AnyType](Movable):
     var item_size: Int
@@ -29,7 +33,7 @@ struct SlabAllocator[T: AnyType](Movable):
         self.use_huge_pages = use_huge_pages
         
         var total_size = self.item_size * self.items_per_slab
-        var initial_slab = self._mmap_alloc_or_die(total_size)
+        var initial_slab = self._slab_alloc_or_die(total_size)
         self.slabs.append(initial_slab)
         self.slab_sizes.append(total_size)
         self.current_slab = initial_slab
@@ -100,12 +104,33 @@ struct SlabAllocator[T: AnyType](Movable):
     def _mmap_free(self, ptr: Pointer[UInt8, MutUntrackedOrigin], size: Int):
         _ = external_call["munmap", Int32](ptr, size)
 
+    def _slab_alloc_or_die(self, size: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+        """A slab of `size` zeroed bytes. Under SMALL_SLAB_BYTES it comes from
+        the heap: a mapping is a whole page (16 KiB on Apple Silicon), and a
+        sorted set's first slab is 16 nodes, ~2.8 KiB, so every small zset or
+        geo key cost a page. Zeroed, as a fresh mapping is."""
+        if size < SMALL_SLAB_BYTES and not self.use_huge_pages:
+            var p = unsafe_alloc[UInt8](size, alignment=64)
+            if Int(p) == 0:
+                print("FATAL: out of memory allocating a", size, "byte slab")
+                external_call["exit", NoneType](Int32(1))
+            unsafe_memset(p, 0, size)
+            return p
+        return self._mmap_alloc_or_die(size)
+
+    def _slab_free(self, ptr: Pointer[UInt8, MutUntrackedOrigin], size: Int):
+        """Free a slab the way `_slab_alloc_or_die` made it: the size decides."""
+        if size < SMALL_SLAB_BYTES and not self.use_huge_pages:
+            ptr.unsafe_free()
+        else:
+            self._mmap_free(ptr, size)
+
 
     def reset(mut self):
         while len(self.slabs) > 1:
             var slab = self.slabs.pop()
             var size = self.slab_sizes.pop()
-            self._mmap_free(slab, size)
+            self._slab_free(slab, size)
         if len(self.slabs) > 0:
             self.current_slab = self.slabs[0]
             # `allocate()` grows `items_per_slab` (doubling) every time a slab
@@ -133,7 +158,7 @@ struct SlabAllocator[T: AnyType](Movable):
         For an allocator whose owner is being destroyed — after this the
         allocator must not be used again."""
         for i in range(len(self.slabs)):
-            self._mmap_free(self.slabs[i], self.slab_sizes[i])
+            self._slab_free(self.slabs[i], self.slab_sizes[i])
         self.slabs.clear()
         self.slab_sizes.clear()
         self.free_list.clear()
@@ -150,7 +175,7 @@ struct SlabAllocator[T: AnyType](Movable):
             if self.items_per_slab < 10000000:
                 self.items_per_slab *= 2
             var total_size = self.item_size * self.items_per_slab
-            var new_slab = self._mmap_alloc_or_die(total_size)
+            var new_slab = self._slab_alloc_or_die(total_size)
             self.slabs.append(new_slab)
             self.slab_sizes.append(total_size)
             self.current_slab = new_slab
@@ -165,4 +190,4 @@ struct SlabAllocator[T: AnyType](Movable):
 
     def free_all(var self):
         for i in range(len(self.slabs)):
-            self._mmap_free(self.slabs[i], self.slab_sizes[i])
+            self._slab_free(self.slabs[i], self.slab_sizes[i])

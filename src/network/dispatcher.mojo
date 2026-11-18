@@ -686,7 +686,7 @@ struct CommandDispatcher:
         
         if val.is_none():
             zset_ptr = self.skip_list_pool[].acquire()
-            zset_ptr.unsafe_write(SlabSkipList(16))
+            zset_ptr.unsafe_write(SlabSkipList(4))
             var new_val = GenericValue()
             new_val.type = ValueType(ValueType.ZSET)
             new_val.set_ptr(zset_ptr.unsafe_bitcast[NoneType]())
@@ -717,7 +717,7 @@ struct CommandDispatcher:
             if xx:
                 return ZAddOutcome(True, False, 0, 0, 0.0, False)
             zset_ptr = self.skip_list_pool[].acquire()
-            zset_ptr.unsafe_write(SlabSkipList(16))
+            zset_ptr.unsafe_write(SlabSkipList(4))
             var new_val = GenericValue()
             new_val.type = ValueType(ValueType.ZSET)
             new_val.set_ptr(zset_ptr.unsafe_bitcast[NoneType]())
@@ -784,7 +784,7 @@ struct CommandDispatcher:
 
         if val.is_none():
             zset_ptr = self.skip_list_pool[].acquire()
-            zset_ptr.unsafe_write(SlabSkipList(16))
+            zset_ptr.unsafe_write(SlabSkipList(4))
             var new_val = GenericValue()
             new_val.type = ValueType(ValueType.ZSET)     # a geo key is a sorted set, as in Redis
             new_val.set_ptr(zset_ptr.unsafe_bitcast[NoneType]())

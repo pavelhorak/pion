@@ -4,6 +4,41 @@ Notable changes. Format loosely follows [Keep a Changelog]; versions before
 0.9.0 were an internal `0.BUILD+SHA` counter and are summarised rather than
 enumerated — there were roughly 1,100 of them.
 
+## [Unreleased]
+
+Small lists, sorted sets, geo keys and streams take a fraction of the memory
+they did, and `MEMORY USAGE` reports what a key really costs.
+
+### Fixed
+
+- **`LSET` and `LINSERT` on a list in its compact form wrote nothing when the
+  write would take it past the form's size limit.** `LSET` replied `+OK` and
+  left the element unchanged; `LINSERT` returned the old length and inserted
+  nothing. The list now converts to its segmented form first and the write
+  lands. Both survive a restart.
+
+### Changed
+
+- **Memory per small container** (RSS per key at 5,000 keys, macOS arm64;
+  1.1.4 → now, Redis 8.10 in brackets): a list of three 100-byte elements
+  16,980 → 423 B (282), a sorted set of two members 18,163 → 2,490 B (1,216),
+  a geo key with one member 17,908 → 2,235 B (190), a stream with one entry
+  3,703 → 600 B (4,515).
+  - A list starts with a 64-byte buffer that doubles up to 8 KB, and allocates
+    its 8 KB segments only when it outgrows that. The compact form's 64-byte
+    limit per element is gone; elements up to 8,190 bytes stay compact.
+  - A sorted set's or geo key's first node slab holds 4 nodes instead of 16,
+    and slabs under 64 KB come from the heap instead of their own `mmap`
+    (on macOS arm64 every mapping took a whole 16 KB page). Node levels are
+    drawn exactly as before.
+  - A stream's entry array starts at 4 slots instead of 64.
+- **`MEMORY USAGE` counts the whole key:** the container struct, every buffer
+  it allocated and a sample of its element payloads. It reported 1/67 of a
+  small list's real cost, 1/42 of a stream's, 1/21 of a vector set's, 1/15 of
+  a geo key's and 1/13 of a sorted set's; for those types it now lands within
+  0.9–1.2× of the measured RSS. The eviction policies size their samples with
+  it, so they now see containers at their real weight.
+
 ## [1.1.4] — 2026-11-17
 
 The `pionlite` wheels carry a package page, their licence files and project

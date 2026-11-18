@@ -132,6 +132,13 @@ def handle_lset(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         else:
             var list_ptr = val.as_list().unsafe_bitcast[SlabList]()
             var lsz3 = list_ptr[].size
+            # A ziplist the new value may not fit converts first, so the
+            # rebuild below does the write. It used to skip the write and still
+            # answer +OK when the bytes passed the ziplist's capacity.
+            if is_not_null(list_ptr[].zip_buf) and not list_ptr[]._zip_fits(
+                list_ptr[].zip_len + 2 + tokens[unsafe_offset=i+3].length
+            ):
+                list_ptr[]._convert_to_segmented()
             if ls_idx < 0: ls_idx += lsz3
             if ls_idx < 0 or ls_idx >= lsz3:
                 writer.append_error_response("ERR index out of range")
@@ -148,7 +155,7 @@ def handle_lset(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
                         var tail_start = zoff3 + old_entry_size
                         var tail_len = list_ptr[].zip_len - tail_start
                         var new_zip_len = list_ptr[].zip_len - old_entry_size + new_entry_size
-                        if new_zip_len <= list_ptr[].zip_cap:
+                        if new_zip_len <= list_ptr[].zip_cap:   # _zip_fits above made room
                             if new_entry_size != old_entry_size and tail_len > 0:
                                 # Same-buffer shift: overlaps whenever the size
                                 # delta is smaller than the tail. Measured on
@@ -206,6 +213,12 @@ def handle_linsert(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
             writer.append_error_response("WRONGTYPE Operation against a key holding the wrong kind of value")
         else:
             var list_ptr = val.as_list().unsafe_bitcast[SlabList]()
+            # As LSET: a ziplist the value may not fit converts first. It used
+            # to skip the insert and still answer with the (unchanged) length.
+            if is_not_null(list_ptr[].zip_buf) and not list_ptr[]._zip_fits(
+                list_ptr[].zip_len + 2 + val_tok2.length
+            ):
+                list_ptr[]._convert_to_segmented()
             if is_null(list_ptr[].zip_buf):
                 # gh #241: quicklist mode. This used to return -1 unconditionally
                 # — indistinguishable from "pivot not found", so a caller could
@@ -254,7 +267,7 @@ def handle_linsert(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
                         var ins_at = zoff4 if before else zoff4 + 2 + vlen
                         var ins_entry_sz = 2 + val_tok2.length
                         var new_zip_len2 = list_ptr[].zip_len + ins_entry_sz
-                        if new_zip_len2 <= list_ptr[].zip_cap:
+                        if new_zip_len2 <= list_ptr[].zip_cap:   # _zip_fits above made room
                             # Shift tail right
                             var tail_len2 = list_ptr[].zip_len - ins_at
                             if tail_len2 > 0:

@@ -149,18 +149,20 @@ A dual-mode list that starts as a compact ziplist and converts to a two-sided se
 | Constant | Value |
 |---|---|
 | `ZIPLIST_MAX_ENTRIES` | 1024 |
-| `ZIPLIST_MAX_VALUE_LEN` | 64 bytes |
-| `ZIPLIST_INITIAL_CAP` | 8192 bytes |
+| `ZIPLIST_MAX_VALUE_LEN` | 8190 bytes |
+| `ZIPLIST_INITIAL_CAP` | 64 bytes |
+| `ZIPLIST_MAX_BYTES` | 8192 bytes |
 | `SEG_SIZE` | 256 elements |
 
-### Ziplist Mode (<=1024 entries, values <=64B each)
+### Ziplist Mode (<=1024 entries, <=8 KB in all)
 
 Contiguous `zip_buf` byte array. Entry format: `[u16 length][data bytes]`, packed sequentially.
 
 - `LPUSH`: prepends via `memmove` of existing data.
 - `RPUSH`: appends in place at `zip_len` offset.
-- Automatic conversion to quicklist mode via `_convert_to_segmented()` when entry count exceeds `ZIPLIST_MAX_ENTRIES` or a value exceeds `ZIPLIST_MAX_VALUE_LEN`.
-- Initial capacity 8192 bytes fits 1024 x ~5-byte benchmark entries without reallocation.
+- The buffer starts at 64 bytes and doubles as entries arrive, up to `ZIPLIST_MAX_BYTES`, the size of a Redis listpack node.
+- Automatic conversion to quicklist mode via `_convert_to_segmented()` when the entry count would exceed `ZIPLIST_MAX_ENTRIES`, a value exceeds `ZIPLIST_MAX_VALUE_LEN`, or the buffer would pass `ZIPLIST_MAX_BYTES`. `LSET` and `LINSERT` convert first when their write would pass it.
+- Quicklist segments (`SEG_SIZE` values each) are allocated only at conversion, so a small list costs its ziplist buffer and nothing more.
 
 ### Quicklist Mode (>1024 entries)
 

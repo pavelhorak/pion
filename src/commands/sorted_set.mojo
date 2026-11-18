@@ -469,7 +469,7 @@ def handle_zincrby(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_
         var _zib_zp: Pointer[SlabSkipList, MutUntrackedOrigin]
         if _zib_v.is_none():
             _zib_zp = skip_list_pool[].acquire()
-            _zib_zp.unsafe_write(SlabSkipList(16))
+            _zib_zp.unsafe_write(SlabSkipList(4))
             var _new_v = GenericValue(); _new_v.type = ValueType(ValueType.ZSET)
             _new_v.set_ptr(_zib_zp.unsafe_bitcast[NoneType]())
             keyspace[].set(_zib_key, _new_v)
@@ -920,7 +920,7 @@ def handle_zunion(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         _zsetop_accumulate(keyspace, _zukeys, _wts, _agg, _mm, _ss, _hh)
         # Order via a temp skip list: it sorts by (score, member-lex), which is
         # Redis's order and matches ZRANGE by construction.
-        var _sl = unsafe_alloc[SlabSkipList](1); _sl.unsafe_write(SlabSkipList(16))
+        var _sl = unsafe_alloc[SlabSkipList](1); _sl.unsafe_write(SlabSkipList(4))
         for _zi in range(len(_mm)): _sl[].insert(_ss[_zi], _mm[_zi])
         writer.append_scored_header(len(_mm), _with)   # RESP3: [member, score] pairs
         var _c = _sl[].head[].forward[0]
@@ -969,7 +969,7 @@ def handle_zinter(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
         # source keys held each member, so the intersection is a filter on it.
         var _mm = List[GenericValue](); var _ss2 = List[Float64](); var _hh = List[Int]()
         _zsetop_accumulate(keyspace, _zikeys, _wts, _agg, _mm, _ss2, _hh)
-        var _sl = unsafe_alloc[SlabSkipList](1); _sl.unsafe_write(SlabSkipList(16))
+        var _sl = unsafe_alloc[SlabSkipList](1); _sl.unsafe_write(SlabSkipList(4))
         var _n_out = 0
         for _zi in range(len(_mm)):
             if _hh[_zi] == len(_zikeys):
@@ -1020,7 +1020,7 @@ def handle_zunionstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
         var _hh = List[Int]()
         _zsetop_accumulate(keyspace, _zukeys, _wts, _agg, _zus_oo, _zus_ss, _hh)
         var _zus_zp = skip_list_pool[].acquire()
-        _zus_zp.unsafe_write(SlabSkipList(16))
+        _zus_zp.unsafe_write(SlabSkipList(4))
         # clone(): the accumulated members are BORROWED from the sources; a
         # stored zset sharing them was a use-after-free (and a crash) on DEL.
         for _zi in range(len(_zus_ss)): _zus_zp[].insert(_zus_ss[_zi], _zus_oo[_zi].clone())
@@ -1076,7 +1076,7 @@ def handle_zinterstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
             if _hh[_zi] == len(_zikeys):
                 _zi_ss.append(_all_ss[_zi]); _zi_oo.append(_mm[_zi])
         var _zis_zp = skip_list_pool[].acquire()
-        _zis_zp.unsafe_write(SlabSkipList(16))
+        _zis_zp.unsafe_write(SlabSkipList(4))
         for _zi in range(len(_zi_ss)): _zis_zp[].insert(_zi_ss[_zi], _zi_oo[_zi].clone())   # owned copy
         var _zis_gv = GenericValue(); _zis_gv.type = ValueType(ValueType.ZSET)
         _zis_gv.set_ptr(_zis_zp.unsafe_bitcast[NoneType]())
@@ -1553,7 +1553,7 @@ def handle_zrangestore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, 
                 if _idx >= _zrs_b: break
                 _idx += 1; _zrsc = _zrsc[].forward[0]
         var _zrs_zp = skip_list_pool[].acquire()
-        _zrs_zp.unsafe_write(SlabSkipList(16))
+        _zrs_zp.unsafe_write(SlabSkipList(4))
         for _zi in range(len(_zrs_ss)): _zrs_zp[].insert(_zrs_ss[_zi], _zrs_oo[_zi].clone())   # owned copy
         var _zrs_gv = GenericValue(); _zrs_gv.type = ValueType(ValueType.ZSET)
         _zrs_gv.set_ptr(_zrs_zp.unsafe_bitcast[NoneType]())
@@ -1670,7 +1670,7 @@ def handle_zdiff(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_to
                 _zsetop_accumulate(keyspace, _rest, _no_w, ZAGG_SUM, _rmm, _rss, _rhh)
                 var _excl = unsafe_alloc[SlabHashMap](1); _excl.unsafe_write(SlabHashMap(64))
                 for _ri in range(len(_rmm)): _excl[].set(_rmm[_ri], GenericValue.from_int(1))
-                var _sl = unsafe_alloc[SlabSkipList](1); _sl.unsafe_write(SlabSkipList(16))
+                var _sl = unsafe_alloc[SlabSkipList](1); _sl.unsafe_write(SlabSkipList(4))
                 var _dn_out = 0
                 for _di in range(len(_doo)):
                     if _excl[].get(_doo[_di]).is_none():
@@ -1731,7 +1731,7 @@ def handle_zdiffstore(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, n
             _excl.unsafe_deinit_pointee(); _excl.unsafe_free()
         # Store result
         var _zdst_zp = skip_list_pool[].acquire()
-        _zdst_zp.unsafe_write(SlabSkipList(16))
+        _zdst_zp.unsafe_write(SlabSkipList(4))
         for _di in range(len(_zd_ss)): _zdst_zp[].insert(_zd_ss[_di], _zd_oo[_di].clone())   # owned copy
         var _zdst_gv = GenericValue(); _zdst_gv.type = ValueType(ValueType.ZSET)
         _zdst_gv.set_ptr(_zdst_zp.unsafe_bitcast[NoneType]())

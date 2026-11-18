@@ -221,7 +221,7 @@ def handle_geoadd(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_t
             continue
         if not is_not_null(zp):
             zp = skip_list_pool[].acquire()
-            zp.unsafe_write(SlabSkipList(16))
+            zp.unsafe_write(SlabSkipList(4))
             var nv = GenericValue()
             nv.type = ValueType(ValueType.ZSET)
             nv.set_ptr(zp.unsafe_bitcast[NoneType]())
@@ -593,7 +593,7 @@ def _geo_search(tokens: Pointer[RESP3Token, MutUntrackedOrigin], i: Int, num_tok
         writer.append_int_response(0)
         return consumed
     var dp = skip_list_pool[].acquire()
-    dp.unsafe_write(SlabSkipList(16))
+    dp.unsafe_write(SlabSkipList(4))
     for k in range(returned):
         var p = points[order[k]]
         # The member is COPIED: sharing the source's payload let a DEL of
