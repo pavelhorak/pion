@@ -94,6 +94,16 @@ jobs:
           make -C "$RUNNER_TEMP/redis" -j"$(nproc)" BUILD_TLS=no > /dev/null
           echo "$RUNNER_TEMP/redis/src" >> "$GITHUB_PATH"
 
+      - name: Core dumps, for a library-mode server that faults
+        # One start in the tier died with SIGSEGV before answering PING
+        # (2026-11-17) and left nothing to read: its log was in the test's
+        # temporary directory. A core and its backtrace are kept now.
+        if: env.TIER != 'none'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gdb > /dev/null
+          sudo mkdir -p /tmp/cores && sudo chmod 1777 /tmp/cores
+          sudo sysctl -w kernel.core_pattern=/tmp/cores/core.%e.%p
+
       - name: Test tier through the library
         # Gate 1, parity, the dispatch sweep and the transaction probe are in
         # the tier, each against a fresh library-mode server.
@@ -101,9 +111,22 @@ jobs:
         env:
           PION_EMBED_LIB: ${{ github.workspace }}/libpion.so
           PION_EMBED_CTYPES: '1'
+          PYTHONFAULTHANDLER: '1'     # a fault prints every thread's Python stack
         run: |
+          ulimit -c unlimited
           python3.12 tests/run_all.py --tier "$TIER" --server-tests-only \
             --binary embedded/tests/pion-server-embedded --report build/embedded-tier.json
+
+      - name: Backtraces of any core
+        if: always() && env.TIER != 'none'
+        run: |
+          for c in /tmp/cores/core.*; do
+            [ -f "$c" ] || continue
+            echo "=== $c"
+            for py in python3.13 python3.12 python3; do
+              gdb -batch -q -ex 'thread apply all bt 40' "$(command -v $py)" "$c" 2>&1 | grep -v '^warning:' | head -300 && break
+            done
+          done
 
       - name: Upload the tier's logs
         if: always() && env.TIER != 'none'
@@ -113,6 +136,7 @@ jobs:
           path: |
             build/test-logs/
             build/embedded-tier.json
+            /tmp/cores/
           retention-days: 14
 
       - name: Build the wheel
@@ -214,6 +238,7 @@ jobs:
         env:
           PION_EMBED_LIB: ${{ github.workspace }}/libpion.dylib
           PION_EMBED_CTYPES: '1'
+          PYTHONFAULTHANDLER: '1'
         run: |
           python3.12 tests/run_all.py --tier "$TIER" --server-tests-only \
             --binary embedded/tests/pion-server-embedded --report build/embedded-tier.json
