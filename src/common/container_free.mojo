@@ -125,7 +125,7 @@ def deep_clone(val: GenericValue) -> GenericValue:
     if t == ValueType.ZSET or t == ValueType.GEO:
         var zsrc = val.as_zset().unsafe_bitcast[SlabSkipList]()
         var zdst = unsafe_alloc[SlabSkipList](1)
-        zdst.unsafe_write(SlabSkipList(16))
+        zdst.unsafe_write(SlabSkipList(4))
         var node = zsrc[].head[].forward[0]
         while is_not_null(node):
             zdst[].insert(node[].score, node[].obj.clone())

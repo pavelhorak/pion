@@ -356,7 +356,9 @@ struct StreamData(Copyable, Movable):
     var groups: List[StreamGroup]  # in creation order
 
     def __init__(out self):
-        self.capacity = 64
+        # Doubles from 4: 64 slots (3 KB) for every stream was most of what
+        # a small one cost.
+        self.capacity = 4
         self.entries = unsafe_alloc[StreamEntry](self.capacity)
         self.count = 0; self.alive = 0
         self.last_id_ms = 0; self.last_id_seq = 0

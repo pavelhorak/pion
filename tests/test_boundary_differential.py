@@ -6,8 +6,8 @@ Pion changes representation at thresholds that Redis does not have, and each
 switch is a place where one half of an implementation can be wrong while the
 other half is tested:
 
-  * lists: contiguous ziplist up to 1024 entries AND 64-byte values, segmented
-    quicklist above (SEG_SIZE 256). RPOP/LPOP broke the segmented invariant for
+  * lists: contiguous ziplist up to 1024 entries AND 8,192 bytes of entries
+    (64-byte values before 2026-11-18), segmented quicklist above (SEG_SIZE 256). RPOP/LPOP broke the segmented invariant for
     years — tests checked "drains fully" (a count), never the popped VALUES.
   * strings: SSO at <= 23 bytes, heap above; writev above 512-byte replies.
   * keys: SSO vs heap hashing (a half-converted derivation passes SSO-only tests).
@@ -418,12 +418,19 @@ def main():
         d = Diff(pion, redis)
         rng = random.Random(args.seed)
 
-        print("lists (ziplist <= 1024 entries & <= 64 B values; segmented above):")
+        print("lists (ziplist <= 1024 entries & <= 8 KiB of entries; segmented above):")
         sizes = [1023, 1024, 1025, 1300] if args.quick else [10, 1023, 1024, 1025, 1280, 1537, 2100]
         for n in sizes:
             for elem in (8, 23, 24, 64, 65):
                 d.section = f"list n={n} elem={elem}B"
                 list_section(d, rng, n, elem, b"bd:list:%d:%d" % (n, elem))
+                d.done(d.section)
+        # The switch by BYTES: 2 x (2 + 4094) fills the 8,192-byte ziplist
+        # exactly, the next entry converts; 8191 B never fits.
+        for n in (1, 2, 3, 6):
+            for elem in (4093, 4094, 4095, 8190, 8191):
+                d.section = f"list n={n} elem={elem}B (ziplist bytes)"
+                list_section(d, rng, n, elem, b"bd:listb:%d:%d" % (n, elem))
                 d.done(d.section)
 
         d.section = "strings/keys at SSO + writev boundaries"

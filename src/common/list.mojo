@@ -1,7 +1,8 @@
 from std.memory.alloc import unsafe_alloc
 from src.common.ptr import is_not_null, is_null, null_ptr
-from std.memory import alloc
+from std.memory import alloc, unsafe_memcpy
 from std.ffi import external_call
+from std.sys import size_of
 from src.common.value import GenericValue, ValueType
 
 struct SlabList(Movable):
@@ -32,8 +33,16 @@ struct SlabList(Movable):
 
     comptime SEG_SIZE = 256
     comptime ZIPLIST_MAX_ENTRIES = 1024
-    comptime ZIPLIST_MAX_VALUE_LEN = 64
-    comptime ZIPLIST_INITIAL_CAP = 8192
+    # Any value the ziplist's bytes still hold, as Redis's listpack node
+    # (list-max-listpack-size -2: 8 KB a node). It was 64, so one 65-byte
+    # element made a 3-element list segmented: two 8 KiB segments.
+    comptime ZIPLIST_MAX_VALUE_LEN = 8190
+    # The ziplist starts at ZIPLIST_INITIAL_CAP bytes and doubles up to
+    # ZIPLIST_MAX_BYTES; past that the list converts to segments. It used to
+    # be 8 KiB from the start, plus both 256-slot segments (16 KiB) that a
+    # ziplist never touches: ~24 KiB for a one-element list.
+    comptime ZIPLIST_INITIAL_CAP = 64
+    comptime ZIPLIST_MAX_BYTES = 8192
 
     def __init__(out self):
         self.size = 0
@@ -41,19 +50,20 @@ struct SlabList(Movable):
         self.zip_buf = unsafe_alloc[UInt8](self.zip_cap)
         self.zip_len = 0
 
-        self.active_head_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
+        # Segmented state is made by _convert_to_segmented; a ziplist has none.
+        self.active_head_data = null_ptr[GenericValue, MutUntrackedOrigin]()
         self.head_off = Self.SEG_SIZE  # empty
         self.head_end = Self.SEG_SIZE
-        self.head_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.head_segs = null_ptr[Pointer[GenericValue, MutUntrackedOrigin], MutUntrackedOrigin]()
         self.head_seg_count = 0
         self.head_segs_start = 0
-        self.head_seg_alloc = 8
+        self.head_seg_alloc = 0
 
-        self.active_tail_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
+        self.active_tail_data = null_ptr[GenericValue, MutUntrackedOrigin]()
         self.tail_count = 0
-        self.tail_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.tail_segs = null_ptr[Pointer[GenericValue, MutUntrackedOrigin], MutUntrackedOrigin]()
         self.tail_seg_count = 0
-        self.tail_seg_alloc = 8
+        self.tail_seg_alloc = 0
 
     def reset(mut self):
         # Free all segmented data
@@ -83,23 +93,24 @@ struct SlabList(Movable):
         self.zip_buf = unsafe_alloc[UInt8](self.zip_cap)
         self.zip_len = 0
 
-        self.active_head_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
-        self.head_off = Self.SEG_SIZE
+        # Segmented state is made by _convert_to_segmented; a ziplist has none.
+        self.active_head_data = null_ptr[GenericValue, MutUntrackedOrigin]()
+        self.head_off = Self.SEG_SIZE  # empty
         self.head_end = Self.SEG_SIZE
-        self.head_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.head_segs = null_ptr[Pointer[GenericValue, MutUntrackedOrigin], MutUntrackedOrigin]()
         self.head_seg_count = 0
         self.head_segs_start = 0
-        self.head_seg_alloc = 8
+        self.head_seg_alloc = 0
 
-        self.active_tail_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
+        self.active_tail_data = null_ptr[GenericValue, MutUntrackedOrigin]()
         self.tail_count = 0
-        self.tail_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.tail_segs = null_ptr[Pointer[GenericValue, MutUntrackedOrigin], MutUntrackedOrigin]()
         self.tail_seg_count = 0
-        self.tail_seg_alloc = 8
+        self.tail_seg_alloc = 0
 
     def release(mut self):
         """gh #369: free everything this list owns when its key is dropped —
-        ~24 KB of buffers even when empty, plus heap payloads in segmented mode
+        its ziplist or segment buffers, plus heap payloads in segmented mode
         (ziplist entries are inline bytes). The list must not be used after."""
         if is_null(self.zip_buf):
             while self.size > 0:
@@ -153,6 +164,46 @@ struct SlabList(Movable):
 
 
     @always_inline
+    def _zip_fits(mut self, needed: Int) -> Bool:
+        """True when the ziplist can hold `needed` bytes, growing it if that
+        stays within ZIPLIST_MAX_BYTES. False means: convert to segments."""
+        if needed <= self.zip_cap:
+            return True
+        if needed > Self.ZIPLIST_MAX_BYTES:
+            return False
+        self._zip_grow(needed)
+        return True
+
+    @no_inline
+    def _zip_grow(mut self, needed: Int):
+        var cap = self.zip_cap if self.zip_cap > 0 else Self.ZIPLIST_INITIAL_CAP
+        while cap < needed:
+            cap *= 2
+        if cap > Self.ZIPLIST_MAX_BYTES:
+            cap = Self.ZIPLIST_MAX_BYTES
+        var nb = unsafe_alloc[UInt8](cap)
+        if self.zip_len > 0:
+            unsafe_memcpy(dest=nb, src=self.zip_buf, count=self.zip_len)
+        self.zip_buf.unsafe_free()
+        self.zip_buf = nb
+        self.zip_cap = cap
+
+    @always_inline
+    def _ensure_active_head(mut self):
+        """A side's active segment is allocated when that side first gets an
+        element, so a list that only ever RPUSHes has no head segment."""
+        if is_null(self.active_head_data):
+            self.active_head_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
+            self.head_off = Self.SEG_SIZE
+            self.head_end = Self.SEG_SIZE
+
+    @always_inline
+    def _ensure_active_tail(mut self):
+        if is_null(self.active_tail_data):
+            self.active_tail_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
+            self.tail_count = 0
+
+    @always_inline
     def _grow_head_segs(mut self):
         var new_alloc = self.head_seg_alloc * 2
         var new_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](new_alloc)
@@ -181,6 +232,12 @@ struct SlabList(Movable):
         # We push items in REVERSE zip_buf order so zip_buf[0] ends up at logical index 0.
         if is_null(self.zip_buf):
             return
+        self.head_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.head_seg_alloc = 8
+        self.tail_segs = unsafe_alloc[Pointer[GenericValue, MutUntrackedOrigin]](8)
+        self.tail_seg_alloc = 8
+        if self.size > 0:
+            self._ensure_active_head()
 
         # Collect entry pointers from zip_buf first
         var ptrs = unsafe_alloc[Pointer[UInt8, MutUntrackedOrigin]](self.size)
@@ -218,7 +275,7 @@ struct SlabList(Movable):
     def lpush(mut self, var value: GenericValue):
         if is_not_null(self.zip_buf):
             var s_len = value.string_len() if value.is_string() else 0
-            if self.size >= Self.ZIPLIST_MAX_ENTRIES or s_len > Self.ZIPLIST_MAX_VALUE_LEN or self.zip_len + 2 + s_len > self.zip_cap:
+            if self.size >= Self.ZIPLIST_MAX_ENTRIES or s_len > Self.ZIPLIST_MAX_VALUE_LEN or not self._zip_fits(self.zip_len + 2 + s_len):
                 self._convert_to_segmented()
                 # Fall through to segmented push below
             else:
@@ -241,6 +298,7 @@ struct SlabList(Movable):
                 return
 
         # Segmented push (head side)
+        self._ensure_active_head()
         if self.head_off == 0 and self.head_end < Self.SEG_SIZE:
             # gh #369: the active head can be partial ([0, head_end) after an
             # rpop or an lpop refill). Committed segs must be FULL (rpop and
@@ -266,7 +324,7 @@ struct SlabList(Movable):
     def rpush(mut self, var value: GenericValue):
         if is_not_null(self.zip_buf):
             var s_len = value.string_len() if value.is_string() else 0
-            if self.size >= Self.ZIPLIST_MAX_ENTRIES or s_len > Self.ZIPLIST_MAX_VALUE_LEN or self.zip_len + 2 + s_len > self.zip_cap:
+            if self.size >= Self.ZIPLIST_MAX_ENTRIES or s_len > Self.ZIPLIST_MAX_VALUE_LEN or not self._zip_fits(self.zip_len + 2 + s_len):
                 self._convert_to_segmented()
                 # Fall through to segmented push below
             else:
@@ -279,6 +337,7 @@ struct SlabList(Movable):
                 return
 
         # Segmented push (tail side)
+        self._ensure_active_tail()
         if self.tail_count == Self.SEG_SIZE:
             if self.tail_seg_count == self.tail_seg_alloc:
                 self._grow_tail_segs()
@@ -327,7 +386,8 @@ struct SlabList(Movable):
         Called only when it is empty and size > 0."""
         if self.head_seg_count > self.head_segs_start:
             # Most recently committed head seg = logically next.
-            self.active_head_data.unsafe_free()
+            if is_not_null(self.active_head_data):
+                self.active_head_data.unsafe_free()
             self.head_seg_count -= 1
             self.active_head_data = self.head_segs[unsafe_offset=self.head_seg_count]
             self.head_off = 0
@@ -337,7 +397,8 @@ struct SlabList(Movable):
                 self.head_segs_start = 0
         elif self.tail_seg_count > 0:
             # Oldest tail seg becomes the active head; shift the rest down.
-            self.active_head_data.unsafe_free()
+            if is_not_null(self.active_head_data):
+                self.active_head_data.unsafe_free()
             self.active_head_data = self.tail_segs[unsafe_offset=0]
             for t in range(1, self.tail_seg_count):
                 self.tail_segs[unsafe_offset=t - 1] = self.tail_segs[unsafe_offset=t]
@@ -348,11 +409,12 @@ struct SlabList(Movable):
             # Only the active tail holds elements: it becomes the active head
             # ([0, tail_count) — lpush realigns a partial head before it ever
             # commits one, so committed segments stay full).
-            self.active_head_data.unsafe_free()
+            if is_not_null(self.active_head_data):
+                self.active_head_data.unsafe_free()
             self.active_head_data = self.active_tail_data
             self.head_off = 0
             self.head_end = self.tail_count
-            self.active_tail_data = unsafe_alloc[GenericValue](Self.SEG_SIZE)
+            self.active_tail_data = null_ptr[GenericValue, MutUntrackedOrigin]()
             self.tail_count = 0
 
     def rpop(mut self) -> GenericValue:
@@ -380,14 +442,16 @@ struct SlabList(Movable):
         # 511, … and then WRONGTYPE garbage). Refill the active tail instead.
         if self.tail_count == 0:
             if self.tail_seg_count > 0:
-                self.active_tail_data.unsafe_free()
+                if is_not_null(self.active_tail_data):
+                    self.active_tail_data.unsafe_free()
                 self.tail_seg_count -= 1
                 self.active_tail_data = self.tail_segs[unsafe_offset=self.tail_seg_count]
                 self.tail_count = Self.SEG_SIZE
             elif self.head_seg_count > self.head_segs_start:
                 # Oldest committed head seg = logically last: it becomes the
                 # active tail, whole.
-                self.active_tail_data.unsafe_free()
+                if is_not_null(self.active_tail_data):
+                    self.active_tail_data.unsafe_free()
                 self.active_tail_data = self.head_segs[unsafe_offset=self.head_segs_start]
                 self.tail_count = Self.SEG_SIZE
                 self.head_segs_start += 1
@@ -410,6 +474,48 @@ struct SlabList(Movable):
 
     def llen(self) -> Int:
         return self.size
+
+    def alloc_bytes(self, samples: Int) -> Int:
+        """What this list has allocated, for MEMORY USAGE: the ziplist's
+        buffer, or the segments, their pointer arrays and the heap payloads of
+        the elements (sampled: the first `samples` elements, 0 all, scaled to
+        the size). Not the struct itself."""
+        if is_not_null(self.zip_buf):
+            return self.zip_cap
+        comptime SEG_BYTES = Self.SEG_SIZE * size_of[GenericValue]()
+        var segs = (self.head_seg_count - self.head_segs_start) + self.tail_seg_count
+        if is_not_null(self.active_head_data):
+            segs += 1
+        if is_not_null(self.active_tail_data):
+            segs += 1
+        var total = segs * SEG_BYTES + (self.head_seg_alloc + self.tail_seg_alloc) * 8
+        if self.size == 0:
+            return total
+        var want = self.size if samples <= 0 or samples > self.size else samples
+        var seen = 0
+        var heap = 0
+        # Logical order (the lrange walk), stopping after `want` elements.
+        var i = self.head_off
+        while i < self.head_end and seen < want:
+            heap += _heap_len(self.active_head_data[unsafe_offset=i]); seen += 1; i += 1
+        var seg = self.head_seg_count - 1
+        while seg >= self.head_segs_start and seen < want:
+            var j = 0
+            while j < Self.SEG_SIZE and seen < want:
+                heap += _heap_len(self.head_segs[unsafe_offset=seg][unsafe_offset=j]); seen += 1; j += 1
+            seg -= 1
+        var t = 0
+        while t < self.tail_seg_count and seen < want:
+            var j = 0
+            while j < Self.SEG_SIZE and seen < want:
+                heap += _heap_len(self.tail_segs[unsafe_offset=t][unsafe_offset=j]); seen += 1; j += 1
+            t += 1
+        var k = 0
+        while k < self.tail_count and seen < want:
+            heap += _heap_len(self.active_tail_data[unsafe_offset=k]); seen += 1; k += 1
+        if seen > 0:
+            total += heap * self.size // seen
+        return total
 
     def owned_elems(self) -> List[GenericValue]:
         """gh #241: deep-copy every element, so the caller may then mutate or
@@ -553,3 +659,11 @@ struct SlabList(Movable):
                 self.tail_segs[i].unsafe_free()
         if is_not_null(self.tail_segs):
             self.tail_segs.unsafe_free()
+
+
+@always_inline
+def _heap_len(v: GenericValue) -> Int:
+    """The heap bytes a segmented list element owns: a heap STRING's payload."""
+    if v.type.value == ValueType.STRING and not v.is_borrowed():
+        return v.string_len()
+    return 0

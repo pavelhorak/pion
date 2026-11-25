@@ -292,7 +292,7 @@ def _replay_zset(keyspace: Pointer[StripedHashMap, MutUntrackedOrigin],
         if not create:
             return null_ptr[SlabSkipList, MutUntrackedOrigin]()
         var zp = unsafe_alloc[SlabSkipList](1)
-        zp.unsafe_write(SlabSkipList(16))
+        zp.unsafe_write(SlabSkipList(4))
         var nv = GenericValue()
         nv.type = ValueType(vtype)
         nv.set_ptr(zp.unsafe_bitcast[NoneType]())

@@ -2239,7 +2239,7 @@ struct FastPathHandler(Movable):
                     var valid = True
                     if val.is_none():
                         var zset_ptr = self.skip_list_pool[].acquire()   # gh: NO reset() — construction follows
-                        zset_ptr.unsafe_write(SlabSkipList(16))
+                        zset_ptr.unsafe_write(SlabSkipList(4))
                         var new_val = GenericValue()
                         new_val.type = ValueType(ValueType.ZSET)
                         new_val.set_ptr(zset_ptr.unsafe_bitcast[NoneType]())
@@ -2562,11 +2562,15 @@ struct FastPathHandler(Movable):
                             writer.append_empty_array_response_fast()
                         else:
                             var count = stop - start + 1
-                            # The ziplist branch writes the buffer itself: at most
-                            # `$64\r\n` + 64 + `\r\n` per element. Without this,
+                            # The ziplist branch writes the buffer itself: per element
+                            # its bytes plus at most 9 (`$8190`, two CRLFs), and the
+                            # ziplist already counts 2 of them. Without this,
                             # pipelined LRANGEs of small lists ran past the end of
                             # the buffer (nothing checked between commands).
-                            if not writer.reserve(16 + count * 72):
+                            var lr_need = 16 + count * 72
+                            if is_not_null(list_ptr[].zip_buf):
+                                lr_need = 16 + count * 9 + list_ptr[].zip_len
+                            if not writer.reserve(lr_need):
                                 return consumed
                             writer.buffer[unsafe_offset=writer.offset] = 42 # '*'
                             writer.offset += 1
@@ -2587,14 +2591,18 @@ struct FastPathHandler(Movable):
                                     var v_len = Int((list_ptr[].zip_buf.unsafe_offset(offset)).unsafe_bitcast[UInt16]()[])
                                     writer.buffer[unsafe_offset=writer.offset] = 36 # '$'
                                     writer.offset += 1
-                                    # Inline 1-or-2-digit length write (v_len is typically 1-64)
+                                    # Inline 1-or-2-digit length write; an element can be up
+                                    # to ZIPLIST_MAX_VALUE_LEN (8190) bytes, so 3-4 digits
+                                    # go through format_int_to_buf
                                     if v_len < 10:
                                         writer.buffer[unsafe_offset=writer.offset] = UInt8(48 + v_len)
                                         writer.offset += 1
-                                    else:
+                                    elif v_len < 100:
                                         writer.buffer[unsafe_offset=writer.offset] = UInt8(48 + v_len // 10)
                                         writer.buffer[unsafe_offset=writer.offset + 1] = UInt8(48 + v_len % 10)
                                         writer.offset += 2
+                                    else:
+                                        writer.offset = format_int_to_buf(writer.buffer, writer.offset, Int64(v_len))
                                     writer.buffer[unsafe_offset=writer.offset] = 13 # '\r'
                                     writer.buffer[unsafe_offset=writer.offset + 1] = 10 # '\n'
                                     writer.offset += 2

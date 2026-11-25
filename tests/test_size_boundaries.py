@@ -8,8 +8,9 @@ place where a length can be computed with the wrong representation in mind:
                 The SSO form packs length+chars into three UInt64 words; the
                 heap form puts a pointer in _data0. Off-by-one here means
                 reading characters as a pointer or vice versa.
-  * 64 bytes  — SlabList ziplist entry threshold (values over it force the
-                segmented quicklist conversion).
+  * 8 KiB     — SlabList ziplist size: a list whose entries (2-byte length
+                + value each) pass 8,192 bytes converts to the segmented
+                quicklist. Before 2026-11-18 any value over 64 bytes did.
   * 1024 entries — ziplist -> quicklist conversion by count.
   * 1 MiB     — blob tier (gh #163): values at or above --blob-threshold go to
                 an mmap'd arena and the WAL logs a 24-byte pointer record
@@ -155,7 +156,7 @@ def main():
               f"got {len(got) if got else 0}B want {len(exp)}B")
 
     print("\n[5] List elements across the ziplist threshold")
-    for n in [22, 23, 24, 63, 64, 65, 200]:
+    for n in [22, 23, 24, 63, 64, 65, 200, 4094, 4095, 8190, 8191]:
         key = f"sb:list:{n}"
         c.cmd("DEL", key)
         elems = [payload(n), payload(n)[::-1], bytes([0xAB]) * n]

@@ -1040,6 +1040,12 @@ timeout = 600
 requires = ["py:redis"]
 
 [[test]]
+file = "tests/test_small_containers.py"
+server = "self"
+tier = "gate"
+timeout = 600
+
+[[test]]
 file = "tests/test_raw.py"
 server = "-w 1"
 tier = "gate"
